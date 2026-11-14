@@ -22,7 +22,7 @@ async fn owned_calls_wait_for_distinct_milestones_without_blocking_events_and_ca
     );
     let result = async {
         let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
-        let session = client.subscribe(&"app".to_owned().try_into()?).await?;
+        let mut session = client.subscribe(&"app".to_owned().try_into()?).await?;
         let mut call = session
             .originate(Originate::new("PJSIP/phone".into())?)
             .await?;
@@ -52,6 +52,18 @@ async fn owned_calls_wait_for_distinct_milestones_without_blocking_events_and_ca
             .await?;
         call.wait(CallMilestone::Answered, Duration::from_secs(2))
             .await?;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(2), session.next_event())
+                .await
+                .map_err(|_| Error::Timeout)??;
+            if let rusterisk_client::api::EventKind::StasisStart { args, .. } = event.kind {
+                assert!(
+                    args.is_empty(),
+                    "omitted arguments must stay empty: {args:?}"
+                );
+                break;
+            }
+        }
         assert!(matches!(
             call.wait(CallMilestone::MediaConnected, Duration::from_millis(30))
                 .await,

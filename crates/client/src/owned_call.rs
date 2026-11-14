@@ -257,20 +257,21 @@ impl Calls {
         self.originates.spawn(async move {
             let timeout = options.timeout.as_secs().to_string();
             let arguments = options.arguments.join(",");
-            let result = client
-                .request(
-                    "channels.originate",
-                    &[],
-                    &[
-                        ("channelId", id.as_str()),
-                        ("endpoint", &options.endpoint),
-                        ("app", application.as_str()),
-                        ("callerId", &options.caller_id),
-                        ("appArgs", &arguments),
-                        ("timeout", &timeout),
-                    ],
-                )
-                .await;
+            let mut query: Vec<(&str, &str)> = [
+                ("channelId", id.as_str()),
+                ("endpoint", options.endpoint.as_str()),
+                ("app", application.as_str()),
+                ("timeout", timeout.as_str()),
+            ]
+            .into_iter()
+            .collect();
+            if !options.caller_id.is_empty() {
+                query.push(("callerId", &options.caller_id));
+            }
+            if !options.arguments.is_empty() {
+                query.push(("appArgs", &arguments));
+            }
+            let result = client.request("channels.originate", &[], &query).await;
             (id, result)
         });
         let _delivered = reply.send(Ok(()));
