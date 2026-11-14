@@ -1,9 +1,14 @@
 #![no_std]
 
+mod dialplan;
 mod digit_admission;
 mod digit_sequence;
 mod digits;
 mod owned_progress;
+pub use dialplan::{
+    DialplanContinuation, DialplanDispatch, DialplanError, DialplanExecution, DialplanInstruction,
+    DialplanMachine, DialplanState, DialplanToken,
+};
 pub use digit_admission::{DtmfCommand, DtmfOutbox, DtmfToken};
 pub use digit_sequence::{DtmfError, DtmfSequence, DtmfTiming, DtmfTone};
 pub use digits::DtmfDigit;
