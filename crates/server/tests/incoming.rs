@@ -51,7 +51,15 @@ async fn incoming_admission_publishes_stasis_before_reply_and_http_answer_waits_
         let mut subscription = controller.subscribe(credentials.clone(), None, "app".into()).await?;
         let id = ChannelId::try_from("incoming".to_owned())?;
         let key = controller.incoming(IncomingCall {
-            id: id.clone(), endpoint: "phone".into(), caller: "100".into(), context: "internal".into(), extension: "200".into(), app: "app".into(), args: Vec::new(),
+            id: id.clone(),
+            endpoint: "phone".into(),
+            caller: "100".into(),
+            context: "internal".into(),
+            extension: "200".into(),
+            target: rusterisk_server::IncomingTarget::Stasis {
+                application: "app".into(),
+                arguments: Vec::new(),
+            },
         }).await?;
         let first = subscription.events.try_recv().map_err(failure)?;
         let second = subscription.events.try_recv().map_err(failure)?;

@@ -158,8 +158,10 @@ fn incoming() -> Result<IncomingCall, ControlError> {
         caller: "spoofed-display".into(),
         context: "internal".into(),
         extension: "100".into(),
-        app: "app".into(),
-        args: ["inbound".into()].into_iter().collect(),
+        target: rusterisk_server::IncomingTarget::Stasis {
+            application: "app".into(),
+            arguments: ["inbound".into()].into_iter().collect(),
+        },
     })
 }
 

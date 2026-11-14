@@ -46,7 +46,17 @@ async fn http_digits_validate_state_timing_and_capacity_before_accepting_a_comma
     let result = async {
         let credentials = Credentials::new("app".into(), "password".into())?;
         let mut subscription = controller.subscribe(credentials, None, "app".into()).await?;
-        let key = controller.incoming(IncomingCall { id: ChannelId::try_from("call".to_owned())?, endpoint: "phone".into(), caller: "100".into(), context: "internal".into(), extension: "100".into(), app: "app".into(), args: Vec::new() }).await?;
+        let key = controller.incoming(IncomingCall {
+            id: ChannelId::try_from("call".to_owned())?,
+            endpoint: "phone".into(),
+            caller: "100".into(),
+            context: "internal".into(),
+            extension: "100".into(),
+            target: rusterisk_server::IncomingTarget::Stasis {
+                application: "app".into(),
+                arguments: Vec::new(),
+            },
+        }).await?;
         let app = router(controller.clone());
         assert_eq!(app.clone().oneshot(request("/ari/channels/call/dtmf?dtmf=12")?).await.map_err(failure)?.status(), StatusCode::PRECONDITION_FAILED);
         controller.signal(Signal::DtmfReady { key: key.clone(), events: u16::MAX }).await?;

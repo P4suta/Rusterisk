@@ -28,8 +28,10 @@ async fn global_shutdown_cancels_effects_when_the_owned_signaling_scope_closes(
             caller: "100".into(),
             context: "internal".into(),
             extension: "200".into(),
-            app: "app".into(),
-            args: Vec::new(),
+            target: rusterisk_server::IncomingTarget::Stasis {
+                application: "app".into(),
+                arguments: Vec::new(),
+            },
         })
         .await?;
     for _ in 0..128 {
@@ -85,8 +87,10 @@ async fn event_overflow_preserves_terminal_cleanup_when_the_effect_queue_is_full
                 caller: "100".into(),
                 context: "internal".into(),
                 extension: "200".into(),
-                app: "app".into(),
-                args: Vec::new(),
+                target: rusterisk_server::IncomingTarget::Stasis {
+                    application: "app".into(),
+                    arguments: Vec::new(),
+                },
             })
             .await?;
         for _ in 0..128 {
@@ -122,8 +126,10 @@ async fn event_overflow_preserves_terminal_cleanup_when_the_effect_queue_is_full
             caller: "101".into(),
             context: "internal".into(),
             extension: "200".into(),
-            app: "replacement".into(),
-            args: Vec::new(),
+            target: rusterisk_server::IncomingTarget::Stasis {
+                application: "replacement".into(),
+                arguments: Vec::new(),
+            },
         };
         assert!(matches!(
             controller.incoming(next.clone()).await,
@@ -199,8 +205,10 @@ async fn a_full_effect_queue_rejects_the_request_without_stopping_existing_calls
                 caller: "100".into(),
                 context: "internal".into(),
                 extension: "200".into(),
-                app: "app".into(),
-                args: Vec::new(),
+                target: rusterisk_server::IncomingTarget::Stasis {
+                    application: "app".into(),
+                    arguments: Vec::new(),
+                },
             })
             .await?;
         for _ in 0..128 {

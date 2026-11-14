@@ -95,8 +95,16 @@ pub struct IncomingCall {
     pub caller: String,
     pub context: String,
     pub extension: String,
-    pub app: String,
-    pub args: Vec<String>,
+    pub target: IncomingTarget,
+}
+
+#[derive(Clone, Debug)]
+pub enum IncomingTarget {
+    Dialplan,
+    Stasis {
+        application: String,
+        arguments: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -424,23 +432,41 @@ impl Control {
         if self.channels.len() >= self.capacity {
             return Err(ControlError::Capacity);
         }
-        let application = self
-            .applications
-            .get(&incoming.app)
-            .copied()
-            .ok_or(ControlError::NotFound("Application not found"))?;
+        let (application, arguments, app_name, app_data) = match incoming.target {
+            IncomingTarget::Dialplan => (None, Vec::new(), String::new(), String::new()),
+            IncomingTarget::Stasis {
+                application,
+                arguments,
+            } => {
+                let token = self
+                    .applications
+                    .get(&application)
+                    .copied()
+                    .ok_or(ControlError::NotFound("Application not found"))?;
+                if arguments.len() > 32 || arguments.iter().any(|argument| argument.len() > 256) {
+                    return Err(ControlError::Invalid("Invalid incoming channel parameters"));
+                }
+                let data = std::iter::once(application.as_str())
+                    .chain(arguments.iter().map(String::as_str))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                (Some(token), arguments, "Stasis".into(), data)
+            }
+        };
         ChannelId::try_from(incoming.endpoint.clone())?;
         if incoming.caller.len() > 128
             || incoming.context.is_empty()
             || incoming.context.len() > 128
             || incoming.extension.is_empty()
             || incoming.extension.len() > 128
-            || incoming.args.len() > 32
-            || incoming.args.iter().any(|argument| argument.len() > 256)
         {
             return Err(ControlError::Invalid("Invalid incoming channel parameters"));
         }
         let generation = self.generation()?;
+        let mut call = Call::incoming(generation).apply(CallEvent::Ring).call();
+        if let Some(application) = application {
+            call = call.enter_stasis(application)?;
+        }
         let snapshot = Channel {
             id: incoming.id.clone(),
             name: format!("PJSIP/{}-{generation:08x}", incoming.endpoint),
@@ -455,40 +481,36 @@ impl Control {
                 context: incoming.context,
                 exten: incoming.extension,
                 priority: 1,
-                app_name: "Stasis".into(),
-                app_data: std::iter::once(incoming.app.as_str())
-                    .chain(incoming.args.iter().map(String::as_str))
-                    .collect::<Vec<_>>()
-                    .join(","),
+                app_name,
+                app_data,
             },
             creationtime: timestamp.into(),
             language: "en".into(),
         };
         let mut outcome = Outcome::json(&snapshot)?;
-        outcome.event(
-            &incoming.app,
+        outcome.optional_event(
+            application_name(&self.applications, call.stasis())?,
             timestamp,
             EventKind::ChannelCreated {
                 channel: snapshot.clone(),
             },
         );
-        outcome.event(
-            &incoming.app,
-            timestamp,
-            EventKind::StasisStart {
-                channel: snapshot.clone(),
-                args: incoming.args.clone(),
-            },
-        );
+        if matches!(call.stasis(), StasisMembership::Entered(_)) {
+            outcome.optional_event(
+                application_name(&self.applications, call.stasis())?,
+                timestamp,
+                EventKind::StasisStart {
+                    channel: snapshot.clone(),
+                    args: arguments.clone(),
+                },
+            );
+        }
         self.channels.insert(
             incoming.id,
             ChannelEntry {
-                call: Call::incoming(generation)
-                    .apply(CallEvent::Ring)
-                    .call()
-                    .enter_stasis(application)?,
+                call,
                 snapshot,
-                arguments: incoming.args,
+                arguments,
                 deadline: None,
                 variables: BTreeMap::new(),
                 dtmf: None,
@@ -626,6 +648,9 @@ impl Control {
                     .channels
                     .get(&channel)
                     .ok_or(ControlError::NotFound("Channel not found"))?;
+                if !matches!(entry.call.stasis(), StasisMembership::Entered(_)) {
+                    return Err(ControlError::Conflict("Channel not in Stasis application"));
+                }
                 Outcome::json(rusterisk_api::Variable {
                     value: entry.variable(&variable)?,
                 })
@@ -853,6 +878,9 @@ impl Control {
                 .channels
                 .get(channel)
                 .ok_or(ControlError::NotFound("Channel not found"))?;
+            if !matches!(entry.call.stasis(), StasisMembership::Entered(_)) {
+                return Err(ControlError::Conflict("Channel not in Stasis application"));
+            }
             let call = if adding {
                 entry.call.join(token)?
             } else {

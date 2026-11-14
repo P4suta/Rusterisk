@@ -324,8 +324,7 @@ impl Signaling {
                         caller,
                         context,
                         extension,
-                        app: String::new(),
-                        args: Vec::new(),
+                        target: crate::IncomingTarget::Dialplan,
                     };
                     if let Err(error) = self.admit(listener, incoming).await {
                         let reason = match error {
@@ -382,8 +381,10 @@ impl Signaling {
                 application,
                 arguments,
             } => {
-                incoming.app = application.clone();
-                incoming.args = arguments.clone();
+                incoming.target = crate::IncomingTarget::Stasis {
+                    application: application.clone(),
+                    arguments: arguments.clone(),
+                };
             }
             Application::NoOp(_)
             | Application::Set { .. }

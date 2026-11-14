@@ -15,8 +15,10 @@ fn control() -> Result<Control, ControlError> {
             caller: "100".into(),
             context: "internal".into(),
             extension: "200".into(),
-            app: "app".into(),
-            args: Vec::new(),
+            target: rusterisk_server::IncomingTarget::Stasis {
+                application: "app".into(),
+                arguments: Vec::new(),
+            },
         },
         "now",
     )?;
