@@ -5,6 +5,8 @@ use serde::de::DeserializeOwned;
 use std::time::Duration;
 
 const MAX_RESPONSE: usize = 1024 * 1024;
+mod session;
+pub use session::Session;
 
 #[derive(Debug)]
 pub enum Error {
@@ -17,6 +19,8 @@ pub enum Error {
     Capacity,
     Closed,
     Timeout,
+    WebSocket(String),
+    EventLagged(u64),
 }
 
 impl std::fmt::Display for Error {
@@ -31,6 +35,8 @@ impl std::fmt::Display for Error {
             Self::Capacity => f.write_str("client capacity exceeded"),
             Self::Closed => f.write_str("client session closed"),
             Self::Timeout => f.write_str("client deadline expired"),
+            Self::WebSocket(message) => write!(f, "event transport: {message}"),
+            Self::EventLagged(count) => write!(f, "event consumer missed {count} events"),
         }
     }
 }
@@ -55,11 +61,17 @@ impl From<serde_json::Error> for Error {
         Self::Json(error)
     }
 }
+impl From<tokio_tungstenite::tungstenite::Error> for Error {
+    fn from(error: tokio_tungstenite::tungstenite::Error) -> Self {
+        Self::WebSocket(error.to_string())
+    }
+}
 
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     base: url::Url,
+    authorization: HeaderValue,
 }
 
 impl Client {
@@ -107,7 +119,15 @@ impl Client {
             .retry(reqwest::retry::never())
             .pool_max_idle_per_host(4)
             .build()?;
-        Ok(Self { http, base })
+        Ok(Self {
+            http,
+            base,
+            authorization,
+        })
+    }
+
+    pub async fn subscribe(&self, application: &api::ChannelId) -> Result<Session, Error> {
+        session::connect(self, application).await
     }
 
     async fn request<T: DeserializeOwned>(
