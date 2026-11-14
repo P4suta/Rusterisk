@@ -346,3 +346,100 @@ fn rejected_invites_release_admission_and_retransmit_the_tagged_final_response(
     );
     Ok(())
 }
+
+fn incoming_id(output: &rusterisk_sip::Output) -> Result<String, SipError> {
+    match output.events.first() {
+        Some(SipEvent::Incoming { id, .. }) => Ok(id.clone()),
+        Some(SipEvent::Ringing { .. } | SipEvent::Answered { .. } | SipEvent::Ended { .. })
+        | None => Err(SipError::InvalidPacket),
+    }
+}
+
+fn incoming_request(answer: &[u8], method: &str, sequence: u32) -> Result<Vec<u8>, SipError> {
+    let reply = match SipMessage::try_from(answer)? {
+        SipMessage::Response(response) => response,
+        SipMessage::Request(_) => return Err(SipError::InvalidPacket),
+    };
+    Ok(format!("{method} sip:100@127.0.0.1:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-{method}-{sequence};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {sequence} {method}\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", reply.from_header()?.value(), reply.to_header()?.value(), reply.call_id_header()?.value()).into_bytes())
+}
+
+#[test]
+fn incoming_answers_retransmit_until_the_matching_ack_and_remote_hangup_is_idempotent(
+) -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (incoming, wire, _) = authenticated_invite(&mut engine)?;
+    let id = incoming_id(&incoming)?;
+    let ringing = engine.ring(&id, 2)?;
+    assert!(ringing.datagrams[0].bytes.starts_with(b"SIP/2.0 180"));
+    assert_eq!(
+        engine.receive(wire.as_bytes(), peer, 3)?.datagrams[0].bytes,
+        ringing.datagrams[0].bytes
+    );
+    let answer = engine.answer(&id, 9, "127.0.0.1:10000".parse()?, 10)?;
+    assert!(matches!(
+        &answer.events[0],
+        SipEvent::Answered { generation: 9, .. }
+    ));
+    assert!(engine.pending(&id).is_none());
+    assert!(engine.active_session(&id, 9).is_some());
+    assert!(engine.tick(509)?.datagrams.is_empty());
+    assert_eq!(
+        engine.tick(510)?.datagrams[0].bytes,
+        answer.datagrams[0].bytes
+    );
+    let ack = incoming_request(&answer.datagrams[0].bytes, "ACK", 2)?;
+    engine.receive(&ack, "127.0.0.1:5062".parse()?, 511)?;
+    assert_eq!(
+        engine.tick(1510)?.datagrams[0].bytes,
+        answer.datagrams[0].bytes
+    );
+    let wrong_sequence = incoming_request(&answer.datagrams[0].bytes, "ACK", 3)?;
+    engine.receive(&wrong_sequence, peer, 1511)?;
+    assert_eq!(
+        engine.tick(3510)?.datagrams[0].bytes,
+        answer.datagrams[0].bytes
+    );
+    assert!(engine.receive(&ack, peer, 3511)?.datagrams.is_empty());
+    assert!(engine.tick(7510)?.datagrams.is_empty());
+    let bye = incoming_request(&answer.datagrams[0].bytes, "BYE", 3)?;
+    assert!(engine
+        .receive(&bye, "127.0.0.1:5062".parse()?, 7511)?
+        .datagrams[0]
+        .bytes
+        .starts_with(b"SIP/2.0 481"));
+    let ended = engine.receive(&bye, peer, 7512)?;
+    assert!(matches!(
+        &ended.events[0],
+        SipEvent::Ended {
+            generation: 9,
+            cause: 16,
+            ..
+        }
+    ));
+    assert!(ended.datagrams[0].bytes.starts_with(b"SIP/2.0 200"));
+    assert!(engine.active_session(&id, 9).is_none());
+    assert!(engine.receive(&bye, peer, 7513)?.events.is_empty());
+    Ok(())
+}
+
+#[test]
+fn an_unacknowledged_incoming_answer_expires_and_terminates_the_peer() -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let (incoming, _, _) = authenticated_invite(&mut engine)?;
+    let id = incoming_id(&incoming)?;
+    engine.answer(&id, 9, "127.0.0.1:10000".parse()?, 10)?;
+    let expired = engine.tick(32010)?;
+    assert!(matches!(
+        &expired.events[0],
+        SipEvent::Ended {
+            generation: 9,
+            cause: 102,
+            ..
+        }
+    ));
+    assert!(expired.datagrams[0].bytes.starts_with(b"BYE "));
+    assert!(engine.active_session(&id, 9).is_none());
+    assert!(engine.tick(32011)?.events.is_empty());
+    Ok(())
+}

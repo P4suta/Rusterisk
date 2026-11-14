@@ -274,6 +274,7 @@ pub struct PendingInvite {
     pub request: Request,
     pub session: Session,
     pub local_tag: String,
+    local: SocketAddr,
 }
 
 pub struct Engine {
@@ -285,6 +286,7 @@ pub struct Engine {
     pending: BTreeMap<String, PendingInvite>,
     contacts: BTreeMap<String, (SocketAddr, u64)>,
     outgoing: BTreeMap<String, outgoing::Outgoing>,
+    incoming: BTreeMap<String, incoming::Incoming>,
 }
 
 impl Engine {
@@ -298,6 +300,7 @@ impl Engine {
             pending: BTreeMap::new(),
             contacts: BTreeMap::new(),
             outgoing: BTreeMap::new(),
+            incoming: BTreeMap::new(),
         }
     }
     pub fn pending(&self, id: &str) -> Option<&PendingInvite> {
@@ -452,6 +455,7 @@ impl Engine {
             return Err(SipError::InvalidPacket);
         }
         if request.method == Method::Ack {
+            self.incoming_ack(&request, peer)?;
             return Ok(Output {
                 datagrams: Vec::new(),
                 events: Vec::new(),
@@ -479,6 +483,14 @@ impl Engine {
             ));
         }
         if let Some(reply) = self.outgoing_bye(&request, peer, now)? {
+            match reply {
+                DialogReply::Accepted { bytes, events } => {
+                    return Ok(self.cache_reply(key, request, peer, now, bytes, events));
+                }
+                DialogReply::Rejected(bytes) => return Ok(Output::response(peer, bytes)),
+            }
+        }
+        if let Some(reply) = self.incoming_request(&request, peer, now)? {
             match reply {
                 DialogReply::Accepted { bytes, events } => {
                     return Ok(self.cache_reply(key, request, peer, now, bytes, events));
@@ -536,7 +548,7 @@ impl Engine {
                             );
                             response(&request, 200, "OK", &extra, "")?
                         }
-                    } else if self.pending.len() >= 64 {
+                    } else if self.pending.len() + self.incoming.len() >= 64 {
                         response(&request, 486, "Busy Here", "", "")?
                     } else {
                         let session = match Session::parse(
@@ -570,6 +582,13 @@ impl Engine {
                             .username
                             .clone();
                         let local_tag = self.token()?;
+                        let local = self
+                            .config
+                            .transports
+                            .iter()
+                            .find(|transport| transport.name == endpoint.transport)
+                            .ok_or(SipError::InvalidPacket)?
+                            .bind;
                         events.push(SipEvent::Incoming {
                             id: id.clone(),
                             identity,
@@ -586,6 +605,7 @@ impl Engine {
                                 request: request.clone(),
                                 session,
                                 local_tag,
+                                local,
                             },
                         );
                         response(&request, 100, "Trying", "", "")?

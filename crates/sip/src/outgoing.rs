@@ -195,6 +195,9 @@ impl Engine {
     }
 
     pub fn cancel(&mut self, id: &str, generation: u64, now: u64) -> Result<Output, SipError> {
+        if let Some(output) = self.hangup_incoming(id, generation, now)? {
+            return Ok(output);
+        }
         let Some(dialog) = self
             .outgoing
             .values_mut()
@@ -249,10 +252,7 @@ impl Engine {
     }
 
     pub fn tick(&mut self, now: u64) -> Result<Output, SipError> {
-        let mut output = Output {
-            datagrams: Vec::new(),
-            events: Vec::new(),
-        };
+        let mut output = self.incoming_tick(now)?;
         self.outgoing.retain(|_, dialog| !matches!(dialog.state, State::CancelPending { expires, .. } | State::Cancelling { expires } | State::Terminated { expires } if expires <= now));
         for dialog in self.outgoing.values_mut() {
             match &mut dialog.state {
@@ -438,6 +438,9 @@ impl Engine {
     }
 
     pub fn active_session(&self, id: &str, generation: u64) -> Option<&Session> {
+        if let Some(session) = self.incoming_session(id, generation) {
+            return Some(session);
+        }
         self.outgoing.values().find_map(|dialog| {
             if dialog.id == id && dialog.generation == generation {
                 if let State::Established(session) = &dialog.state {
