@@ -318,6 +318,20 @@ async fn dispatch(
                 .transpose()
                 .map_err(|_| ControlError::Invalid("Invalid dialplan priority"))?,
         },
+        ("POST", ["ari", "channels", channel, "move"]) => Action::Move {
+            channel: id(channel)?,
+            app: required(parameters, "app")?.into(),
+            args: parameters
+                .get("appArgs")
+                .map(|value| {
+                    value
+                        .split(',')
+                        .filter(|value| !value.is_empty())
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
         ("POST", ["ari", "channels", channel, "dtmf"]) => Action::SendDtmf {
             channel: id(channel)?,
             digits: required(parameters, "dtmf")?.into(),

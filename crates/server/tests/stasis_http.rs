@@ -107,3 +107,45 @@ async fn http_continuation_validates_positions_before_leaving_and_resumes_withou
     task.await.map_err(failure)??;
     result
 }
+
+#[tokio::test]
+async fn http_move_routes_events_and_cleanup_to_the_current_stasis_app() -> Result<(), ControlError>
+{
+    let config = Config::parse(
+        "[general]\nbindaddr=127.0.0.1\n",
+        "[app]\ntype=user\npassword=password\n",
+        "",
+        "",
+        "[internal]\nexten => 200,1,Stasis(app)\n",
+    )
+    .map_err(failure)?;
+    let (controller, runner, mut effects) = Controller::new(config, 4);
+    let task = tokio::spawn(runner.run());
+    let result = async {
+        let credentials = Credentials::new("app".into(), "password".into())?;
+        let mut previous = controller.subscribe(credentials.clone(), None, "app".into()).await?;
+        let mut destination = controller.subscribe(credentials.clone(), None, "destination".into()).await?;
+        let key = controller.incoming(IncomingCall { id: ChannelId::try_from("incoming".to_owned())?, endpoint: "phone".into(), caller: "100".into(), context: "internal".into(), extension: "200".into(), target: IncomingTarget::Dialplan }).await?;
+        previous.events.recv().await.ok_or(ControlError::Capacity)?;
+        previous.events.recv().await.ok_or(ControlError::Capacity)?;
+        let app = router(controller.clone());
+        let failed = app.clone().oneshot(request("/ari/channels/incoming/move?app=missing&appArgs=retry")?).await.map_err(failure)?;
+        assert_eq!(failed.status(), StatusCode::NO_CONTENT);
+        let failed = previous.events.recv().await.ok_or(ControlError::Capacity)?;
+        assert!(matches!(failed.kind, EventKind::ApplicationMoveFailed { args, .. } if args == ["retry"]));
+        let moved = app.oneshot(request("/ari/channels/incoming/move?app=destination&appArgs=arrived,second")?).await.map_err(failure)?;
+        assert_eq!(moved.status(), StatusCode::NO_CONTENT);
+        assert!(matches!(previous.events.recv().await.ok_or(ControlError::Capacity)?.kind, EventKind::StasisEnd { .. }));
+        assert!(matches!(destination.events.recv().await.ok_or(ControlError::Capacity)?.kind, EventKind::StasisStart { args, .. } if args == ["arrived", "second"]));
+        drop(previous);
+        controller.execute(credentials.clone(), None, rusterisk_server::Action::GetChannel(key.id.clone())).await?;
+        assert!(effects.try_recv().is_err());
+        drop(destination);
+        let released = tokio::time::timeout(Duration::from_secs(1), effects.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
+        assert!(matches!(released, rusterisk_server::Effect::Release { key: ended } if ended == key));
+        Ok(())
+    }.await;
+    controller.shutdown();
+    task.await.map_err(failure)??;
+    result
+}
