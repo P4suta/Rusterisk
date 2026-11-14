@@ -1,0 +1,10 @@
+disallowed-types = [
+  { path = "std::boxed::Box", reason = "Use concrete owned values; exceptions require a scoped decision." },
+  { path = "std::sync::Arc", reason = "Move ownership through bounded channels." },
+  { path = "std::rc::Rc", reason = "Shared domain ownership is prohibited." },
+  { path = "std::cell::RefCell", reason = "Keep domain state in the control task." },
+  { path = "std::sync::Mutex", reason = "Keep domain state in the control task." },
+  { path = "std::sync::RwLock", reason = "Keep domain state in the control task." },
+  { path = "tokio::sync::Mutex", reason = "Keep domain state in the control task." },
+  { path = "tokio::sync::RwLock", reason = "Keep domain state in the control task." },
+]

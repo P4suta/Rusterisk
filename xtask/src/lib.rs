@@ -1,0 +1,182 @@
+use syn::parse::Parser;
+use syn::visit::{self, Visit};
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct Finding {
+    pub rule: &'static str,
+    pub detail: String,
+}
+
+pub fn inspect(source: &str) -> Result<Vec<Finding>, syn::Error> {
+    inspect_with_exceptions(source, &[])
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Exception {
+    pub path: String,
+    pub item: String,
+    pub lint: String,
+    pub adr: String,
+    pub rationale: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Exceptions {
+    pub exceptions: Vec<Exception>,
+}
+
+pub fn inspect_with_exceptions(
+    source: &str,
+    exceptions: &[Exception],
+) -> Result<Vec<Finding>, syn::Error> {
+    let file = syn::parse_file(source)?;
+    let mut policy = Policy {
+        findings: Vec::new(),
+        exceptions,
+        used: std::collections::BTreeSet::new(),
+    };
+    policy.visit_file(&file);
+    for (index, exception) in exceptions.iter().enumerate() {
+        if !policy.used.contains(&index) {
+            policy.reject(
+                "unused-exception",
+                format!("{}: {}", exception.item, exception.lint),
+            );
+        }
+    }
+    Ok(policy.findings)
+}
+
+struct Policy<'a> {
+    findings: Vec<Finding>,
+    exceptions: &'a [Exception],
+    used: std::collections::BTreeSet<usize>,
+}
+
+impl Policy<'_> {
+    fn reject(&mut self, rule: &'static str, detail: impl Into<String>) {
+        self.findings.push(Finding {
+            rule,
+            detail: detail.into(),
+        });
+    }
+
+    fn name(&mut self, name: &str) {
+        match name {
+            "Arc" | "Rc" | "RefCell" | "Mutex" | "RwLock" => self.reject("shared-ownership", name),
+            "Box" => self.reject("heap-erasure", name),
+            "unbounded_channel" | "UnboundedSender" | "UnboundedReceiver" => {
+                self.reject("unbounded-queue", name)
+            }
+            "async_trait" => self.reject("async-trait", name),
+            _ => {}
+        }
+    }
+
+    fn approved(&mut self, attribute: &syn::Attribute, item: &str) -> bool {
+        if !attribute.path().is_ident("expect") || !matches!(attribute.style, syn::AttrStyle::Outer)
+        {
+            return false;
+        }
+        let mut lint = String::new();
+        let mut reason = String::new();
+        let result = attribute.parse_nested_meta(|meta| {
+            if meta.path.is_ident("reason") {
+                reason = meta.value()?.parse::<syn::LitStr>()?.value();
+            } else {
+                if !lint.is_empty() {
+                    return Err(meta.error("one lint per exception is required"));
+                }
+                lint = meta
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>()
+                    .join("::");
+            }
+            Ok(())
+        });
+        if result.is_err() {
+            return false;
+        }
+        for (index, exception) in self.exceptions.iter().enumerate() {
+            if exception.item == item
+                && exception.lint == lint
+                && reason == format!("{}: {}", exception.adr, exception.rationale)
+            {
+                self.used.insert(index);
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl<'ast> Visit<'ast> for Policy<'_> {
+    fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
+        for attribute in &node.attrs {
+            if self.approved(attribute, &node.ident.to_string()) {
+                visit::visit_attribute(self, attribute);
+            } else {
+                self.visit_attribute(attribute);
+            }
+        }
+        self.visit_visibility(&node.vis);
+        self.visit_generics(&node.generics);
+        for variant in &node.variants {
+            self.visit_variant(variant);
+        }
+    }
+    fn visit_type_trait_object(&mut self, node: &'ast syn::TypeTraitObject) {
+        self.reject(
+            "dynamic-dispatch",
+            "use a concrete type, generic parameter, or closed enum",
+        );
+        visit::visit_type_trait_object(self, node);
+    }
+
+    fn visit_path(&mut self, node: &'ast syn::Path) {
+        for segment in &node.segments {
+            self.name(&segment.ident.to_string());
+        }
+        visit::visit_path(self, node);
+    }
+
+    fn visit_use_name(&mut self, node: &'ast syn::UseName) {
+        self.name(&node.ident.to_string());
+        visit::visit_use_name(self, node);
+    }
+
+    fn visit_use_rename(&mut self, node: &'ast syn::UseRename) {
+        self.name(&node.ident.to_string());
+        visit::visit_use_rename(self, node);
+    }
+
+    fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
+        if node.path().is_ident("allow") || node.path().is_ident("expect") {
+            self.reject(
+                "lint-suppression",
+                "exceptions must be registered with an ADR and a precise source location",
+            );
+        }
+        visit::visit_attribute(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if node.path.is_ident("vec") {
+            let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+            if let Ok(elements) = parser.parse2(node.tokens.clone()) {
+                if elements.len() == 1 {
+                    self.reject(
+                        "single-element-vector",
+                        "use the concrete owned value or a bounded collection",
+                    );
+                }
+            }
+        }
+        visit::visit_macro(self, node);
+    }
+}

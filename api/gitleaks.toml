@@ -1,0 +1,6 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Exclude build outputs and Git object storage."
+paths = ['''(^|/)target/''', '''(^|/)\.git/''']

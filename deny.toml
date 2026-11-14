@@ -1,0 +1,25 @@
+[advisories]
+db-urls = ["https://github.com/RustSec/advisory-db"]
+
+[licenses]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "0BSD",
+  "Zlib",
+  "BSL-1.0",
+  "Unlicense",
+]
+confidence-threshold = 0.95
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
