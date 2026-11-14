@@ -1,0 +1,8 @@
+name = "Rusterisk"
+summary = "Rust call control with bounded state and explicit protocol contracts"
+install = "mise install"
+usage = """
+mise x -- just check
+mise x -- just security"""
+copyright = "Yasunobu"
+license = "MIT OR Apache-2.0"
