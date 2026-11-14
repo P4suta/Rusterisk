@@ -1,10 +1,12 @@
 #![no_std]
 
+mod dial_fork;
 mod dialplan;
 mod digit_admission;
 mod digit_sequence;
 mod digits;
 mod owned_progress;
+pub use dial_fork::{DialFork, DialForkDecision, DialForkError, DialForkOutcome, DialForkState};
 pub use dialplan::{
     DialplanContinuation, DialplanDispatch, DialplanError, DialplanExecution, DialplanInstruction,
     DialplanMachine, DialplanState, DialplanToken,
