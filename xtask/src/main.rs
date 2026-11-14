@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+mod security;
 
 #[derive(Debug)]
 enum TaskError {
@@ -143,7 +144,7 @@ fn execute() -> Result<(), TaskError> {
             run("cargo", &["test", "--workspace", "--locked"])
         }
         [task] if task == "security" => {
-            run("cargo", &["deny", "check"])?;
+            security::check()?;
             run(
                 "gitleaks",
                 &[

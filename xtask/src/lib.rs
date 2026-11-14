@@ -1,6 +1,41 @@
 use syn::parse::Parser;
 use syn::visit::{self, Visit};
 
+#[derive(Debug)]
+pub enum SecurityConfigError {
+    Parse(toml::de::Error),
+    MissingAdvisories,
+}
+
+impl From<toml::de::Error> for SecurityConfigError {
+    fn from(error: toml::de::Error) -> Self {
+        Self::Parse(error)
+    }
+}
+
+impl std::fmt::Display for SecurityConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Parse(error) => write!(f, "{error}"),
+            Self::MissingAdvisories => f.write_str("advisory policy table is required"),
+        }
+    }
+}
+impl std::error::Error for SecurityConfigError {}
+
+pub fn advisory_snapshot_config(
+    source: &str,
+    db_path: &str,
+) -> Result<toml::Value, SecurityConfigError> {
+    let mut config: toml::Value = toml::from_str(source)?;
+    let advisories = config
+        .get_mut("advisories")
+        .and_then(toml::Value::as_table_mut)
+        .ok_or(SecurityConfigError::MissingAdvisories)?;
+    advisories.insert("db-path".into(), toml::Value::String(db_path.into()));
+    Ok(config)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Finding {
     pub rule: &'static str,
