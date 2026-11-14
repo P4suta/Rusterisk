@@ -1,5 +1,5 @@
 use rusterisk_api::{Bridge, Caller, Channel, ChannelId, ChannelState, Dialplan, Event, EventKind};
-use rusterisk_core::{Call, CallEvent, CallState};
+use rusterisk_core::{Call, CallEvent, CallState, Transition};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -633,15 +633,21 @@ impl Control {
                             }
                         }
                     }
-                    Milestone::MediaConnected => outcome.event(
-                        &entry.application,
-                        timestamp,
-                        EventKind::ChannelVarset {
-                            variable: "RUSTERISK_MEDIA_CONNECTED".into(),
-                            value: "1".into(),
-                            channel: entry.snapshot.clone(),
-                        },
-                    ),
+                    Milestone::MediaConnected => {
+                        let decision = entry.call.connect_media();
+                        entry.call = decision.call();
+                        if decision.transition() == Transition::Notify {
+                            outcome.event(
+                                &entry.application,
+                                timestamp,
+                                EventKind::ChannelVarset {
+                                    variable: "RUSTERISK_MEDIA_CONNECTED".into(),
+                                    value: "1".into(),
+                                    channel: entry.snapshot.clone(),
+                                },
+                            );
+                        }
+                    }
                     Milestone::Ended => {
                         return Err(ControlError::Conflict("Terminal event was already handled"))
                     }

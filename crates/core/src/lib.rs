@@ -17,6 +17,13 @@ pub enum MediaState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaConnection {
+    Pending,
+    Connected,
+    Released,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallEvent {
     Ring,
     Answer,
@@ -47,6 +54,7 @@ pub struct Call {
     generation: u64,
     state: CallState,
     media: MediaState,
+    connection: MediaConnection,
     bridge: Option<u64>,
 }
 
@@ -76,6 +84,7 @@ impl Call {
             generation,
             state: CallState::Down,
             media: MediaState::Waiting,
+            connection: MediaConnection::Pending,
             bridge: None,
         }
     }
@@ -90,6 +99,24 @@ impl Call {
 
     pub const fn media(self) -> MediaState {
         self.media
+    }
+
+    pub const fn media_connection(self) -> MediaConnection {
+        self.connection
+    }
+
+    pub fn connect_media(mut self) -> Decision {
+        let transition = match self.connection {
+            MediaConnection::Pending => {
+                self.connection = MediaConnection::Connected;
+                Transition::Notify
+            }
+            MediaConnection::Connected | MediaConnection::Released => Transition::Ignore,
+        };
+        Decision {
+            call: self,
+            transition,
+        }
     }
 
     pub const fn bridge(self) -> Option<u64> {
@@ -116,6 +143,7 @@ impl Call {
             ) => {
                 self.state = CallState::Ended;
                 self.media = MediaState::Released;
+                self.connection = MediaConnection::Released;
                 self.bridge = None;
                 Transition::Release
             }
