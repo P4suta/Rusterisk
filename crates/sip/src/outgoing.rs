@@ -15,11 +15,23 @@ pub struct Outbound {
 }
 
 enum State {
-    Calling { retry: u64, interval: u64 },
+    Calling {
+        retry: u64,
+        interval: u64,
+    },
+    CancelPending {
+        retry: u64,
+        interval: u64,
+        expires: u64,
+    },
     Proceeding,
     Established(Session),
-    Cancelling { expires: u64 },
-    Terminated { expires: u64 },
+    Cancelling {
+        expires: u64,
+    },
+    Terminated {
+        expires: u64,
+    },
 }
 
 pub(crate) struct Outgoing {
@@ -32,6 +44,7 @@ pub(crate) struct Outgoing {
     remote_contact: Uri,
     codecs: Vec<Codec>,
     deadline: u64,
+    transaction_deadline: u64,
     state: State,
     cseq: u32,
     remote_cseq: Option<u32>,
@@ -169,6 +182,7 @@ impl Engine {
             bytes: bytes.as_bytes().to_vec(),
             codecs: endpoint.codecs,
             deadline: now.saturating_add(outbound.timeout_ms),
+            transaction_deadline: now.saturating_add(32_000),
             state: State::Calling {
                 retry: now.saturating_add(500),
                 interval: 500,
@@ -192,7 +206,18 @@ impl Engine {
             });
         };
         let packet = match dialog.state {
-            State::Calling { .. } | State::Proceeding => {
+            State::Calling { retry, interval } => {
+                dialog.state = State::CancelPending {
+                    retry,
+                    interval,
+                    expires: dialog.transaction_deadline,
+                };
+                return Ok(Output {
+                    datagrams: Vec::new(),
+                    events: Vec::new(),
+                });
+            }
+            State::Proceeding => {
                 let packet = related(
                     dialog,
                     Method::Cancel,
@@ -213,7 +238,7 @@ impl Engine {
                 };
                 packet
             }
-            State::Cancelling { .. } | State::Terminated { .. } => {
+            State::CancelPending { .. } | State::Cancelling { .. } | State::Terminated { .. } => {
                 return Ok(Output {
                     datagrams: Vec::new(),
                     events: Vec::new(),
@@ -228,20 +253,54 @@ impl Engine {
             datagrams: Vec::new(),
             events: Vec::new(),
         };
-        self.outgoing.retain(|_, dialog| !matches!(dialog.state, State::Cancelling { expires } | State::Terminated { expires } if expires <= now));
+        self.outgoing.retain(|_, dialog| !matches!(dialog.state, State::CancelPending { expires, .. } | State::Cancelling { expires } | State::Terminated { expires } if expires <= now));
         for dialog in self.outgoing.values_mut() {
             match &mut dialog.state {
-                State::Calling { retry, interval } if dialog.deadline > now => {
+                State::Calling { retry, interval }
+                    if dialog.deadline.min(dialog.transaction_deadline) > now =>
+                {
                     if *retry <= now {
                         output.datagrams.push(Datagram {
                             peer: dialog.peer,
                             bytes: dialog.bytes.clone(),
                         });
-                        *interval = (*interval * 2).min(4000);
+                        *interval = (*interval * 2).min(32_000);
                         *retry = now.saturating_add(*interval);
                     }
                 }
-                State::Calling { .. } | State::Proceeding if dialog.deadline <= now => {
+                State::CancelPending {
+                    retry, interval, ..
+                } => {
+                    if *retry <= now {
+                        output.datagrams.push(Datagram {
+                            peer: dialog.peer,
+                            bytes: dialog.bytes.clone(),
+                        });
+                        *interval = (*interval * 2).min(32_000);
+                        *retry = now.saturating_add(*interval);
+                    }
+                }
+                State::Calling { retry, interval }
+                    if dialog.deadline.min(dialog.transaction_deadline) <= now =>
+                {
+                    output.events.push(SipEvent::Ended {
+                        id: dialog.id.clone(),
+                        generation: dialog.generation,
+                        cause: 19,
+                    });
+                    dialog.state = if dialog.transaction_deadline <= now {
+                        State::Terminated {
+                            expires: now.saturating_add(32_000),
+                        }
+                    } else {
+                        State::CancelPending {
+                            retry: *retry,
+                            interval: *interval,
+                            expires: dialog.transaction_deadline,
+                        }
+                    };
+                }
+                State::Proceeding if dialog.deadline <= now => {
                     output.datagrams.push(Datagram {
                         peer: dialog.peer,
                         bytes: related(
@@ -293,6 +352,20 @@ impl Engine {
         }
         let code = response.status_code.code();
         if code < 200 {
+            if let State::CancelPending { expires, .. } = dialog.state {
+                output.datagrams.push(Datagram {
+                    peer,
+                    bytes: related(
+                        dialog,
+                        Method::Cancel,
+                        dialog.invite.to_header()?.value(),
+                        dialog.cseq,
+                        false,
+                    )?,
+                });
+                dialog.state = State::Cancelling { expires };
+                return Ok(output);
+            }
             if matches!(dialog.state, State::Calling { .. }) {
                 if code >= 180 {
                     output.events.push(SipEvent::Ringing {
@@ -337,7 +410,7 @@ impl Engine {
                     });
                     dialog.state = State::Established(session);
                 }
-                State::Cancelling { .. } => {
+                State::CancelPending { .. } | State::Cancelling { .. } => {
                     dialog.cseq = dialog.cseq.checked_add(1).ok_or(SipError::Capacity)?;
                     output.datagrams.push(Datagram {
                         peer,
@@ -423,6 +496,7 @@ impl Engine {
                 cause: 16,
             }),
             State::Calling { .. }
+            | State::CancelPending { .. }
             | State::Proceeding
             | State::Cancelling { .. }
             | State::Terminated { .. } => {}

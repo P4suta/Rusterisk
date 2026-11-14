@@ -101,6 +101,29 @@ fn answered(invite: &[u8]) -> Result<Vec<u8>, SipError> {
     Ok(format!("SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=callee\r\nCall-ID: {}\r\nCSeq: {}\r\nContact: <sip:phone@127.0.0.1:5061>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", request.top_via_header()?.value(), request.from_header()?.value(), request.to_header()?.value(), request.call_id_header()?.value(), request.cseq_header()?.value(), body.len()).into_bytes())
 }
 
+fn provisional(invite: &[u8]) -> Result<Vec<u8>, SipError> {
+    let request = request(invite)?;
+    Ok(format!("SIP/2.0 180 Ringing\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=callee\r\nCall-ID: {}\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n", request.top_via_header()?.value(), request.from_header()?.value(), request.to_header()?.value(), request.call_id_header()?.value(), request.cseq_header()?.value()).into_bytes())
+}
+
+#[test]
+fn cancellation_waits_for_a_provisional_response_and_never_announces_a_late_answer(
+) -> Result<(), SipError> {
+    let mut config = config()?;
+    config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+    let mut engine = Engine::new(config, [9; 32]);
+    let invite = engine.originate(outbound(), 0)?.datagrams.remove(0).bytes;
+    assert!(engine.cancel("outgoing", 7, 1)?.datagrams.is_empty());
+    assert!(engine.tick(500)?.datagrams[0].bytes.starts_with(b"INVITE "));
+    let cancelled = engine.receive(&provisional(&invite)?, "127.0.0.1:5061".parse()?, 600)?;
+    assert!(cancelled.datagrams[0].bytes.starts_with(b"CANCEL "));
+    assert!(cancelled.events.is_empty());
+    let late = engine.receive(&answered(&invite)?, "127.0.0.1:5061".parse()?, 700)?;
+    assert_eq!(late.datagrams.len(), 2);
+    assert!(late.events.is_empty());
+    Ok(())
+}
+
 #[test]
 fn a_cancelled_generation_does_not_prevent_reusing_the_channel_identifier() -> Result<(), SipError>
 {
@@ -142,6 +165,11 @@ fn outgoing_invite_retransmits_and_late_answer_after_cancel_is_acknowledged_then
         engine.tick(500)?.datagrams[0].bytes,
         output.datagrams[0].bytes
     );
+    engine.receive(
+        &provisional(&output.datagrams[0].bytes)?,
+        "127.0.0.1:5061".parse()?,
+        550,
+    )?;
     let cancelled = engine.cancel("outgoing", 7, 600)?;
     assert!(cancelled
         .datagrams
@@ -227,7 +255,8 @@ fn repeated_late_answers_keep_the_original_invite_sequence_in_ack() -> Result<()
     config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
     let mut engine = Engine::new(config, [9; 32]);
     let invite = engine.originate(outbound(), 0)?.datagrams.remove(0).bytes;
-    let cancelled = engine.cancel("outgoing", 7, 1)?;
+    engine.receive(&provisional(&invite)?, "127.0.0.1:5061".parse()?, 1)?;
+    let cancelled = engine.cancel("outgoing", 7, 2)?;
     assert_eq!(
         request(&cancelled.datagrams[0].bytes)?
             .top_via_header()?
