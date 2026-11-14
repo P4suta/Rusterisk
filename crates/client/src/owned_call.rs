@@ -154,6 +154,20 @@ impl OwnedCall {
         .await
         .map_err(|_| Error::Timeout)?
     }
+    pub async fn wait_completion(&mut self, timeout: Duration) -> Result<CallSnapshot, Error> {
+        tokio::time::timeout(timeout, async {
+            loop {
+                let received = self.progress.borrow_and_update().clone();
+                let snapshot = self.observed(received);
+                if snapshot.progress.completion().is_some() {
+                    return Ok(snapshot);
+                }
+                self.progress.changed().await.map_err(|_| Error::Closed)?;
+            }
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
+    }
     pub async fn close(mut self) -> Result<(), Error> {
         self.cancel();
         tokio::time::timeout(Duration::from_secs(23), async {

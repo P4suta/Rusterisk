@@ -73,6 +73,36 @@ enum Failure {
 }
 
 #[tokio::test]
+async fn callers_can_wait_for_peer_completion_without_reading_the_event_queue() -> Result<(), Error>
+{
+    let harness = Harness::start(Failure::None).await?;
+    let result = async {
+        let session = harness
+            .client
+            .subscribe(&"app".to_owned().try_into()?)
+            .await?;
+        let mut call = session
+            .originate(Originate::new("PJSIP/phone".into())?)
+            .await?;
+        call.wait(CallMilestone::Accepted, Duration::from_secs(2))
+            .await?;
+        assert!(matches!(
+            call.wait_completion(Duration::from_millis(20)).await,
+            Err(Error::Timeout)
+        ));
+        harness.client.hangup(call.id()).await?;
+        let completed = call.wait_completion(Duration::from_secs(2)).await?;
+        assert_eq!(completed.progress.completion(), Some(CallCompletion::Ended));
+        call.close().await?;
+        session.shutdown().await?;
+        Ok(())
+    }
+    .await;
+    harness.shutdown().await?;
+    result
+}
+
+#[tokio::test]
 async fn dropping_a_session_cleans_calls_while_their_handles_are_still_alive() -> Result<(), Error>
 {
     let harness = Harness::start(Failure::None).await?;
