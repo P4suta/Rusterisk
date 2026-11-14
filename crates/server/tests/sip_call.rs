@@ -9,8 +9,8 @@ use rsipstack::sip::{
 use rsipstack::sip::{HeadersExt, SipMessage};
 use rusterisk_api::{ChannelId, ChannelState, EventKind};
 use rusterisk_config::{Codec, Config};
-use rusterisk_core::MuteDirection;
-use rusterisk_media::{mulaw_decode, AudioFormat, Frame, RtpPacket, RtpSender};
+use rusterisk_core::{DtmfDigit, MuteDirection};
+use rusterisk_media::{mulaw_decode, AudioFormat, Frame, RtpPacket, RtpSender, TelephoneEvent};
 use rusterisk_server::media::MediaHub;
 use rusterisk_server::rtp::SocketPair;
 use rusterisk_server::signaling::Signaling;
@@ -71,6 +71,31 @@ async fn receive_audio(peer: &SocketPair, expected: i32) -> Result<(), ControlEr
             }
         }
         Err(ControlError::Invalid("Expected received audio"))
+    })
+    .await
+    .map_err(failure)?
+}
+
+async fn receive_digit(
+    events: &mut tokio::sync::mpsc::Receiver<rusterisk_api::Event>,
+    channel: &ChannelId,
+    expected: &str,
+) -> Result<(), ControlError> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(event) = events.recv().await {
+            if let EventKind::ChannelDtmfReceived {
+                channel: actual,
+                digit,
+                duration_ms,
+            } = event.kind
+            {
+                assert_eq!(&actual.id, channel);
+                assert_eq!(digit, expected);
+                assert_eq!(duration_ms, 120);
+                return Ok(());
+            }
+        }
+        Err(ControlError::Capacity)
     })
     .await
     .map_err(failure)?
@@ -337,7 +362,7 @@ async fn invite(
         remote: audio.local_addr().map_err(failure)?,
         codec: Codec::Pcmu,
         payload_type: 0,
-        dtmf_payload: None,
+        dtmf_payload: Some(101),
         direction: Direction::SendRecv,
     }
     .answer(audio.local_addr().map_err(failure)?, 1);
@@ -446,6 +471,22 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
                 if channel.state == ChannelState::Up { up.insert(channel.id); }
             }
         }
+        let body = "Signal=#\r\nDuration=120\r\n";
+        let info = ack.replace("ACK sip:", "INFO sip:")
+            .replace("z9hG4bK-ack", "z9hG4bK-info")
+            .replace("CSeq: 2 ACK", "CSeq: 3 INFO")
+            .replace("Content-Length: 0\r\n\r\n", &format!("Content-Type: application/dtmf-relay\r\nContent-Length: {}\r\n\r\n{body}", body.len()));
+        for _ in 0..3 {
+            alice.send_to(info.as_bytes(), target).await.map_err(failure)?;
+            assert_eq!(response(&alice).await?.status_code.code(), 200);
+        }
+        receive_digit(&mut events.events, &incoming, "#").await?;
+        for sequence in 1..=3 {
+            let payload = TelephoneEvent::new(DtmfDigit::Five, true, 10, 960).map_err(failure)?.encode();
+            let packet = RtpPacket::new(101, sequence, 1000, 0x07070707, &payload).map_err(failure)?.encode().map_err(failure)?;
+            alice_audio.data().send_to(&packet, alice_target).await.map_err(failure)?;
+        }
+        receive_digit(&mut events.events, &incoming, "5").await?;
         controller.execute(credentials()?, None, Action::CreateBridge { id: id("mix")?, name: "Conversation".into() }).await?;
         controller.execute(credentials()?, None, Action::AddChannels { bridge: id("mix")?, channels: [incoming.clone(), id("bob")?].into_iter().collect() }).await?;
         for (phone, target, value, seed) in [(&alice_audio, alice_target, 4000, 7), (&bob_audio, bob_target, -7000, 8)] {
