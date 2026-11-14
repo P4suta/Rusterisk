@@ -5,6 +5,32 @@ const ARI: &str = "[general]\nenabled=yes\nallowed_origins=https://localhost\n[t
 const SIP: &str = "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:5060\n[phone-auth]\ntype=auth\nauth_type=userpass\nusername=phone\npassword=local-test-password\n[phone-aor]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=phone-auth\naors=phone-aor\ncontext=internal\ndisallow=all\nallow=ulaw,alaw,opus\n";
 
 #[test]
+fn bundled_configuration_keeps_management_local_and_defines_both_example_phones(
+) -> Result<(), ConfigError> {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
+    let config = Config::load(&directory)?;
+    assert!(config.http.bind.ip().is_loopback());
+    assert!(config
+        .users
+        .iter()
+        .any(|user| user.name == "api" && !user.read_only));
+    for name in ["alice", "bob"] {
+        let endpoint = config
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == name);
+        assert!(endpoint.is_some());
+        assert!(config.auth.iter().any(|auth| auth.username == name));
+    }
+    assert!(config
+        .dialplan
+        .steps
+        .iter()
+        .any(|step| step.context == "internal" && step.extension == "100"));
+    Ok(())
+}
+
+#[test]
 fn parses_asterisk_sections_without_leaking_secrets_in_debug() -> Result<(), ConfigError> {
     let config = Config::parse(
         HTTP,
