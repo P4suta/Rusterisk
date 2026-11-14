@@ -36,15 +36,16 @@ pub(crate) async fn upgrade(
             return Err(ControlError::Unsupported);
         }
         let subscription = controller
-            .subscribe(credentials, origin, application)
+            .subscribe_socket(credentials, origin, application)
             .await?;
+        let stopped = controller.shutdown_signal();
         Ok(upgrade
             .protocols(["ari"])
             .max_frame_size(16384)
             .max_message_size(16384)
             .write_buffer_size(0)
             .max_write_buffer_size(32768)
-            .on_upgrade(|socket| events(socket, subscription)))
+            .on_upgrade(|socket| events(socket, subscription, stopped)))
     }
     .await;
     match result {
@@ -60,13 +61,21 @@ async fn send(socket: &mut WebSocket, message: Message) -> bool {
     }
 }
 
-async fn events(mut socket: WebSocket, mut subscription: Subscription) {
+async fn events(
+    mut socket: WebSocket,
+    mut subscription: Subscription,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) {
     let mut last_received = Instant::now();
     let period = Duration::from_secs(20);
     let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        if *stop.borrow() {
+            break;
+        }
         tokio::select! {
+            changed = stop.changed() => if changed.is_err() || *stop.borrow() { break; },
             event = subscription.events.recv() => {
                 let Some(event) = event else { break; };
                 let text = match serde_json::to_string(&event) {
@@ -97,8 +106,8 @@ async fn events(mut socket: WebSocket, mut subscription: Subscription) {
             }
         }
     }
-    drop(subscription);
     if !send(&mut socket, Message::Close(None)).await {
         tracing::debug!("event connection closed before the close frame was sent");
     }
+    drop(subscription);
 }

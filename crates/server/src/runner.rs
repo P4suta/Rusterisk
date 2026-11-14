@@ -43,6 +43,8 @@ enum Request {
         origin: Option<String>,
         application: String,
         events: mpsc::Sender<Event>,
+        lifetime: mpsc::Receiver<()>,
+        kind: SubscriptionKind,
         reply: oneshot::Sender<Result<u64, ControlError>>,
     },
     Unsubscribe {
@@ -54,6 +56,16 @@ enum Request {
 struct Subscriber {
     token: u64,
     events: mpsc::Sender<Event>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubscriptionKind {
+    Direct,
+    Socket,
+}
+struct Session {
+    lifetime: mpsc::Receiver<()>,
+    kind: SubscriptionKind,
 }
 
 #[derive(Clone)]
@@ -71,6 +83,7 @@ pub struct Runner {
     effects: mpsc::Sender<Effect>,
     shutdown: watch::Receiver<bool>,
     subscribers: BTreeMap<String, Subscriber>,
+    sessions: BTreeMap<u64, Session>,
     subscription_generation: u64,
 }
 
@@ -79,6 +92,7 @@ pub struct Subscription {
     pub token: u64,
     pub events: mpsc::Receiver<Event>,
     controller: Controller,
+    _lifetime: mpsc::Sender<()>,
 }
 
 impl Drop for Subscription {
@@ -126,6 +140,7 @@ impl Controller {
                 effects,
                 shutdown: shutdown_receiver,
                 subscribers: BTreeMap::new(),
+                sessions: BTreeMap::new(),
                 subscription_generation: 0,
             },
             effect_receiver,
@@ -192,7 +207,29 @@ impl Controller {
         origin: Option<String>,
         application: String,
     ) -> Result<Subscription, ControlError> {
+        self.subscribe_kind(credentials, origin, application, SubscriptionKind::Direct)
+            .await
+    }
+
+    pub(crate) async fn subscribe_socket(
+        &self,
+        credentials: Credentials,
+        origin: Option<String>,
+        application: String,
+    ) -> Result<Subscription, ControlError> {
+        self.subscribe_kind(credentials, origin, application, SubscriptionKind::Socket)
+            .await
+    }
+
+    async fn subscribe_kind(
+        &self,
+        credentials: Credentials,
+        origin: Option<String>,
+        application: String,
+        kind: SubscriptionKind,
+    ) -> Result<Subscription, ControlError> {
         let (events, receiver) = mpsc::channel(64);
+        let (lifetime, lifetime_receiver) = mpsc::channel(1);
         let (reply, response) = oneshot::channel();
         self.requests
             .try_send(Request::Subscribe {
@@ -200,6 +237,8 @@ impl Controller {
                 origin,
                 application: application.clone(),
                 events,
+                lifetime: lifetime_receiver,
+                kind,
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
@@ -209,6 +248,7 @@ impl Controller {
             token,
             events: receiver,
             controller: self.clone(),
+            _lifetime: lifetime,
         })
     }
 }
@@ -325,17 +365,28 @@ impl Runner {
                 origin,
                 application,
                 events,
+                lifetime,
+                kind,
                 reply,
             } => {
+                if reply.is_closed() {
+                    return Ok(());
+                }
                 let result = self
                     .authorize(&credentials, origin.as_deref(), true)
                     .and_then(|()| {
+                        self.sessions
+                            .retain(|_, session| !session.lifetime.is_closed());
+                        if self.sessions.len() >= 64 {
+                            return Err(ControlError::Capacity);
+                        }
                         self.control.subscribe(&application)?;
                         self.subscription_generation = self
                             .subscription_generation
                             .checked_add(1)
                             .ok_or(ControlError::Capacity)?;
                         let token = self.subscription_generation;
+                        self.sessions.insert(token, Session { lifetime, kind });
                         if let Some(previous) = self
                             .subscribers
                             .insert(application.clone(), Subscriber { token, events })
@@ -359,6 +410,7 @@ impl Runner {
                 }
             }
             Request::Unsubscribe { application, token } => {
+                self.sessions.remove(&token);
                 if self
                     .subscribers
                     .get(&application)
@@ -373,7 +425,7 @@ impl Runner {
         Ok(())
     }
 
-    pub async fn run(mut self) -> Result<(), ControlError> {
+    async fn serve(&mut self) -> Result<(), ControlError> {
         let started = Instant::now();
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -385,14 +437,55 @@ impl Runner {
                     if let Some(request) = request { self.request(request, u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?; } else { break; }
                 }
                 _instant = tick.tick() => {
+                    self.sessions.retain(|_, session| !session.lifetime.is_closed());
                     let mut outcome = self.control.expire(u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?, &timestamp())?; self.publish(&mut outcome)?;
                     let disconnected: Vec<String> = self.subscribers.iter().filter(|(_, subscriber)| subscriber.events.is_closed()).map(|(application, _)| application.clone()).collect();
                     for application in disconnected { self.subscribers.remove(&application); let mut outcome = self.control.unsubscribe(&application, &timestamp())?; self.publish(&mut outcome)?; }
                 }
             }
         }
-        let mut outcome = self.control.shutdown(&timestamp())?;
-        self.publish(&mut outcome)?;
         Ok(())
+    }
+
+    async fn close(&mut self) -> Result<(), ControlError> {
+        let result = self
+            .control
+            .shutdown(&timestamp())
+            .and_then(|mut outcome| self.publish(&mut outcome));
+        self.subscribers.clear();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut cleanup = Ok(());
+        for (_, mut session) in std::mem::take(&mut self.sessions) {
+            if session.kind == SubscriptionKind::Socket {
+                match tokio::time::timeout_at(deadline, session.lifetime.recv()).await {
+                    Ok(None) => {}
+                    Ok(Some(())) => {
+                        cleanup = Err(ControlError::Adapter(
+                            "Unexpected connection lifetime signal".into(),
+                        ))
+                    }
+                    Err(error) => cleanup = Err(ControlError::Adapter(error.to_string())),
+                }
+            }
+        }
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(primary), Err(cleanup)) => Err(ControlError::Adapter(format!(
+                "{primary}; event connection cleanup failed: {cleanup}"
+            ))),
+        }
+    }
+
+    pub async fn run(mut self) -> Result<(), ControlError> {
+        let result = self.serve().await;
+        let cleanup = self.close().await;
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(primary), Err(cleanup)) => Err(ControlError::Adapter(format!(
+                "{primary}; control cleanup failed: {cleanup}"
+            ))),
+        }
     }
 }

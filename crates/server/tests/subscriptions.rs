@@ -8,6 +8,43 @@ fn credentials() -> Result<Credentials, ControlError> {
 }
 
 #[tokio::test]
+async fn replaced_connections_keep_their_admission_slot_until_the_receiver_is_dropped(
+) -> Result<(), ControlError> {
+    let config = Config::parse(
+        "[general]\nbindaddr=127.0.0.1\n",
+        "[app]\ntype=user\npassword=test-password\n",
+        "",
+        "",
+        "",
+    )
+    .map_err(|error| ControlError::Adapter(error.to_string()))?;
+    let (controller, runner, _effects) = Controller::new(config, 4);
+    let task = tokio::spawn(runner.run());
+    let mut subscriptions = Vec::with_capacity(64);
+    for _ in 0..64 {
+        subscriptions.push(
+            controller
+                .subscribe(credentials()?, None, "app".into())
+                .await?,
+        );
+    }
+    let overflow = controller
+        .subscribe(credentials()?, None, "app".into())
+        .await;
+    assert!(matches!(overflow, Err(ControlError::Capacity)));
+    drop(subscriptions.remove(0));
+    let replacement = controller
+        .subscribe(credentials()?, None, "app".into())
+        .await?;
+    drop(replacement);
+    drop(subscriptions);
+    controller.shutdown();
+    task.await
+        .map_err(|error| ControlError::Adapter(error.to_string()))??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn replacement_and_ingestion_do_not_wait_for_an_event_consumer() -> Result<(), ControlError> {
     let config = Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
