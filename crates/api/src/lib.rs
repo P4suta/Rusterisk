@@ -332,6 +332,26 @@ pub struct Operation {
 }
 
 impl Operation {
+    pub fn matches(&self, method: &str, path: &str) -> bool {
+        if self.method.upper() != method {
+            return false;
+        }
+        let mut actual = path.split('/');
+        for expected in self.path.split('/') {
+            let Some(segment) = actual.next() else {
+                return false;
+            };
+            if expected.starts_with('{') && expected.ends_with('}') {
+                if segment.is_empty() {
+                    return false;
+                }
+            } else if expected != segment {
+                return false;
+            }
+        }
+        actual.next().is_none()
+    }
+
     pub fn resource(&self) -> &str {
         self.path
             .trim_start_matches('/')
@@ -345,6 +365,32 @@ macro_rules! operation {
     ($id:literal, $name:literal, $method:ident, $path:literal, $response:literal, [$($parameter:literal),*]) => {
         Operation { id: $id, nickname: $name, method: Method::$method, path: $path, response: $response, parameters: &[$($parameter),*] }
     };
+}
+
+const UNSUPPORTED_OPERATIONS: &[Operation] = &[
+    operation!(
+        "channels.snoopChannel",
+        "snoopChannel",
+        Post,
+        "/channels/{channelId}/snoop",
+        "Channel",
+        ["app!", "spy", "whisper", "appArgs", "snoopId"]
+    ),
+    operation!(
+        "channels.snoopChannelWithId",
+        "snoopChannelWithId",
+        Post,
+        "/channels/{channelId}/snoop/{snoopId}",
+        "Channel",
+        ["app!", "spy", "whisper", "appArgs"]
+    ),
+];
+
+pub fn is_known_operation(method: &str, path: &str) -> bool {
+    OPERATIONS
+        .iter()
+        .chain(UNSUPPORTED_OPERATIONS)
+        .any(|operation| operation.matches(method, path))
 }
 
 pub const OPERATIONS: &[Operation] = &[

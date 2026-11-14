@@ -275,7 +275,16 @@ async fn dispatch(
         if !value.is_object() {
             return Err(ControlError::Invalid("Expected a JSON object"));
         }
-        return Err(ControlError::Unsupported);
+        return Err(
+            if path
+                .strip_prefix("/ari")
+                .is_some_and(|path| rusterisk_api::is_known_operation(method.as_str(), path))
+            {
+                ControlError::Unsupported
+            } else {
+                ControlError::NotFound("Resource not found")
+            },
+        );
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let action = match (method.as_str(), segments.as_slice()) {
@@ -349,7 +358,13 @@ async fn dispatch(
                 .map(id)
                 .collect::<Result<Vec<_>, _>>()?,
         },
-        (_, ["ari", ..]) => return Err(ControlError::Unsupported),
+        (_, ["ari", ..])
+            if path
+                .strip_prefix("/ari")
+                .is_some_and(|path| rusterisk_api::is_known_operation(method.as_str(), path)) =>
+        {
+            return Err(ControlError::Unsupported)
+        }
         _ => return Err(ControlError::NotFound("Resource not found")),
     };
     Ok(response(

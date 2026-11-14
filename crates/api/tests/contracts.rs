@@ -11,6 +11,34 @@ fn identifiers_are_bounded_path_segments() {
 }
 
 #[test]
+fn declared_operations_match_complete_paths_and_their_exact_method() {
+    for operation in OPERATIONS {
+        let path = operation
+            .path
+            .split('/')
+            .map(|part| if part.starts_with('{') { "item" } else { part })
+            .collect::<Vec<_>>()
+            .join("/");
+        assert!(
+            operation.matches(operation.method.upper(), &path),
+            "{}",
+            operation.id
+        );
+        assert!(!operation.matches("PATCH", &path), "{}", operation.id);
+        assert!(
+            !operation.matches(operation.method.upper(), &format!("{path}/extra")),
+            "{}",
+            operation.id
+        );
+        assert!(
+            !operation.matches(operation.method.upper(), &format!("/extra{path}")),
+            "{}",
+            operation.id
+        );
+    }
+}
+
+#[test]
 fn discovery_formats_preserve_asterisk_lists_and_standard_array_types(
 ) -> Result<(), rusterisk_api::SwaggerError> {
     for format in [DiscoveryFormat::Asterisk, DiscoveryFormat::Standard] {

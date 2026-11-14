@@ -199,12 +199,39 @@ async fn http_bridge_lifecycle_and_known_unsupported_operations_have_ari_errors(
     let error: rusterisk_api::ApiError = serde_json::from_slice(&bytes)?;
     assert_eq!(error.message, "Bridge not found");
     assert_eq!(
-        app.oneshot(request("POST", "/ari/channels/x/snoop", Some("test"))?)
+        app.clone()
+            .oneshot(request("POST", "/ari/channels/x/play", Some("test"))?)
             .await
             .map_err(|error| ControlError::Adapter(error.to_string()))?
             .status(),
         StatusCode::NOT_IMPLEMENTED
     );
+    for path in ["/ari/channels/x/snoop", "/ari/channels/x/snoop/observer"] {
+        assert_eq!(
+            app.clone()
+                .oneshot(request("POST", path, Some("test"))?)
+                .await
+                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .status(),
+            StatusCode::NOT_IMPLEMENTED,
+            "{path}"
+        );
+    }
+    for path in [
+        "/ari/unknown",
+        "/ari/channels/x/unknown",
+        "/ari/channels/x/play/extra/unexpected",
+    ] {
+        assert_eq!(
+            app.clone()
+                .oneshot(request("POST", path, Some("test"))?)
+                .await
+                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .status(),
+            StatusCode::NOT_FOUND,
+            "{path}"
+        );
+    }
     controller.shutdown();
     task.await
         .map_err(|error| ControlError::Adapter(error.to_string()))??;
