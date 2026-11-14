@@ -12,7 +12,10 @@ pub enum DialplanInstruction {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DialplanToken(u64);
+pub struct DialplanToken {
+    generation: u64,
+    sequence: u64,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialplanError {
@@ -66,6 +69,7 @@ enum Phase {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DialplanMachine {
+    generation: u64,
     position: u16,
     length: u16,
     issued: u64,
@@ -74,11 +78,12 @@ pub struct DialplanMachine {
 }
 
 impl DialplanMachine {
-    pub fn new(entry: u16, length: u16) -> Result<Self, DialplanError> {
+    pub fn new(generation: u64, entry: u16, length: u16) -> Result<Self, DialplanError> {
         if length == 0 || length > 4096 || entry >= length {
             return Err(DialplanError::Program);
         }
         Ok(Self {
+            generation,
             position: entry,
             length,
             issued: 0,
@@ -133,7 +138,10 @@ impl DialplanMachine {
             return Ok(DialplanDispatch::Yield);
         }
         let issued = self.issued.checked_add(1).ok_or(DialplanError::Capacity)?;
-        let token = DialplanToken(issued);
+        let token = DialplanToken {
+            generation: self.generation,
+            sequence: issued,
+        };
         let phase = match instruction {
             DialplanInstruction::Wait(duration) => Phase::Waiting {
                 deadline: now
