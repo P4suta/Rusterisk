@@ -1,8 +1,14 @@
 use crate::{Datagram, DialogReply, Engine, Output, Session, SipError, SipEvent};
 use rsipstack::sip::{
-    headers::untyped::ToTypedHeader, HeadersExt, Method, Request, Response, SipMessage, Uri,
+    headers::{
+        auth::{Algorithm, AuthQop, Qop, Scheme},
+        typed::{Authorization, WwwAuthenticate},
+        untyped::ToTypedHeader,
+    },
+    services::DigestGenerator,
+    Header, HeadersExt, Method, Request, Response, SipMessage, Uri,
 };
-use rusterisk_config::Codec;
+use rusterisk_config::{Auth, Codec};
 use std::net::SocketAddr;
 
 pub struct Outbound {
@@ -48,6 +54,172 @@ pub(crate) struct Outgoing {
     state: State,
     cseq: u32,
     remote_cseq: Option<u32>,
+    credentials: Vec<Auth>,
+    challenges: Vec<Challenge>,
+}
+
+struct Challenge {
+    response: Response,
+    ack: Vec<u8>,
+    expires: u64,
+}
+
+fn authenticate(
+    dialog: &mut Outgoing,
+    response: &Response,
+    now: u64,
+) -> Result<Option<Vec<u8>>, SipError> {
+    if dialog.challenges.len() >= 4
+        || dialog.deadline <= now
+        || !matches!(dialog.state, State::Calling { .. } | State::Proceeding)
+    {
+        return Ok(None);
+    }
+    let proxy = match response.status_code.code() {
+        401 => false,
+        407 => true,
+        _ => return Ok(None),
+    };
+    let name = if proxy {
+        "Proxy-Authenticate"
+    } else {
+        "WWW-Authenticate"
+    };
+    let Some(header) = response
+        .headers
+        .iter()
+        .find(|header| header.name().eq_ignore_ascii_case(name))
+    else {
+        return Ok(None);
+    };
+    let challenge = match WwwAuthenticate::parse(header.value()) {
+        Ok(challenge) => challenge,
+        Err(_) => return Ok(None),
+    };
+    if challenge.scheme != Scheme::Digest
+        || challenge.nonce.len() > 256
+        || challenge.realm.len() > 256
+        || challenge
+            .opaque
+            .as_ref()
+            .is_some_and(|opaque| opaque.len() > 256)
+    {
+        return Ok(None);
+    }
+    let algorithm = match challenge.algorithm.unwrap_or(Algorithm::Md5) {
+        Algorithm::Md5 => Algorithm::Md5,
+        Algorithm::Md5Sess => Algorithm::Md5Sess,
+        Algorithm::Sha256 | Algorithm::Sha256Sess | Algorithm::Sha512 | Algorithm::Sha512Sess => {
+            return Ok(None)
+        }
+    };
+    let authorization_name = if proxy {
+        "Proxy-Authorization"
+    } else {
+        "Authorization"
+    };
+    if let Some(previous) = dialog
+        .invite
+        .headers
+        .iter()
+        .find(|header| header.name().eq_ignore_ascii_case(authorization_name))
+    {
+        let previous = Authorization::parse(previous.value())?;
+        if challenge.stale.as_deref() != Some("true") || previous.nonce == challenge.nonce {
+            return Ok(None);
+        }
+    }
+    let Some(credentials) = dialog
+        .credentials
+        .iter()
+        .find(|auth| auth.realm == challenge.realm)
+        .or_else(|| {
+            dialog
+                .credentials
+                .iter()
+                .find(|auth| auth.realm.is_empty() || auth.realm == "*")
+        })
+    else {
+        return Ok(None);
+    };
+    let qop = match challenge.qop {
+        Some(Qop::Auth) => {
+            let mut bytes = [0; 16];
+            getrandom::fill(&mut bytes).map_err(|_| SipError::Entropy)?;
+            Some(AuthQop::Auth {
+                cnonce: format!("{:032x}", u128::from_be_bytes(bytes)),
+                nc: 1,
+            })
+        }
+        Some(Qop::AuthInt) => return Ok(None),
+        None if algorithm == Algorithm::Md5Sess => return Ok(None),
+        None => None,
+    };
+    let digest = DigestGenerator {
+        username: &credentials.username,
+        password: credentials.password.expose(),
+        nonce: &challenge.nonce,
+        uri: &dialog.invite.uri,
+        realm: &challenge.realm,
+        method: &Method::Invite,
+        qop: qop.as_ref(),
+        algorithm,
+    }
+    .compute();
+    let authorization = Authorization {
+        scheme: Scheme::Digest,
+        username: credentials.username.clone(),
+        realm: challenge.realm,
+        nonce: challenge.nonce,
+        uri: dialog.invite.uri.clone(),
+        response: digest,
+        algorithm: Some(algorithm),
+        opaque: challenge.opaque,
+        qop,
+    };
+    let mut invite = dialog.invite.clone();
+    let sequence = dialog
+        .cseq
+        .checked_add(1)
+        .filter(|sequence| *sequence < 1 << 31)
+        .ok_or(SipError::Capacity)?;
+    let via = invite.top_via_header()?.typed()?;
+    let branch = format!(
+        "{}-auth-{sequence}",
+        via.branch().ok_or(SipError::InvalidPacket)?
+    );
+    let header = invite
+        .headers
+        .iter_mut()
+        .find(|header| header.name().eq_ignore_ascii_case("Via"))
+        .ok_or(SipError::InvalidPacket)?;
+    *header = Header::Via(rsipstack::sip::headers::untyped::Via::new(
+        via.with_branch(branch.into()).to_string(),
+    ));
+    invite
+        .cseq_header_mut()?
+        .replace(format!("{sequence} INVITE"));
+    let header = if proxy {
+        Header::ProxyAuthorization(rsipstack::sip::headers::untyped::ProxyAuthorization::new(
+            authorization.to_string(),
+        ))
+    } else {
+        authorization.into()
+    };
+    invite.headers.unique_push(header);
+    let bytes = invite.to_string().into_bytes();
+    if bytes.len() > crate::MAX_MESSAGE {
+        return Err(SipError::Capacity);
+    }
+    dialog.cseq = sequence;
+    dialog.invite = invite;
+    dialog.bytes = bytes.clone();
+    dialog.state = State::Calling {
+        retry: now.saturating_add(500),
+        interval: 500,
+    };
+    dialog.transaction_deadline = now.saturating_add(32_000);
+    Ok(Some(bytes))
 }
 
 fn request(bytes: &str) -> Result<Request, SipError> {
@@ -79,7 +251,15 @@ fn related(
         &dialog.remote_contact
     };
     let bytes = format!("{method} {uri} SIP/2.0\r\nVia: {via}\r\nFrom: {}\r\nTo: {to}\r\nCall-ID: {}\r\nCSeq: {cseq} {method}\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", dialog.invite.from_header()?.value(), dialog.invite.call_id_header()?.value());
-    let parsed = request(&bytes)?;
+    let mut parsed = request(&bytes)?;
+    if method == Method::Ack {
+        for header in dialog.invite.headers.iter().filter(|header| {
+            header.name().eq_ignore_ascii_case("Authorization")
+                || header.name().eq_ignore_ascii_case("Proxy-Authorization")
+        }) {
+            parsed.headers.push(header.clone());
+        }
+    }
     Ok(parsed.to_string().into_bytes())
 }
 
@@ -189,6 +369,13 @@ impl Engine {
             },
             cseq: 1,
             remote_cseq: None,
+            credentials: endpoint
+                .outbound_auth
+                .iter()
+                .filter_map(|name| self.config.auth.iter().find(|auth| &auth.name == name))
+                .cloned()
+                .collect(),
+            challenges: Vec::new(),
         };
         self.outgoing.insert(call_id, dialog);
         Ok(Output::response(peer, bytes.into_bytes()))
@@ -255,6 +442,9 @@ impl Engine {
         let mut output = self.incoming_tick(now)?;
         self.outgoing.retain(|_, dialog| !matches!(dialog.state, State::CancelPending { expires, .. } | State::Cancelling { expires } | State::Terminated { expires } if expires <= now));
         for dialog in self.outgoing.values_mut() {
+            dialog
+                .challenges
+                .retain(|challenge| challenge.expires > now);
             match &mut dialog.state {
                 State::Calling { retry, interval }
                     if dialog.deadline.min(dialog.transaction_deadline) > now =>
@@ -343,6 +533,15 @@ impl Engine {
         let Some(dialog) = self.outgoing.get_mut(response.call_id_header()?.value()) else {
             return Ok(output);
         };
+        if dialog.peer == peer {
+            if let Some(challenge) = dialog
+                .challenges
+                .iter()
+                .find(|challenge| challenge.expires > now && challenge.response == response)
+            {
+                return Ok(Output::response(peer, challenge.ack.clone()));
+            }
+        }
         if dialog.peer != peer
             || response.cseq_header()?.value() != dialog.invite.cseq_header()?.value()
             || response.transaction_id()? != dialog.invite.transaction_id()?
@@ -398,6 +597,15 @@ impl Engine {
                 code < 300,
             )?,
         });
+        if let Some(bytes) = authenticate(dialog, &response, now)? {
+            dialog.challenges.push(Challenge {
+                response,
+                ack: output.datagrams[0].bytes.clone(),
+                expires: now.saturating_add(32_000),
+            });
+            output.datagrams.push(Datagram { peer, bytes });
+            return Ok(output);
+        }
         if code < 300 {
             match dialog.state {
                 State::Calling { .. } | State::Proceeding => {

@@ -523,3 +523,118 @@ fn authentication_challenges_retransmit_until_the_original_transaction_is_acknow
     assert!(expired.tick(32000)?.datagrams.is_empty());
     Ok(())
 }
+
+fn challenge_invite(bytes: &[u8], proxy: bool) -> Result<Vec<u8>, SipError> {
+    let invite = request(bytes)?;
+    let (code, phrase, header) = if proxy {
+        (407, "Proxy Authentication Required", "Proxy-Authenticate")
+    } else {
+        (401, "Unauthorized", "WWW-Authenticate")
+    };
+    Ok(format!("SIP/2.0 {code} {phrase}\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=challenge\r\nCall-ID: {}\r\nCSeq: {}\r\n{header}: Digest realm=\"rusterisk\", nonce=\"remote-nonce\", algorithm=MD5, qop=\"auth\", opaque=\"roundtrip\"\r\nContent-Length: 0\r\n\r\n", invite.top_via_header()?.value(), invite.from_header()?.value(), invite.to_header()?.value(), invite.call_id_header()?.value(), invite.cseq_header()?.value()).into_bytes())
+}
+
+fn authorization(request: &rsipstack::sip::Request, proxy: bool) -> Option<&str> {
+    let name = if proxy {
+        "Proxy-Authorization"
+    } else {
+        "Authorization"
+    };
+    request
+        .headers
+        .iter()
+        .find(|header| header.name().eq_ignore_ascii_case(name))
+        .map(|header| header.value())
+}
+
+#[test]
+fn outgoing_authentication_preserves_caller_identity_and_uses_a_fresh_transaction(
+) -> Result<(), SipError> {
+    for proxy in [false, true] {
+        let mut config = config()?;
+        config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+        config.endpoints[0].outbound_auth.push("a".into());
+        let mut engine = Engine::new(config, [9; 32]);
+        let invite = engine.originate(outbound(), 0)?.datagrams.remove(0).bytes;
+        let challenged = engine.receive(
+            &challenge_invite(&invite, proxy)?,
+            "127.0.0.1:5061".parse()?,
+            1,
+        )?;
+        assert_eq!(challenged.datagrams.len(), 2);
+        assert!(challenged.datagrams[0].bytes.starts_with(b"ACK "));
+        assert!(challenged.events.is_empty());
+        let replayed = engine.receive(
+            &challenge_invite(&invite, proxy)?,
+            "127.0.0.1:5061".parse()?,
+            1,
+        )?;
+        assert_eq!(replayed.datagrams.len(), 1);
+        assert_eq!(replayed.datagrams[0].bytes, challenged.datagrams[0].bytes);
+        let authorized = request(&challenged.datagrams[1].bytes)?;
+        assert_eq!(authorized.cseq_header()?.value(), "2 INVITE");
+        assert_eq!(
+            authorized.from_header()?.value(),
+            request(&invite)?.from_header()?.value()
+        );
+        assert_ne!(
+            authorized.top_via_header()?.value(),
+            request(&invite)?.top_via_header()?.value()
+        );
+        let authorization = authorization(&authorized, proxy).ok_or(SipError::InvalidPacket)?;
+        let authorization = rsipstack::sip::headers::typed::Authorization::parse(authorization)?;
+        assert_eq!(authorization.username, "phone");
+        assert_eq!(authorization.opaque.as_deref(), Some("roundtrip"));
+        assert_eq!(
+            authorization.response,
+            DigestGenerator::from(&authorization, "password", &Method::Invite).compute()
+        );
+        let answer = engine.receive(
+            &answered(&challenged.datagrams[1].bytes)?,
+            "127.0.0.1:5061".parse()?,
+            2,
+        )?;
+        assert!(matches!(
+            &answer.events[0],
+            SipEvent::Answered { generation: 7, .. }
+        ));
+        let ack = request(&answer.datagrams[0].bytes)?;
+        assert!(self::authorization(&ack, proxy).is_some());
+    }
+    Ok(())
+}
+
+#[test]
+fn rejected_or_unconfigured_outbound_credentials_are_never_retried() -> Result<(), SipError> {
+    for (configured, matching_realm) in [(false, true), (true, false), (true, true)] {
+        let mut config = config()?;
+        config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+        if configured {
+            config.endpoints[0].outbound_auth.push("a".into());
+        }
+        if !matching_realm {
+            config.auth[0].realm = "another-peer".into();
+        }
+        let mut engine = Engine::new(config, [9; 32]);
+        let initial = engine.originate(outbound(), 0)?.datagrams.remove(0).bytes;
+        let mut reply = engine.receive(
+            &challenge_invite(&initial, false)?,
+            "127.0.0.1:5061".parse()?,
+            1,
+        )?;
+        if configured && matching_realm {
+            reply = engine.receive(
+                &challenge_invite(&reply.datagrams[1].bytes, false)?,
+                "127.0.0.1:5061".parse()?,
+                2,
+            )?;
+        }
+        assert_eq!(reply.datagrams.len(), 1);
+        assert!(reply.datagrams[0].bytes.starts_with(b"ACK "));
+        assert!(matches!(
+            &reply.events[0],
+            SipEvent::Ended { cause: 21, .. }
+        ));
+    }
+    Ok(())
+}
