@@ -1,0 +1,17 @@
+[package]
+name = "rusterisk-storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rusterisk-api = { version = "0.1.0", path = "../api" }
+rusterisk-media = { version = "0.1.0", path = "../media" }
+rusqlite = { version = "0.42", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3.25"
+
+[lints]
+workspace = true
