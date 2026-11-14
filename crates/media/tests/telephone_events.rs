@@ -1,7 +1,7 @@
 use rusterisk_core::{DtmfDigit, DtmfTone};
 use rusterisk_media::{
-    AudioFormat, Frame, MediaError, RtpPacket, RtpSender, TelephoneEvent, TelephoneReceiver,
-    TelephoneSender,
+    AudioFormat, Frame, MediaError, RtpPacket, RtpSender, TelephoneEvent, TelephoneFormat,
+    TelephoneReceiver, TelephoneSender,
 };
 
 #[test]
@@ -299,5 +299,33 @@ fn repeated_digits_have_distinct_start_times_while_audio_is_silent() -> Result<(
         }
     }
     assert_eq!(received, [tone, tone]);
+    Ok(())
+}
+
+#[test]
+fn senders_refuse_digits_outside_the_negotiated_event_set() -> Result<(), MediaError> {
+    let audio = RtpSender::new(AudioFormat::Pcmu, 0, [0; 10])?;
+    let format = TelephoneFormat::new(101, 8000)?.with_events(1 << DtmfDigit::Hash.event())?;
+    let mut sender = TelephoneSender::with_format(&audio, format, [1; 10])?;
+    assert!(sender
+        .start(
+            DtmfTone {
+                digit: DtmfDigit::One,
+                duration_ms: 100
+            },
+            0,
+            &audio
+        )
+        .is_err());
+    assert!(sender.ready());
+    sender.start(
+        DtmfTone {
+            digit: DtmfDigit::Hash,
+            duration_ms: 100,
+        },
+        0,
+        &audio,
+    )?;
+    assert!(TelephoneFormat::new(101, 8000)?.with_events(0).is_err());
     Ok(())
 }

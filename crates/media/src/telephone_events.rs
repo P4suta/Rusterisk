@@ -6,6 +6,7 @@ use rusterisk_core::{DtmfDigit, DtmfTone};
 pub struct TelephoneFormat {
     payload_type: u8,
     rate: u32,
+    events: u16,
 }
 
 impl TelephoneFormat {
@@ -13,7 +14,11 @@ impl TelephoneFormat {
         if payload_type > 127 || !matches!(rate, 8000 | 48000) {
             return Err(MediaError::Unsupported);
         }
-        Ok(Self { payload_type, rate })
+        Ok(Self {
+            payload_type,
+            rate,
+            events: u16::MAX,
+        })
     }
 
     pub const fn payload_type(self) -> u8 {
@@ -21,6 +26,18 @@ impl TelephoneFormat {
     }
     pub const fn rate(self) -> u32 {
         self.rate
+    }
+
+    pub fn with_events(mut self, events: u16) -> Result<Self, MediaError> {
+        if events == 0 {
+            return Err(MediaError::Unsupported);
+        }
+        self.events = events;
+        Ok(self)
+    }
+
+    pub const fn supports(self, digit: DtmfDigit) -> bool {
+        self.events & (1 << digit.event()) != 0
     }
 }
 
@@ -269,6 +286,7 @@ struct Ending {
 pub struct TelephoneSender {
     payload_type: u8,
     rate: u32,
+    events: u16,
     source: EventSource,
     active: Option<Transmission>,
     endings: Vec<Ending>,
@@ -281,7 +299,15 @@ impl TelephoneSender {
         rate: u32,
         seed: [u8; 10],
     ) -> Result<Self, MediaError> {
-        TelephoneFormat::new(payload_type, rate)?;
+        Self::with_format(audio, TelephoneFormat::new(payload_type, rate)?, seed)
+    }
+
+    pub fn with_format(
+        audio: &RtpSender,
+        format: TelephoneFormat,
+        seed: [u8; 10],
+    ) -> Result<Self, MediaError> {
+        let rate = format.rate;
         let source = if audio.rate() == rate {
             EventSource::Shared
         } else {
@@ -292,8 +318,9 @@ impl TelephoneSender {
             EventSource::Separate(clock)
         };
         Ok(Self {
-            payload_type,
+            payload_type: format.payload_type,
             rate,
+            events: format.events,
             source,
             active: None,
             endings: Vec::with_capacity(2),
@@ -315,6 +342,9 @@ impl TelephoneSender {
         }
         if !(1..=5000).contains(&tone.duration_ms) {
             return Err(MediaError::InvalidPacket);
+        }
+        if self.events & (1 << tone.digit.event()) == 0 {
+            return Err(MediaError::Unsupported);
         }
         now.checked_add(u64::from(tone.duration_ms) + 40)
             .ok_or(MediaError::Capacity)?;

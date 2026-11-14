@@ -230,7 +230,8 @@ impl Signaling {
                                             TelephoneFormat::new(
                                                 format.payload_type(),
                                                 format.rate(),
-                                            )
+                                            )?
+                                            .with_events(format.events())
                                         })
                                         .transpose()
                                         .map_err(failure)?,
