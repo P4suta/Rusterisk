@@ -1,5 +1,9 @@
 use rusterisk_api::ChannelId;
-use rusterisk_media::{mulaw_decode, AudioFormat, Frame, MediaError, RtpPacket, RtpSender};
+use rusterisk_core::DtmfDigit;
+use rusterisk_media::{
+    mulaw_decode, AudioFormat, Frame, MediaError, RtpPacket, RtpSender, TelephoneEvent,
+    TelephoneFormat,
+};
 use rusterisk_server::media::{MediaHub, MediaNotice};
 use rusterisk_server::rtp::{RtpSession, SocketPair};
 use rusterisk_server::CallKey;
@@ -59,6 +63,7 @@ async fn owned_workers_bridge_real_received_audio_and_stop_together() -> Result<
                         remote: peer.local_addr().map_err(failure)?,
                         format: AudioFormat::Pcmu,
                         payload_type: 0,
+                        telephone: None,
                     },
                 )
                 .await?;
@@ -95,4 +100,57 @@ async fn owned_workers_bridge_real_received_audio_and_stop_together() -> Result<
         assert_eq!(sockets.local_addr().map_err(failure)?, address);
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn telephone_datagrams_emit_one_digit_without_claiming_an_audio_connection(
+) -> Result<(), MediaError> {
+    let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let peer = SocketPair::bind(ip, 0, 0).map_err(failure)?;
+    let sockets = SocketPair::bind(ip, 0, 0).map_err(failure)?;
+    let local = sockets.local_addr().map_err(failure)?;
+    let (media, hub, mut notices) = MediaHub::new(1);
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(hub.run(stopped));
+    let result = async {
+        media
+            .attach(
+                key("alice")?,
+                sockets,
+                RtpSession {
+                    remote: peer.local_addr().map_err(failure)?,
+                    format: AudioFormat::Pcmu,
+                    payload_type: 0,
+                    telephone: Some(TelephoneFormat::new(101, 8000)?),
+                },
+            )
+            .await?;
+        for sequence in 1..=3 {
+            let event = TelephoneEvent::new(DtmfDigit::Hash, true, 10, 960)?;
+            let bytes = RtpPacket::new(101, sequence, 1000, 7, &event.encode())?.encode()?;
+            peer.data().send_to(&bytes, local).await.map_err(failure)?;
+        }
+        let notice = tokio::time::timeout(Duration::from_secs(2), notices.recv())
+            .await
+            .map_err(failure)?;
+        assert!(matches!(notice, Some(MediaNotice::Dtmf { key: call, tone })
+            if call == key("alice")? && tone.digit == DtmfDigit::Hash && tone.duration_ms == 120));
+        peer.data()
+            .send_to(
+                &RtpPacket::new(0, 4, 1960, 7, &[0xff; 160])?.encode()?,
+                local,
+            )
+            .await
+            .map_err(failure)?;
+        let notice = tokio::time::timeout(Duration::from_secs(2), notices.recv())
+            .await
+            .map_err(failure)?;
+        assert!(matches!(notice, Some(MediaNotice::Connected { .. })));
+        assert!(notices.try_recv().is_err());
+        Ok(())
+    }
+    .await;
+    stop.send_replace(true);
+    task.await.map_err(failure)??;
+    result
 }

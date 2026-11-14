@@ -5,7 +5,9 @@ mod streams;
 mod telephone_events;
 pub use mixing::{Gate, Mixer};
 pub use streams::{AudioFormat, RtpReceiver, RtpSender};
-pub use telephone_events::{TelephoneEvent, TelephoneEvents, TelephoneReceiver, TelephoneSender};
+pub use telephone_events::{
+    TelephoneEvent, TelephoneEvents, TelephoneFormat, TelephoneReceiver, TelephoneSender,
+};
 
 pub const MAX_SAMPLES: usize = 960;
 pub const MAX_PACKET: usize = 1500;

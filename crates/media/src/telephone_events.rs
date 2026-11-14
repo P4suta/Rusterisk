@@ -3,6 +3,28 @@ use crate::{MediaError, RtpPacket, RtpSender};
 use rusterisk_core::{DtmfDigit, DtmfTone};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TelephoneFormat {
+    payload_type: u8,
+    rate: u32,
+}
+
+impl TelephoneFormat {
+    pub fn new(payload_type: u8, rate: u32) -> Result<Self, MediaError> {
+        if payload_type > 127 || !matches!(rate, 8000 | 48000) {
+            return Err(MediaError::Unsupported);
+        }
+        Ok(Self { payload_type, rate })
+    }
+
+    pub const fn payload_type(self) -> u8 {
+        self.payload_type
+    }
+    pub const fn rate(self) -> u32 {
+        self.rate
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TelephoneEvent {
     digit: DtmfDigit,
     ended: bool,
@@ -118,9 +140,7 @@ pub struct TelephoneReceiver {
 
 impl TelephoneReceiver {
     pub fn new(payload_type: u8, rate: u32) -> Result<Self, MediaError> {
-        if payload_type > 127 || !matches!(rate, 8000 | 48000) {
-            return Err(MediaError::Unsupported);
-        }
+        TelephoneFormat::new(payload_type, rate)?;
         Ok(Self {
             payload_type,
             rate,
@@ -261,9 +281,7 @@ impl TelephoneSender {
         rate: u32,
         seed: [u8; 10],
     ) -> Result<Self, MediaError> {
-        if payload_type > 127 || !matches!(rate, 8000 | 48000) {
-            return Err(MediaError::Unsupported);
-        }
+        TelephoneFormat::new(payload_type, rate)?;
         let source = if audio.rate() == rate {
             EventSource::Shared
         } else {

@@ -4,7 +4,7 @@ use crate::{CallKey, ControlError, Controller, Effect, IncomingCall, Milestone, 
 use rusterisk_api::ChannelId;
 use rusterisk_config::{Application, Codec, Config, Protocol};
 use rusterisk_core::AudioGate;
-use rusterisk_media::{AudioFormat, Gate};
+use rusterisk_media::{AudioFormat, Gate, TelephoneFormat};
 use rusterisk_sip::{Datagram, Engine, Outbound, Output, RejectReason, SipEvent, MAX_MESSAGE};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -224,6 +224,11 @@ impl Signaling {
                                     remote: session.remote,
                                     format,
                                     payload_type: session.payload_type,
+                                    telephone: session
+                                        .dtmf_payload
+                                        .map(|payload| TelephoneFormat::new(payload, 8000))
+                                        .transpose()
+                                        .map_err(failure)?,
                                 },
                             )
                             .await
@@ -578,6 +583,7 @@ impl Signaling {
                     }
                 }
                 notice = self.notices.recv() => match notice {
+                    Some(MediaNotice::Dtmf { key, tone }) => self.notify(Signal::DtmfReceived { key, digit: tone.digit, duration_ms: tone.duration_ms }).await?,
                     Some(MediaNotice::Connected { key }) => self.notify(Signal::Milestone { key, milestone: Milestone::MediaConnected }).await?,
                     Some(MediaNotice::Stopped { key, result }) => {
                         if let Err(error) = result { tracing::warn!(channel = %key.id.as_str(), generation = key.generation, %error, "media stopped"); }

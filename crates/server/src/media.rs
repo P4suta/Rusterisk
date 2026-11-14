@@ -1,5 +1,6 @@
 use crate::rtp::{LinkStats, RtpChannels, RtpLink, RtpSession, SocketPair};
 use crate::CallKey;
+use rusterisk_core::DtmfTone;
 use rusterisk_media::{Frame, Gate, MediaError, Mixer};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -7,6 +8,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
 pub enum MediaNotice {
+    Dtmf {
+        key: CallKey,
+        tone: DtmfTone,
+    },
     Connected {
         key: CallKey,
     },
@@ -88,6 +93,7 @@ enum Connection {
 }
 struct Port {
     incoming: mpsc::Receiver<Frame>,
+    digits: mpsc::Receiver<DtmfTone>,
     outgoing: mpsc::Sender<Frame>,
     stop: watch::Sender<bool>,
     connection: Connection,
@@ -151,6 +157,7 @@ impl MediaHub {
             return Err(MediaError::InvalidRoute);
         }
         let (incoming, input) = mpsc::channel(3);
+        let (digits, digit_input) = mpsc::channel(16);
         let (outgoing, output) = mpsc::channel(3);
         let (stop, stopped) = watch::channel(false);
         let link = RtpLink::new(
@@ -158,6 +165,7 @@ impl MediaHub {
             session,
             RtpChannels {
                 incoming,
+                digits,
                 outgoing: output,
                 stop: stopped,
             },
@@ -167,6 +175,7 @@ impl MediaHub {
             key.clone(),
             Port {
                 incoming: input,
+                digits: digit_input,
                 outgoing,
                 stop,
                 connection: Connection::Waiting,
@@ -217,6 +226,20 @@ impl MediaHub {
 
     fn tick(&mut self) -> Result<(), MediaError> {
         for (key, port) in &mut self.ports {
+            for _ in 0..16 {
+                match port.digits.try_recv() {
+                    Ok(tone) => self
+                        .notices
+                        .try_send(MediaNotice::Dtmf {
+                            key: key.clone(),
+                            tone,
+                        })
+                        .map_err(|_| MediaError::Capacity)?,
+                    Err(
+                        mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
+                    ) => break,
+                }
+            }
             for _ in 0..3 {
                 match port.incoming.try_recv() {
                     Ok(frame) => match self.mixer.push(key, frame) {

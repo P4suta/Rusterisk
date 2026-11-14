@@ -16,6 +16,7 @@ async fn real_datagrams_carry_known_audio_in_both_directions_and_release_ports(
     let sockets = SocketPair::bind(ip, 0, 0).map_err(failure)?;
     let local = sockets.local_addr().map_err(failure)?;
     let (incoming, mut received) = mpsc::channel(3);
+    let (digits, _digits) = mpsc::channel(16);
     let (outgoing, sent) = mpsc::channel(3);
     let (stop, stopped) = watch::channel(false);
     let link = RtpLink::new(
@@ -24,9 +25,11 @@ async fn real_datagrams_carry_known_audio_in_both_directions_and_release_ports(
             remote: peer.local_addr().map_err(failure)?,
             format: AudioFormat::Pcmu,
             payload_type: 0,
+            telephone: None,
         },
         RtpChannels {
             incoming,
+            digits,
             outgoing: sent,
             stop: stopped,
         },

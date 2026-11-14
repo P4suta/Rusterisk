@@ -1,5 +1,7 @@
+use rusterisk_core::DtmfTone;
 use rusterisk_media::{
-    AudioFormat, Frame, MediaError, RtpPacket, RtpReceiver, RtpSender, MAX_PACKET,
+    AudioFormat, Frame, MediaError, RtpPacket, RtpReceiver, RtpSender, TelephoneFormat,
+    TelephoneReceiver, MAX_PACKET,
 };
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -86,10 +88,12 @@ pub struct RtpSession {
     pub remote: SocketAddr,
     pub format: AudioFormat,
     pub payload_type: u8,
+    pub telephone: Option<TelephoneFormat>,
 }
 
 pub struct RtpChannels {
     pub incoming: mpsc::Sender<Frame>,
+    pub digits: mpsc::Sender<DtmfTone>,
     pub outgoing: mpsc::Receiver<Frame>,
     pub stop: watch::Receiver<bool>,
 }
@@ -107,6 +111,7 @@ pub struct RtpLink {
     channels: RtpChannels,
     receiver: RtpReceiver,
     sender: RtpSender,
+    telephone: Option<TelephoneReceiver>,
 }
 
 fn failure(error: impl std::fmt::Display) -> MediaError {
@@ -142,9 +147,19 @@ impl RtpLink {
         if session.remote.port() == 0 || session.remote.port() == u16::MAX {
             return Err(MediaError::InvalidPacket);
         }
+        if session
+            .telephone
+            .is_some_and(|format| format.payload_type() == session.payload_type)
+        {
+            return Err(MediaError::InvalidPacket);
+        }
         let mut seed = [0; 10];
         getrandom::fill(&mut seed).map_err(failure)?;
         Ok(Self {
+            telephone: session
+                .telephone
+                .map(|format| TelephoneReceiver::new(format.payload_type(), format.rate()))
+                .transpose()?,
             receiver: RtpReceiver::new(session.format, session.payload_type)?,
             sender: RtpSender::new(session.format, session.payload_type, seed)?,
             sockets,
@@ -162,6 +177,7 @@ impl RtpLink {
         let mut data = [0; MAX_PACKET + 1];
         let mut control = [0; MAX_PACKET + 1];
         let mut stats = LinkStats::default();
+        let started = tokio::time::Instant::now();
         let mut last_sent = None;
         let mut octets = 0u32;
         let control_peer =
@@ -177,7 +193,8 @@ impl RtpLink {
                 packet = self.sockets.data.recv_from(&mut data) => {
                     let (size, peer) = packet.map_err(failure)?;
                     if peer != self.session.remote || size > MAX_PACKET { stats.dropped += 1; continue; }
-                    match RtpPacket::parse(&data[..size]).and_then(|packet| self.receiver.push(&packet)) {
+                    let now = started.elapsed().as_millis() as u64;
+                    match RtpPacket::parse(&data[..size]).and_then(|packet| self.receive(&packet, now)) {
                         Ok(true) => stats.packets_received += 1,
                         Ok(false) | Err(_) => stats.dropped += 1,
                     }
@@ -195,6 +212,11 @@ impl RtpLink {
                     stats.packets_sent += 1;
                 }
                 _instant = playout.tick() => {
+                    if let Some(telephone) = &mut self.telephone {
+                        if let Some(tone) = telephone.expire(started.elapsed().as_millis() as u64)? {
+                            self.channels.digits.try_send(tone).map_err(|_| MediaError::Capacity)?;
+                        }
+                    }
                     match self.receiver.pop() {
                         Ok(Some(frame)) => match self.channels.incoming.try_send(frame) {
                             Ok(()) => {}
@@ -220,5 +242,25 @@ impl RtpLink {
             }
         }
         Ok(stats)
+    }
+
+    fn receive(&mut self, packet: &RtpPacket, now: u64) -> Result<bool, MediaError> {
+        if self
+            .session
+            .telephone
+            .is_some_and(|format| packet.payload_type() == format.payload_type())
+        {
+            let telephone = self.telephone.as_mut().ok_or(MediaError::Unsupported)?;
+            for tone in telephone.push(packet, now)?.into_tones() {
+                self.channels
+                    .digits
+                    .try_send(tone)
+                    .map_err(|_| MediaError::Capacity)?;
+            }
+            self.receiver.skip(packet)?;
+            Ok(true)
+        } else {
+            self.receiver.push(packet)
+        }
     }
 }
