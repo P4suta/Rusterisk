@@ -1,3 +1,8 @@
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
+use base64::Engine as Base64Engine;
 use rsipstack::sip::{
     headers::{
         auth::{Algorithm, AuthQop},
@@ -9,7 +14,7 @@ use rsipstack::sip::{
 use rsipstack::sip::{HeadersExt, SipMessage};
 use rusterisk_api::{ChannelId, ChannelState, EventKind};
 use rusterisk_config::{Codec, Config, Dtmf};
-use rusterisk_core::{DtmfDigit, DtmfTiming, MuteDirection};
+use rusterisk_core::{DtmfDigit, MuteDirection};
 use rusterisk_media::{
     mulaw_decode, AudioFormat, Frame, RtpPacket, RtpSender, TelephoneEvent, TelephoneReceiver,
 };
@@ -22,6 +27,7 @@ use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::UdpSocket;
+use tower::ServiceExt;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
@@ -527,7 +533,12 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
         }
         let body = "Signal=#\r\nDuration=120\r\n";
         for (channel, digits) in [(incoming.clone(), "11"), (id("bob")?, "7#")] {
-            controller.execute(credentials()?, None, Action::SendDtmf { channel, digits: digits.into(), timing: DtmfTiming::new(0, 20, 60, 0).map_err(|_| ControlError::Invalid("Invalid digit timing"))? }).await?;
+            let query = serde_urlencoded::to_string([("dtmf", digits), ("between", "20"), ("duration", "60")]).map_err(failure)?;
+            let request = Request::builder().method("POST").uri(format!("/ari/channels/{channel}/dtmf?{query}"))
+                .header("Authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("app:test-password")))
+                .body(Body::empty()).map_err(failure)?;
+            let response = rusterisk_server::http::router(controller.clone()).oneshot(request).await.map_err(failure)?;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
         }
         receive_outgoing_digits(&alice_audio, &bob).await?;
         let info = ack.replace("ACK sip:", "INFO sip:")

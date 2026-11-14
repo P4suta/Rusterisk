@@ -9,7 +9,7 @@ use axum::{
 };
 use base64::Engine;
 use rusterisk_api::ChannelId;
-use rusterisk_core::MuteDirection;
+use rusterisk_core::{DtmfTiming, MuteDirection};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -127,6 +127,23 @@ fn mute_direction(parameters: &BTreeMap<String, String>) -> Result<MuteDirection
     }
 }
 
+fn digit_timing(parameters: &BTreeMap<String, String>) -> Result<DtmfTiming, ControlError> {
+    let value = |name, default| {
+        parameters
+            .get(name)
+            .map(|value| value.parse::<u32>())
+            .transpose()
+            .map_err(|_| ControlError::Invalid("Invalid digit timing"))
+            .map(|value| value.unwrap_or(default))
+    };
+    Ok(DtmfTiming::new(
+        value("before", 0)?,
+        value("between", 100)?,
+        value("duration", 100)?,
+        value("after", 0)?,
+    )?)
+}
+
 fn response(outcome: Outcome) -> Response {
     match outcome.body {
         Some(body) => (StatusCode::OK, Json(body)).into_response(),
@@ -212,6 +229,11 @@ async fn dispatch(
         ("GET", ["ari", "channels", channel]) => Action::GetChannel(id(channel)?),
         ("POST", ["ari", "channels", channel, "answer"]) => Action::Answer(id(channel)?),
         ("POST", ["ari", "channels", channel, "ring"]) => Action::Ring(id(channel)?),
+        ("POST", ["ari", "channels", channel, "dtmf"]) => Action::SendDtmf {
+            channel: id(channel)?,
+            digits: required(parameters, "dtmf")?.into(),
+            timing: digit_timing(parameters)?,
+        },
         ("GET", ["ari", "channels", channel, "variable"]) => Action::GetVariable {
             channel: id(channel)?,
             variable: required(parameters, "variable")?.into(),
