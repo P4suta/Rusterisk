@@ -6,6 +6,7 @@ mod digit_admission;
 mod digit_sequence;
 mod digits;
 mod owned_progress;
+mod stasis;
 pub use dial_fork::{DialFork, DialForkDecision, DialForkError, DialForkOutcome, DialForkState};
 pub use dialplan::{
     DialplanContinuation, DialplanDispatch, DialplanError, DialplanExecution, DialplanInstruction,
@@ -15,6 +16,7 @@ pub use digit_admission::{DtmfCommand, DtmfOutbox, DtmfToken};
 pub use digit_sequence::{DtmfError, DtmfSequence, DtmfTiming, DtmfTone};
 pub use digits::DtmfDigit;
 pub use owned_progress::{CallCompletion, CallMilestone, OwnedCallProgress};
+pub use stasis::{StasisApplication, StasisMembership};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallState {
@@ -106,6 +108,9 @@ pub enum CoreError {
     NotHeld,
     AlreadyBridged,
     WrongBridge,
+    StasisConflict,
+    WrongStasisApplication,
+    NotInStasis,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +121,7 @@ pub struct Call {
     connection: MediaConnection,
     mute: AudioGate,
     bridge: Option<u64>,
+    stasis: StasisMembership,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,6 +153,7 @@ impl Call {
             connection: MediaConnection::Pending,
             mute: AudioGate::Open,
             bridge: None,
+            stasis: StasisMembership::Outside,
         }
     }
 
@@ -230,6 +237,7 @@ impl Call {
                 self.connection = MediaConnection::Released;
                 self.mute = AudioGate::Closed;
                 self.bridge = None;
+                self.stasis = StasisMembership::Released;
                 Transition::Release
             }
             (CallState::Down, CallEvent::Ring) => {
