@@ -1010,7 +1010,12 @@ impl Control {
             .ok_or(ControlError::NotFound("Channel not found"))?;
         access.check(entry.call.stasis())?;
         if let Some(value) = &value {
-            if entry.variables.len() >= 64 && !entry.variables.contains_key(&variable) {
+            let user_variables =
+                entry.variables.len() - usize::from(entry.variables.contains_key("STASISSTATUS"));
+            if variable != "STASISSTATUS"
+                && user_variables >= 64
+                && !entry.variables.contains_key(&variable)
+            {
                 return Err(ControlError::Capacity);
             }
             entry.variables.insert(variable.clone(), value.clone());

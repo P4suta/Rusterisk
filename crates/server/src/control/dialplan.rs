@@ -154,6 +154,9 @@ impl Control {
             .get_mut(id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
         entry.call = entry.call.leave_stasis(application)?;
+        entry
+            .variables
+            .insert("STASISSTATUS".into(), "SUCCESS".into());
         let frame = entry
             .dialplan
             .as_mut()
@@ -456,34 +459,35 @@ impl Control {
                     if arguments.len() > 32 || arguments.iter().any(|value| value.len() > 256) {
                         return Err(ControlError::Capacity);
                     }
-                    let token = self
-                        .applications
-                        .get(application)
-                        .copied()
-                        .ok_or(ControlError::NotFound("Application not found"))?;
                     self.set_dialplan_location(key, "Stasis", expanded.clone())?;
                     let entry = self
                         .channels
                         .get_mut(&key.id)
                         .ok_or(ControlError::NotFound("Channel not found"))?;
-                    entry.call = entry.call.enter_stasis(token)?;
-                    entry.arguments = arguments.clone();
-                    outcome.event(
-                        application,
-                        timestamp,
-                        EventKind::ChannelCreated {
-                            channel: entry.snapshot.clone(),
-                        },
-                    );
-                    outcome.event(
-                        application,
-                        timestamp,
-                        EventKind::StasisStart {
-                            channel: entry.snapshot.clone(),
-                            args: arguments,
-                        },
-                    );
-                    return Ok(());
+                    if let Some(token) = self.applications.get(application).copied() {
+                        entry.variables.insert("STASISSTATUS".into(), String::new());
+                        entry.call = entry.call.enter_stasis(token)?;
+                        entry.arguments = arguments.clone();
+                        outcome.event(
+                            application,
+                            timestamp,
+                            EventKind::ChannelCreated {
+                                channel: entry.snapshot.clone(),
+                            },
+                        );
+                        outcome.event(
+                            application,
+                            timestamp,
+                            EventKind::StasisStart {
+                                channel: entry.snapshot.clone(),
+                                args: arguments,
+                            },
+                        );
+                        return Ok(());
+                    }
+                    entry
+                        .variables
+                        .insert("STASISSTATUS".into(), "FAILED".into());
                 }
                 Application::Hangup => {
                     outcome.append(self.end(&key.id, timestamp, 16)?);

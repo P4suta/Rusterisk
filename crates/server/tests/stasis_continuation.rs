@@ -15,7 +15,7 @@ fn program(source: &str) -> Result<Dialplan, ControlError> {
 #[test]
 fn continuing_leaves_the_bridge_and_resumes_after_stasis_without_restarting_tokens(
 ) -> Result<(), ControlError> {
-    let program = program("[internal]\nexten => 200,1,Stasis(calls,first)\nsame => n,Set(RESUMED=yes)\nsame => n,Stasis(calls,second,${RESUMED})\n")?;
+    let program = program("[internal]\nexten => 200,1,Stasis(calls,first)\nsame => n,Set(RESUMED=yes)\nsame => n,Stasis(calls,second,${RESUMED},${STASISSTATUS})\n")?;
     let mut control = Control::with_dialplan(4, program.clone());
     control.subscribe("calls")?;
     let channel = id("incoming")?;
@@ -82,7 +82,7 @@ fn continuing_leaves_the_bridge_and_resumes_after_stasis_without_restarting_toke
     ));
     let resumed = control.tick_dialplans(100, "later")?;
     assert!(
-        matches!(&resumed.events[1].kind, EventKind::StasisStart { channel: resumed, args } if resumed.dialplan.priority == 3 && args == &["second", "yes"])
+        matches!(&resumed.events[1].kind, EventKind::StasisStart { channel: resumed, args } if resumed.dialplan.priority == 3 && args == &["second", "yes", "SUCCESS"])
     );
     assert_eq!(control.key(&channel)?, key);
     Ok(())

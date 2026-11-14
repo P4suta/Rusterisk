@@ -223,3 +223,54 @@ fn hangup_cancels_a_suspended_answer_before_late_milestones() -> Result<(), Cont
     assert!(control.tick_dialplans(2000, "later")?.events.is_empty());
     Ok(())
 }
+
+#[test]
+fn an_unregistered_stasis_app_sets_failure_and_continues_to_the_following_priority(
+) -> Result<(), ControlError> {
+    let mut control = Control::new(4);
+    control.subscribe("calls")?;
+    let key = incoming(&mut control, "first")?;
+    let program = Dialplan::parse("[internal]\nexten => 200,1,Stasis(unregistered)\nsame => n,Stasis(calls,${STASISSTATUS})\n").map_err(failure)?;
+    let entered = control.start_dialplan(&key, program, 0, "now")?;
+    assert!(entered.effects.is_empty());
+    assert!(
+        matches!(&entered.events[1].kind, EventKind::StasisStart { args, .. } if args == &["FAILED"])
+    );
+    assert_eq!(
+        control
+            .apply(
+                Action::GetVariable {
+                    channel: key.id.clone(),
+                    variable: "STASISSTATUS".into()
+                },
+                "now",
+                0
+            )?
+            .body,
+        Some(serde_json::json!({"value": ""}))
+    );
+    for index in 0..64 {
+        control.apply(
+            Action::SetVariable {
+                channel: key.id.clone(),
+                variable: format!("X{index}"),
+                value: Some("kept".into()),
+            },
+            "now",
+            0,
+        )?;
+    }
+    assert!(matches!(
+        control.apply(
+            Action::SetVariable {
+                channel: key.id,
+                variable: "OVERFLOW".into(),
+                value: Some("refused".into())
+            },
+            "now",
+            0
+        ),
+        Err(ControlError::Capacity)
+    ));
+    Ok(())
+}
