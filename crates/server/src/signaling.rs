@@ -1,8 +1,8 @@
 use crate::media::{MediaNotice, MediaPort};
 use crate::rtp::{RtpSession, SocketPair};
-use crate::{CallKey, ControlError, Controller, Effect, Milestone, Signal};
+use crate::{CallKey, ControlError, Controller, Effect, IncomingCall, Milestone, Signal};
 use rusterisk_api::ChannelId;
-use rusterisk_config::{Codec, Config, Protocol};
+use rusterisk_config::{Application, Codec, Config, Protocol};
 use rusterisk_media::AudioFormat;
 use rusterisk_sip::{Datagram, Engine, Outbound, Output, RejectReason, SipEvent, MAX_MESSAGE};
 use std::collections::BTreeMap;
@@ -245,15 +245,41 @@ impl Signaling {
                     })
                     .await?
                 }
-                SipEvent::Incoming { id, .. } => {
-                    let rejected = self.listeners[listener]
-                        .engine
-                        .reject(&id, RejectReason::Unsupported, now)
-                        .map_err(failure)?;
-                    if !rejected.events.is_empty() {
-                        return Err(ControlError::Adapter("Unexpected rejection event".into()));
+                SipEvent::Incoming {
+                    id,
+                    endpoint,
+                    caller,
+                    context,
+                    extension,
+                    ..
+                } => {
+                    let incoming = IncomingCall {
+                        id: ChannelId::try_from(id.clone())?,
+                        endpoint,
+                        caller,
+                        context,
+                        extension,
+                        app: String::new(),
+                        args: Vec::new(),
+                    };
+                    if let Err(error) = self.admit(listener, incoming).await {
+                        let reason = match error {
+                            ControlError::Capacity => RejectReason::Busy,
+                            ControlError::NotFound(_) => RejectReason::NoRoute,
+                            ControlError::Unsupported => RejectReason::Unsupported,
+                            ControlError::Invalid(_)
+                            | ControlError::Conflict(_)
+                            | ControlError::Unauthorized
+                            | ControlError::Forbidden
+                            | ControlError::Encoding(_)
+                            | ControlError::Adapter(_) => RejectReason::Rejected,
+                        };
+                        let rejected = self.listeners[listener]
+                            .engine
+                            .reject(&id, reason, now)
+                            .map_err(failure)?;
+                        self.transmit(listener, rejected.datagrams).await?;
                     }
-                    self.transmit(listener, rejected.datagrams).await?;
                 }
                 SipEvent::IncomingEnded { id, cause } => {
                     let key = self.calls.keys().find(|key| key.id.as_str() == id).cloned();
@@ -263,6 +289,53 @@ impl Signaling {
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn admit(
+        &mut self,
+        listener: usize,
+        mut incoming: IncomingCall,
+    ) -> Result<(), ControlError> {
+        if self.calls.len() >= 64 {
+            return Err(ControlError::Capacity);
+        }
+        let step = self
+            .config
+            .dialplan
+            .steps
+            .iter()
+            .find(|step| {
+                step.context == incoming.context
+                    && step.extension == incoming.extension
+                    && step.priority == 1
+            })
+            .ok_or(ControlError::NotFound("Extension not found"))?;
+        match &step.application {
+            Application::Stasis {
+                application,
+                arguments,
+            } => {
+                incoming.app = application.clone();
+                incoming.args = arguments.clone();
+            }
+            Application::NoOp(_)
+            | Application::Set { .. }
+            | Application::Answer
+            | Application::Dial { .. }
+            | Application::Playback(_)
+            | Application::Wait(_)
+            | Application::Goto { .. }
+            | Application::Hangup => return Err(ControlError::Unsupported),
+        }
+        let key = self.controller.incoming(incoming).await?;
+        self.calls.insert(
+            key,
+            Active {
+                listener,
+                pending: None,
+            },
+        );
         Ok(())
     }
 
