@@ -4,6 +4,33 @@ use rusterisk_core::{
 };
 
 #[test]
+fn resumed_positions_preserve_tokens_and_cannot_revive_cancelled_execution(
+) -> Result<(), DialplanError> {
+    let mut machine = DialplanMachine::new(1, 0, 4)?;
+    let DialplanDispatch::Execute(first) =
+        machine.dispatch(DialplanInstruction::Stasis, Some(1), 0)?
+    else {
+        return Err(DialplanError::Program);
+    };
+    let before = machine;
+    assert!(!machine.complete(first.token, DialplanContinuation::Jump(4)));
+    assert_eq!(machine, before);
+    assert!(machine.complete(first.token, DialplanContinuation::Jump(3)));
+    assert_eq!(machine.state(), DialplanState::Ready { position: 3 });
+    let DialplanDispatch::Execute(second) =
+        machine.dispatch(DialplanInstruction::Stasis, None, 0)?
+    else {
+        return Err(DialplanError::Program);
+    };
+    assert_ne!(first.token, second.token);
+    assert!(!machine.complete(first.token, DialplanContinuation::Jump(0)));
+    machine.cancel();
+    assert!(!machine.complete(second.token, DialplanContinuation::Jump(0)));
+    assert_eq!(machine.state(), DialplanState::Ended);
+    Ok(())
+}
+
+#[test]
 fn operation_tokens_from_another_call_cannot_advance_execution() -> Result<(), DialplanError> {
     let mut first = DialplanMachine::new(7, 0, 1)?;
     let mut second = DialplanMachine::new(8, 0, 1)?;

@@ -27,6 +27,7 @@ pub enum DialplanError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialplanContinuation {
     Advance,
+    Jump(u16),
     End,
 }
 
@@ -169,6 +170,9 @@ impl DialplanMachine {
     }
 
     pub fn complete(&mut self, token: DialplanToken, continuation: DialplanContinuation) -> bool {
+        if matches!(continuation, DialplanContinuation::Jump(position) if position >= self.length) {
+            return false;
+        }
         match self.phase {
             Phase::Awaiting {
                 token: expected,
@@ -176,6 +180,7 @@ impl DialplanMachine {
             } if token == expected => {
                 match continuation {
                     DialplanContinuation::Advance => self.advance(next),
+                    DialplanContinuation::Jump(position) => self.advance(Some(position)),
                     DialplanContinuation::End => self.cancel(),
                 }
                 true
