@@ -222,6 +222,11 @@ pub enum EventKind {
     ChannelStateChange {
         channel: Channel,
     },
+    ChannelCallerId {
+        caller_presentation: i32,
+        caller_presentation_txt: String,
+        channel: Channel,
+    },
     ChannelDestroyed {
         cause: u16,
         cause_txt: String,

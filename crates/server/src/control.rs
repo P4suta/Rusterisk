@@ -254,6 +254,10 @@ impl ChannelEntry {
             "PRIORITY" => self.snapshot.dialplan.priority.to_string(),
             "CALLERID(num)" => self.snapshot.caller.number.clone(),
             "CALLERID(name)" => self.snapshot.caller.name.clone(),
+            "CALLERID(all)" => format!(
+                "\"{}\" <{}>",
+                self.snapshot.caller.name, self.snapshot.caller.number
+            ),
             "RUSTERISK_MEDIA_CONNECTED" => match self.call.media_connection() {
                 MediaConnection::Connected => "1".into(),
                 MediaConnection::Pending | MediaConnection::Released => "0".into(),
@@ -298,6 +302,12 @@ enum MediaOperation {
     Unhold,
     Mute(MuteDirection),
     Unmute(MuteDirection),
+}
+
+enum CallerField {
+    Name,
+    Number,
+    All,
 }
 struct BridgeEntry {
     token: u64,
@@ -768,6 +778,15 @@ impl Control {
         value: Option<String>,
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
+        let field = match variable.as_str() {
+            "CALLERID(name)" => Some(CallerField::Name),
+            "CALLERID(num)" => Some(CallerField::Number),
+            "CALLERID(all)" => Some(CallerField::All),
+            _ => None,
+        };
+        if let Some(field) = field {
+            return self.set_caller(id, field, value.as_deref().unwrap_or(""), timestamp);
+        }
         validate_variable(&variable)?;
         if matches!(
             variable.as_str(),
@@ -803,6 +822,64 @@ impl Control {
             EventKind::ChannelVarset {
                 variable,
                 value: value.unwrap_or_default(),
+                channel: entry.snapshot.clone(),
+            },
+        );
+        Ok(outcome)
+    }
+
+    fn set_caller(
+        &mut self,
+        id: &ChannelId,
+        field: CallerField,
+        value: &str,
+        timestamp: &str,
+    ) -> Result<Outcome, ControlError> {
+        if value.len() > 4096 || value.chars().any(char::is_control) {
+            return Err(ControlError::Invalid("Invalid caller identification"));
+        }
+        let entry = self
+            .channels
+            .get_mut(id)
+            .ok_or(ControlError::NotFound("Channel not found"))?;
+        if entry.stasis != Stasis::Entered {
+            return Err(ControlError::Conflict("Channel not in Stasis application"));
+        }
+        let mut caller = entry.snapshot.caller.clone();
+        match field {
+            CallerField::Name => caller.name = value.into(),
+            CallerField::Number => caller.number = value.into(),
+            CallerField::All => {
+                caller = if let Some((name, number)) = value.split_once('<') {
+                    let number = number
+                        .trim()
+                        .strip_suffix('>')
+                        .ok_or(ControlError::Invalid("Invalid caller identification"))?;
+                    Caller {
+                        name: name.trim().trim_matches('"').into(),
+                        number: number.trim().into(),
+                    }
+                } else {
+                    Caller {
+                        name: String::new(),
+                        number: value.trim().into(),
+                    }
+                };
+            }
+        }
+        if caller.name.len() > 128 || caller.number.len() > 128 {
+            return Err(ControlError::Invalid(
+                "Caller identification exceeds 128 bytes",
+            ));
+        }
+        entry.snapshot.caller = caller;
+        let mut outcome = Outcome::empty();
+        outcome.event(
+            &entry.application,
+            timestamp,
+            EventKind::ChannelCallerId {
+                caller_presentation: 0,
+                caller_presentation_txt: "Presentation Allowed, Not Screened".into(),
                 channel: entry.snapshot.clone(),
             },
         );

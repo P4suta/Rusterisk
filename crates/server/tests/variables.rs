@@ -107,3 +107,32 @@ fn builtin_variables_follow_the_channel_snapshot_and_limits_preserve_existing_va
         .is_err());
     Ok(())
 }
+
+#[test]
+fn caller_functions_update_display_values_without_changing_endpoint_or_call_ownership(
+) -> Result<(), ControlError> {
+    let mut control = control()?;
+    let key = control.key(&id()?)?;
+    let name = control.channel(&id()?)?.name.clone();
+    control.apply(set("CALLERID(name)", Some("Desk phone"))?, "now", 0)?;
+    let updated = control.apply(set("CALLERID(num)", Some("300"))?, "now", 0)?;
+    assert!(
+        matches!(&updated.events[0].kind, EventKind::ChannelCallerId { caller_presentation: 0, channel, .. } if channel.caller.number == "300")
+    );
+    assert_eq!(
+        control.apply(get("CALLERID(all)")?, "now", 0)?.body,
+        Some(serde_json::json!({"value": "\"Desk phone\" <300>"}))
+    );
+    control.apply(set("CALLERID(all)", Some("\"Reception\" <400>"))?, "now", 0)?;
+    assert_eq!(control.channel(&id()?)?.caller.name, "Reception");
+    assert_eq!(control.channel(&id()?)?.caller.number, "400");
+    assert!(control
+        .apply(set("CALLERID(name)", Some(&"x".repeat(129)))?, "now", 0)
+        .is_err());
+    assert_eq!(control.channel(&id()?)?.caller.name, "Reception");
+    assert_eq!(control.key(&id()?)?, key);
+    assert_eq!(control.channel(&id()?)?.name, name);
+    control.apply(set("CALLERID(num)", None)?, "now", 0)?;
+    assert_eq!(control.channel(&id()?)?.caller.number, "");
+    Ok(())
+}
