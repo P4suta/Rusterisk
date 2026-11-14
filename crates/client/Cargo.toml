@@ -1,0 +1,30 @@
+[package]
+name = "rusterisk-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Typed ARI client with owned call lifetimes"
+
+[dependencies]
+rusterisk-api = { version = "0.1.0", path = "../api" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest = { version = "0.13.5", default-features = false, features = [
+  "rustls",
+  "json",
+  "http2",
+] }
+base64 = "0.22.1"
+url = "2.5.8"
+
+[dev-dependencies]
+futures-util = "0.3.32"
+axum = "0.8.8"
+rusterisk-server = { version = "0.1.0", path = "../server" }
+rusterisk-config = { version = "0.1.0", path = "../config" }
+
+[lints]
+workspace = true

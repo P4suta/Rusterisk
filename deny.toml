@@ -16,6 +16,11 @@ allow = [
 ]
 confidence-threshold = 0.95
 
+[[licenses.exceptions]]
+name = "webpki-root-certs"
+version = "=1.0.12"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

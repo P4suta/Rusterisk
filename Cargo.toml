@@ -3,6 +3,7 @@ members = [
   "crates/core",
   "crates/config",
   "crates/api",
+  "crates/client",
   "crates/media",
   "crates/storage",
   "crates/server",

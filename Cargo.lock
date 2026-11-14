@@ -1821,6 +1821,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusterisk-client"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "futures-util",
+ "reqwest",
+ "rusterisk-api",
+ "rusterisk-config",
+ "rusterisk-server",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "rusterisk-config"
 version = "0.1.0"
 dependencies = [
