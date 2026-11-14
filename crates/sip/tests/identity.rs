@@ -638,3 +638,48 @@ fn rejected_or_unconfigured_outbound_credentials_are_never_retried() -> Result<(
     }
     Ok(())
 }
+
+fn transaction_response(bytes: &[u8], code: u16) -> Result<Vec<u8>, SipError> {
+    let request = request(bytes)?;
+    Ok(format!("SIP/2.0 {code} Response\r\nVia: {}\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n", request.top_via_header()?.value(), request.from_header()?.value(), request.to_header()?.value(), request.call_id_header()?.value(), request.cseq_header()?.value()).into_bytes())
+}
+
+#[test]
+fn hangup_retries_until_a_matching_response_and_ignores_other_peers() -> Result<(), SipError> {
+    let mut config = config()?;
+    config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+    let mut engine = Engine::new(config, [9; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let invite = engine.originate(outbound(), 0)?.datagrams.remove(0).bytes;
+    engine.receive(&answered(&invite)?, peer, 1)?;
+    let bye = engine.cancel("outgoing", 7, 2)?.datagrams.remove(0).bytes;
+    assert!(engine.tick(501)?.datagrams.is_empty());
+    assert_eq!(engine.tick(502)?.datagrams[0].bytes, bye);
+    let response = transaction_response(&bye, 200)?;
+    engine.receive(&response, "127.0.0.1:5062".parse()?, 503)?;
+    assert_eq!(engine.tick(1502)?.datagrams[0].bytes, bye);
+    assert!(engine.receive(&response, peer, 1503)?.events.is_empty());
+    assert!(engine.tick(3502)?.datagrams.is_empty());
+    assert!(engine.active_session("outgoing", 7).is_none());
+    Ok(())
+}
+
+#[test]
+fn cancellation_retries_with_a_bounded_interval_and_expires_without_a_response(
+) -> Result<(), SipError> {
+    let mut config = config()?;
+    config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+    let mut engine = Engine::new(config, [9; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let invite = engine.originate(outbound(), 0)?.datagrams.remove(0).bytes;
+    engine.receive(&provisional(&invite)?, peer, 1)?;
+    let cancel = engine.cancel("outgoing", 7, 2)?.datagrams.remove(0).bytes;
+    assert_eq!(engine.tick(502)?.datagrams[0].bytes, cancel);
+    engine.receive(&transaction_response(&cancel, 100)?, peer, 503)?;
+    assert!(engine.tick(1501)?.datagrams.is_empty());
+    assert_eq!(engine.tick(1502)?.datagrams[0].bytes, cancel);
+    assert!(engine.tick(5501)?.datagrams.is_empty());
+    assert_eq!(engine.tick(5502)?.datagrams[0].bytes, cancel);
+    assert!(engine.tick(32002)?.datagrams.is_empty());
+    Ok(())
+}

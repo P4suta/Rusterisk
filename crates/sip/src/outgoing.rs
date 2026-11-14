@@ -382,6 +382,12 @@ impl Engine {
     }
 
     pub fn cancel(&mut self, id: &str, generation: u64, now: u64) -> Result<Output, SipError> {
+        let output = self.cancel_inner(id, generation, now)?;
+        self.track_output(&output, now)?;
+        Ok(output)
+    }
+
+    fn cancel_inner(&mut self, id: &str, generation: u64, now: u64) -> Result<Output, SipError> {
         if let Some(output) = self.hangup_incoming(id, generation, now)? {
             return Ok(output);
         }
@@ -439,6 +445,13 @@ impl Engine {
     }
 
     pub fn tick(&mut self, now: u64) -> Result<Output, SipError> {
+        let mut output = self.tick_inner(now)?;
+        self.track_output(&output, now)?;
+        output.datagrams.extend(self.transactions.tick(now));
+        Ok(output)
+    }
+
+    fn tick_inner(&mut self, now: u64) -> Result<Output, SipError> {
         let mut output = self.incoming_tick(now)?;
         self.outgoing.retain(|_, dialog| !matches!(dialog.state, State::CancelPending { expires, .. } | State::Cancelling { expires } | State::Terminated { expires } if expires <= now));
         for dialog in self.outgoing.values_mut() {

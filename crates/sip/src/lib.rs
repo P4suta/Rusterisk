@@ -14,6 +14,7 @@ use std::net::{IpAddr, SocketAddr};
 use subtle::ConstantTimeEq;
 mod incoming;
 mod outgoing;
+mod transactions;
 pub use incoming::RejectReason;
 pub use outgoing::Outbound;
 
@@ -321,6 +322,7 @@ pub struct Engine {
     contacts: BTreeMap<String, (SocketAddr, u64)>,
     outgoing: BTreeMap<String, outgoing::Outgoing>,
     incoming: BTreeMap<String, incoming::Incoming>,
+    transactions: transactions::Transactions,
 }
 
 impl Engine {
@@ -335,6 +337,7 @@ impl Engine {
             contacts: BTreeMap::new(),
             outgoing: BTreeMap::new(),
             incoming: BTreeMap::new(),
+            transactions: transactions::Transactions::default(),
         }
     }
     pub fn pending(&self, id: &str) -> Option<&PendingInvite> {
@@ -469,6 +472,32 @@ impl Engine {
         peer: SocketAddr,
         now: u64,
     ) -> Result<Output, SipError> {
+        let output = self.receive_inner(bytes, peer, now)?;
+        self.track_output(&output, now)?;
+        Ok(output)
+    }
+
+    fn track_output(&mut self, output: &Output, now: u64) -> Result<(), SipError> {
+        for datagram in &output.datagrams {
+            match SipMessage::try_from(datagram.bytes.as_slice())? {
+                SipMessage::Request(request) => {
+                    if !matches!(request.method, Method::Invite | Method::Ack) {
+                        self.transactions
+                            .track(request, datagram.peer, &datagram.bytes, now)?;
+                    }
+                }
+                SipMessage::Response(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn receive_inner(
+        &mut self,
+        bytes: &[u8],
+        peer: SocketAddr,
+        now: u64,
+    ) -> Result<Output, SipError> {
         if bytes.len() > MAX_MESSAGE {
             return Err(SipError::Capacity);
         }
@@ -477,7 +506,15 @@ impl Engine {
         self.contacts.retain(|_, (_, expires)| *expires > now);
         let request = match SipMessage::try_from(bytes)? {
             SipMessage::Request(request) => request,
-            SipMessage::Response(response) => return self.receive_response(response, peer, now),
+            SipMessage::Response(response) => {
+                if self.transactions.receive(&response, peer, now)? {
+                    return Ok(Output {
+                        datagrams: Vec::new(),
+                        events: Vec::new(),
+                    });
+                }
+                return self.receive_response(response, peer, now);
+            }
         };
         if request.headers.iter().count() > 64
             || request.cseq_header()?.typed()?.method != request.method
