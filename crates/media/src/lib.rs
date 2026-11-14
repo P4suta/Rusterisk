@@ -1,5 +1,7 @@
 use bytes::Bytes;
 use webrtc_util::marshal::{Marshal, Unmarshal};
+mod mixing;
+pub use mixing::{Gate, Mixer};
 
 pub const MAX_SAMPLES: usize = 960;
 pub const MAX_PACKET: usize = 1500;
@@ -9,6 +11,8 @@ pub enum MediaError {
     Capacity,
     InvalidFrame,
     InvalidPacket,
+    InvalidRoute,
+    UnknownStream,
     Unsupported,
     Codec(String),
     Transport(String),
@@ -21,6 +25,8 @@ impl std::fmt::Display for MediaError {
             Self::Capacity => f.write_str("media capacity exceeded"),
             Self::InvalidFrame => f.write_str("invalid audio frame"),
             Self::InvalidPacket => f.write_str("invalid media packet"),
+            Self::InvalidRoute => f.write_str("invalid media route"),
+            Self::UnknownStream => f.write_str("unknown media stream"),
             Self::Unsupported => f.write_str("unsupported media format"),
             Self::Codec(error) => write!(f, "codec: {error}"),
             Self::Transport(error) => write!(f, "transport: {error}"),
