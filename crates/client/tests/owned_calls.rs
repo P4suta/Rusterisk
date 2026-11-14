@@ -1,6 +1,16 @@
-use rusterisk_client::{api::ChannelState, CallMilestone, Client, Error, Originate};
+use rusterisk_client::{
+    api::ChannelState, CallMilestone, Client, DtmfDigit, DtmfTiming, Error, MuteDirection,
+    Originate,
+};
 use rusterisk_server::{Effect, Milestone, Signal};
 use std::{future::IntoFuture, time::Duration};
+
+enum AudioControl {
+    Hold,
+    Mute,
+    Unhold,
+    Unmute,
+}
 
 #[tokio::test]
 async fn owned_calls_wait_for_distinct_milestones_without_blocking_events_and_cancel_on_drop(
@@ -78,6 +88,98 @@ async fn owned_calls_wait_for_distinct_milestones_without_blocking_events_and_ca
             .map_err(|_| Error::Closed)?;
         call.wait(CallMilestone::MediaConnected, Duration::from_secs(2))
             .await?;
+        client
+            .set_variable(call.id(), "ACCOUNT_TAG", Some("value /&=test"))
+            .await?;
+        assert_eq!(
+            client.variable(call.id(), "ACCOUNT_TAG").await?.value,
+            "value /&=test"
+        );
+        client.set_variable(call.id(), "ACCOUNT_TAG", None).await?;
+        assert!(matches!(
+            client.variable(call.id(), "ACCOUNT_TAG").await,
+            Err(Error::Api { status: 404, .. })
+        ));
+        for (operation, gate) in [
+            (AudioControl::Hold, rusterisk_core::AudioGate::Closed),
+            (AudioControl::Mute, rusterisk_core::AudioGate::Closed),
+            (
+                AudioControl::Unhold,
+                rusterisk_core::AudioGate::IncomingMuted,
+            ),
+            (AudioControl::Unmute, rusterisk_core::AudioGate::Open),
+        ] {
+            match operation {
+                AudioControl::Hold => client.hold(call.id()).await?,
+                AudioControl::Mute => client.mute(call.id(), MuteDirection::Incoming).await?,
+                AudioControl::Unhold => client.unhold(call.id()).await?,
+                AudioControl::Unmute => client.unmute(call.id(), MuteDirection::Incoming).await?,
+            }
+            let effect = tokio::time::timeout(Duration::from_secs(2), effects.recv())
+                .await
+                .map_err(|_| Error::Timeout)?
+                .ok_or(Error::Closed)?;
+            assert!(matches!(effect, Effect::Gate { gate: actual, .. } if actual == gate));
+        }
+        controller
+            .signal(Signal::DtmfReady {
+                key: key.clone(),
+                events: u16::MAX,
+            })
+            .await
+            .map_err(|_| Error::Closed)?;
+        client
+            .send_dtmf(
+                call.id(),
+                &[DtmfDigit::Five, DtmfDigit::Hash],
+                DtmfTiming::new(3, 20, 60, 4).map_err(|_| Error::Invalid("test timing"))?,
+            )
+            .await?;
+        let effect = tokio::time::timeout(Duration::from_secs(2), effects.recv())
+            .await
+            .map_err(|_| Error::Timeout)?
+            .ok_or(Error::Closed)?;
+        let Effect::Dtmf { mut command, .. } = effect else {
+            return Err(Error::Invalid("expected digit effect"));
+        };
+        assert!(command
+            .sequence
+            .advance(0)
+            .map_err(|_| Error::Invalid("test clock"))?
+            .is_none());
+        assert_eq!(
+            command
+                .sequence
+                .advance(3)
+                .map_err(|_| Error::Invalid("test clock"))?
+                .map(|tone| (tone.digit, tone.duration_ms)),
+            Some((DtmfDigit::Five, 60))
+        );
+        assert!(command
+            .sequence
+            .advance(82)
+            .map_err(|_| Error::Invalid("test clock"))?
+            .is_none());
+        assert_eq!(
+            command
+                .sequence
+                .advance(83)
+                .map_err(|_| Error::Invalid("test clock"))?
+                .map(|tone| (tone.digit, tone.duration_ms)),
+            Some((DtmfDigit::Hash, 60))
+        );
+        assert!(command
+            .sequence
+            .advance(146)
+            .map_err(|_| Error::Invalid("test clock"))?
+            .is_none());
+        assert!(!command.sequence.finished());
+        assert!(command
+            .sequence
+            .advance(147)
+            .map_err(|_| Error::Invalid("test clock"))?
+            .is_none());
+        assert!(command.sequence.finished());
         let id = call.id().clone();
         drop(call);
         let released = tokio::time::timeout(Duration::from_secs(2), effects.recv())

@@ -19,6 +19,18 @@ pub struct DtmfTiming {
 }
 
 impl DtmfTiming {
+    pub const fn before_ms(self) -> u32 {
+        self.before
+    }
+    pub const fn between_ms(self) -> u32 {
+        self.between
+    }
+    pub const fn duration_ms(self) -> u32 {
+        self.duration
+    }
+    pub const fn after_ms(self) -> u32 {
+        self.after
+    }
     pub const fn new(
         before: u32,
         between: u32,
