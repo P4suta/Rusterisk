@@ -325,3 +325,32 @@ fn media_controls_preserve_muting_through_hold_and_apply_preanswer_settings_afte
     ));
     Ok(())
 }
+
+#[test]
+fn received_digits_require_the_current_answered_channel_generation() -> Result<(), ControlError> {
+    let mut control = Control::new(2);
+    control.subscribe("app")?;
+    control.incoming(incoming()?, "now")?;
+    let key = control.key(&id("incoming")?)?;
+    let signal = Signal::DtmfReceived {
+        key: key.clone(),
+        digit: rusterisk_core::DtmfDigit::Hash,
+        duration_ms: 100,
+    };
+    assert!(control.signal(signal.clone(), "early")?.events.is_empty());
+    control.signal(
+        Signal::Milestone {
+            key: key.clone(),
+            milestone: Milestone::Answered,
+        },
+        "answer",
+    )?;
+    let received = control.signal(signal.clone(), "digit")?;
+    assert!(
+        matches!(&received.events[0].kind, EventKind::ChannelDtmfReceived { digit, duration_ms: 100, .. } if digit == "#")
+    );
+    control.apply(Action::Hangup(key.id.clone()), "end", 0)?;
+    control.incoming(incoming()?, "replacement")?;
+    assert!(control.signal(signal, "late")?.events.is_empty());
+    Ok(())
+}

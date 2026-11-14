@@ -194,8 +194,19 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
-    Milestone { key: CallKey, milestone: Milestone },
-    Terminated { key: CallKey, cause: u16 },
+    DtmfReceived {
+        key: CallKey,
+        digit: rusterisk_core::DtmfDigit,
+        duration_ms: u32,
+    },
+    Milestone {
+        key: CallKey,
+        milestone: Milestone,
+    },
+    Terminated {
+        key: CallKey,
+        cause: u16,
+    },
 }
 
 #[derive(Debug)]
@@ -1024,6 +1035,29 @@ impl Control {
 
     pub fn signal(&mut self, signal: Signal, timestamp: &str) -> Result<Outcome, ControlError> {
         match signal {
+            Signal::DtmfReceived {
+                key,
+                digit,
+                duration_ms,
+            } => {
+                let mut outcome = Outcome::empty();
+                if let Some(entry) = self.channels.get(&key.id).filter(|entry| {
+                    entry.call.generation() == key.generation
+                        && entry.call.state() == CallState::Up
+                        && entry.stasis == Stasis::Entered
+                }) {
+                    outcome.event(
+                        &entry.application,
+                        timestamp,
+                        EventKind::ChannelDtmfReceived {
+                            digit: digit.symbol().to_string(),
+                            duration_ms,
+                            channel: entry.snapshot.clone(),
+                        },
+                    );
+                }
+                Ok(outcome)
+            }
             Signal::Terminated { key, cause } => {
                 if self
                     .channels
