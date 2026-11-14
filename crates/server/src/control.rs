@@ -1,6 +1,6 @@
 use rusterisk_api::{Bridge, Caller, Channel, ChannelId, ChannelState, Dialplan, Event, EventKind};
 use rusterisk_core::{
-    AudioGate, Call, CallEvent, CallState, MediaState, MuteDirection, Transition,
+    AudioGate, Call, CallEvent, CallState, MediaConnection, MediaState, MuteDirection, Transition,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -85,6 +85,15 @@ pub struct IncomingCall {
 pub enum Action {
     ListChannels,
     GetChannel(ChannelId),
+    GetVariable {
+        channel: ChannelId,
+        variable: String,
+    },
+    SetVariable {
+        channel: ChannelId,
+        variable: String,
+        value: Option<String>,
+    },
     Originate {
         id: ChannelId,
         endpoint: String,
@@ -126,10 +135,13 @@ pub enum Action {
 impl Action {
     pub const fn read_only(&self) -> bool {
         match self {
-            Self::ListChannels | Self::GetChannel(_) | Self::ListBridges | Self::GetBridge(_) => {
-                true
-            }
+            Self::ListChannels
+            | Self::GetChannel(_)
+            | Self::GetVariable { .. }
+            | Self::ListBridges
+            | Self::GetBridge(_) => true,
             Self::Originate { .. }
+            | Self::SetVariable { .. }
             | Self::Hangup(_)
             | Self::Answer(_)
             | Self::Ring(_)
@@ -231,6 +243,47 @@ struct ChannelEntry {
     arguments: Vec<String>,
     deadline: Option<u64>,
     stasis: Stasis,
+    variables: BTreeMap<String, String>,
+}
+
+impl ChannelEntry {
+    fn variable(&self, name: &str) -> Result<String, ControlError> {
+        let value = match name {
+            "EXTEN" => self.snapshot.dialplan.exten.clone(),
+            "CONTEXT" => self.snapshot.dialplan.context.clone(),
+            "PRIORITY" => self.snapshot.dialplan.priority.to_string(),
+            "CALLERID(num)" => self.snapshot.caller.number.clone(),
+            "CALLERID(name)" => self.snapshot.caller.name.clone(),
+            "RUSTERISK_MEDIA_CONNECTED" => match self.call.media_connection() {
+                MediaConnection::Connected => "1".into(),
+                MediaConnection::Pending | MediaConnection::Released => "0".into(),
+            },
+            _ => {
+                validate_variable(name)?;
+                self.variables
+                    .get(name)
+                    .cloned()
+                    .ok_or(ControlError::NotFound("Provided variable was not found"))?
+            }
+        };
+        Ok(value)
+    }
+}
+
+fn validate_variable(name: &str) -> Result<(), ControlError> {
+    if name.is_empty() || name.len() > 128 {
+        return Err(ControlError::Invalid("Invalid variable name"));
+    }
+    if name.contains(['(', ')']) {
+        return Err(ControlError::Unsupported);
+    }
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return Err(ControlError::Invalid("Invalid variable name"));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -336,6 +389,7 @@ impl Control {
                 arguments: incoming.args,
                 deadline: None,
                 stasis: Stasis::Entered,
+                variables: BTreeMap::new(),
             },
         );
         Ok(outcome)
@@ -428,6 +482,20 @@ impl Control {
                     .collect::<Vec<_>>(),
             ),
             Action::GetChannel(id) => Outcome::json(self.channel(&id)?),
+            Action::GetVariable { channel, variable } => {
+                let entry = self
+                    .channels
+                    .get(&channel)
+                    .ok_or(ControlError::NotFound("Channel not found"))?;
+                Outcome::json(rusterisk_api::Variable {
+                    value: entry.variable(&variable)?,
+                })
+            }
+            Action::SetVariable {
+                channel,
+                variable,
+                value,
+            } => self.set_variable(&channel, variable, value, timestamp),
             Action::Originate {
                 id,
                 endpoint,
@@ -510,6 +578,7 @@ impl Control {
                         arguments: args,
                         deadline: Some(deadline),
                         stasis: Stasis::Pending,
+                        variables: BTreeMap::new(),
                     },
                 );
                 Ok(outcome)
@@ -689,6 +758,54 @@ impl Control {
             .map(|id| self.key(id))
             .collect::<Result<Vec<_>, _>>()?;
         outcome.effects.push(Effect::Bridge { id, channels: keys });
+        Ok(outcome)
+    }
+
+    fn set_variable(
+        &mut self,
+        id: &ChannelId,
+        variable: String,
+        value: Option<String>,
+        timestamp: &str,
+    ) -> Result<Outcome, ControlError> {
+        validate_variable(&variable)?;
+        if matches!(
+            variable.as_str(),
+            "EXTEN" | "CONTEXT" | "PRIORITY" | "RUSTERISK_MEDIA_CONNECTED"
+        ) {
+            return Err(ControlError::Unsupported);
+        }
+        if value
+            .as_ref()
+            .is_some_and(|value| value.len() > 4096 || value.chars().any(char::is_control))
+        {
+            return Err(ControlError::Invalid("Invalid variable value"));
+        }
+        let entry = self
+            .channels
+            .get_mut(id)
+            .ok_or(ControlError::NotFound("Channel not found"))?;
+        if entry.stasis != Stasis::Entered {
+            return Err(ControlError::Conflict("Channel not in Stasis application"));
+        }
+        if let Some(value) = &value {
+            if entry.variables.len() >= 64 && !entry.variables.contains_key(&variable) {
+                return Err(ControlError::Capacity);
+            }
+            entry.variables.insert(variable.clone(), value.clone());
+        } else {
+            entry.variables.remove(&variable);
+        }
+        let mut outcome = Outcome::empty();
+        outcome.event(
+            &entry.application,
+            timestamp,
+            EventKind::ChannelVarset {
+                variable,
+                value: value.unwrap_or_default(),
+                channel: entry.snapshot.clone(),
+            },
+        );
         Ok(outcome)
     }
 
