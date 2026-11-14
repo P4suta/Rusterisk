@@ -8,9 +8,11 @@ use rsipstack::sip::{
 };
 use rsipstack::sip::{HeadersExt, SipMessage};
 use rusterisk_api::{ChannelId, ChannelState, EventKind};
-use rusterisk_config::{Codec, Config};
-use rusterisk_core::{DtmfDigit, MuteDirection};
-use rusterisk_media::{mulaw_decode, AudioFormat, Frame, RtpPacket, RtpSender, TelephoneEvent};
+use rusterisk_config::{Codec, Config, Dtmf};
+use rusterisk_core::{DtmfDigit, DtmfTiming, MuteDirection};
+use rusterisk_media::{
+    mulaw_decode, AudioFormat, Frame, RtpPacket, RtpSender, TelephoneEvent, TelephoneReceiver,
+};
 use rusterisk_server::media::MediaHub;
 use rusterisk_server::rtp::SocketPair;
 use rusterisk_server::signaling::Signaling;
@@ -99,6 +101,51 @@ async fn receive_digit(
     })
     .await
     .map_err(failure)?
+}
+
+async fn receive_outgoing_digits(
+    audio: &SocketPair,
+    signaling: &UdpSocket,
+) -> Result<(), ControlError> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let received_audio = async {
+            let mut receiver = TelephoneReceiver::new(101, 8000).map_err(failure)?;
+            let mut bytes = [0; 1501];
+            let mut digits = String::new();
+            for now in 0..100 {
+                let (size, _) = audio.data().recv_from(&mut bytes).await.map_err(failure)?;
+                let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
+                if packet.payload_type() == 101 {
+                    for tone in receiver.push(&packet, now).map_err(failure)?.into_tones() {
+                        assert_eq!(tone.duration_ms, 60);
+                        digits.push(tone.digit.symbol());
+                    }
+                }
+                if digits.len() == 2 { assert_eq!(digits, "11"); return Ok(()); }
+            }
+            Err(ControlError::Capacity)
+        };
+        let received_info = async {
+            let mut bytes = [0; 16385];
+            let mut digits = String::new();
+            for _ in 0..8 {
+                let (size, peer) = signaling.recv_from(&mut bytes).await.map_err(failure)?;
+                let SipMessage::Request(request) = SipMessage::try_from(&bytes[..size]).map_err(failure)? else { return Err(ControlError::Capacity); };
+                if request.method == Method::Ack { continue; }
+                assert_eq!(request.method, Method::Info);
+                let body = std::str::from_utf8(&request.body).map_err(failure)?;
+                assert!(body.contains("Duration=60\r\n"));
+                let digit = body.strip_prefix("Signal=").and_then(|value| value.chars().next()).ok_or(ControlError::Capacity)?;
+                digits.push(digit);
+                let response = format!("SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n", request.top_via_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.to_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value(), request.cseq_header().map_err(failure)?.value());
+                signaling.send_to(response.as_bytes(), peer).await.map_err(failure)?;
+                if digits.len() == 2 { assert_eq!(digits, "7#"); return Ok(()); }
+            }
+            Err(ControlError::Capacity)
+        };
+        tokio::try_join!(received_audio, received_info)?;
+        Ok(())
+    }).await.map_err(failure)?
 }
 
 struct AudioPeer<'a> {
@@ -432,6 +479,13 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
         "[internal]\nexten => 100,1,Stasis(app,root)\n",
     )
     .map_err(failure)?;
+    let mut config = config;
+    config
+        .endpoints
+        .iter_mut()
+        .find(|endpoint| endpoint.name == "bob")
+        .ok_or(ControlError::Capacity)?
+        .dtmf = Dtmf::Info;
     let (controller, runner, effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
     let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
@@ -472,6 +526,10 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
             }
         }
         let body = "Signal=#\r\nDuration=120\r\n";
+        for (channel, digits) in [(incoming.clone(), "11"), (id("bob")?, "7#")] {
+            controller.execute(credentials()?, None, Action::SendDtmf { channel, digits: digits.into(), timing: DtmfTiming::new(0, 20, 60, 0).map_err(|_| ControlError::Invalid("Invalid digit timing"))? }).await?;
+        }
+        receive_outgoing_digits(&alice_audio, &bob).await?;
         let info = ack.replace("ACK sip:", "INFO sip:")
             .replace("z9hG4bK-ack", "z9hG4bK-info")
             .replace("CSeq: 2 ACK", "CSeq: 3 INFO")

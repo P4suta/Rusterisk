@@ -2,11 +2,11 @@ use crate::media::{MediaNotice, MediaPort};
 use crate::rtp::{RtpSession, SocketPair};
 use crate::{CallKey, ControlError, Controller, Effect, IncomingCall, Milestone, Signal};
 use rusterisk_api::ChannelId;
-use rusterisk_config::{Application, Codec, Config, Protocol};
-use rusterisk_core::AudioGate;
+use rusterisk_config::{Application, Codec, Config, Dtmf, Protocol};
+use rusterisk_core::{AudioGate, DtmfCommand};
 use rusterisk_media::{AudioFormat, Gate, TelephoneFormat};
 use rusterisk_sip::{Datagram, Engine, Outbound, Output, RejectReason, SipEvent, MAX_MESSAGE};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::task::Poll;
 use std::time::{Duration, Instant};
@@ -22,6 +22,8 @@ struct Listener {
 struct Active {
     listener: usize,
     pending: Option<SocketPair>,
+    dtmf: Dtmf,
+    digits: VecDeque<DtmfCommand>,
 }
 struct Received {
     listener: usize,
@@ -240,6 +242,20 @@ impl Signaling {
                             .await
                         {
                             Ok(()) => {
+                                let mode = self.calls.get(&key).ok_or(ControlError::Capacity)?.dtmf;
+                                let events = match mode {
+                                    Dtmf::Info => Some(u16::MAX),
+                                    Dtmf::Rfc4733 => {
+                                        session.telephone.map(|format| format.events())
+                                    }
+                                };
+                                if let Some(events) = events {
+                                    self.notify(Signal::DtmfReady {
+                                        key: key.clone(),
+                                        events,
+                                    })
+                                    .await?;
+                                }
                                 self.notify(Signal::Milestone {
                                     key,
                                     milestone: Milestone::Answered,
@@ -293,6 +309,7 @@ impl Signaling {
                             ControlError::NotFound(_) => RejectReason::NoRoute,
                             ControlError::Unsupported => RejectReason::Unsupported,
                             ControlError::Invalid(_)
+                            | ControlError::InvalidState(_)
                             | ControlError::Conflict(_)
                             | ControlError::Unauthorized
                             | ControlError::Forbidden
@@ -353,12 +370,21 @@ impl Signaling {
             | Application::Goto { .. }
             | Application::Hangup => return Err(ControlError::Unsupported),
         }
+        let dtmf = self
+            .config
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == incoming.endpoint)
+            .ok_or(ControlError::NotFound("Endpoint not found"))?
+            .dtmf;
         let key = self.controller.incoming(incoming).await?;
         self.calls.insert(
             key,
             Active {
                 listener,
                 pending: None,
+                dtmf,
+                digits: VecDeque::with_capacity(8),
             },
         );
         Ok(())
@@ -406,6 +432,7 @@ impl Signaling {
             transport.external_media_address.unwrap_or(local.ip()),
             local.port(),
         );
+        let dtmf = endpoint.dtmf;
         let output = self.listeners[listener]
             .engine
             .originate(
@@ -425,6 +452,8 @@ impl Signaling {
             Active {
                 listener,
                 pending: Some(sockets),
+                dtmf,
+                digits: VecDeque::with_capacity(8),
             },
         );
         self.output(listener, output, now).await
@@ -432,6 +461,27 @@ impl Signaling {
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
+            Effect::Dtmf { key, command } => {
+                if let Some(call) = self.calls.get_mut(&key) {
+                    if call
+                        .digits
+                        .iter()
+                        .any(|pending| pending.token == command.token)
+                    {
+                        return Ok(());
+                    }
+                    if call.digits.len() < 8 {
+                        call.digits.push_back(command);
+                        return Ok(());
+                    }
+                    tracing::warn!(channel = %key.id, generation = key.generation, "digit command queue full");
+                }
+                self.notify(Signal::DtmfFinished {
+                    key,
+                    token: command.token,
+                })
+                .await?;
+            }
             Effect::Gate { key, gate } => {
                 let gate = match gate {
                     AudioGate::Open => Gate::Open,
@@ -561,28 +611,78 @@ impl Signaling {
         }
     }
 
+    async fn digit_tick(&mut self, now: u64) -> Result<(), ControlError> {
+        let keys: Vec<_> = self.calls.keys().cloned().collect();
+        for key in keys {
+            let Some(call) = self.calls.get_mut(&key) else {
+                continue;
+            };
+            let Some(command) = call.digits.front_mut() else {
+                continue;
+            };
+            let tone = command.sequence.advance(now).map_err(ControlError::from)?;
+            let mut finished = command.sequence.finished();
+            let token = command.token;
+            let listener = call.listener;
+            let mode = call.dtmf;
+            if let Some(tone) = tone {
+                let result = match mode {
+                    Dtmf::Rfc4733 => self
+                        .media
+                        .send_tone(key.clone(), tone)
+                        .await
+                        .map_err(failure),
+                    Dtmf::Info => match self.listeners[listener].engine.send_info(
+                        key.id.as_str(),
+                        key.generation,
+                        tone.digit,
+                        tone.duration_ms,
+                        now,
+                    ) {
+                        Ok(output) => self.transmit(listener, output.datagrams).await,
+                        Err(error) => Err(failure(error)),
+                    },
+                };
+                if let Err(error) = result {
+                    tracing::warn!(channel = %key.id, generation = key.generation, %error, "digit command failed");
+                    finished = true;
+                }
+            }
+            if finished {
+                self.calls
+                    .get_mut(&key)
+                    .ok_or(ControlError::Capacity)?
+                    .digits
+                    .pop_front();
+                self.notify(Signal::DtmfFinished { key, token }).await?;
+            }
+        }
+        Ok(())
+    }
+
     async fn serve(
         &mut self,
         stop: &mut watch::Receiver<bool>,
         started: Instant,
     ) -> Result<(), ControlError> {
-        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        let mut tick = tokio::time::interval(Duration::from_millis(20));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             if *stop.borrow() {
                 break;
             }
-            let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
             tokio::select! {
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { break; },
                 effect = self.effects.recv() => match effect {
                     Some(effect) => {
+                        let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
                         if let Err(error) = self.effect(effect, now).await { if *stop.borrow() { break; } return Err(error); }
                     }
                     None => break,
                 },
                 packet = receive(&self.listeners) => {
                     let packet = packet?;
+                    let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
                     match self.listeners[packet.listener].engine.receive(&packet.bytes, packet.peer, now) {
                         Ok(output) => self.output(packet.listener, output, now).await?,
                         Err(error) => tracing::debug!(transport = %self.listeners[packet.listener].name, %error, "signaling input refused"),
@@ -598,10 +698,12 @@ impl Signaling {
                     None => { if !*stop.borrow() { return Err(ControlError::Adapter("Media task stopped".into())); } break; }
                 },
                 _instant = tick.tick() => {
+                    let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
                     for listener in 0..self.listeners.len() {
                         let output = self.listeners[listener].engine.tick(now).map_err(failure)?;
                         self.output(listener, output, now).await?;
                     }
+                    self.digit_tick(now).await?;
                 }
             }
         }

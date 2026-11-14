@@ -28,6 +28,7 @@ pub(crate) fn error(error: ControlError) -> Response {
         403 => StatusCode::FORBIDDEN,
         404 => StatusCode::NOT_FOUND,
         409 => StatusCode::CONFLICT,
+        412 => StatusCode::PRECONDITION_FAILED,
         501 => StatusCode::NOT_IMPLEMENTED,
         503 => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,

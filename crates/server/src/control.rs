@@ -1,6 +1,7 @@
 use rusterisk_api::{Bridge, Caller, Channel, ChannelId, ChannelState, Dialplan, Event, EventKind};
 use rusterisk_core::{
-    AudioGate, Call, CallEvent, CallState, MediaConnection, MediaState, MuteDirection, Transition,
+    AudioGate, Call, CallEvent, CallState, DtmfCommand, DtmfDigit, DtmfError, DtmfOutbox,
+    DtmfTiming, DtmfToken, MediaConnection, MediaState, MuteDirection, Transition,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,6 +11,7 @@ pub enum ControlError {
     Invalid(&'static str),
     NotFound(&'static str),
     Conflict(&'static str),
+    InvalidState(&'static str),
     Capacity,
     Unauthorized,
     Forbidden,
@@ -24,6 +26,7 @@ impl ControlError {
             Self::Invalid(_) => 400,
             Self::NotFound(_) => 404,
             Self::Conflict(_) => 409,
+            Self::InvalidState(_) => 412,
             Self::Capacity => 503,
             Self::Unauthorized => 401,
             Self::Forbidden => 403,
@@ -36,9 +39,10 @@ impl ControlError {
 impl std::fmt::Display for ControlError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Invalid(message) | Self::NotFound(message) | Self::Conflict(message) => {
-                f.write_str(message)
-            }
+            Self::Invalid(message)
+            | Self::NotFound(message)
+            | Self::Conflict(message)
+            | Self::InvalidState(message) => f.write_str(message),
             Self::Capacity => f.write_str("Resource capacity exceeded"),
             Self::Unauthorized => f.write_str("Authentication required"),
             Self::Forbidden => f.write_str("Operation forbidden"),
@@ -56,6 +60,19 @@ impl From<rusterisk_api::InvalidId> for ControlError {
 impl From<rusterisk_core::CoreError> for ControlError {
     fn from(_: rusterisk_core::CoreError) -> Self {
         Self::Conflict("Channel in invalid state")
+    }
+}
+
+impl From<DtmfError> for ControlError {
+    fn from(error: DtmfError) -> Self {
+        match error {
+            DtmfError::Empty => Self::Invalid("DTMF is required"),
+            DtmfError::Timing => Self::Invalid("Invalid digit timing"),
+            DtmfError::Capacity => Self::Capacity,
+            DtmfError::Clock => Self::Adapter("Digit timer overflow".into()),
+            DtmfError::Unsupported => Self::Unsupported,
+            DtmfError::Ended => Self::InvalidState("Channel in invalid state"),
+        }
     }
 }
 impl From<serde_json::Error> for ControlError {
@@ -83,6 +100,11 @@ pub struct IncomingCall {
 
 #[derive(Clone, Debug)]
 pub enum Action {
+    SendDtmf {
+        channel: ChannelId,
+        digits: String,
+        timing: DtmfTiming,
+    },
     ListChannels,
     GetChannel(ChannelId),
     GetVariable {
@@ -141,6 +163,7 @@ impl Action {
             | Self::ListBridges
             | Self::GetBridge(_) => true,
             Self::Originate { .. }
+            | Self::SendDtmf { .. }
             | Self::SetVariable { .. }
             | Self::Hangup(_)
             | Self::Answer(_)
@@ -159,6 +182,10 @@ impl Action {
 
 #[derive(Clone, Debug)]
 pub enum Effect {
+    Dtmf {
+        key: CallKey,
+        command: DtmfCommand,
+    },
     Gate {
         key: CallKey,
         gate: AudioGate,
@@ -194,6 +221,14 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
+    DtmfReady {
+        key: CallKey,
+        events: u16,
+    },
+    DtmfFinished {
+        key: CallKey,
+        token: DtmfToken,
+    },
     DtmfReceived {
         key: CallKey,
         digit: rusterisk_core::DtmfDigit,
@@ -255,6 +290,7 @@ struct ChannelEntry {
     deadline: Option<u64>,
     stasis: Stasis,
     variables: BTreeMap<String, String>,
+    dtmf: Option<DtmfOutbox>,
 }
 
 impl ChannelEntry {
@@ -411,6 +447,7 @@ impl Control {
                 deadline: None,
                 stasis: Stasis::Entered,
                 variables: BTreeMap::new(),
+                dtmf: None,
             },
         );
         Ok(outcome)
@@ -496,6 +533,41 @@ impl Control {
         now_ms: u64,
     ) -> Result<Outcome, ControlError> {
         match action {
+            Action::SendDtmf {
+                channel,
+                digits,
+                timing,
+            } => {
+                if digits.is_empty() || digits.len() > 32 {
+                    return Err(ControlError::Invalid("Invalid DTMF digits"));
+                }
+                let mut values = [DtmfDigit::Zero; 32];
+                for (index, symbol) in digits.chars().enumerate() {
+                    values[index] = DtmfDigit::from_symbol(symbol)
+                        .ok_or(ControlError::Invalid("Invalid DTMF digits"))?;
+                }
+                let entry = self
+                    .channels
+                    .get_mut(&channel)
+                    .ok_or(ControlError::NotFound("Channel not found"))?;
+                if entry.stasis != Stasis::Entered {
+                    return Err(ControlError::Conflict("Channel not in Stasis application"));
+                }
+                if entry.call.state() != CallState::Up {
+                    return Err(ControlError::InvalidState("Channel in invalid state"));
+                }
+                let outbox = entry.dtmf.as_mut().ok_or(ControlError::Unsupported)?;
+                let command = outbox.admit(&values[..digits.len()], timing)?;
+                let mut outcome = Outcome::empty();
+                outcome.effects.push(Effect::Dtmf {
+                    key: CallKey {
+                        id: channel,
+                        generation: entry.call.generation(),
+                    },
+                    command,
+                });
+                Ok(outcome)
+            }
             Action::ListChannels => Outcome::json(
                 self.channels
                     .values()
@@ -600,6 +672,7 @@ impl Control {
                         deadline: Some(deadline),
                         stasis: Stasis::Pending,
                         variables: BTreeMap::new(),
+                        dtmf: None,
                     },
                 );
                 Ok(outcome)
@@ -941,6 +1014,9 @@ impl Control {
             }
         }
         entry.call = entry.call.apply(CallEvent::Hangup).call();
+        if let Some(outbox) = &mut entry.dtmf {
+            outbox.cancel();
+        }
         outcome.effects.push(Effect::Release {
             key: CallKey {
                 id: id.clone(),
@@ -1035,6 +1111,30 @@ impl Control {
 
     pub fn signal(&mut self, signal: Signal, timestamp: &str) -> Result<Outcome, ControlError> {
         match signal {
+            Signal::DtmfReady { key, events } => {
+                if let Some(entry) = self
+                    .channels
+                    .get_mut(&key.id)
+                    .filter(|entry| entry.call.generation() == key.generation)
+                {
+                    if entry.dtmf.is_none() {
+                        entry.dtmf = Some(DtmfOutbox::new(events)?);
+                    }
+                }
+                Ok(Outcome::empty())
+            }
+            Signal::DtmfFinished { key, token } => {
+                if let Some(entry) = self
+                    .channels
+                    .get_mut(&key.id)
+                    .filter(|entry| entry.call.generation() == key.generation)
+                {
+                    if let Some(outbox) = &mut entry.dtmf {
+                        let _released = outbox.finish(token);
+                    }
+                }
+                Ok(Outcome::empty())
+            }
             Signal::DtmfReceived {
                 key,
                 digit,
