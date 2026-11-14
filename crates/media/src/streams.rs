@@ -120,12 +120,26 @@ impl RtpSender {
     }
 }
 
+enum Received {
+    Audio(RtpPacket),
+    Signal(u16),
+}
+
+impl Received {
+    fn sequence(&self) -> u16 {
+        match self {
+            Self::Audio(packet) => packet.sequence(),
+            Self::Signal(sequence) => *sequence,
+        }
+    }
+}
+
 pub struct RtpReceiver {
     codec: Codec,
     payload_type: u8,
     ssrc: Option<u32>,
     next: Option<u16>,
-    packets: Vec<RtpPacket>,
+    packets: Vec<Received>,
 }
 
 impl RtpReceiver {
@@ -149,6 +163,21 @@ impl RtpReceiver {
         {
             return Err(MediaError::InvalidPacket);
         }
+        let accepted = self.insert(Received::Audio(packet.clone()))?;
+        if accepted {
+            self.ssrc = Some(packet.ssrc());
+        }
+        Ok(accepted)
+    }
+
+    pub fn skip(&mut self, packet: &RtpPacket) -> Result<bool, MediaError> {
+        if self.ssrc != Some(packet.ssrc()) {
+            return Ok(false);
+        }
+        self.insert(Received::Signal(packet.sequence()))
+    }
+
+    fn insert(&mut self, packet: Received) -> Result<bool, MediaError> {
         let mut next = self.next.unwrap_or(packet.sequence());
         let mut distance = packet.sequence().wrapping_sub(next);
         if distance >= 32768
@@ -167,29 +196,28 @@ impl RtpReceiver {
             return Err(MediaError::Capacity);
         }
         self.next = Some(next);
-        self.ssrc = Some(packet.ssrc());
-        self.packets.push(packet.clone());
+        self.packets.push(packet);
         Ok(true)
     }
 
     pub fn pop(&mut self) -> Result<Option<Frame>, MediaError> {
-        if self.packets.is_empty() {
-            return Ok(None);
+        while !self.packets.is_empty() {
+            let Some(next) = self.next else {
+                return Ok(None);
+            };
+            self.next = Some(next.wrapping_add(1));
+            let Some(index) = self
+                .packets
+                .iter()
+                .position(|packet| packet.sequence() == next)
+            else {
+                return Ok(None);
+            };
+            match self.packets.remove(index) {
+                Received::Audio(packet) => return self.codec.decode(packet.payload()).map(Some),
+                Received::Signal(_) => {}
+            }
         }
-        let Some(next) = self.next else {
-            return Ok(None);
-        };
-        self.next = Some(next.wrapping_add(1));
-        match self
-            .packets
-            .iter()
-            .position(|packet| packet.sequence() == next)
-        {
-            Some(index) => self
-                .codec
-                .decode(self.packets.remove(index).payload())
-                .map(Some),
-            None => Ok(None),
-        }
+        Ok(None)
     }
 }

@@ -59,3 +59,24 @@ fn silence_suppression_does_not_advance_packet_numbers_without_received_packets(
     assert!(receiver.pop()?.is_some());
     Ok(())
 }
+
+#[test]
+fn telephone_packets_share_sequence_numbers_without_delaying_audio() -> Result<(), MediaError> {
+    let mut receiver = RtpReceiver::new(AudioFormat::Pcmu, 0)?;
+    let event = RtpPacket::new(101, 65535, 0, 7, &[1, 0, 0, 160])?;
+    assert!(!receiver.skip(&event)?);
+    receiver.push(&RtpPacket::new(0, 65534, 0, 7, &[0xff; 160])?)?;
+    receiver.push(&RtpPacket::new(0, 1, 160, 7, &[0x80; 160])?)?;
+    assert!(!receiver.skip(&RtpPacket::new(101, 65535, 0, 8, event.payload())?)?);
+    assert!(receiver.skip(&event)?);
+    assert!(receiver.skip(&RtpPacket::new(101, 0, 0, 7, event.payload())?)?);
+    assert!(!receiver.skip(&event)?);
+    assert_eq!(
+        receiver.pop()?.ok_or(MediaError::InvalidFrame)?.samples()[0],
+        0
+    );
+    assert!(receiver.pop()?.ok_or(MediaError::InvalidFrame)?.samples()[0] > 30000);
+    assert!(receiver.pop()?.is_none());
+    assert!(!receiver.skip(&event)?);
+    Ok(())
+}
