@@ -33,6 +33,9 @@ fn authenticated_invite(
         .find_map(|line| line.strip_prefix("WWW-Authenticate: "))
         .ok_or(SipError::InvalidPacket)?;
     let challenge = WwwAuthenticate::parse(challenge)?;
+    let ack = incoming_request(&challenged.datagrams[0].bytes, "ACK", 1)?;
+    let ack = std::str::from_utf8(&ack)?.replace("z9hG4bK-ACK-1", "z9hG4bK-1");
+    engine.receive(ack.as_bytes(), peer, 0)?;
     let uri = Uri::try_from("sip:100@localhost")?;
     let qop = AuthQop::Auth {
         cnonce: "test-client".into(),
@@ -345,6 +348,14 @@ fn rejected_invites_release_admission_and_retransmit_the_tagged_final_response(
             .bytes,
         rejected.datagrams[0].bytes
     );
+    assert_eq!(
+        engine.tick(502)?.datagrams[0].bytes,
+        rejected.datagrams[0].bytes
+    );
+    let ack = incoming_request(&rejected.datagrams[0].bytes, "ACK", 2)?;
+    let ack = std::str::from_utf8(&ack)?.replace("z9hG4bK-ACK-2", "z9hG4bK-2");
+    engine.receive(ack.as_bytes(), "127.0.0.1:5061".parse()?, 503)?;
+    assert!(engine.tick(1502)?.datagrams.is_empty());
     Ok(())
 }
 
@@ -484,5 +495,31 @@ fn cancellation_requires_the_original_invite_transaction_and_releases_pending_ad
         engine.receive(wire.as_bytes(), peer, 6)?.datagrams[0].bytes,
         cancelled.datagrams[1].bytes
     );
+    Ok(())
+}
+
+#[test]
+fn authentication_challenges_retransmit_until_the_original_transaction_is_acknowledged(
+) -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let challenge = engine.receive(invite("", 1).as_bytes(), peer, 0)?;
+    assert!(engine.tick(499)?.datagrams.is_empty());
+    assert_eq!(
+        engine.tick(500)?.datagrams[0].bytes,
+        challenge.datagrams[0].bytes
+    );
+    let wrong_ack = incoming_request(&challenge.datagrams[0].bytes, "ACK", 1)?;
+    engine.receive(&wrong_ack, peer, 501)?;
+    assert_eq!(
+        engine.tick(1500)?.datagrams[0].bytes,
+        challenge.datagrams[0].bytes
+    );
+    let ack = std::str::from_utf8(&wrong_ack)?.replace("z9hG4bK-ACK-1", "z9hG4bK-1");
+    engine.receive(ack.as_bytes(), peer, 1501)?;
+    assert!(engine.tick(3500)?.datagrams.is_empty());
+    let mut expired = Engine::new(config()?, [7; 32]);
+    expired.receive(invite("", 1).as_bytes(), peer, 0)?;
+    assert!(expired.tick(32000)?.datagrams.is_empty());
     Ok(())
 }

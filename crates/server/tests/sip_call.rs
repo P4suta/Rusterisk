@@ -230,6 +230,11 @@ async fn invite(
         .map_err(failure)?;
     let challenge = response(signal).await?;
     assert_eq!(challenge.status_code.code(), 401);
+    let ack = format!("ACK {uri} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK-incoming-1;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 1 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", challenge.from_header().map_err(failure)?.value(), challenge.to_header().map_err(failure)?.value(), challenge.call_id_header().map_err(failure)?.value());
+    signal
+        .send_to(ack.as_bytes(), target)
+        .await
+        .map_err(failure)?;
     let challenge = WwwAuthenticate::parse(
         challenge
             .www_authenticate_header()

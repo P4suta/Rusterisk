@@ -272,6 +272,35 @@ struct Cached {
     peer: SocketAddr,
     bytes: Vec<u8>,
     expires: u64,
+    retry: Option<ServerRetry>,
+}
+
+struct ServerRetry {
+    next: u64,
+    interval: u64,
+    tag: String,
+}
+
+impl ServerRetry {
+    fn for_reply(request: &Request, bytes: &[u8], now: u64) -> Result<Option<Self>, SipError> {
+        if request.method != Method::Invite {
+            return Ok(None);
+        }
+        let response = match SipMessage::try_from(bytes)? {
+            SipMessage::Response(response) => response,
+            SipMessage::Request(_) => return Err(SipError::InvalidPacket),
+        };
+        if response.status_code.code() < 300 {
+            return Ok(None);
+        }
+        let to = response.to_header()?.typed()?;
+        let tag = to.tag().ok_or(SipError::InvalidPacket)?.value().to_owned();
+        Ok(Some(Self {
+            next: now.saturating_add(500),
+            interval: 500,
+            tag,
+        }))
+    }
 }
 pub struct PendingInvite {
     pub id: String,
@@ -493,7 +522,7 @@ impl Engine {
         if let Some(reply) = self.outgoing_bye(&request, peer, now)? {
             match reply {
                 DialogReply::Accepted { bytes, events } => {
-                    return Ok(self.cache_reply(key, request, peer, now, bytes, events));
+                    return self.cache_reply(key, request, peer, now, bytes, events);
                 }
                 DialogReply::Rejected(bytes) => return Ok(Output::response(peer, bytes)),
             }
@@ -501,7 +530,7 @@ impl Engine {
         if let Some(reply) = self.incoming_request(&request, peer, now)? {
             match reply {
                 DialogReply::Accepted { bytes, events } => {
-                    return Ok(self.cache_reply(key, request, peer, now, bytes, events));
+                    return self.cache_reply(key, request, peer, now, bytes, events);
                 }
                 DialogReply::Rejected(bytes) => return Ok(Output::response(peer, bytes)),
             }
@@ -637,7 +666,7 @@ impl Engine {
             | Method::Update
             | Method::Other(_) => response(&request, 501, "Not Implemented", "", "")?,
         };
-        Ok(self.cache_reply(key, request, peer, now, reply, events))
+        self.cache_reply(key, request, peer, now, reply, events)
     }
 
     fn cache_reply(
@@ -648,7 +677,8 @@ impl Engine {
         now: u64,
         reply: Vec<u8>,
         events: Vec<SipEvent>,
-    ) -> Output {
+    ) -> Result<Output, SipError> {
+        let retry = ServerRetry::for_reply(&request, &reply, now)?;
         self.cache.insert(
             key,
             Cached {
@@ -656,12 +686,13 @@ impl Engine {
                 peer,
                 bytes: reply.clone(),
                 expires: now.saturating_add(32_000),
+                retry,
             },
         );
-        Output {
+        Ok(Output {
             datagrams: [Datagram { peer, bytes: reply }].into_iter().collect(),
             events,
-        }
+        })
     }
 }
 

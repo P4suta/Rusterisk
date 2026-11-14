@@ -111,7 +111,7 @@ impl Engine {
             ));
         }
         let bytes = response(&tagged(&request, &invite.local_tag)?, 200, "OK", "", "")?;
-        let mut output = self.cache_reply(key, request, peer, now, bytes, Vec::new());
+        let mut output = self.cache_reply(key, request, peer, now, bytes, Vec::new())?;
         if let Some(invite) = self.pending.remove(&call_id) {
             let bytes = response(
                 &tagged(&invite.request, &invite.local_tag)?,
@@ -120,7 +120,7 @@ impl Engine {
                 "",
                 "",
             )?;
-            self.update_invite_reply(&invite, &bytes, now);
+            self.update_invite_reply(&invite, &bytes, now)?;
             output.datagrams.push(Datagram { peer, bytes });
             output.events.push(SipEvent::IncomingEnded {
                 id: invite.id,
@@ -130,7 +130,12 @@ impl Engine {
         Ok(output)
     }
 
-    fn update_invite_reply(&mut self, invite: &PendingInvite, bytes: &[u8], now: u64) {
+    fn update_invite_reply(
+        &mut self,
+        invite: &PendingInvite,
+        bytes: &[u8],
+        now: u64,
+    ) -> Result<(), SipError> {
         for cached in self
             .cache
             .values_mut()
@@ -138,7 +143,9 @@ impl Engine {
         {
             cached.bytes = bytes.into();
             cached.expires = now.saturating_add(32_000);
+            cached.retry = crate::ServerRetry::for_reply(&cached.request, bytes, now)?;
         }
+        Ok(())
     }
 
     pub fn ring(&mut self, id: &str, now: u64) -> Result<Output, SipError> {
@@ -192,7 +199,7 @@ impl Engine {
         )?;
         let sequence = invite.request.cseq_header()?.typed()?.seq;
         let invite = self.pending.remove(&key).ok_or(SipError::InvalidPacket)?;
-        self.update_invite_reply(&invite, &bytes, now);
+        self.update_invite_reply(&invite, &bytes, now)?;
         let mut output = Output::response(invite.peer, bytes.clone());
         output.events.push(SipEvent::Answered {
             id: id.into(),
@@ -222,6 +229,22 @@ impl Engine {
         request: &Request,
         peer: SocketAddr,
     ) -> Result<(), SipError> {
+        for cached in self.cache.values_mut() {
+            if let Some(retry) = &cached.retry {
+                if cached.peer == peer
+                    && cached.request.call_id_header()?.value() == request.call_id_header()?.value()
+                    && cached.request.cseq_header()?.typed()?.seq
+                        == request.cseq_header()?.typed()?.seq
+                    && cached.request.top_via_header()?.typed()?
+                        == request.top_via_header()?.typed()?
+                    && cached.request.from_header()?.typed()? == request.from_header()?.typed()?
+                    && request.to_header()?.typed()?.tag().map(|tag| tag.value())
+                        == Some(retry.tag.as_str())
+                {
+                    cached.retry = None;
+                }
+            }
+        }
         if let Some(dialog) = self.incoming.get_mut(request.call_id_header()?.value()) {
             if dialog.matches(request, peer)?
                 && request.cseq_header()?.typed()?.seq
@@ -323,6 +346,7 @@ impl Engine {
     }
 
     pub(crate) fn incoming_tick(&mut self, now: u64) -> Result<Output, SipError> {
+        self.cache.retain(|_, cached| cached.expires > now);
         self.incoming.retain(
             |_, dialog| !matches!(dialog.state, State::Terminated { expires } if expires <= now),
         );
@@ -330,6 +354,18 @@ impl Engine {
             datagrams: Vec::new(),
             events: Vec::new(),
         };
+        for cached in self.cache.values_mut() {
+            if let Some(retry) = &mut cached.retry {
+                if retry.next <= now {
+                    output.datagrams.push(Datagram {
+                        peer: cached.peer,
+                        bytes: cached.bytes.clone(),
+                    });
+                    retry.interval = (retry.interval * 2).min(4000);
+                    retry.next = now.saturating_add(retry.interval);
+                }
+            }
+        }
         for dialog in self.incoming.values_mut() {
             match &mut dialog.state {
                 State::AwaitingAck { deadline, .. } if *deadline <= now => {
@@ -370,14 +406,7 @@ impl Engine {
         let (code, phrase) = reason.response();
         let request = tagged(&invite.request, &invite.local_tag)?;
         let bytes = response(&request, code, phrase, "", "")?;
-        for cached in self
-            .cache
-            .values_mut()
-            .filter(|cached| cached.peer == invite.peer && cached.request == invite.request)
-        {
-            cached.bytes = bytes.clone();
-            cached.expires = now.saturating_add(32_000);
-        }
+        self.update_invite_reply(&invite, &bytes, now)?;
         Ok(Output::response(invite.peer, bytes))
     }
 }
