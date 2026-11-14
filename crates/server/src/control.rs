@@ -6,6 +6,8 @@ use rusterisk_core::{
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+mod dialplan;
+use dialplan::DialplanFrame;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControlError {
@@ -328,6 +330,7 @@ struct ChannelEntry {
     deadline: Option<u64>,
     variables: BTreeMap<String, String>,
     dtmf: Option<DtmfOutbox>,
+    dialplan: Option<DialplanFrame>,
 }
 
 impl ChannelEntry {
@@ -514,6 +517,7 @@ impl Control {
                 deadline: None,
                 variables: BTreeMap::new(),
                 dtmf: None,
+                dialplan: None,
             },
         );
         Ok(outcome)
@@ -744,6 +748,7 @@ impl Control {
                         deadline: Some(deadline),
                         variables: BTreeMap::new(),
                         dtmf: None,
+                        dialplan: None,
                     },
                 );
                 Ok(outcome)
