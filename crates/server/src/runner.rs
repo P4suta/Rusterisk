@@ -557,7 +557,7 @@ impl Runner {
                     }
                 }
                 changed = self.shutdown.changed() => { if changed.is_err() || *self.shutdown.borrow() { break; } }
-                signal = self.signals.recv(), if self.pending_effects.is_empty() => { if let Some(signal) = signal { let mut outcome = self.control.signal(signal, &timestamp())?; self.publish(&mut outcome)?; } else { break; } }
+                signal = self.signals.recv(), if self.pending_effects.is_empty() => { if let Some(signal) = signal { let mut outcome = self.control.signal_at(signal, &timestamp(), u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?; self.publish(&mut outcome)?; } else { break; } }
                 request = self.requests.recv() => {
                     if let Some(request) = request { self.request(request, u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?; } else { break; }
                 }

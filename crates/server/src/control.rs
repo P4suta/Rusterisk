@@ -561,7 +561,9 @@ impl Control {
         let ids: Vec<ChannelId> = self.channels.keys().cloned().collect();
         let mut outcome = Outcome::empty();
         for id in ids {
-            outcome.append(self.end(&id, timestamp, 16)?);
+            if self.channels.contains_key(&id) {
+                outcome.append(self.end(&id, timestamp, 16)?);
+            }
         }
         Ok(outcome)
     }
@@ -608,7 +610,9 @@ impl Control {
         let ids: Vec<ChannelId> = self.channels.iter().filter(|(_, entry)| matches!(entry.call.stasis(), StasisMembership::Pending(current) | StasisMembership::Entered(current) if current == application)).map(|(id, _)| id.clone()).collect();
         let mut outcome = Outcome::empty();
         for id in ids {
-            outcome.append(self.end(&id, timestamp, 16)?);
+            if self.channels.contains_key(&id) {
+                outcome.append(self.end(&id, timestamp, 16)?);
+            }
         }
         self.applications.remove(name);
         Ok(outcome)
@@ -792,7 +796,7 @@ impl Control {
                 );
                 Ok(outcome)
             }
-            Action::Hangup(id) => self.end(&id, timestamp, 16),
+            Action::Hangup(id) => self.end_at(&id, timestamp, 16, now_ms),
             Action::Continue {
                 channel,
                 context,
@@ -1113,6 +1117,17 @@ impl Control {
         timestamp: &str,
         cause: u16,
     ) -> Result<Outcome, ControlError> {
+        self.end_at(id, timestamp, cause, 0)
+    }
+
+    fn end_at(
+        &mut self,
+        id: &ChannelId,
+        timestamp: &str,
+        cause: u16,
+        now: u64,
+    ) -> Result<Outcome, ControlError> {
+        let branch = self.dial_branch(&self.key(id)?);
         let mut entry = self
             .channels
             .remove(id)
@@ -1194,6 +1209,9 @@ impl Control {
                 channel: entry.snapshot,
             },
         );
+        if let Some(branch) = branch {
+            outcome.append(self.failed_dial_branch(branch, cause, now, timestamp)?);
+        }
         Ok(outcome)
     }
 
@@ -1255,6 +1273,15 @@ impl Control {
     }
 
     pub fn signal(&mut self, signal: Signal, timestamp: &str) -> Result<Outcome, ControlError> {
+        self.signal_at(signal, timestamp, 0)
+    }
+
+    pub fn signal_at(
+        &mut self,
+        signal: Signal,
+        timestamp: &str,
+        now: u64,
+    ) -> Result<Outcome, ControlError> {
         match signal {
             Signal::DtmfReady { key, events } => {
                 if let Some(entry) = self
@@ -1309,7 +1336,7 @@ impl Control {
                     .get(&key.id)
                     .is_some_and(|entry| entry.call.generation() == key.generation)
                 {
-                    self.end(&key.id, timestamp, cause)
+                    self.end_at(&key.id, timestamp, cause, now)
                 } else {
                     let mut outcome = Outcome::empty();
                     outcome.effects.push(Effect::Release { key });
@@ -1328,7 +1355,7 @@ impl Control {
                     return Ok(outcome);
                 }
                 if milestone == Milestone::Ended {
-                    return self.end(&key.id, timestamp, 16);
+                    return self.end_at(&key.id, timestamp, 16, now);
                 }
                 let entry = self
                     .channels
@@ -1422,7 +1449,9 @@ impl Control {
             .collect();
         let mut outcome = Outcome::empty();
         for id in expired {
-            outcome.append(self.end(&id, timestamp, 19)?);
+            if self.channels.contains_key(&id) {
+                outcome.append(self.end_at(&id, timestamp, 19, now_ms)?);
+            }
         }
         Ok(outcome)
     }

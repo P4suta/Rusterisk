@@ -130,3 +130,52 @@ fn generated_children_cannot_replace_an_existing_user_selected_identifier(
     assert_eq!(control.key(&reserved)?, retained);
     Ok(())
 }
+
+#[test]
+fn all_failed_attempts_resume_once_and_late_failures_do_not_end_the_parent(
+) -> Result<(), ControlError> {
+    let (mut control, parent, started) = start(4, "")?;
+    let children = started
+        .effects
+        .into_iter()
+        .map(|effect| match effect {
+            Effect::Start { key, .. } => Ok(key),
+            Effect::Dtmf { .. }
+            | Effect::Gate { .. }
+            | Effect::Answer { .. }
+            | Effect::Ring { .. }
+            | Effect::Release { .. }
+            | Effect::Bridge { .. } => Err(ControlError::Unsupported),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for (index, child) in children.iter().enumerate() {
+        let ended = control.signal_at(
+            rusterisk_server::Signal::Terminated {
+                key: child.clone(),
+                cause: 21,
+            },
+            "later",
+            100 + index as u64,
+        )?;
+        assert!(ended.events.is_empty());
+        assert!(control.channel(&parent.id).is_ok());
+    }
+    let resumed = control.tick_dialplans(200, "later")?;
+    assert!(
+        matches!(&resumed.events[1].kind, EventKind::StasisStart { args, .. } if args == &["CHANUNAVAIL"])
+    );
+    for child in children {
+        let late = control.signal_at(
+            rusterisk_server::Signal::Terminated {
+                key: child,
+                cause: 21,
+            },
+            "later",
+            300,
+        )?;
+        assert!(late.events.is_empty());
+    }
+    assert!(control.channel(&parent.id).is_ok());
+    assert!(control.tick_dialplans(400, "later")?.events.is_empty());
+    Ok(())
+}

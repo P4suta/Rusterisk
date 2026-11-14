@@ -1,5 +1,6 @@
 #![no_std]
 
+mod dial_failure;
 mod dial_fork;
 mod dialplan;
 mod dialplan_answer;
@@ -8,6 +9,7 @@ mod digit_sequence;
 mod digits;
 mod owned_progress;
 mod stasis;
+pub use dial_failure::DialFailure;
 pub use dial_fork::{DialFork, DialForkDecision, DialForkError, DialForkOutcome, DialForkState};
 pub use dialplan::{
     DialplanContinuation, DialplanDispatch, DialplanError, DialplanExecution, DialplanInstruction,

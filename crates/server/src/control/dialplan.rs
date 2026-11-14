@@ -4,7 +4,7 @@ use rusterisk_config::{expand_variables, Application, Dialplan, ExpansionError};
 use rusterisk_core::{
     AnswerProgress, AnswerStatus, CallState, DialForkOutcome, DialplanContinuation,
     DialplanDispatch, DialplanError, DialplanInstruction, DialplanMachine, DialplanState,
-    StasisMembership,
+    DialplanToken, StasisMembership,
 };
 
 pub(super) struct DialplanFrame {
@@ -15,6 +15,18 @@ pub(super) struct DialplanFrame {
 }
 
 impl DialplanFrame {
+    pub(super) fn complete_dial(&mut self, token: DialplanToken) -> Result<(), ControlError> {
+        if self
+            .machine
+            .as_mut()
+            .is_some_and(|machine| machine.complete(token, DialplanContinuation::Advance))
+        {
+            Ok(())
+        } else {
+            Err(ControlError::Conflict("Dial completion changed"))
+        }
+    }
+
     pub(super) fn dormant(program: Dialplan) -> Self {
         Self {
             program,
