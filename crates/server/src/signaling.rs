@@ -445,10 +445,7 @@ impl Signaling {
             }
             Effect::Release { key } => {
                 if let Some(call) = self.calls.remove(&key) {
-                    let output = self.listeners[call.listener]
-                        .engine
-                        .cancel(key.id.as_str(), key.generation, now)
-                        .map_err(failure)?;
+                    let output = self.terminate(call.listener, &key, now).map_err(failure)?;
                     self.transmit(call.listener, output.datagrams).await?;
                 }
                 self.media.release(key).map_err(failure)?;
@@ -516,6 +513,20 @@ impl Signaling {
         self.output(listener, output, now).await
     }
 
+    fn terminate(
+        &mut self,
+        listener: usize,
+        key: &CallKey,
+        now: u64,
+    ) -> Result<Output, rusterisk_sip::SipError> {
+        let engine = &mut self.listeners[listener].engine;
+        if engine.pending(key.id.as_str()).is_some() {
+            engine.reject(key.id.as_str(), RejectReason::Rejected, now)
+        } else {
+            engine.cancel(key.id.as_str(), key.generation, now)
+        }
+    }
+
     async fn serve(
         &mut self,
         stop: &mut watch::Receiver<bool>,
@@ -568,10 +579,7 @@ impl Signaling {
         let mut cleanup = Ok(());
         let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
         for (key, call) in std::mem::take(&mut self.calls) {
-            match self.listeners[call.listener]
-                .engine
-                .cancel(key.id.as_str(), key.generation, now)
-            {
+            match self.terminate(call.listener, &key, now) {
                 Ok(output) => {
                     if let Err(error) = self.transmit(call.listener, output.datagrams).await {
                         tracing::error!(%error, "signaling cleanup failed");

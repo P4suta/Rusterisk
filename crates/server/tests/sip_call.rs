@@ -339,3 +339,59 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
     hub.await.map_err(failure)?.map_err(failure)?;
     result
 }
+
+#[tokio::test]
+async fn disconnecting_the_stasis_app_rejects_an_unanswered_invitation() -> Result<(), ControlError>
+{
+    let phone = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(failure)?;
+    let audio = SocketPair::bind(IpAddr::V4(Ipv4Addr::LOCALHOST), 0, 0).map_err(failure)?;
+    let sip = "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[contact]\ntype=aor\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=contact\ncontext=internal\nallow=ulaw\n";
+    let config = Config::parse(
+        "[general]\nbindaddr=127.0.0.1\n",
+        "[app]\ntype=user\npassword=test-password\n",
+        sip,
+        "",
+        "[internal]\nexten => 100,1,Stasis(app)\n",
+    )
+    .map_err(failure)?;
+    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (media, hub, notices) = MediaHub::new(4);
+    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let target = signaling.listeners()?[0].1;
+    let runner = tokio::spawn(runner.run());
+    let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
+    let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
+    let result = async {
+        let mut subscription = controller
+            .subscribe(credentials()?, None, "app".into())
+            .await?;
+        invite(&phone, target, &audio).await?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = subscription.events.recv().await {
+                if matches!(event.kind, EventKind::StasisStart { .. }) {
+                    return Ok(());
+                }
+            }
+            Err(ControlError::Capacity)
+        })
+        .await
+        .map_err(failure)??;
+        drop(subscription);
+        assert_eq!(response(&phone).await?.status_code.code(), 603);
+        let channels = controller
+            .execute(credentials()?, None, Action::ListChannels)
+            .await?
+            .body
+            .ok_or(ControlError::Capacity)?;
+        assert_eq!(channels, serde_json::json!([]));
+        Ok(())
+    }
+    .await;
+    controller.shutdown();
+    runner.await.map_err(failure)??;
+    signaling.await.map_err(failure)??;
+    hub.await.map_err(failure)?.map_err(failure)?;
+    result
+}
