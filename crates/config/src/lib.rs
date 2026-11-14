@@ -923,7 +923,7 @@ impl Dialplan {
                     let (variable, value) = arguments
                         .split_once('=')
                         .ok_or_else(|| error("Set requires a variable and value"))?;
-                    if !valid_name(variable) {
+                    if !valid_variable_expression(variable) {
                         return Err(error("invalid Set variable"));
                     }
                     Application::Set {
@@ -1015,12 +1015,14 @@ impl Dialplan {
     }
 }
 
+fn valid_variable_expression(name: &str) -> bool {
+    valid_name(name) || matches!(name, "CALLERID(num)" | "CALLERID(name)" | "CALLERID(all)")
+}
+
 fn validate_expansion(mut value: &str) -> Result<(), &'static str> {
     while let Some((_, tail)) = value.split_once("${") {
         let (name, rest) = tail.split_once('}').ok_or("unclosed variable expansion")?;
-        if !(valid_name(name)
-            || matches!(name, "CALLERID(num)" | "CALLERID(name)" | "CALLERID(all)"))
-        {
+        if !valid_variable_expression(name) {
             return Err("unsupported variable expression");
         }
         value = rest;

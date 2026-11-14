@@ -128,6 +128,27 @@ fn dialplan_accepts_parallel_pjsip_and_rejects_unsupported_applications() -> Res
 }
 
 #[test]
+fn dialplan_assignments_accept_the_supported_caller_identification_fields(
+) -> Result<(), ConfigError> {
+    for target in ["CALLERID(num)", "CALLERID(name)", "CALLERID(all)"] {
+        let source = format!("[internal]\nexten => 100,1,Set({target}=${{CALLERID(num)}})\n");
+        let plan = Dialplan::parse(&source)?;
+        assert!(
+            matches!(&plan.steps[0].application, rusterisk_config::Application::Set { variable, value } if variable == target && value == "${CALLERID(num)}")
+        );
+    }
+    for target in ["CALLERID(ani)", "CALLERID()", "GLOBAL(X)", "SHELL(command)"] {
+        let result = Dialplan::parse(&format!("[internal]\nexten => 100,1,Set({target}=value)\n"));
+        assert!(result.is_err(), "unsupported assignment must fail");
+        if let Err(error) = result {
+            assert_eq!(error.file, "extensions.conf");
+            assert_eq!(error.line, 2);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn rejects_includes_duplicate_sections_and_oversized_inputs() {
     assert!(Ini::parse("pjsip.conf", "#include private.conf\n").is_err());
     assert!(Ini::parse("pjsip.conf", "[x]\na=1\n[x]\nb=2\n").is_err());
