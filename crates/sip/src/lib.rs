@@ -272,7 +272,7 @@ struct Cached {
     request: Request,
     peer: SocketAddr,
     bytes: Vec<u8>,
-    expires: u64,
+    expires: Option<u64>,
     retry: Option<ServerRetry>,
 }
 
@@ -502,7 +502,8 @@ impl Engine {
             return Err(SipError::Capacity);
         }
         self.nonces.retain(|_, value| value.expires > now);
-        self.cache.retain(|_, value| value.expires > now);
+        self.cache
+            .retain(|_, value| value.expires.is_none_or(|expires| expires > now));
         self.contacts.retain(|_, (_, expires)| *expires > now);
         let request = match SipMessage::try_from(bytes)? {
             SipMessage::Request(request) => request,
@@ -716,13 +717,23 @@ impl Engine {
         events: Vec<SipEvent>,
     ) -> Result<Output, SipError> {
         let retry = ServerRetry::for_reply(&request, &reply, now)?;
+        let expires = if request.method == Method::Invite
+            && self
+                .pending
+                .get(request.call_id_header()?.value())
+                .is_some_and(|invite| invite.request == request)
+        {
+            None
+        } else {
+            Some(now.saturating_add(32_000))
+        };
         self.cache.insert(
             key,
             Cached {
                 request,
                 peer,
                 bytes: reply.clone(),
-                expires: now.saturating_add(32_000),
+                expires,
                 retry,
             },
         );

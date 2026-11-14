@@ -387,7 +387,7 @@ fn incoming_answers_retransmit_until_the_matching_ack_and_remote_hangup_is_idemp
     let peer = "127.0.0.1:5061".parse()?;
     let (incoming, wire, _) = authenticated_invite(&mut engine)?;
     let id = incoming_id(&incoming)?;
-    let ringing = engine.ring(&id, 2)?;
+    let ringing = engine.ring(&id)?;
     assert!(ringing.datagrams[0].bytes.starts_with(b"SIP/2.0 180"));
     assert_eq!(
         engine.receive(wire.as_bytes(), peer, 3)?.datagrams[0].bytes,
@@ -681,5 +681,24 @@ fn cancellation_retries_with_a_bounded_interval_and_expires_without_a_response(
     assert!(engine.tick(5501)?.datagrams.is_empty());
     assert_eq!(engine.tick(5502)?.datagrams[0].bytes, cancel);
     assert!(engine.tick(32002)?.datagrams.is_empty());
+    Ok(())
+}
+
+#[test]
+fn pending_invitations_keep_their_last_response_until_a_final_decision() -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (incoming, wire, _) = authenticated_invite(&mut engine)?;
+    let id = incoming_id(&incoming)?;
+    let ringing = engine.ring(&id)?;
+    assert!(engine.tick(32003)?.datagrams.is_empty());
+    let repeated = engine.receive(wire.as_bytes(), peer, 32004)?;
+    assert!(repeated.events.is_empty());
+    assert_eq!(repeated.datagrams[0].bytes, ringing.datagrams[0].bytes);
+    engine.reject(&id, rusterisk_sip::RejectReason::NoRoute, 32005)?;
+    assert!(engine.tick(64005)?.datagrams.is_empty());
+    assert!(engine.receive(wire.as_bytes(), peer, 64006)?.datagrams[0]
+        .bytes
+        .starts_with(b"SIP/2.0 401"));
     Ok(())
 }

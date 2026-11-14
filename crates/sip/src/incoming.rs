@@ -142,13 +142,13 @@ impl Engine {
             .filter(|cached| cached.peer == invite.peer && cached.request == invite.request)
         {
             cached.bytes = bytes.into();
-            cached.expires = now.saturating_add(32_000);
+            cached.expires = Some(now.saturating_add(32_000));
             cached.retry = crate::ServerRetry::for_reply(&cached.request, bytes, now)?;
         }
         Ok(())
     }
 
-    pub fn ring(&mut self, id: &str, now: u64) -> Result<Output, SipError> {
+    pub fn ring(&mut self, id: &str) -> Result<Output, SipError> {
         let invite = self
             .pending
             .values()
@@ -168,7 +168,7 @@ impl Engine {
             .filter(|cached| cached.peer == peer && cached.request == invite.request)
         {
             cached.bytes = bytes.clone();
-            cached.expires = now.saturating_add(32_000);
+            cached.expires = None;
         }
         Ok(Output::response(peer, bytes))
     }
@@ -346,7 +346,8 @@ impl Engine {
     }
 
     pub(crate) fn incoming_tick(&mut self, now: u64) -> Result<Output, SipError> {
-        self.cache.retain(|_, cached| cached.expires > now);
+        self.cache
+            .retain(|_, cached| cached.expires.is_none_or(|expires| expires > now));
         self.incoming.retain(
             |_, dialog| !matches!(dialog.state, State::Terminated { expires } if expires <= now),
         );
