@@ -5,7 +5,7 @@ mod streams;
 mod telephone_events;
 pub use mixing::{Gate, Mixer};
 pub use streams::{AudioFormat, RtpReceiver, RtpSender};
-pub use telephone_events::TelephoneEvent;
+pub use telephone_events::{TelephoneEvent, TelephoneEvents, TelephoneReceiver};
 
 pub const MAX_SAMPLES: usize = 960;
 pub const MAX_PACKET: usize = 1500;
@@ -257,6 +257,10 @@ impl RtpPacket {
     pub fn with_marker(mut self, marker: bool) -> Self {
         self.0.header.marker = marker;
         self
+    }
+
+    pub fn marker(&self) -> bool {
+        self.0.header.marker
     }
     pub const fn sequence(&self) -> u16 {
         self.0.header.sequence_number
