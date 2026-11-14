@@ -253,6 +253,7 @@ pub struct Endpoint {
     pub name: String,
     pub transport: String,
     pub auth: String,
+    pub outbound_auth: Vec<String>,
     pub aors: Vec<String>,
     pub context: String,
     pub codecs: Vec<Codec>,
@@ -627,6 +628,7 @@ impl Config {
                         "type",
                         "transport",
                         "auth",
+                        "outbound_auth",
                         "aors",
                         "context",
                         "disallow",
@@ -656,6 +658,13 @@ impl Config {
                     name: section.name.clone(),
                     transport: section.required(file, "transport")?.into(),
                     auth: section.required(file, "auth")?.into(),
+                    outbound_auth: section
+                        .value("outbound_auth")
+                        .unwrap_or("")
+                        .split(',')
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| value.trim().into())
+                        .collect(),
                     aors: section
                         .required(file, "aors")?
                         .split(',')
@@ -715,6 +724,11 @@ impl Config {
                 .iter()
                 .any(|value| value.name == endpoint.transport)
                 || !self.auth.iter().any(|value| value.name == endpoint.auth)
+                || endpoint.outbound_auth.len() > 8
+                || endpoint
+                    .outbound_auth
+                    .iter()
+                    .any(|name| !self.auth.iter().any(|value| &value.name == name))
                 || endpoint
                     .aors
                     .iter()

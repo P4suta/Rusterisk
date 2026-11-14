@@ -133,3 +133,24 @@ fn rejects_includes_duplicate_sections_and_oversized_inputs() {
     assert!(Ini::parse("pjsip.conf", "[x]\na=1\n[x]\nb=2\n").is_err());
     assert!(Ini::parse("pjsip.conf", &"x".repeat(1_048_577)).is_err());
 }
+
+#[test]
+fn outbound_credentials_are_explicit_references_separate_from_incoming_authentication(
+) -> Result<(), ConfigError> {
+    let sip = format!("{}[remote]\ntype=auth\nusername=remote-user\npassword=remote-password\nrealm=peer.example\n", SIP.replace("auth=phone-auth", "auth=phone-auth\noutbound_auth=remote"));
+    let config = Config::parse(HTTP, ARI, &sip, "", "")?;
+    assert_eq!(config.endpoints[0].outbound_auth, ["remote"]);
+    assert_eq!(config.endpoints[0].auth, "phone-auth");
+    assert!(Config::parse(
+        HTTP,
+        ARI,
+        &sip.replace("outbound_auth=remote", "outbound_auth=missing"),
+        "",
+        ""
+    )
+    .is_err());
+    assert!(Config::parse(HTTP, ARI, SIP, "", "")?.endpoints[0]
+        .outbound_auth
+        .is_empty());
+    Ok(())
+}
