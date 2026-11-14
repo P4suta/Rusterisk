@@ -1,10 +1,12 @@
 use crate::{Action, CallKey, Control, ControlError, Effect, IncomingCall, Outcome, Signal};
 use rusterisk_api::{Event, EventKind};
 use rusterisk_config::Config;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot, watch};
+
+const MAX_PENDING_EFFECTS: usize = 64 * 2 + 1;
 
 #[derive(Clone)]
 pub struct Credentials {
@@ -85,6 +87,7 @@ pub struct Runner {
     requests: mpsc::Receiver<Request>,
     signals: mpsc::Receiver<Signal>,
     effects: mpsc::Sender<Effect>,
+    pending_effects: VecDeque<Effect>,
     shutdown: watch::Receiver<bool>,
     subscribers: BTreeMap<String, Subscriber>,
     sessions: BTreeMap<u64, Session>,
@@ -150,6 +153,7 @@ impl Controller {
                 requests: request_receiver,
                 signals: signal_receiver,
                 effects,
+                pending_effects: VecDeque::with_capacity(MAX_PENDING_EFFECTS),
                 shutdown: shutdown_receiver,
                 subscribers: BTreeMap::new(),
                 sessions: BTreeMap::new(),
@@ -300,11 +304,33 @@ impl Runner {
         Ok(())
     }
 
+    fn emit_effect(&mut self, effect: Effect) -> Result<(), ControlError> {
+        let effect = if self.pending_effects.is_empty() {
+            match self.effects.try_send(effect) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::TrySendError::Full(effect)) => effect,
+                Err(mpsc::error::TrySendError::Closed(_)) if *self.shutdown.borrow() => {
+                    return Ok(())
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return Err(ControlError::Adapter(
+                        "Signaling effect receiver closed".into(),
+                    ))
+                }
+            }
+        } else {
+            effect
+        };
+        if self.pending_effects.len() >= MAX_PENDING_EFFECTS {
+            return Err(ControlError::Capacity);
+        }
+        self.pending_effects.push_back(effect);
+        Ok(())
+    }
+
     fn publish(&mut self, outcome: &mut Outcome) -> Result<(), ControlError> {
         for effect in outcome.effects.drain(..) {
-            self.effects
-                .try_send(effect)
-                .map_err(|_| ControlError::Capacity)?;
+            self.emit_effect(effect)?;
         }
         let mut disconnected = Vec::new();
         for event in outcome.events.drain(..) {
@@ -321,9 +347,7 @@ impl Runner {
             self.subscribers.remove(&application);
             let mut cleanup = self.control.unsubscribe(&application, &timestamp())?;
             for effect in cleanup.effects.drain(..) {
-                self.effects
-                    .try_send(effect)
-                    .map_err(|_| ControlError::Capacity)?;
+                self.emit_effect(effect)?;
             }
         }
         Ok(())
@@ -333,6 +357,12 @@ impl Runner {
         match request {
             Request::Incoming { call, reply } => {
                 if reply.is_closed() {
+                    return Ok(());
+                }
+                if !self.pending_effects.is_empty() {
+                    if reply.send(Err(ControlError::Capacity)).is_err() {
+                        tracing::debug!("incoming requester disconnected during pending cleanup");
+                    }
                     return Ok(());
                 }
                 let id = call.id.clone();
@@ -382,7 +412,9 @@ impl Runner {
                 let result = self
                     .authorize(&credentials, origin.as_deref(), action.read_only())
                     .and_then(|()| {
-                        if self.effects.capacity() < action.effect_budget() {
+                        if (!self.pending_effects.is_empty() && !action.read_only())
+                            || self.effects.capacity() < action.effect_budget()
+                        {
                             return Err(ControlError::Capacity);
                         }
                         self.control.apply(action, &timestamp(), now_ms)
@@ -469,13 +501,21 @@ impl Runner {
     }
 
     async fn serve(&mut self) -> Result<(), ControlError> {
+        let effect_sender = self.effects.clone();
         let started = Instant::now();
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                permit = effect_sender.reserve(), if !self.pending_effects.is_empty() => {
+                    match permit {
+                        Ok(permit) => if let Some(effect) = self.pending_effects.pop_front() { permit.send(effect); },
+                        Err(_) if *self.shutdown.borrow() => break,
+                        Err(error) => return Err(ControlError::Adapter(error.to_string())),
+                    }
+                }
                 changed = self.shutdown.changed() => { if changed.is_err() || *self.shutdown.borrow() { break; } }
-                signal = self.signals.recv() => { if let Some(signal) = signal { let mut outcome = self.control.signal(signal, &timestamp())?; self.publish(&mut outcome)?; } else { break; } }
+                signal = self.signals.recv(), if self.pending_effects.is_empty() => { if let Some(signal) = signal { let mut outcome = self.control.signal(signal, &timestamp())?; self.publish(&mut outcome)?; } else { break; } }
                 request = self.requests.recv() => {
                     if let Some(request) = request { self.request(request, u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?; } else { break; }
                 }
@@ -490,6 +530,28 @@ impl Runner {
         Ok(())
     }
 
+    async fn drain_effects(&mut self, deadline: tokio::time::Instant) -> Result<(), ControlError> {
+        while !self.pending_effects.is_empty() {
+            match tokio::time::timeout_at(deadline, self.effects.reserve()).await {
+                Ok(Ok(permit)) => {
+                    if let Some(effect) = self.pending_effects.pop_front() {
+                        permit.send(effect);
+                    }
+                }
+                Ok(Err(_)) if *self.shutdown.borrow() => {
+                    tracing::debug!(
+                        pending = self.pending_effects.len(),
+                        "pending effects cancelled with the signaling scope"
+                    );
+                    self.pending_effects.clear();
+                }
+                Ok(Err(error)) => return Err(ControlError::Adapter(error.to_string())),
+                Err(error) => return Err(ControlError::Adapter(error.to_string())),
+            }
+        }
+        Ok(())
+    }
+
     async fn close(&mut self) -> Result<(), ControlError> {
         let result = self
             .control
@@ -497,17 +559,22 @@ impl Runner {
             .and_then(|mut outcome| self.publish(&mut outcome));
         self.subscribers.clear();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut cleanup = Ok(());
+        let mut cleanup = self.drain_effects(deadline).await;
         for (_, mut session) in std::mem::take(&mut self.sessions) {
             if session.kind == SubscriptionKind::Socket {
-                match tokio::time::timeout_at(deadline, session.lifetime.recv()).await {
-                    Ok(None) => {}
-                    Ok(Some(())) => {
-                        cleanup = Err(ControlError::Adapter(
-                            "Unexpected connection lifetime signal".into(),
-                        ))
+                let result = match tokio::time::timeout_at(deadline, session.lifetime.recv()).await
+                {
+                    Ok(None) => Ok(()),
+                    Ok(Some(())) => Err(ControlError::Adapter(
+                        "Unexpected connection lifetime signal".into(),
+                    )),
+                    Err(error) => Err(ControlError::Adapter(error.to_string())),
+                };
+                if let Err(error) = result {
+                    tracing::warn!(%error, "event connection cleanup failed");
+                    if cleanup.is_ok() {
+                        cleanup = Err(error);
                     }
-                    Err(error) => cleanup = Err(ControlError::Adapter(error.to_string())),
                 }
             }
         }
