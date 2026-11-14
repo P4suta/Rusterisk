@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "Typed ARI client with owned call lifetimes"
 
+[[example]]
+name = "call"
+test = true
+
 [dependencies]
 rusterisk-api = { version = "0.1.0", path = "../api" }
 rusterisk-core = { version = "0.1.0", path = "../core" }
