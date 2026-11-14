@@ -9,5 +9,7 @@ mod runner;
 pub mod runtime;
 pub mod signaling;
 mod websocket;
-pub use control::{Action, CallKey, Control, ControlError, Effect, Milestone, Outcome, Signal};
+pub use control::{
+    Action, CallKey, Control, ControlError, Effect, IncomingCall, Milestone, Outcome, Signal,
+};
 pub use runner::{Controller, Credentials, Runner, Subscription};

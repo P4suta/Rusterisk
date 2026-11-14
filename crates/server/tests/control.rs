@@ -1,5 +1,5 @@
 use rusterisk_api::{ChannelId, EventKind};
-use rusterisk_server::{Action, Control, ControlError, Effect, Milestone, Signal};
+use rusterisk_server::{Action, Control, ControlError, Effect, IncomingCall, Milestone, Signal};
 
 fn id(value: &str) -> Result<ChannelId, ControlError> {
     Ok(ChannelId::try_from(value.to_owned())?)
@@ -147,5 +147,69 @@ fn shutdown_releases_every_call_and_is_idempotent() -> Result<(), ControlError> 
         assert!(control.channel(&id(name)?).is_err());
     }
     assert!(control.shutdown("again")?.effects.is_empty());
+    Ok(())
+}
+
+fn incoming() -> Result<IncomingCall, ControlError> {
+    Ok(IncomingCall {
+        id: id("incoming")?,
+        endpoint: "phone".into(),
+        caller: "spoofed-display".into(),
+        context: "internal".into(),
+        extension: "100".into(),
+        app: "app".into(),
+        args: ["inbound".into()].into_iter().collect(),
+    })
+}
+
+#[test]
+fn incoming_stasis_entry_precedes_answer_and_terminal_cleanup_is_balanced(
+) -> Result<(), ControlError> {
+    let mut control = Control::new(2);
+    control.subscribe("app")?;
+    let admitted = control.incoming(incoming()?, "now")?;
+    assert!(admitted.effects.is_empty());
+    assert!(
+        matches!(&admitted.events[1].kind, EventKind::StasisStart { channel, args } if channel.state == rusterisk_api::ChannelState::Ring && args == &["inbound"])
+    );
+    let channel = control.channel(&id("incoming")?)?;
+    assert_eq!(channel.caller.number, "spoofed-display");
+    assert_eq!(channel.dialplan.context, "internal");
+    assert_eq!(channel.dialplan.exten, "100");
+    let ended = control.apply(Action::Hangup(id("incoming")?), "later", 0)?;
+    assert!(matches!(&ended.events[0].kind, EventKind::StasisEnd { .. }));
+    assert!(matches!(
+        &ended.events[1].kind,
+        EventKind::ChannelDestroyed { .. }
+    ));
+    control.incoming(incoming()?, "again")?;
+    let key = control.key(&id("incoming")?)?;
+    let answered = control.signal(
+        Signal::Milestone {
+            key,
+            milestone: Milestone::Answered,
+        },
+        "answer",
+    )?;
+    assert!(answered
+        .events
+        .iter()
+        .all(|event| !matches!(event.kind, EventKind::StasisStart { .. })));
+    assert_eq!(
+        control.channel(&id("incoming")?)?.state,
+        rusterisk_api::ChannelState::Up
+    );
+    Ok(())
+}
+
+#[test]
+fn incoming_admission_requires_a_subscribed_app_and_preserves_existing_calls(
+) -> Result<(), ControlError> {
+    let mut control = Control::new(1);
+    assert!(control.incoming(incoming()?, "now").is_err());
+    control.subscribe("app")?;
+    control.incoming(incoming()?, "now")?;
+    assert!(control.incoming(incoming()?, "duplicate").is_err());
+    assert_eq!(control.channel(&id("incoming")?)?.creationtime, "now");
     Ok(())
 }

@@ -69,6 +69,17 @@ pub struct CallKey {
 }
 
 #[derive(Clone, Debug)]
+pub struct IncomingCall {
+    pub id: ChannelId,
+    pub endpoint: String,
+    pub caller: String,
+    pub context: String,
+    pub extension: String,
+    pub app: String,
+    pub args: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
 pub enum Action {
     ListChannels,
     GetChannel(ChannelId),
@@ -189,6 +200,13 @@ struct ChannelEntry {
     application: String,
     arguments: Vec<String>,
     deadline: Option<u64>,
+    stasis: Stasis,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stasis {
+    Pending,
+    Entered,
 }
 struct BridgeEntry {
     token: u64,
@@ -204,6 +222,87 @@ pub struct Control {
 }
 
 impl Control {
+    pub fn incoming(
+        &mut self,
+        incoming: IncomingCall,
+        timestamp: &str,
+    ) -> Result<Outcome, ControlError> {
+        if self.channels.contains_key(&incoming.id) {
+            return Err(ControlError::Conflict(
+                "Channel with given unique ID already exists",
+            ));
+        }
+        if self.channels.len() >= self.capacity {
+            return Err(ControlError::Capacity);
+        }
+        if !self.applications.contains(&incoming.app) {
+            return Err(ControlError::NotFound("Application not found"));
+        }
+        ChannelId::try_from(incoming.endpoint.clone())?;
+        if incoming.caller.len() > 128
+            || incoming.context.is_empty()
+            || incoming.context.len() > 128
+            || incoming.extension.is_empty()
+            || incoming.extension.len() > 128
+            || incoming.args.len() > 32
+            || incoming.args.iter().any(|argument| argument.len() > 256)
+        {
+            return Err(ControlError::Invalid("Invalid incoming channel parameters"));
+        }
+        let generation = self.generation()?;
+        let snapshot = Channel {
+            id: incoming.id.clone(),
+            name: format!("PJSIP/{}-{generation:08x}", incoming.endpoint),
+            state: ChannelState::Ring,
+            accountcode: String::new(),
+            caller: Caller {
+                name: String::new(),
+                number: incoming.caller,
+            },
+            connected: Caller::default(),
+            dialplan: Dialplan {
+                context: incoming.context,
+                exten: incoming.extension,
+                priority: 1,
+                app_name: "Stasis".into(),
+                app_data: std::iter::once(incoming.app.as_str())
+                    .chain(incoming.args.iter().map(String::as_str))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            },
+            creationtime: timestamp.into(),
+            language: "en".into(),
+        };
+        let mut outcome = Outcome::json(&snapshot)?;
+        outcome.event(
+            &incoming.app,
+            timestamp,
+            EventKind::ChannelCreated {
+                channel: snapshot.clone(),
+            },
+        );
+        outcome.event(
+            &incoming.app,
+            timestamp,
+            EventKind::StasisStart {
+                channel: snapshot.clone(),
+                args: incoming.args.clone(),
+            },
+        );
+        self.channels.insert(
+            incoming.id,
+            ChannelEntry {
+                call: Call::incoming(generation).apply(CallEvent::Ring).call(),
+                snapshot,
+                application: incoming.app,
+                arguments: incoming.args,
+                deadline: None,
+                stasis: Stasis::Entered,
+            },
+        );
+        Ok(outcome)
+    }
+
     pub fn shutdown(&mut self, timestamp: &str) -> Result<Outcome, ControlError> {
         let ids: Vec<ChannelId> = self.channels.keys().cloned().collect();
         let mut outcome = Outcome::empty();
@@ -372,6 +471,7 @@ impl Control {
                         application: app,
                         arguments: args,
                         deadline: Some(deadline),
+                        stasis: Stasis::Pending,
                     },
                 );
                 Ok(outcome)
@@ -557,7 +657,6 @@ impl Control {
                 });
             }
         }
-        let was_up = entry.call.state() == CallState::Up;
         entry.call = entry.call.apply(CallEvent::Hangup).call();
         outcome.effects.push(Effect::Release {
             key: CallKey {
@@ -565,7 +664,7 @@ impl Control {
                 generation: entry.call.generation(),
             },
         });
-        if was_up {
+        if entry.stasis == Stasis::Entered {
             outcome.event(
                 &entry.application,
                 timestamp,
@@ -653,7 +752,10 @@ impl Control {
                                     channel: entry.snapshot.clone(),
                                 },
                             );
-                            if entry.call.state() == CallState::Up {
+                            if entry.call.state() == CallState::Up
+                                && entry.stasis == Stasis::Pending
+                            {
+                                entry.stasis = Stasis::Entered;
                                 entry.deadline = None;
                                 entry.snapshot.dialplan.app_name = "Stasis".into();
                                 entry.snapshot.dialplan.app_data = entry.application.clone();
