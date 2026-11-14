@@ -6,6 +6,7 @@ use rusterisk_core::{
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+mod dial;
 mod dialplan;
 mod stasis;
 use dialplan::DialplanFrame;
@@ -250,7 +251,7 @@ pub enum Effect {
         key: CallKey,
         endpoint: String,
         caller: String,
-        timeout: u32,
+        timeout: Option<u32>,
     },
     Release {
         key: CallKey,
@@ -775,7 +776,7 @@ impl Control {
                     },
                     endpoint,
                     caller,
-                    timeout,
+                    timeout: Some(timeout),
                 });
                 self.channels.insert(
                     id,
@@ -1021,9 +1022,12 @@ impl Control {
             .ok_or(ControlError::NotFound("Channel not found"))?;
         access.check(entry.call.stasis())?;
         if let Some(value) = &value {
-            let user_variables =
-                entry.variables.len() - usize::from(entry.variables.contains_key("STASISSTATUS"));
-            if variable != "STASISSTATUS"
+            let system_variables = ["STASISSTATUS", "DIALSTATUS"]
+                .into_iter()
+                .filter(|name| entry.variables.contains_key(*name))
+                .count();
+            let user_variables = entry.variables.len() - system_variables;
+            if !matches!(variable.as_str(), "STASISSTATUS" | "DIALSTATUS")
                 && user_variables >= 64
                 && !entry.variables.contains_key(&variable)
             {
@@ -1117,6 +1121,11 @@ impl Control {
             application_name(&self.applications, entry.call.stasis())?.map(str::to_owned);
         let was_in_stasis = matches!(entry.call.stasis(), StasisMembership::Entered(_));
         let mut outcome = Outcome::empty();
+        if let Some(frame) = &mut entry.dialplan {
+            if let Some(mut dial) = frame.dial.take() {
+                outcome.append(self.cancel_dial(&mut dial, timestamp)?);
+            }
+        }
         if let Some(token) = entry.call.bridge() {
             for bridge in self
                 .bridges

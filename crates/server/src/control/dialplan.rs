@@ -2,14 +2,16 @@ use super::{CallKey, Control, ControlError, Effect, Outcome, VariableAccess};
 use rusterisk_api::{ChannelId, ChannelState, EventKind};
 use rusterisk_config::{expand_variables, Application, Dialplan, ExpansionError};
 use rusterisk_core::{
-    AnswerProgress, AnswerStatus, CallState, DialplanContinuation, DialplanDispatch, DialplanError,
-    DialplanInstruction, DialplanMachine, DialplanState, StasisMembership,
+    AnswerProgress, AnswerStatus, CallState, DialForkOutcome, DialplanContinuation,
+    DialplanDispatch, DialplanError, DialplanInstruction, DialplanMachine, DialplanState,
+    StasisMembership,
 };
 
 pub(super) struct DialplanFrame {
     program: Dialplan,
     machine: Option<DialplanMachine>,
     answer: Option<AnswerProgress>,
+    pub(super) dial: Option<super::dial::DialBranches>,
 }
 
 impl DialplanFrame {
@@ -18,6 +20,7 @@ impl DialplanFrame {
             program,
             machine: None,
             answer: None,
+            dial: None,
         }
     }
 }
@@ -212,6 +215,7 @@ impl Control {
             program,
             machine: Some(machine),
             answer: None,
+            dial: None,
         });
         self.advance_dialplan(key, now, timestamp)
     }
@@ -285,7 +289,8 @@ impl Control {
                 if let Some(machine) = &mut frame.machine {
                     machine.cancel();
                 }
-                if self.channels.contains_key(&key.id) {
+                if let Some(entry) = self.channels.get_mut(&key.id) {
+                    entry.dialplan = Some(frame);
                     outcome.append(self.end(&key.id, timestamp, 21)?);
                 }
             }
@@ -305,6 +310,21 @@ impl Control {
             return Ok(());
         };
         loop {
+            if let Some(dial) = &mut frame.dial {
+                let decision = dial.fork.tick(now);
+                if decision.outcome == DialForkOutcome::Continue {
+                    outcome.append(self.release_dial(dial, decision.release, timestamp)?);
+                    if !machine.complete(dial.token, DialplanContinuation::Advance) {
+                        return Err(ControlError::Conflict("Dial completion changed"));
+                    }
+                    frame.dial = None;
+                    self.channels
+                        .get_mut(&key.id)
+                        .ok_or(ControlError::NotFound("Channel not found"))?
+                        .variables
+                        .insert("DIALSTATUS".into(), "NOANSWER".into());
+                }
+            }
             if let Some(answer) = &mut frame.answer {
                 let entry = self
                     .channels
@@ -493,9 +513,44 @@ impl Control {
                     outcome.append(self.end(&key.id, timestamp, 16)?);
                     return Ok(());
                 }
-                Application::Dial { .. } | Application::Playback(_) => {
-                    return Err(ControlError::Unsupported)
+                Application::Dial {
+                    destinations,
+                    timeout,
+                } => {
+                    let destinations = self.expand(key, &destinations.join("&"))?;
+                    let data = match timeout {
+                        Some(timeout) => format!("{destinations},{timeout}"),
+                        None => destinations.clone(),
+                    };
+                    self.set_dialplan_location(key, "Dial", data)?;
+                    match self.begin_dial(
+                        key,
+                        execution.token,
+                        &destinations,
+                        timeout,
+                        now,
+                        timestamp,
+                    ) {
+                        Ok((dial, started)) => {
+                            frame.dial = Some(dial);
+                            outcome.append(started);
+                            return Ok(());
+                        }
+                        Err(
+                            ControlError::Capacity
+                            | ControlError::NotFound(_)
+                            | ControlError::Unsupported,
+                        ) => {
+                            self.channels
+                                .get_mut(&key.id)
+                                .ok_or(ControlError::NotFound("Channel not found"))?
+                                .variables
+                                .insert("DIALSTATUS".into(), "CHANUNAVAIL".into());
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
+                Application::Playback(_) => return Err(ControlError::Unsupported),
             }
             if !machine.complete(execution.token, DialplanContinuation::Advance) {
                 return Err(ControlError::Conflict("Dialplan completion changed"));

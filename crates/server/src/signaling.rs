@@ -385,7 +385,7 @@ impl Signaling {
         key: CallKey,
         endpoint: String,
         caller: String,
-        timeout: u32,
+        timeout: Option<u32>,
         now: u64,
     ) -> Result<(), ControlError> {
         if self.calls.len() >= 64 {
@@ -432,7 +432,7 @@ impl Signaling {
                     endpoint: endpoint.name.clone(),
                     caller,
                     local_rtp,
-                    timeout_ms: Some(u64::from(timeout) * 1000),
+                    timeout_ms: timeout.map(|timeout| u64::from(timeout) * 1000),
                 },
                 now,
             )
