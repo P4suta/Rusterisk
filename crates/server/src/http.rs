@@ -4,7 +4,7 @@ use axum::{
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
-    routing::any,
+    routing::{any, get},
     Json, Router,
 };
 use base64::Engine;
@@ -14,12 +14,13 @@ use std::collections::BTreeMap;
 
 pub fn router(controller: Controller) -> Router {
     Router::new()
+        .route("/ari/events", get(crate::websocket::upgrade))
         .fallback(any(api))
         .layer(DefaultBodyLimit::max(16384))
         .with_state(controller)
 }
 
-fn error(error: ControlError) -> Response {
+pub(crate) fn error(error: ControlError) -> Response {
     let status = match error.status() {
         400 => StatusCode::BAD_REQUEST,
         401 => StatusCode::UNAUTHORIZED,
