@@ -213,3 +213,38 @@ fn incoming_admission_requires_a_subscribed_app_and_preserves_existing_calls(
     assert_eq!(control.channel(&id("incoming")?)?.creationtime, "now");
     Ok(())
 }
+
+#[test]
+fn answering_requests_a_signaling_effect_without_predicting_peer_or_media_milestones(
+) -> Result<(), ControlError> {
+    let mut control = Control::new(2);
+    control.subscribe("app")?;
+    control.incoming(incoming()?, "now")?;
+    let ringing = control.apply(Action::Ring(id("incoming")?), "ring", 0)?;
+    assert!(matches!(&ringing.effects[0], Effect::Ring { .. }));
+    let accepted = control.apply(Action::Answer(id("incoming")?), "accept", 0)?;
+    assert_eq!(accepted.status, 204);
+    assert!(accepted.events.is_empty());
+    assert!(matches!(&accepted.effects[0], Effect::Answer { .. }));
+    assert_eq!(
+        control.channel(&id("incoming")?)?.state,
+        rusterisk_api::ChannelState::Ring
+    );
+    control.signal(
+        Signal::Milestone {
+            key: control.key(&id("incoming")?)?,
+            milestone: Milestone::Answered,
+        },
+        "answered",
+    )?;
+    assert!(control
+        .apply(Action::Answer(id("incoming")?), "duplicate", 0)?
+        .effects
+        .is_empty());
+    control.apply(originate("outgoing", 30)?, "now", 0)?;
+    assert!(matches!(
+        control.apply(Action::Answer(id("outgoing")?), "wrong", 0),
+        Err(ControlError::Conflict(_))
+    ));
+    Ok(())
+}

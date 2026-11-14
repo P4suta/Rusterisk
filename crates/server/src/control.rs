@@ -92,6 +92,8 @@ pub enum Action {
         timeout: u32,
     },
     Hangup(ChannelId),
+    Answer(ChannelId),
+    Ring(ChannelId),
     ListBridges,
     GetBridge(ChannelId),
     CreateBridge {
@@ -117,6 +119,8 @@ impl Action {
             }
             Self::Originate { .. }
             | Self::Hangup(_)
+            | Self::Answer(_)
+            | Self::Ring(_)
             | Self::CreateBridge { .. }
             | Self::DestroyBridge(_)
             | Self::AddChannels { .. }
@@ -127,6 +131,12 @@ impl Action {
 
 #[derive(Clone, Debug)]
 pub enum Effect {
+    Answer {
+        key: CallKey,
+    },
+    Ring {
+        key: CallKey,
+    },
     Start {
         key: CallKey,
         endpoint: String,
@@ -477,6 +487,38 @@ impl Control {
                 Ok(outcome)
             }
             Action::Hangup(id) => self.end(&id, timestamp, 16),
+            Action::Answer(id) => {
+                let entry = self
+                    .channels
+                    .get(&id)
+                    .ok_or(ControlError::NotFound("Channel not found"))?;
+                if entry.stasis != Stasis::Entered {
+                    return Err(ControlError::Conflict("Channel not in Stasis application"));
+                }
+                let mut outcome = Outcome::empty();
+                if entry.call.state() != CallState::Up {
+                    outcome.effects.push(Effect::Answer {
+                        key: self.key(&id)?,
+                    });
+                }
+                Ok(outcome)
+            }
+            Action::Ring(id) => {
+                let entry = self
+                    .channels
+                    .get(&id)
+                    .ok_or(ControlError::NotFound("Channel not found"))?;
+                if entry.stasis != Stasis::Entered {
+                    return Err(ControlError::Conflict("Channel not in Stasis application"));
+                }
+                let mut outcome = Outcome::empty();
+                if entry.call.state() != CallState::Up {
+                    outcome.effects.push(Effect::Ring {
+                        key: self.key(&id)?,
+                    });
+                }
+                Ok(outcome)
+            }
             Action::ListBridges => Outcome::json(
                 self.bridges
                     .values()

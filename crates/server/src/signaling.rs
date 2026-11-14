@@ -334,6 +334,28 @@ impl Signaling {
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
+            Effect::Answer { key } => {
+                if let Err(error) = self.answer(&key, now).await {
+                    tracing::warn!(channel = %key.id, generation = key.generation, %error, "incoming answer failed");
+                    self.notify(Signal::Terminated { key, cause: 21 }).await?;
+                }
+            }
+            Effect::Ring { key } => {
+                if let Some(call) = self.calls.get(&key) {
+                    let listener = call.listener;
+                    if self.listeners[listener]
+                        .engine
+                        .pending(key.id.as_str())
+                        .is_some()
+                    {
+                        let output = self.listeners[listener]
+                            .engine
+                            .ring(key.id.as_str(), now)
+                            .map_err(failure)?;
+                        self.transmit(listener, output.datagrams).await?;
+                    }
+                }
+            }
             Effect::Start {
                 key,
                 endpoint,
@@ -378,6 +400,47 @@ impl Signaling {
             }
         }
         Ok(())
+    }
+
+    async fn answer(&mut self, key: &CallKey, now: u64) -> Result<(), ControlError> {
+        let call = self
+            .calls
+            .get(key)
+            .ok_or(ControlError::NotFound("Channel not found"))?;
+        let listener = call.listener;
+        if self.listeners[listener]
+            .engine
+            .active_session(key.id.as_str(), key.generation)
+            .is_some()
+        {
+            return Ok(());
+        }
+        let transport = self
+            .config
+            .transports
+            .iter()
+            .find(|transport| transport.name == self.listeners[listener].name)
+            .ok_or(ControlError::NotFound("Transport not found"))?;
+        let sockets = SocketPair::bind(
+            transport.bind.ip(),
+            self.config.rtp.start,
+            self.config.rtp.end,
+        )
+        .map_err(failure)?;
+        let local = sockets.local_addr().map_err(failure)?;
+        let advertised = SocketAddr::new(
+            transport.external_media_address.unwrap_or(local.ip()),
+            local.port(),
+        );
+        let output = self.listeners[listener]
+            .engine
+            .answer(key.id.as_str(), key.generation, advertised, now)
+            .map_err(failure)?;
+        self.calls
+            .get_mut(key)
+            .ok_or(ControlError::NotFound("Channel not found"))?
+            .pending = Some(sockets);
+        self.output(listener, output, now).await
     }
 
     async fn serve(
