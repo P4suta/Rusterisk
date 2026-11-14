@@ -1,5 +1,8 @@
-use crate::{response, DialogReply, SipError, SipEvent};
-use rsipstack::sip::Request;
+use crate::{response, DialogReply, Engine, Output, SipError, SipEvent};
+use rsipstack::sip::{
+    headers::untyped::{ContentLength, ContentType},
+    Header, Request,
+};
 use rusterisk_core::DtmfDigit;
 
 enum InfoError {
@@ -95,4 +98,55 @@ pub(crate) fn receive(
         bytes: response(request, code, phrase, "", "")?,
         events,
     })
+}
+
+pub(crate) fn encode(
+    mut request: Request,
+    digit: DtmfDigit,
+    duration_ms: u32,
+) -> Result<Vec<u8>, SipError> {
+    let body = format!("Signal={}\r\nDuration={duration_ms}\r\n", digit.symbol());
+    request
+        .headers
+        .unique_push(Header::ContentType(ContentType::new(
+            "application/dtmf-relay",
+        )));
+    request
+        .headers
+        .unique_push(Header::ContentLength(ContentLength::new(
+            body.len().to_string(),
+        )));
+    request.body = body.into_bytes();
+    let bytes = request.to_string().into_bytes();
+    if bytes.len() > crate::MAX_MESSAGE {
+        return Err(SipError::Capacity);
+    }
+    Ok(bytes)
+}
+
+impl Engine {
+    pub fn send_info(
+        &mut self,
+        id: &str,
+        generation: u64,
+        digit: DtmfDigit,
+        duration_ms: u32,
+        now: u64,
+    ) -> Result<Output, SipError> {
+        if duration_ms == 0 || duration_ms > 5000 {
+            return Err(SipError::InvalidPacket);
+        }
+        let packet = match self.outgoing_info(id, generation, digit, duration_ms)? {
+            Some(packet) => packet,
+            None => self
+                .incoming_info(id, generation, digit, duration_ms)?
+                .ok_or(SipError::InvalidPacket)?,
+        };
+        let output = Output {
+            datagrams: [packet].into_iter().collect(),
+            events: Vec::new(),
+        };
+        self.track_output(&output, now)?;
+        Ok(output)
+    }
 }

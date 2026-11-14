@@ -1,7 +1,7 @@
 use crate::{
     response, Datagram, DialogReply, Engine, Output, PendingInvite, Session, SipError, SipEvent,
 };
-use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, Request};
+use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, Request, SipMessage};
 use std::net::SocketAddr;
 
 enum State {
@@ -34,11 +34,23 @@ impl Incoming {
                 == Some(self.invite.local_tag.as_str()))
     }
 
-    fn bye(&mut self, now: u64) -> Result<Vec<u8>, SipError> {
-        self.local_cseq = self.local_cseq.checked_add(1).ok_or(SipError::Capacity)?;
+    fn request(&mut self, method: Method) -> Result<Request, SipError> {
+        self.local_cseq = self
+            .local_cseq
+            .checked_add(1)
+            .filter(|sequence| *sequence < 1 << 31)
+            .ok_or(SipError::Capacity)?;
         let invite = tagged(&self.invite.request, &self.invite.local_tag)?;
         let target = invite.contact_header()?.typed()?.uri;
-        let packet = format!("BYE {target} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-{}-BYE-{};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {} BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", self.invite.local, self.invite.local_tag, self.local_cseq, invite.to_header()?.value(), invite.from_header()?.value(), invite.call_id_header()?.value(), self.local_cseq).into_bytes();
+        let packet = format!("{method} {target} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-{}-{method}-{};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {} {method}\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", self.invite.local, self.invite.local_tag, self.local_cseq, invite.to_header()?.value(), invite.from_header()?.value(), invite.call_id_header()?.value(), self.local_cseq);
+        match SipMessage::try_from(packet.as_str())? {
+            SipMessage::Request(request) => Ok(request),
+            SipMessage::Response(_) => Err(SipError::InvalidPacket),
+        }
+    }
+
+    fn bye(&mut self, now: u64) -> Result<Vec<u8>, SipError> {
+        let packet = self.request(Method::Bye)?.to_string().into_bytes();
         self.state = State::Terminated {
             expires: now.saturating_add(32_000),
         };
@@ -86,6 +98,31 @@ fn same_invite(
 }
 
 impl Engine {
+    pub(crate) fn incoming_info(
+        &mut self,
+        id: &str,
+        generation: u64,
+        digit: rusterisk_core::DtmfDigit,
+        duration_ms: u32,
+    ) -> Result<Option<Datagram>, SipError> {
+        let Some(dialog) = self
+            .incoming
+            .values_mut()
+            .find(|dialog| dialog.invite.id == id && dialog.generation == generation)
+        else {
+            return Ok(None);
+        };
+        if !matches!(dialog.state, State::AwaitingAck { .. } | State::Established) {
+            return Err(SipError::InvalidPacket);
+        }
+        let request = dialog.request(Method::Info)?;
+        let bytes = crate::info::encode(request, digit, duration_ms)?;
+        Ok(Some(Datagram {
+            peer: dialog.invite.peer,
+            bytes,
+        }))
+    }
+
     pub(crate) fn incoming_cancel(
         &mut self,
         key: String,

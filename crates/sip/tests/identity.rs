@@ -756,3 +756,51 @@ fn empty_info_is_acknowledged_without_a_body_type_and_unknown_bodies_are_refused
     assert!(engine.active_session(&id, 9).is_some());
     Ok(())
 }
+
+#[test]
+fn sending_info_uses_the_existing_dialog_and_retries_without_ending_the_call(
+) -> Result<(), SipError> {
+    for incoming in [false, true] {
+        let mut config = config()?;
+        config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+        let mut engine = Engine::new(config, [9; 32]);
+        let peer = "127.0.0.1:5061".parse()?;
+        let (id, generation) = if incoming {
+            let (output, _, _) = authenticated_invite(&mut engine)?;
+            let id = incoming_id(&output)?;
+            let answer = engine.answer(&id, 9, "127.0.0.1:10000".parse()?, 10)?;
+            engine.receive(
+                &incoming_request(&answer.datagrams[0].bytes, "ACK", 2)?,
+                peer,
+                11,
+            )?;
+            (id, 9)
+        } else {
+            let invite = engine.originate(outbound(), 0)?.datagrams.remove(0).bytes;
+            engine.receive(&answered(&invite)?, peer, 1)?;
+            ("outgoing".into(), 7)
+        };
+        let output = engine.send_info(&id, generation, rusterisk_core::DtmfDigit::Hash, 120, 20)?;
+        assert!(output.events.is_empty());
+        let wire = &output.datagrams[0].bytes;
+        let info = request(wire)?;
+        assert_eq!(info.method, Method::Info);
+        assert_eq!(info.body, b"Signal=#\r\nDuration=120\r\n");
+        assert!(info.to_header()?.typed()?.tag().is_some());
+        assert!(info.from_header()?.typed()?.tag().is_some());
+        assert_eq!(engine.tick(520)?.datagrams[0].bytes, *wire);
+        engine.receive(&transaction_response(wire, 200)?, peer, 521)?;
+        assert!(engine.tick(1520)?.datagrams.is_empty());
+        assert!(engine.active_session(&id, generation).is_some());
+        assert!(engine
+            .send_info(
+                &id,
+                generation + 1,
+                rusterisk_core::DtmfDigit::Five,
+                120,
+                1521
+            )
+            .is_err());
+    }
+    Ok(())
+}

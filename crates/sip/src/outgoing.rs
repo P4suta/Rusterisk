@@ -287,6 +287,37 @@ fn formats(codecs: &[Codec], local: SocketAddr, serial: u64) -> String {
 }
 
 impl Engine {
+    pub(crate) fn outgoing_info(
+        &mut self,
+        id: &str,
+        generation: u64,
+        digit: rusterisk_core::DtmfDigit,
+        duration_ms: u32,
+    ) -> Result<Option<Datagram>, SipError> {
+        let Some(dialog) = self
+            .outgoing
+            .values_mut()
+            .find(|dialog| dialog.id == id && dialog.generation == generation)
+        else {
+            return Ok(None);
+        };
+        if !matches!(dialog.state, State::Established(_)) {
+            return Err(SipError::InvalidPacket);
+        }
+        dialog.cseq = dialog
+            .cseq
+            .checked_add(1)
+            .filter(|sequence| *sequence < 1 << 31)
+            .ok_or(SipError::Capacity)?;
+        let packet = related(dialog, Method::Info, &dialog.remote_to, dialog.cseq, true)?;
+        let request = request(std::str::from_utf8(&packet)?)?;
+        let bytes = crate::info::encode(request, digit, duration_ms)?;
+        Ok(Some(Datagram {
+            peer: dialog.peer,
+            bytes,
+        }))
+    }
+
     pub fn originate(&mut self, outbound: Outbound, now: u64) -> Result<Output, SipError> {
         if self.outgoing.len() >= 64
             || outbound.id.is_empty()
