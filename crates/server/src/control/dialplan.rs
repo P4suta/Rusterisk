@@ -1,15 +1,25 @@
 use super::{CallKey, Control, ControlError, Effect, Outcome, VariableAccess};
-use rusterisk_api::EventKind;
+use rusterisk_api::{ChannelId, ChannelState, EventKind};
 use rusterisk_config::{expand_variables, Application, Dialplan, ExpansionError};
 use rusterisk_core::{
     AnswerProgress, AnswerStatus, CallState, DialplanContinuation, DialplanDispatch, DialplanError,
-    DialplanInstruction, DialplanMachine, DialplanState,
+    DialplanInstruction, DialplanMachine, DialplanState, StasisMembership,
 };
 
 pub(super) struct DialplanFrame {
     program: Dialplan,
-    machine: DialplanMachine,
+    machine: Option<DialplanMachine>,
     answer: Option<AnswerProgress>,
+}
+
+impl DialplanFrame {
+    pub(super) fn dormant(program: Dialplan) -> Self {
+        Self {
+            program,
+            machine: None,
+            answer: None,
+        }
+    }
 }
 
 fn core_error(error: DialplanError) -> ControlError {
@@ -31,6 +41,138 @@ fn position(program: &Dialplan, context: &str, extension: &str, priority: u16) -
 }
 
 impl Control {
+    pub(super) fn continue_dialplan(
+        &mut self,
+        id: &ChannelId,
+        context: Option<String>,
+        extension: Option<String>,
+        priority: Option<u16>,
+        timestamp: &str,
+    ) -> Result<Outcome, ControlError> {
+        let entry = self
+            .channels
+            .get(id)
+            .ok_or(ControlError::NotFound("Channel not found"))?;
+        let StasisMembership::Entered(application) = entry.call.stasis() else {
+            return Err(ControlError::Conflict("Channel not in Stasis application"));
+        };
+        if matches!(
+            entry.snapshot.state,
+            ChannelState::Down | ChannelState::Rsrved | ChannelState::Ringing
+        ) {
+            return Err(ControlError::InvalidState("Channel in invalid state"));
+        }
+        let context = context.filter(|value| !value.is_empty());
+        let extension = extension.filter(|value| !value.is_empty());
+        if context
+            .iter()
+            .chain(extension.iter())
+            .any(|value| value.len() > 128 || value.chars().any(char::is_control))
+        {
+            return Err(ControlError::Invalid("Invalid dialplan location"));
+        }
+        let rank = match priority.filter(|priority| *priority != 0) {
+            Some(priority) => priority,
+            None if context.is_none() && extension.is_none() => {
+                u16::try_from(entry.snapshot.dialplan.priority)
+                    .ok()
+                    .and_then(|rank| rank.checked_add(1))
+                    .ok_or(ControlError::Invalid("Invalid dialplan priority"))?
+            }
+            None => 1,
+        };
+        let extension = extension.as_deref().unwrap_or_else(|| {
+            if context.is_some() {
+                "s"
+            } else {
+                &entry.snapshot.dialplan.exten
+            }
+        });
+        let context = context
+            .as_deref()
+            .unwrap_or(&entry.snapshot.dialplan.context);
+        let frame = entry
+            .dialplan
+            .as_ref()
+            .ok_or(ControlError::Conflict("Dialplan is executing"))?;
+        let destination = position(&frame.program, context, extension, rank);
+        let next_machine = if let Some(mut machine) = frame.machine {
+            let DialplanState::Awaiting { position, token } = machine.state() else {
+                return Err(ControlError::Conflict("Dialplan is not waiting in Stasis"));
+            };
+            if !frame
+                .program
+                .steps
+                .get(usize::from(position))
+                .is_some_and(|step| matches!(step.application, Application::Stasis { .. }))
+            {
+                return Err(ControlError::Conflict("Dialplan is not waiting in Stasis"));
+            }
+            let continuation = destination
+                .map(DialplanContinuation::Jump)
+                .unwrap_or(DialplanContinuation::End);
+            if !machine.complete(token, continuation) {
+                return Err(ControlError::Conflict("Dialplan continuation changed"));
+            }
+            Some(machine)
+        } else {
+            destination
+                .map(|index| {
+                    DialplanMachine::new(
+                        entry.call.generation(),
+                        index,
+                        u16::try_from(frame.program.steps.len())
+                            .map_err(|_| ControlError::Capacity)?,
+                    )
+                    .map_err(core_error)
+                })
+                .transpose()?
+        };
+        let application_name = super::application_name(&self.applications, entry.call.stasis())?
+            .ok_or(ControlError::NotFound("Application not found"))?
+            .to_owned();
+        let bridge = entry
+            .call
+            .bridge()
+            .map(|token| {
+                self.bridges
+                    .iter()
+                    .find_map(|(id, bridge)| (bridge.token == token).then_some(id.clone()))
+                    .ok_or_else(|| {
+                        ControlError::Adapter("Channel bridge ownership is missing".into())
+                    })
+            })
+            .transpose()?;
+        let mut outcome = match bridge {
+            Some(bridge) => {
+                self.membership(bridge, [id.clone()].into_iter().collect(), false, timestamp)?
+            }
+            None => Outcome::empty(),
+        };
+        let entry = self
+            .channels
+            .get_mut(id)
+            .ok_or(ControlError::NotFound("Channel not found"))?;
+        entry.call = entry.call.leave_stasis(application)?;
+        let frame = entry
+            .dialplan
+            .as_mut()
+            .ok_or(ControlError::Conflict("Dialplan is executing"))?;
+        frame.machine = next_machine;
+        frame.answer = None;
+        outcome.event(
+            &application_name,
+            timestamp,
+            EventKind::StasisEnd {
+                channel: entry.snapshot.clone(),
+            },
+        );
+        if next_machine.is_none() {
+            outcome.append(self.end(id, timestamp, 16)?);
+        }
+        Ok(outcome)
+    }
+
     pub fn start_dialplan(
         &mut self,
         key: &CallKey,
@@ -45,7 +187,11 @@ impl Control {
         if entry.call.generation() != key.generation {
             return Err(ControlError::Conflict("Channel generation changed"));
         }
-        if entry.dialplan.is_some() {
+        if entry
+            .dialplan
+            .as_ref()
+            .is_some_and(|frame| frame.machine.is_some())
+        {
             return Err(ControlError::Conflict("Dialplan already started"));
         }
         let location = &entry.snapshot.dialplan;
@@ -61,7 +207,7 @@ impl Control {
         let machine = DialplanMachine::new(key.generation, index, length).map_err(core_error)?;
         entry.dialplan = Some(DialplanFrame {
             program,
-            machine,
+            machine: Some(machine),
             answer: None,
         });
         self.advance_dialplan(key, now, timestamp)
@@ -72,14 +218,18 @@ impl Control {
             .channels
             .iter_mut()
             .filter_map(|(id, entry)| {
-                entry.dialplan.as_mut().map(|frame| {
-                    frame.machine.begin_turn();
-                    frame.machine.tick(now);
-                    CallKey {
-                        id: id.clone(),
-                        generation: entry.call.generation(),
-                    }
-                })
+                entry
+                    .dialplan
+                    .as_mut()
+                    .and_then(|frame| frame.machine.as_mut())
+                    .map(|machine| {
+                        machine.begin_turn();
+                        machine.tick(now);
+                        CallKey {
+                            id: id.clone(),
+                            generation: entry.call.generation(),
+                        }
+                    })
             })
             .collect::<Vec<_>>();
         let mut outcome = Outcome::empty();
@@ -129,7 +279,9 @@ impl Control {
             }
             Err(error) => {
                 tracing::warn!(channel = %key.id, generation = key.generation, %error, "dialplan failed");
-                frame.machine.cancel();
+                if let Some(machine) = &mut frame.machine {
+                    machine.cancel();
+                }
                 if self.channels.contains_key(&key.id) {
                     outcome.append(self.end(&key.id, timestamp, 21)?);
                 }
@@ -146,6 +298,9 @@ impl Control {
         timestamp: &str,
         outcome: &mut Outcome,
     ) -> Result<(), ControlError> {
+        let Some(machine) = &mut frame.machine else {
+            return Ok(());
+        };
         loop {
             if let Some(answer) = &mut frame.answer {
                 let entry = self
@@ -158,20 +313,20 @@ impl Control {
                 {
                     AnswerStatus::Pending => return Ok(()),
                     AnswerStatus::Ready => {
-                        let DialplanState::Awaiting { token, .. } = frame.machine.state() else {
+                        let DialplanState::Awaiting { token, .. } = machine.state() else {
                             return Err(ControlError::Conflict(
                                 "Answer lost its dialplan operation",
                             ));
                         };
-                        if !frame.machine.complete(token, DialplanContinuation::Advance) {
+                        if !machine.complete(token, DialplanContinuation::Advance) {
                             return Err(ControlError::Conflict("Answer completion changed"));
                         }
                         frame.answer = None;
                     }
-                    AnswerStatus::Cancelled => frame.machine.cancel(),
+                    AnswerStatus::Cancelled => machine.cancel(),
                 }
             }
-            let index = match frame.machine.state() {
+            let index = match machine.state() {
                 DialplanState::Ready { position } => position,
                 DialplanState::Awaiting { .. } | DialplanState::Waiting { .. } => return Ok(()),
                 DialplanState::Ended => {
@@ -218,8 +373,7 @@ impl Control {
                     position(&frame.program, &step.context, &step.extension, priority)
                 }),
             };
-            let execution = match frame
-                .machine
+            let execution = match machine
                 .dispatch(instruction, next, now)
                 .map_err(core_error)?
             {
@@ -282,7 +436,7 @@ impl Control {
                 }
                 Application::Wait(seconds) => {
                     self.set_dialplan_location(key, "Wait", seconds.to_string())?;
-                    frame.machine.tick(now);
+                    machine.tick(now);
                     continue;
                 }
                 Application::Stasis {
@@ -339,10 +493,7 @@ impl Control {
                     return Err(ControlError::Unsupported)
                 }
             }
-            if !frame
-                .machine
-                .complete(execution.token, DialplanContinuation::Advance)
-            {
+            if !machine.complete(execution.token, DialplanContinuation::Advance) {
                 return Err(ControlError::Conflict("Dialplan completion changed"));
             }
         }

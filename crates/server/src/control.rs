@@ -136,6 +136,12 @@ pub enum Action {
         timeout: u32,
     },
     Hangup(ChannelId),
+    Continue {
+        channel: ChannelId,
+        context: Option<String>,
+        extension: Option<String>,
+        priority: Option<u16>,
+    },
     Answer(ChannelId),
     Ring(ChannelId),
     Hold(ChannelId),
@@ -175,7 +181,7 @@ impl Action {
             | Self::ListBridges
             | Self::GetBridge(_)
             | Self::CreateBridge { .. } => 0,
-            Self::Hangup(_) => 2,
+            Self::Hangup(_) | Self::Continue { .. } => 2,
             Self::Originate { .. }
             | Self::SendDtmf { .. }
             | Self::Answer(_)
@@ -201,6 +207,7 @@ impl Action {
             | Self::SendDtmf { .. }
             | Self::SetVariable { .. }
             | Self::Hangup(_)
+            | Self::Continue { .. }
             | Self::Answer(_)
             | Self::Ring(_)
             | Self::Hold(_)
@@ -436,6 +443,7 @@ pub struct Control {
     channels: BTreeMap<ChannelId, ChannelEntry>,
     bridges: BTreeMap<ChannelId, BridgeEntry>,
     applications: BTreeMap<String, StasisApplication>,
+    dialplan_program: rusterisk_config::Dialplan,
 }
 
 impl Control {
@@ -534,7 +542,7 @@ impl Control {
                 deadline: None,
                 variables: BTreeMap::new(),
                 dtmf: None,
-                dialplan: None,
+                dialplan: Some(DialplanFrame::dormant(self.dialplan_program.clone())),
             },
         );
         Ok(outcome)
@@ -549,12 +557,17 @@ impl Control {
         Ok(outcome)
     }
     pub fn new(capacity: usize) -> Self {
+        Self::with_dialplan(capacity, rusterisk_config::Dialplan { steps: Vec::new() })
+    }
+
+    pub fn with_dialplan(capacity: usize, program: rusterisk_config::Dialplan) -> Self {
         Self {
             capacity: capacity.min(64),
             generation: 0,
             channels: BTreeMap::new(),
             bridges: BTreeMap::new(),
             applications: BTreeMap::new(),
+            dialplan_program: program,
         }
     }
 
@@ -765,12 +778,18 @@ impl Control {
                         deadline: Some(deadline),
                         variables: BTreeMap::new(),
                         dtmf: None,
-                        dialplan: None,
+                        dialplan: Some(DialplanFrame::dormant(self.dialplan_program.clone())),
                     },
                 );
                 Ok(outcome)
             }
             Action::Hangup(id) => self.end(&id, timestamp, 16),
+            Action::Continue {
+                channel,
+                context,
+                extension,
+                priority,
+            } => self.continue_dialplan(&channel, context, extension, priority, timestamp),
             Action::Hold(id) => self.media(&id, MediaOperation::Hold, timestamp),
             Action::Unhold(id) => self.media(&id, MediaOperation::Unhold, timestamp),
             Action::Mute { channel, direction } => {
