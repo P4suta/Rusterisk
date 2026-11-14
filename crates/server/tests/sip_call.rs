@@ -549,7 +549,7 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
         "[app]\ntype=user\npassword=test-password\n",
         &sip,
         "",
-        "[internal]\nexten => 100,1,Stasis(app,root)\n",
+        "[internal]\nexten => 100,1,NoOp(start)\nsame => n,Set(LABEL=root-${EXTEN}-${CALLERID(num)})\nsame => n,Wait(0)\nsame => n,Stasis(app,${LABEL})\n",
     )
     .map_err(failure)?;
     let mut config = config;
@@ -575,7 +575,7 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
                     assert_eq!(channel.state, ChannelState::Ring);
                     assert_eq!(channel.caller.number, "spoofed");
                     assert!(channel.name.starts_with("PJSIP/alice-"));
-                    assert_eq!(args, ["root"]);
+                    assert_eq!(args, ["root-100-spoofed"]);
                     return Ok(channel.id);
                 }
             }

@@ -365,9 +365,8 @@ impl Runner {
                     }
                     return Ok(());
                 }
-                let id = call.id.clone();
-                let result = match self.control.incoming(call, &timestamp()) {
-                    Ok(mut outcome) => {
+                let result = match self.admit_incoming(call, now_ms) {
+                    Ok((key, mut outcome)) => {
                         if let Err(error) = self.publish(&mut outcome) {
                             if reply.send(Err(error.clone())).is_err() {
                                 tracing::debug!(
@@ -376,15 +375,21 @@ impl Runner {
                             }
                             return Err(error);
                         }
-                        self.control.key(&id)
+                        Ok(key)
                     }
                     Err(error) => Err(error),
                 };
                 if let Err(Ok(key)) = reply.send(result) {
-                    let mut cleanup =
-                        self.control
-                            .apply(Action::Hangup(key.id), &timestamp(), now_ms)?;
-                    self.publish(&mut cleanup)?;
+                    if self
+                        .control
+                        .key(&key.id)
+                        .is_ok_and(|current| current == key)
+                    {
+                        let mut cleanup =
+                            self.control
+                                .apply(Action::Hangup(key.id), &timestamp(), now_ms)?;
+                        self.publish(&mut cleanup)?;
+                    }
                 }
             }
             Request::Authorize {
@@ -500,6 +505,43 @@ impl Runner {
         Ok(())
     }
 
+    fn admit_incoming(
+        &mut self,
+        call: IncomingCall,
+        now_ms: u64,
+    ) -> Result<(CallKey, Outcome), ControlError> {
+        let dialplan = matches!(&call.target, crate::IncomingTarget::Dialplan);
+        if dialplan
+            && !self.config.dialplan.steps.iter().any(|step| {
+                step.context == call.context
+                    && step.extension == call.extension
+                    && step.priority == 1
+            })
+        {
+            return Err(ControlError::NotFound("Extension not found"));
+        }
+        let id = call.id.clone();
+        let timestamp = timestamp();
+        let mut outcome = self.control.incoming(call, &timestamp)?;
+        let key = self.control.key(&id)?;
+        if dialplan {
+            match self.control.start_dialplan(
+                &key,
+                self.config.dialplan.clone(),
+                now_ms,
+                &timestamp,
+            ) {
+                Ok(executed) => outcome.append(executed),
+                Err(error) => {
+                    outcome.append(self.control.apply(Action::Hangup(id), &timestamp, now_ms)?);
+                    self.publish(&mut outcome)?;
+                    return Err(error);
+                }
+            }
+        }
+        Ok((key, outcome))
+    }
+
     async fn serve(&mut self) -> Result<(), ControlError> {
         let effect_sender = self.effects.clone();
         let started = Instant::now();
@@ -522,6 +564,10 @@ impl Runner {
                 _instant = tick.tick() => {
                     self.sessions.retain(|_, session| !session.lifetime.is_closed());
                     let mut outcome = self.control.expire(u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?, &timestamp())?; self.publish(&mut outcome)?;
+                    if self.pending_effects.is_empty() {
+                        let mut outcome = self.control.tick_dialplans(u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?, &timestamp())?;
+                        self.publish(&mut outcome)?;
+                    }
                     let disconnected: Vec<String> = self.subscribers.iter().filter(|(_, subscriber)| subscriber.events.is_closed()).map(|(application, _)| application.clone()).collect();
                     for application in disconnected { self.subscribers.remove(&application); let mut outcome = self.control.unsubscribe(&application, &timestamp())?; self.publish(&mut outcome)?; }
                 }

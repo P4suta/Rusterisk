@@ -2,7 +2,7 @@ use crate::media::{MediaNotice, MediaPort};
 use crate::rtp::{RtpSession, SocketPair};
 use crate::{CallKey, ControlError, Controller, Effect, IncomingCall, Milestone, Signal};
 use rusterisk_api::ChannelId;
-use rusterisk_config::{Application, Codec, Config, Dtmf, Protocol};
+use rusterisk_config::{Codec, Config, Dtmf, Protocol};
 use rusterisk_core::{AudioGate, DtmfCommand};
 use rusterisk_media::{AudioFormat, Gate, TelephoneFormat};
 use rusterisk_sip::{Datagram, Engine, Outbound, Output, RejectReason, SipEvent, MAX_MESSAGE};
@@ -357,43 +357,9 @@ impl Signaling {
         Ok(())
     }
 
-    async fn admit(
-        &mut self,
-        listener: usize,
-        mut incoming: IncomingCall,
-    ) -> Result<(), ControlError> {
+    async fn admit(&mut self, listener: usize, incoming: IncomingCall) -> Result<(), ControlError> {
         if self.calls.len() >= 64 {
             return Err(ControlError::Capacity);
-        }
-        let step = self
-            .config
-            .dialplan
-            .steps
-            .iter()
-            .find(|step| {
-                step.context == incoming.context
-                    && step.extension == incoming.extension
-                    && step.priority == 1
-            })
-            .ok_or(ControlError::NotFound("Extension not found"))?;
-        match &step.application {
-            Application::Stasis {
-                application,
-                arguments,
-            } => {
-                incoming.target = crate::IncomingTarget::Stasis {
-                    application: application.clone(),
-                    arguments: arguments.clone(),
-                };
-            }
-            Application::NoOp(_)
-            | Application::Set { .. }
-            | Application::Answer
-            | Application::Dial { .. }
-            | Application::Playback(_)
-            | Application::Wait(_)
-            | Application::Goto { .. }
-            | Application::Hangup => return Err(ControlError::Unsupported),
         }
         let dtmf = self
             .config
