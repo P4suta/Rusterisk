@@ -1,7 +1,9 @@
 use bytes::Bytes;
 use webrtc_util::marshal::{Marshal, Unmarshal};
 mod mixing;
+mod streams;
 pub use mixing::{Gate, Mixer};
+pub use streams::{AudioFormat, RtpReceiver, RtpSender};
 
 pub const MAX_SAMPLES: usize = 960;
 pub const MAX_PACKET: usize = 1500;
@@ -249,6 +251,10 @@ impl RtpPacket {
     }
     pub fn payload(&self) -> &[u8] {
         &self.0.payload
+    }
+    pub fn with_marker(mut self, marker: bool) -> Self {
+        self.0.header.marker = marker;
+        self
     }
     pub const fn sequence(&self) -> u16 {
         self.0.header.sequence_number
