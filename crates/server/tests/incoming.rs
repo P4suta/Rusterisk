@@ -3,6 +3,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use base64::Engine;
+use http_body_util::BodyExt;
 use rusterisk_api::{ChannelId, ChannelState, EventKind};
 use rusterisk_config::Config;
 use rusterisk_core::AudioGate;
@@ -81,6 +82,15 @@ async fn incoming_admission_publishes_stasis_before_reply_and_http_answer_waits_
             let response = router(controller.clone()).oneshot(http_request("POST", path)?).await.map_err(failure)?;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
         }
+        let app = router(controller.clone());
+        let changed = app.clone().oneshot(http_request("POST", "/ari/channels/incoming/variable?variable=TEST&value=call%2Bbridge")?).await.map_err(failure)?;
+        assert_eq!(changed.status(), StatusCode::NO_CONTENT);
+        let variable = app.clone().oneshot(http_request("GET", "/ari/channels/incoming/variable?variable=TEST")?).await.map_err(failure)?;
+        assert_eq!(variable.status(), StatusCode::OK);
+        let body = variable.into_body().collect().await.map_err(failure)?.to_bytes();
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&body)?, serde_json::json!({"value": "call+bridge"}));
+        assert_eq!(app.clone().oneshot(http_request("POST", "/ari/channels/incoming/variable?variable=TEST")?).await.map_err(failure)?.status(), StatusCode::NO_CONTENT);
+        assert_eq!(app.oneshot(http_request("GET", "/ari/channels/incoming/variable?variable=TEST")?).await.map_err(failure)?.status(), StatusCode::NOT_FOUND);
         controller.execute(credentials, None, Action::Hangup(id)).await?;
         Ok(())
     }.await;

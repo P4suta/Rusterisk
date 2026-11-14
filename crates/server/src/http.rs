@@ -211,6 +211,15 @@ async fn dispatch(
         ("GET", ["ari", "channels", channel]) => Action::GetChannel(id(channel)?),
         ("POST", ["ari", "channels", channel, "answer"]) => Action::Answer(id(channel)?),
         ("POST", ["ari", "channels", channel, "ring"]) => Action::Ring(id(channel)?),
+        ("GET", ["ari", "channels", channel, "variable"]) => Action::GetVariable {
+            channel: id(channel)?,
+            variable: required(parameters, "variable")?.into(),
+        },
+        ("POST", ["ari", "channels", channel, "variable"]) => Action::SetVariable {
+            channel: id(channel)?,
+            variable: required(parameters, "variable")?.into(),
+            value: parameters.get("value").cloned(),
+        },
         ("POST", ["ari", "channels", channel, "hold"]) => Action::Hold(id(channel)?),
         ("DELETE", ["ari", "channels", channel, "hold"]) => Action::Unhold(id(channel)?),
         ("POST", ["ari", "channels", channel, "mute"]) => Action::Mute {
