@@ -7,6 +7,7 @@ use rusterisk_core::{
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 mod dialplan;
+mod stasis;
 use dialplan::DialplanFrame;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,6 +143,11 @@ pub enum Action {
         extension: Option<String>,
         priority: Option<u16>,
     },
+    Move {
+        channel: ChannelId,
+        app: String,
+        args: Vec<String>,
+    },
     Answer(ChannelId),
     Ring(ChannelId),
     Hold(ChannelId),
@@ -180,7 +186,8 @@ impl Action {
             | Self::SetVariable { .. }
             | Self::ListBridges
             | Self::GetBridge(_)
-            | Self::CreateBridge { .. } => 0,
+            | Self::CreateBridge { .. }
+            | Self::Move { .. } => 0,
             Self::Hangup(_) | Self::Continue { .. } => 2,
             Self::Originate { .. }
             | Self::SendDtmf { .. }
@@ -208,6 +215,7 @@ impl Action {
             | Self::SetVariable { .. }
             | Self::Hangup(_)
             | Self::Continue { .. }
+            | Self::Move { .. }
             | Self::Answer(_)
             | Self::Ring(_)
             | Self::Hold(_)
@@ -790,6 +798,9 @@ impl Control {
                 extension,
                 priority,
             } => self.continue_dialplan(&channel, context, extension, priority, timestamp),
+            Action::Move { channel, app, args } => {
+                self.move_application(&channel, app, args, timestamp)
+            }
             Action::Hold(id) => self.media(&id, MediaOperation::Hold, timestamp),
             Action::Unhold(id) => self.media(&id, MediaOperation::Unhold, timestamp),
             Action::Mute { channel, direction } => {

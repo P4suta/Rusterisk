@@ -146,3 +146,93 @@ fn an_originated_channel_keeps_a_program_for_explicit_context_continuation(
     assert!(control.channel(&channel).is_err());
     Ok(())
 }
+
+#[test]
+fn moving_stasis_keeps_the_bridge_and_failed_moves_keep_the_previous_app(
+) -> Result<(), ControlError> {
+    let mut control = Control::new(4);
+    control.subscribe("calls")?;
+    control.subscribe("destination")?;
+    let channel = id("incoming")?;
+    control.incoming(
+        IncomingCall {
+            id: channel.clone(),
+            endpoint: "phone".into(),
+            caller: "100".into(),
+            context: "internal".into(),
+            extension: "200".into(),
+            target: IncomingTarget::Stasis {
+                application: "calls".into(),
+                arguments: Vec::new(),
+            },
+        },
+        "now",
+    )?;
+    let key = control.key(&channel)?;
+    control.signal(
+        Signal::Milestone {
+            key: key.clone(),
+            milestone: Milestone::Answered,
+        },
+        "now",
+    )?;
+    control.apply(
+        Action::CreateBridge {
+            id: id("mix")?,
+            name: "Conversation".into(),
+        },
+        "now",
+        0,
+    )?;
+    control.apply(
+        Action::AddChannels {
+            bridge: id("mix")?,
+            channels: [channel.clone()].into_iter().collect(),
+        },
+        "now",
+        0,
+    )?;
+    let failed = control.apply(
+        Action::Move {
+            channel: channel.clone(),
+            app: "missing".into(),
+            args: ["retry".into()].into_iter().collect(),
+        },
+        "now",
+        0,
+    )?;
+    assert_eq!(failed.status, 204);
+    assert!(failed.effects.is_empty());
+    assert_eq!(failed.events[0].application, "calls");
+    assert!(
+        matches!(&failed.events[0].kind, EventKind::ApplicationMoveFailed { destination, args, .. } if destination == "missing" && args == &["retry"])
+    );
+    let moved = control.apply(
+        Action::Move {
+            channel: channel.clone(),
+            app: "destination".into(),
+            args: ["arrived".into()].into_iter().collect(),
+        },
+        "now",
+        0,
+    )?;
+    assert!(moved.effects.is_empty());
+    assert_eq!(moved.events.len(), 2);
+    assert_eq!(moved.events[0].application, "calls");
+    assert!(matches!(&moved.events[0].kind, EventKind::StasisEnd { .. }));
+    assert_eq!(moved.events[1].application, "destination");
+    assert!(
+        matches!(&moved.events[1].kind, EventKind::StasisStart { args, .. } if args == &["arrived"])
+    );
+    assert_eq!(
+        control.bridge(&id("mix")?)?.channels.as_slice(),
+        std::slice::from_ref(&channel)
+    );
+    assert!(control.unsubscribe("calls", "later")?.effects.is_empty());
+    assert_eq!(control.key(&channel)?, key);
+    let ended = control.unsubscribe("destination", "later")?;
+    assert_eq!(ended.effects.len(), 2);
+    assert!(control.bridge(&id("mix")?)?.channels.is_empty());
+    assert!(control.channel(&channel).is_err());
+    Ok(())
+}
