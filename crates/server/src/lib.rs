@@ -1,5 +1,6 @@
 mod control;
 pub mod http;
+pub mod media;
 pub mod rtp;
 mod runner;
 mod websocket;
