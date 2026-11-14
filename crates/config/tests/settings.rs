@@ -1,0 +1,66 @@
+use rusterisk_config::{Config, ConfigError, Dialplan, Ini, Reload};
+
+const HTTP: &str = "[general]\nenabled=yes\nbindaddr=127.0.0.1\nbindport=8088\n";
+const ARI: &str = "[general]\nenabled=yes\nallowed_origins=https://localhost\n[test]\ntype=user\npassword=change-at-install\nread_only=no\n";
+const SIP: &str = "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:5060\n[phone-auth]\ntype=auth\nauth_type=userpass\nusername=phone\npassword=local-test-password\n[phone-aor]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=phone-auth\naors=phone-aor\ncontext=internal\ndisallow=all\nallow=ulaw,alaw,opus\n";
+
+#[test]
+fn parses_asterisk_sections_without_leaking_secrets_in_debug() -> Result<(), ConfigError> {
+    let config = Config::parse(
+        HTTP,
+        ARI,
+        SIP,
+        "[general]\nrtpstart=10000\nrtpend=10100\n",
+        "[internal]\nexten => 100,1,Stasis(test)\n",
+    )?;
+    assert!(config.http.bind.ip().is_loopback());
+    assert_eq!(config.endpoints.len(), 1);
+    assert!(!format!("{config:?}").contains("local-test-password"));
+    assert!(!format!("{config:?}").contains("change-at-install"));
+    Ok(())
+}
+
+#[test]
+fn refuses_unknown_options_with_their_position() {
+    let result = Config::parse(&format!("{HTTP}mystery=yes\n"), ARI, SIP, "", "");
+    assert!(matches!(result, Err(ConfigError { line: 5, .. })));
+}
+
+#[test]
+fn external_management_requires_tls() {
+    let http = "[general]\nenabled=yes\nbindaddr=0.0.0.0\nbindport=8088\n";
+    assert!(Config::parse(http, ARI, SIP, "", "").is_err());
+}
+
+#[test]
+fn reload_is_transactional_and_listener_changes_require_restart() -> Result<(), ConfigError> {
+    let first = Config::parse(HTTP, ARI, SIP, "", "")?;
+    let changed_auth = Config::parse(
+        HTTP,
+        &ARI.replace("change-at-install", "another-password"),
+        SIP,
+        "",
+        "",
+    )?;
+    assert_eq!(first.reload(&changed_auth), Reload::Apply);
+    let moved = Config::parse(&HTTP.replace("8088", "8089"), ARI, SIP, "", "")?;
+    assert_eq!(first.reload(&moved), Reload::RestartRequired);
+    Ok(())
+}
+
+#[test]
+fn dialplan_accepts_parallel_pjsip_and_rejects_unsupported_applications() -> Result<(), ConfigError>
+{
+    let dialplan = Dialplan::parse("[internal]\nexten => 100,1,NoOp(start)\nsame => n,Set(X=${EXTEN})\nsame => n,Dial(PJSIP/alice&PJSIP/bob,15)\nsame => n,Hangup()\n")?;
+    assert_eq!(dialplan.steps.len(), 4);
+    assert!(Dialplan::parse("[internal]\nexten => 100,1,Queue(sales)\n").is_err());
+    assert!(Dialplan::parse("[internal]\nexten => 100,1,Dial(SIP/alice)\n").is_err());
+    Ok(())
+}
+
+#[test]
+fn rejects_includes_duplicate_sections_and_oversized_inputs() {
+    assert!(Ini::parse("pjsip.conf", "#include private.conf\n").is_err());
+    assert!(Ini::parse("pjsip.conf", "[x]\na=1\n[x]\nb=2\n").is_err());
+    assert!(Ini::parse("pjsip.conf", &"x".repeat(1_048_577)).is_err());
+}
