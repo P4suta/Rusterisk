@@ -92,7 +92,12 @@ pub struct CallSnapshot {
 pub struct OwnedCall {
     id: api::ChannelId,
     progress: watch::Receiver<CallSnapshot>,
-    lifetime: Option<oneshot::Sender<()>>,
+    lifetime: Lifetime,
+}
+
+enum Lifetime {
+    Owned(oneshot::Sender<()>),
+    Released(OwnedCallProgress),
 }
 
 impl OwnedCall {
@@ -100,10 +105,25 @@ impl OwnedCall {
         &self.id
     }
     pub fn snapshot(&self) -> CallSnapshot {
-        self.progress.borrow().clone()
+        self.observed(self.progress.borrow().clone())
+    }
+    fn observed(&self, mut snapshot: CallSnapshot) -> CallSnapshot {
+        match &self.lifetime {
+            Lifetime::Owned(_) => {}
+            Lifetime::Released(progress) => snapshot.progress = *progress,
+        }
+        snapshot
     }
     pub fn cancel(&mut self) {
-        self.lifetime.take();
+        let progress = self
+            .progress
+            .borrow()
+            .progress
+            .finish(CallCompletion::Cancelled);
+        match std::mem::replace(&mut self.lifetime, Lifetime::Released(progress)) {
+            Lifetime::Owned(lifetime) => drop(lifetime),
+            Lifetime::Released(previous) => self.lifetime = Lifetime::Released(previous),
+        }
     }
     pub async fn wait(
         &mut self,
@@ -112,11 +132,17 @@ impl OwnedCall {
     ) -> Result<CallSnapshot, Error> {
         tokio::time::timeout(timeout, async {
             loop {
-                let snapshot = self.progress.borrow_and_update().clone();
+                let received = self.progress.borrow_and_update().clone();
+                let snapshot = self.observed(received);
                 if let Some(completion) = snapshot.progress.completion() {
-                    return Err(match snapshot.failure {
-                        Some(failure) => Error::CallFailed(failure),
-                        None => Error::CallEnded(completion),
+                    return Err(match completion {
+                        CallCompletion::Failed => match snapshot.failure {
+                            Some(failure) => Error::CallFailed(failure),
+                            None => Error::CallEnded(completion),
+                        },
+                        CallCompletion::Cancelled | CallCompletion::Ended => {
+                            Error::CallEnded(completion)
+                        }
                     });
                 }
                 if snapshot.progress.has_reached(milestone) {
@@ -142,6 +168,52 @@ impl OwnedCall {
         })
         .await
         .map_err(|_| Error::Timeout)?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelled_handles_keep_their_result_when_a_late_request_fails() -> Result<(), Error> {
+        let (progress, received) = watch::channel(CallSnapshot {
+            progress: OwnedCallProgress::new(),
+            channel: None,
+            failure: None,
+            cleanup: Cleanup::Pending,
+        });
+        let (lifetime, _dropped) = oneshot::channel();
+        let mut call = OwnedCall {
+            id: api::ChannelId::try_from("cancelled".to_owned())?,
+            progress: received,
+            lifetime: Lifetime::Owned(lifetime),
+        };
+        call.cancel();
+        progress.send_modify(|snapshot| {
+            snapshot.progress = snapshot
+                .progress
+                .observe(CallMilestone::Answered)
+                .finish(CallCompletion::Failed);
+            snapshot.failure = Some(CallFailure {
+                status: Some(400),
+                message: "late request failure".into(),
+            });
+        });
+        assert_eq!(
+            call.snapshot().progress.completion(),
+            Some(CallCompletion::Cancelled)
+        );
+        assert!(!call
+            .snapshot()
+            .progress
+            .has_reached(CallMilestone::Answered));
+        assert!(matches!(
+            call.wait(CallMilestone::Accepted, Duration::from_secs(1))
+                .await,
+            Err(Error::CallEnded(CallCompletion::Cancelled))
+        ));
+        Ok(())
     }
 }
 
@@ -180,7 +252,7 @@ pub(crate) async fn originate(
     Ok(OwnedCall {
         id,
         progress: received,
-        lifetime: Some(lifetime),
+        lifetime: Lifetime::Owned(lifetime),
     })
 }
 

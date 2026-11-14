@@ -71,6 +71,10 @@ async fn cancellation_ends_an_observed_channel_before_its_delayed_originate_resp
         assert!(entered.progress.has_reached(CallMilestone::Answered));
         assert!(!entered.progress.has_reached(CallMilestone::Accepted));
         call.cancel();
+        assert_eq!(
+            call.snapshot().progress.completion(),
+            Some(CallCompletion::Cancelled)
+        );
         assert!(matches!(
             call.wait(CallMilestone::Accepted, Duration::from_secs(2))
                 .await,
