@@ -95,6 +95,29 @@ fn malformed_or_oversized_signaling_and_unsupported_audio_are_refused() -> Resul
     Ok(())
 }
 
+#[test]
+fn invitations_offer_telephone_events_at_each_supported_audio_clock() -> Result<(), SipError> {
+    let mut settings = config()?;
+    settings.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+    let mut engine = Engine::new(settings.clone(), [9; 32]);
+    let output = engine.originate(outbound(), 0)?;
+    let invitation = request(&output.datagrams[0].bytes)?;
+    let source = std::str::from_utf8(&invitation.body)?;
+    assert!(source.contains("a=rtpmap:102 telephone-event/48000\r\n"));
+    assert!(source.contains("a=fmtp:101 0-15\r\n"));
+    assert!(source.contains("a=fmtp:102 0-15\r\n"));
+    let session = Session::parse(source, &[rusterisk_config::Codec::Opus])?;
+    assert_eq!(session.telephone.map(|format| format.rate()), Some(48000));
+    settings.endpoints[0].codecs = [rusterisk_config::Codec::Pcmu].into_iter().collect();
+    let mut engine = Engine::new(settings, [9; 32]);
+    let output = engine.originate(outbound(), 0)?;
+    let invitation = request(&output.datagrams[0].bytes)?;
+    let source = std::str::from_utf8(&invitation.body)?;
+    assert!(!source.contains("telephone-event/48000"));
+    assert!(source.contains("a=fmtp:101 0-15\r\n"));
+    Ok(())
+}
+
 fn answered(invite: &[u8]) -> Result<Vec<u8>, SipError> {
     let request = match SipMessage::try_from(invite)? {
         SipMessage::Request(request) => request,

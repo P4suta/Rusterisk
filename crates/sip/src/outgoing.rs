@@ -274,7 +274,12 @@ fn formats(codecs: &[Codec], local: SocketAddr, serial: u64) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    let mut body = format!("v=0\r\no=rusterisk {serial} {serial} IN {family} {}\r\ns=Rusterisk\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {payloads} 101\r\n", local.ip(), local.ip(), local.port());
+    let events = if codecs.contains(&Codec::Opus) {
+        "101 102"
+    } else {
+        "101"
+    };
+    let mut body = format!("v=0\r\no=rusterisk {serial} {serial} IN {family} {}\r\ns=Rusterisk\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {payloads} {events}\r\n", local.ip(), local.ip(), local.port());
     for codec in codecs {
         body.push_str(match codec {
             Codec::Pcmu => "a=rtpmap:0 PCMU/8000\r\n",
@@ -282,7 +287,11 @@ fn formats(codecs: &[Codec], local: SocketAddr, serial: u64) -> String {
             Codec::Opus => "a=rtpmap:111 opus/48000/2\r\na=fmtp:111 minptime=10;useinbandfec=1\r\n",
         });
     }
-    body.push_str("a=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\na=sendrecv\r\n");
+    body.push_str("a=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-15\r\n");
+    if codecs.contains(&Codec::Opus) {
+        body.push_str("a=rtpmap:102 telephone-event/48000\r\na=fmtp:102 0-15\r\n");
+    }
+    body.push_str("a=sendrecv\r\n");
     body
 }
 
