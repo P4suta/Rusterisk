@@ -9,6 +9,7 @@ use rsipstack::sip::{
 use rsipstack::sip::{HeadersExt, SipMessage};
 use rusterisk_api::{ChannelId, ChannelState, EventKind};
 use rusterisk_config::{Codec, Config};
+use rusterisk_core::MuteDirection;
 use rusterisk_media::{mulaw_decode, AudioFormat, Frame, RtpPacket, RtpSender};
 use rusterisk_server::media::MediaHub;
 use rusterisk_server::rtp::SocketPair;
@@ -73,6 +74,102 @@ async fn receive_audio(peer: &SocketPair, expected: i32) -> Result<(), ControlEr
     })
     .await
     .map_err(failure)?
+}
+
+struct AudioPeer<'a> {
+    socket: &'a SocketPair,
+    target: SocketAddr,
+    sender: RtpSender,
+    sample: i16,
+}
+
+impl AudioPeer<'_> {
+    async fn send(&mut self) -> Result<(), ControlError> {
+        let packet = self
+            .sender
+            .packet(Frame::new(&[self.sample; 160], 8000).map_err(failure)?)
+            .map_err(failure)?
+            .encode()
+            .map_err(failure)?;
+        self.socket
+            .data()
+            .send_to(&packet, self.target)
+            .await
+            .map_err(failure)?;
+        Ok(())
+    }
+}
+
+async fn stable_audio(peer: &SocketPair, expected: i32) -> Result<(), ControlError> {
+    let mut bytes = [0; 1501];
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut consecutive = 0;
+        for _ in 0..100 {
+            let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
+            let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
+            if packet.payload().len() == 160
+                && packet
+                    .payload()
+                    .iter()
+                    .all(|sample| (i32::from(mulaw_decode(*sample)) - expected).abs() < 300)
+            {
+                consecutive += 1;
+                if consecutive == 6 {
+                    return Ok(());
+                }
+            } else {
+                consecutive = 0;
+            }
+        }
+        Err(ControlError::Invalid(
+            "Received audio did not stabilize at the expected signal",
+        ))
+    })
+    .await
+    .map_err(failure)?
+}
+
+async fn exchange(
+    left: &mut AudioPeer<'_>,
+    right: &mut AudioPeer<'_>,
+    expected: (i32, i32),
+) -> Result<(), ControlError> {
+    let first = left.socket;
+    let second = right.socket;
+    for peer in [first, second] {
+        let mut bytes = [0; 1501];
+        for _ in 0..100 {
+            match peer.data().try_recv_from(&mut bytes) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => return Err(failure(error)),
+            }
+        }
+    }
+    let transmit = async {
+        let mut tick = tokio::time::interval(Duration::from_millis(20));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        for _ in 0..100 {
+            tick.tick().await;
+            left.send().await?;
+            right.send().await?;
+        }
+        Err::<(), ControlError>(ControlError::Invalid(
+            "Audio verification exceeded its packet bound",
+        ))
+    };
+    let receive = async {
+        tokio::try_join!(
+            stable_audio(first, expected.0),
+            stable_audio(second, expected.1)
+        )?;
+        Ok::<(), ControlError>(())
+    };
+    tokio::select! {
+        result = transmit => result?,
+        result = receive => result?,
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -158,26 +255,49 @@ async fn control_requests_establish_two_sip_calls_and_bridge_received_audio(
                 },
             )
             .await?;
-        let mut sender = RtpSender::new(AudioFormat::Pcmu, 0, [8; 10]).map_err(failure)?;
-        for (phone, target, value) in [
-            (&alice_audio, alice_target, 4000),
-            (&bob_audio, bob_target, -7000),
-        ] {
-            let bytes = sender
-                .packet(Frame::new(&[value; 160], 8000).map_err(failure)?)
-                .map_err(failure)?
-                .encode()
-                .map_err(failure)?;
-            phone
-                .data()
-                .send_to(&bytes, target)
-                .await
-                .map_err(failure)?;
-        }
-        tokio::try_join!(
-            receive_audio(&alice_audio, -7000),
-            receive_audio(&bob_audio, 4000)
-        )?;
+        let mut left = AudioPeer {
+            socket: &alice_audio,
+            target: alice_target,
+            sender: RtpSender::new(AudioFormat::Pcmu, 0, [8; 10]).map_err(failure)?,
+            sample: 4000,
+        };
+        let mut right = AudioPeer {
+            socket: &bob_audio,
+            target: bob_target,
+            sender: RtpSender::new(AudioFormat::Pcmu, 0, [9; 10]).map_err(failure)?,
+            sample: -7000,
+        };
+        exchange(&mut left, &mut right, (-7000, 4000)).await?;
+        controller
+            .execute(
+                credentials()?,
+                None,
+                Action::Mute {
+                    channel: id("alice")?,
+                    direction: MuteDirection::Incoming,
+                },
+            )
+            .await?;
+        exchange(&mut left, &mut right, (-7000, 0)).await?;
+        controller
+            .execute(credentials()?, None, Action::Hold(id("alice")?))
+            .await?;
+        exchange(&mut left, &mut right, (0, 0)).await?;
+        controller
+            .execute(credentials()?, None, Action::Unhold(id("alice")?))
+            .await?;
+        exchange(&mut left, &mut right, (-7000, 0)).await?;
+        controller
+            .execute(
+                credentials()?,
+                None,
+                Action::Unmute {
+                    channel: id("alice")?,
+                    direction: MuteDirection::Incoming,
+                },
+            )
+            .await?;
+        exchange(&mut left, &mut right, (-7000, 4000)).await?;
         controller
             .execute(credentials()?, None, Action::Hangup(id("alice")?))
             .await?;
