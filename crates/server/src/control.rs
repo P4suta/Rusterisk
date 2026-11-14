@@ -1,5 +1,7 @@
 use rusterisk_api::{Bridge, Caller, Channel, ChannelId, ChannelState, Dialplan, Event, EventKind};
-use rusterisk_core::{Call, CallEvent, CallState, Transition};
+use rusterisk_core::{
+    AudioGate, Call, CallEvent, CallState, MediaState, MuteDirection, Transition,
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -94,6 +96,16 @@ pub enum Action {
     Hangup(ChannelId),
     Answer(ChannelId),
     Ring(ChannelId),
+    Hold(ChannelId),
+    Unhold(ChannelId),
+    Mute {
+        channel: ChannelId,
+        direction: MuteDirection,
+    },
+    Unmute {
+        channel: ChannelId,
+        direction: MuteDirection,
+    },
     ListBridges,
     GetBridge(ChannelId),
     CreateBridge {
@@ -121,6 +133,10 @@ impl Action {
             | Self::Hangup(_)
             | Self::Answer(_)
             | Self::Ring(_)
+            | Self::Hold(_)
+            | Self::Unhold(_)
+            | Self::Mute { .. }
+            | Self::Unmute { .. }
             | Self::CreateBridge { .. }
             | Self::DestroyBridge(_)
             | Self::AddChannels { .. }
@@ -131,6 +147,10 @@ impl Action {
 
 #[derive(Clone, Debug)]
 pub enum Effect {
+    Gate {
+        key: CallKey,
+        gate: AudioGate,
+    },
     Answer {
         key: CallKey,
     },
@@ -217,6 +237,14 @@ struct ChannelEntry {
 enum Stasis {
     Pending,
     Entered,
+}
+
+#[derive(Clone, Copy)]
+enum MediaOperation {
+    Hold,
+    Unhold,
+    Mute(MuteDirection),
+    Unmute(MuteDirection),
 }
 struct BridgeEntry {
     token: u64,
@@ -487,6 +515,14 @@ impl Control {
                 Ok(outcome)
             }
             Action::Hangup(id) => self.end(&id, timestamp, 16),
+            Action::Hold(id) => self.media(&id, MediaOperation::Hold, timestamp),
+            Action::Unhold(id) => self.media(&id, MediaOperation::Unhold, timestamp),
+            Action::Mute { channel, direction } => {
+                self.media(&channel, MediaOperation::Mute(direction), timestamp)
+            }
+            Action::Unmute { channel, direction } => {
+                self.media(&channel, MediaOperation::Unmute(direction), timestamp)
+            }
             Action::Answer(id) => {
                 let entry = self
                     .channels
@@ -735,6 +771,63 @@ impl Control {
         Ok(outcome)
     }
 
+    fn media(
+        &mut self,
+        id: &ChannelId,
+        operation: MediaOperation,
+        timestamp: &str,
+    ) -> Result<Outcome, ControlError> {
+        let entry = self
+            .channels
+            .get_mut(id)
+            .ok_or(ControlError::NotFound("Channel not found"))?;
+        if entry.stasis != Stasis::Entered {
+            return Err(ControlError::Conflict("Channel not in Stasis application"));
+        }
+        let mut outcome = Outcome::empty();
+        let call = match operation {
+            MediaOperation::Hold if entry.call.media() == MediaState::Held => return Ok(outcome),
+            MediaOperation::Unhold if entry.call.media() == MediaState::Active => {
+                return Ok(outcome)
+            }
+            MediaOperation::Hold => entry.call.hold()?,
+            MediaOperation::Unhold => entry.call.resume()?,
+            MediaOperation::Mute(direction) => entry.call.mute(direction)?,
+            MediaOperation::Unmute(direction) => entry.call.unmute(direction)?,
+        };
+        if entry.call == call {
+            return Ok(outcome);
+        }
+        entry.call = call;
+        if call.state() == CallState::Up {
+            outcome.effects.push(Effect::Gate {
+                key: CallKey {
+                    id: id.clone(),
+                    generation: call.generation(),
+                },
+                gate: call.audio_gate(),
+            });
+        }
+        match operation {
+            MediaOperation::Hold => outcome.event(
+                &entry.application,
+                timestamp,
+                EventKind::ChannelHold {
+                    channel: entry.snapshot.clone(),
+                },
+            ),
+            MediaOperation::Unhold => outcome.event(
+                &entry.application,
+                timestamp,
+                EventKind::ChannelUnhold {
+                    channel: entry.snapshot.clone(),
+                },
+            ),
+            MediaOperation::Mute(_) | MediaOperation::Unmute(_) => {}
+        }
+        Ok(outcome)
+    }
+
     pub fn signal(&mut self, signal: Signal, timestamp: &str) -> Result<Outcome, ControlError> {
         match signal {
             Signal::Terminated { key, cause } => {
@@ -787,6 +880,14 @@ impl Control {
                             CallState::Ended => ChannelState::Down,
                         };
                         if entry.call.state() != before {
+                            if entry.call.state() == CallState::Up
+                                && entry.call.audio_gate() != AudioGate::Open
+                            {
+                                outcome.effects.push(Effect::Gate {
+                                    key: key.clone(),
+                                    gate: entry.call.audio_gate(),
+                                });
+                            }
                             outcome.event(
                                 &entry.application,
                                 timestamp,

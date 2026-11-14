@@ -3,7 +3,8 @@ use crate::rtp::{RtpSession, SocketPair};
 use crate::{CallKey, ControlError, Controller, Effect, IncomingCall, Milestone, Signal};
 use rusterisk_api::ChannelId;
 use rusterisk_config::{Application, Codec, Config, Protocol};
-use rusterisk_media::AudioFormat;
+use rusterisk_core::AudioGate;
+use rusterisk_media::{AudioFormat, Gate};
 use rusterisk_sip::{Datagram, Engine, Outbound, Output, RejectReason, SipEvent, MAX_MESSAGE};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -407,6 +408,15 @@ impl Signaling {
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
+            Effect::Gate { key, gate } => {
+                let gate = match gate {
+                    AudioGate::Open => Gate::Open,
+                    AudioGate::IncomingMuted => Gate::IncomingMuted,
+                    AudioGate::OutgoingMuted => Gate::OutgoingMuted,
+                    AudioGate::Closed => Gate::Closed,
+                };
+                self.media.gate(key, gate).map_err(failure)?;
+            }
             Effect::Answer { key } => {
                 if let Err(error) = self.answer(&key, now).await {
                     tracing::warn!(channel = %key.id, generation = key.generation, %error, "incoming answer failed");

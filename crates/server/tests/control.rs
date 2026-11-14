@@ -1,4 +1,5 @@
 use rusterisk_api::{ChannelId, EventKind};
+use rusterisk_core::{AudioGate, MuteDirection};
 use rusterisk_server::{Action, Control, ControlError, Effect, IncomingCall, Milestone, Signal};
 
 fn id(value: &str) -> Result<ChannelId, ControlError> {
@@ -245,6 +246,82 @@ fn answering_requests_a_signaling_effect_without_predicting_peer_or_media_milest
     assert!(matches!(
         control.apply(Action::Answer(id("outgoing")?), "wrong", 0),
         Err(ControlError::Conflict(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn media_controls_preserve_muting_through_hold_and_apply_preanswer_settings_after_answer(
+) -> Result<(), ControlError> {
+    let mut control = Control::new(2);
+    control.subscribe("app")?;
+    control.incoming(incoming()?, "now")?;
+    let channel = id("incoming")?;
+    let muted = control.apply(
+        Action::Mute {
+            channel: channel.clone(),
+            direction: MuteDirection::Incoming,
+        },
+        "mute",
+        0,
+    )?;
+    assert!(muted.effects.is_empty());
+    let answered = control.signal(
+        Signal::Milestone {
+            key: control.key(&channel)?,
+            milestone: Milestone::Answered,
+        },
+        "answer",
+    )?;
+    assert!(matches!(
+        &answered.effects[0],
+        Effect::Gate {
+            gate: AudioGate::IncomingMuted,
+            ..
+        }
+    ));
+    let held = control.apply(Action::Hold(channel.clone()), "hold", 0)?;
+    assert!(matches!(
+        &held.effects[0],
+        Effect::Gate {
+            gate: AudioGate::Closed,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &held.events[0].kind,
+        EventKind::ChannelHold { .. }
+    ));
+    assert!(control
+        .apply(Action::Hold(channel.clone()), "duplicate", 0)?
+        .events
+        .is_empty());
+    let resumed = control.apply(Action::Unhold(channel.clone()), "resume", 0)?;
+    assert!(matches!(
+        &resumed.effects[0],
+        Effect::Gate {
+            gate: AudioGate::IncomingMuted,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &resumed.events[0].kind,
+        EventKind::ChannelUnhold { .. }
+    ));
+    let unmuted = control.apply(
+        Action::Unmute {
+            channel,
+            direction: MuteDirection::Both,
+        },
+        "unmute",
+        0,
+    )?;
+    assert!(matches!(
+        &unmuted.effects[0],
+        Effect::Gate {
+            gate: AudioGate::Open,
+            ..
+        }
     ));
     Ok(())
 }
