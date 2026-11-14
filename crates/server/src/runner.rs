@@ -418,7 +418,7 @@ impl Runner {
                     .authorize(&credentials, origin.as_deref(), action.read_only())
                     .and_then(|()| {
                         if (!self.pending_effects.is_empty() && !action.read_only())
-                            || self.effects.capacity() < action.effect_budget()
+                            || self.effects.capacity() < self.control.effect_budget(&action)
                         {
                             return Err(ControlError::Capacity);
                         }

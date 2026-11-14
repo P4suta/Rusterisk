@@ -4,6 +4,101 @@ use rusterisk_server::{Action, ControlError, Controller, Credentials, IncomingCa
 use std::time::Duration;
 
 #[tokio::test]
+async fn dial_cancellation_checks_capacity_for_every_owned_child_before_changing_state(
+) -> Result<(), ControlError> {
+    let config = Config::parse(
+        "[general]\nbindaddr=127.0.0.1\n",
+        "[app]\ntype=user\npassword=test-password\n",
+        "",
+        "",
+        "[internal]\nexten => 200,1,Dial(PJSIP/alice&PJSIP/bob)\n",
+    )
+    .map_err(|error| ControlError::Adapter(error.to_string()))?;
+    let (controller, runner, mut effects) = Controller::new(config, 4);
+    let task = tokio::spawn(runner.run());
+    let result = async {
+        let credentials = Credentials::new("app".into(), "test-password".into())?;
+        let _subscription = controller
+            .subscribe(credentials.clone(), None, "app".into())
+            .await?;
+        let ringing = ChannelId::try_from("ringing".to_owned())?;
+        let parent = ChannelId::try_from("parent".to_owned())?;
+        for (id, target) in [
+            (
+                ringing.clone(),
+                rusterisk_server::IncomingTarget::Stasis {
+                    application: "app".into(),
+                    arguments: Vec::new(),
+                },
+            ),
+            (parent.clone(), rusterisk_server::IncomingTarget::Dialplan),
+        ] {
+            controller
+                .incoming(IncomingCall {
+                    id,
+                    endpoint: "phone".into(),
+                    caller: "100".into(),
+                    context: "internal".into(),
+                    extension: "200".into(),
+                    target,
+                })
+                .await?;
+        }
+        for _ in 0..2 {
+            assert!(matches!(
+                effects.recv().await,
+                Some(rusterisk_server::Effect::Start { .. })
+            ));
+        }
+        for _ in 0..126 {
+            controller
+                .execute(credentials.clone(), None, Action::Ring(ringing.clone()))
+                .await?;
+        }
+        assert!(matches!(
+            controller
+                .execute(credentials.clone(), None, Action::Hangup(parent.clone()))
+                .await,
+            Err(ControlError::Capacity)
+        ));
+        controller
+            .execute(
+                credentials.clone(),
+                None,
+                Action::GetChannel(parent.clone()),
+            )
+            .await?;
+        effects.recv().await.ok_or(ControlError::Capacity)?;
+        controller
+            .execute(credentials.clone(), None, Action::Hangup(parent))
+            .await?;
+        for _ in 0..125 {
+            assert!(matches!(
+                effects.recv().await,
+                Some(rusterisk_server::Effect::Ring { .. })
+            ));
+        }
+        for _ in 0..3 {
+            assert!(matches!(
+                effects.recv().await,
+                Some(rusterisk_server::Effect::Release { .. })
+            ));
+        }
+        controller
+            .execute(credentials, None, Action::Hangup(ringing))
+            .await?;
+        effects.recv().await.ok_or(ControlError::Capacity)?;
+        Ok(())
+    }
+    .await;
+    controller.shutdown();
+    while effects.try_recv().is_ok() {}
+    task.await
+        .map_err(|error| ControlError::Adapter(error.to_string()))??;
+    result
+}
+
+#[tokio::test]
 async fn global_shutdown_cancels_effects_when_the_owned_signaling_scope_closes(
 ) -> Result<(), ControlError> {
     let config = Config::parse(

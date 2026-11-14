@@ -1,7 +1,7 @@
 use super::{CallKey, ChannelEntry, Control, ControlError, Effect, Outcome};
 use rusterisk_api::{Channel, ChannelId, ChannelState};
 use rusterisk_core::{Call, DialFailure, DialFork, DialForkError, DialForkOutcome, DialplanToken};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct DialBranches {
     pub token: DialplanToken,
@@ -45,6 +45,39 @@ fn fork_error(error: DialForkError) -> ControlError {
 }
 
 impl Control {
+    pub(super) fn termination_budget(&self, id: &ChannelId) -> usize {
+        let Ok(key) = self.key(id) else {
+            return 2;
+        };
+        let mut discovered = BTreeSet::new();
+        discovered.insert(key.clone());
+        let mut pending = Vec::with_capacity(self.channels.len());
+        pending.push(key);
+        let mut effects = 0;
+        while let Some(key) = pending.pop() {
+            let Some(entry) = self
+                .channels
+                .get(&key.id)
+                .filter(|entry| entry.call.generation() == key.generation)
+            else {
+                continue;
+            };
+            effects += 1 + usize::from(entry.call.bridge().is_some());
+            if let Some(dial) = entry
+                .dialplan
+                .as_ref()
+                .and_then(|frame| frame.dial.as_ref())
+            {
+                for child in &dial.children {
+                    if discovered.insert(child.clone()) {
+                        pending.push(child.clone());
+                    }
+                }
+            }
+        }
+        effects
+    }
+
     pub(super) fn dial_branch(&self, child: &CallKey) -> Option<DialBranch> {
         self.channels.iter().find_map(|(id, entry)| {
             let dial = entry.dialplan.as_ref()?.dial.as_ref()?;

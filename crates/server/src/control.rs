@@ -456,6 +456,14 @@ pub struct Control {
 }
 
 impl Control {
+    pub(crate) fn effect_budget(&self, action: &Action) -> usize {
+        if let Action::Hangup(id) = action {
+            self.termination_budget(id)
+        } else {
+            action.effect_budget()
+        }
+    }
+
     pub fn incoming(
         &mut self,
         incoming: IncomingCall,
