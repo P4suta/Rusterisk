@@ -8,8 +8,13 @@ license.workspace = true
 [dependencies]
 rusterisk-api = { version = "0.1.0", path = "../api" }
 rusterisk-core = { version = "0.1.0", path = "../core" }
+rusterisk-config = { version = "0.1.0", path = "../config" }
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
+subtle = "2.6.1"
+chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
+tracing = "0.1.44"
 
 [lints]
 workspace = true

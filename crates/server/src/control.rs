@@ -98,6 +98,22 @@ pub enum Action {
     },
 }
 
+impl Action {
+    pub const fn read_only(&self) -> bool {
+        match self {
+            Self::ListChannels | Self::GetChannel(_) | Self::ListBridges | Self::GetBridge(_) => {
+                true
+            }
+            Self::Originate { .. }
+            | Self::Hangup(_)
+            | Self::CreateBridge { .. }
+            | Self::DestroyBridge(_)
+            | Self::AddChannels { .. }
+            | Self::RemoveChannels { .. } => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Effect {
     Start {

@@ -1,0 +1,390 @@
+use crate::{Action, Control, ControlError, Effect, Outcome, Signal};
+use rusterisk_api::{Event, EventKind};
+use rusterisk_config::Config;
+use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+use subtle::ConstantTimeEq;
+use tokio::sync::{mpsc, oneshot, watch};
+
+#[derive(Clone)]
+pub struct Credentials {
+    username: String,
+    password: String,
+}
+
+impl Credentials {
+    pub fn new(username: String, password: String) -> Result<Self, ControlError> {
+        if username.is_empty()
+            || username.len() > 128
+            || password.is_empty()
+            || password.len() > 256
+        {
+            return Err(ControlError::Unauthorized);
+        }
+        Ok(Self { username, password })
+    }
+}
+
+enum Request {
+    Authorize {
+        credentials: Credentials,
+        origin: Option<String>,
+        read_only: bool,
+        reply: oneshot::Sender<Result<(), ControlError>>,
+    },
+    Apply {
+        credentials: Credentials,
+        origin: Option<String>,
+        action: Action,
+        reply: oneshot::Sender<Result<Outcome, ControlError>>,
+    },
+    Subscribe {
+        credentials: Credentials,
+        origin: Option<String>,
+        application: String,
+        events: mpsc::Sender<Event>,
+        reply: oneshot::Sender<Result<u64, ControlError>>,
+    },
+    Unsubscribe {
+        application: String,
+        token: u64,
+    },
+}
+
+struct Subscriber {
+    token: u64,
+    events: mpsc::Sender<Event>,
+}
+
+#[derive(Clone)]
+pub struct Controller {
+    requests: mpsc::Sender<Request>,
+    signals: mpsc::Sender<Signal>,
+    shutdown: watch::Sender<bool>,
+}
+
+pub struct Runner {
+    control: Control,
+    config: Config,
+    requests: mpsc::Receiver<Request>,
+    signals: mpsc::Receiver<Signal>,
+    effects: mpsc::Sender<Effect>,
+    shutdown: watch::Receiver<bool>,
+    subscribers: BTreeMap<String, Subscriber>,
+    subscription_generation: u64,
+}
+
+pub struct Subscription {
+    pub application: String,
+    pub token: u64,
+    pub events: mpsc::Receiver<Event>,
+    controller: Controller,
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        if self
+            .controller
+            .requests
+            .try_send(Request::Unsubscribe {
+                application: self.application.clone(),
+                token: self.token,
+            })
+            .is_err()
+        {
+            tracing::debug!(application = %self.application, "subscription cleanup deferred to the control task");
+        }
+    }
+}
+
+async fn receive<T>(
+    receiver: oneshot::Receiver<Result<T, ControlError>>,
+) -> Result<T, ControlError> {
+    tokio::time::timeout(Duration::from_secs(5), receiver)
+        .await
+        .map_err(|_| ControlError::Capacity)?
+        .map_err(|_| ControlError::Adapter("Control task stopped".into()))?
+}
+
+impl Controller {
+    pub fn new(config: Config, capacity: usize) -> (Self, Runner, mpsc::Receiver<Effect>) {
+        let (requests, request_receiver) = mpsc::channel(128);
+        let (signals, signal_receiver) = mpsc::channel(128);
+        let (effects, effect_receiver) = mpsc::channel(128);
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        (
+            Self {
+                requests,
+                signals,
+                shutdown,
+            },
+            Runner {
+                control: Control::new(capacity),
+                config,
+                requests: request_receiver,
+                signals: signal_receiver,
+                effects,
+                shutdown: shutdown_receiver,
+                subscribers: BTreeMap::new(),
+                subscription_generation: 0,
+            },
+            effect_receiver,
+        )
+    }
+
+    pub fn shutdown(&self) {
+        self.shutdown.send_replace(true);
+    }
+
+    pub async fn signal(&self, signal: Signal) -> Result<(), ControlError> {
+        self.signals
+            .try_send(signal)
+            .map_err(|_| ControlError::Capacity)
+    }
+
+    pub async fn authorize(
+        &self,
+        credentials: Credentials,
+        origin: Option<String>,
+        read_only: bool,
+    ) -> Result<(), ControlError> {
+        let (reply, receiver) = oneshot::channel();
+        self.requests
+            .try_send(Request::Authorize {
+                credentials,
+                origin,
+                read_only,
+                reply,
+            })
+            .map_err(|_| ControlError::Capacity)?;
+        receive(receiver).await
+    }
+
+    pub async fn execute(
+        &self,
+        credentials: Credentials,
+        origin: Option<String>,
+        action: Action,
+    ) -> Result<Outcome, ControlError> {
+        let (reply, receiver) = oneshot::channel();
+        self.requests
+            .try_send(Request::Apply {
+                credentials,
+                origin,
+                action,
+                reply,
+            })
+            .map_err(|_| ControlError::Capacity)?;
+        receive(receiver).await
+    }
+
+    pub async fn subscribe(
+        &self,
+        credentials: Credentials,
+        origin: Option<String>,
+        application: String,
+    ) -> Result<Subscription, ControlError> {
+        let (events, receiver) = mpsc::channel(64);
+        let (reply, response) = oneshot::channel();
+        self.requests
+            .try_send(Request::Subscribe {
+                credentials,
+                origin,
+                application: application.clone(),
+                events,
+                reply,
+            })
+            .map_err(|_| ControlError::Capacity)?;
+        let token = receive(response).await?;
+        Ok(Subscription {
+            application,
+            token,
+            events: receiver,
+            controller: self.clone(),
+        })
+    }
+}
+
+fn timestamp() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+impl Runner {
+    fn authorize(
+        &self,
+        credentials: &Credentials,
+        origin: Option<&str>,
+        read_only: bool,
+    ) -> Result<(), ControlError> {
+        if origin.is_some_and(|origin| !self.config.origins.iter().any(|allowed| origin == allowed))
+        {
+            return Err(ControlError::Forbidden);
+        }
+        let user = self
+            .config
+            .users
+            .iter()
+            .find(|user| user.name == credentials.username)
+            .ok_or(ControlError::Unauthorized)?;
+        if !bool::from(
+            user.password
+                .expose()
+                .as_bytes()
+                .ct_eq(credentials.password.as_bytes()),
+        ) {
+            return Err(ControlError::Unauthorized);
+        }
+        if user.read_only && !read_only {
+            return Err(ControlError::Forbidden);
+        }
+        Ok(())
+    }
+
+    fn publish(&mut self, outcome: &mut Outcome) -> Result<(), ControlError> {
+        for effect in outcome.effects.drain(..) {
+            self.effects
+                .try_send(effect)
+                .map_err(|_| ControlError::Capacity)?;
+        }
+        let mut disconnected = Vec::new();
+        for event in outcome.events.drain(..) {
+            if let Some(subscriber) = self.subscribers.get(&event.application) {
+                let application = event.application.clone();
+                if subscriber.events.try_send(event).is_err()
+                    && !disconnected.contains(&application)
+                {
+                    disconnected.push(application);
+                }
+            }
+        }
+        for application in disconnected {
+            self.subscribers.remove(&application);
+            let mut cleanup = self.control.unsubscribe(&application, &timestamp())?;
+            for effect in cleanup.effects.drain(..) {
+                self.effects
+                    .try_send(effect)
+                    .map_err(|_| ControlError::Capacity)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn request(&mut self, request: Request, now_ms: u64) -> Result<(), ControlError> {
+        match request {
+            Request::Authorize {
+                credentials,
+                origin,
+                read_only,
+                reply,
+            } => {
+                if reply
+                    .send(self.authorize(&credentials, origin.as_deref(), read_only))
+                    .is_err()
+                {
+                    tracing::debug!("authorization requester disconnected");
+                }
+            }
+            Request::Apply {
+                credentials,
+                origin,
+                action,
+                reply,
+            } => {
+                if reply.is_closed() {
+                    return Ok(());
+                }
+                let result = self
+                    .authorize(&credentials, origin.as_deref(), action.read_only())
+                    .and_then(|()| self.control.apply(action, &timestamp(), now_ms));
+                let result = match result {
+                    Ok(mut outcome) => {
+                        if let Err(error) = self.publish(&mut outcome) {
+                            if reply.send(Err(error.clone())).is_err() {
+                                tracing::debug!("control requester disconnected during overload");
+                            }
+                            return Err(error);
+                        }
+                        Ok(outcome)
+                    }
+                    Err(error) => Err(error),
+                };
+                if reply.send(result).is_err() {
+                    tracing::debug!("control requester disconnected");
+                }
+            }
+            Request::Subscribe {
+                credentials,
+                origin,
+                application,
+                events,
+                reply,
+            } => {
+                let result = self
+                    .authorize(&credentials, origin.as_deref(), true)
+                    .and_then(|()| {
+                        self.control.subscribe(&application)?;
+                        self.subscription_generation = self
+                            .subscription_generation
+                            .checked_add(1)
+                            .ok_or(ControlError::Capacity)?;
+                        let token = self.subscription_generation;
+                        if let Some(previous) = self
+                            .subscribers
+                            .insert(application.clone(), Subscriber { token, events })
+                        {
+                            if previous
+                                .events
+                                .try_send(Event {
+                                    timestamp: timestamp(),
+                                    application,
+                                    kind: EventKind::ApplicationReplaced {},
+                                })
+                                .is_err()
+                            {
+                                tracing::debug!("replaced application receiver disconnected");
+                            }
+                        }
+                        Ok(token)
+                    });
+                if reply.send(result).is_err() {
+                    tracing::debug!("event subscriber disconnected");
+                }
+            }
+            Request::Unsubscribe { application, token } => {
+                if self
+                    .subscribers
+                    .get(&application)
+                    .is_some_and(|subscriber| subscriber.token == token)
+                {
+                    self.subscribers.remove(&application);
+                    let mut outcome = self.control.unsubscribe(&application, &timestamp())?;
+                    self.publish(&mut outcome)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn run(mut self) -> Result<(), ControlError> {
+        let started = Instant::now();
+        let mut tick = tokio::time::interval(Duration::from_millis(100));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                changed = self.shutdown.changed() => { if changed.is_err() || *self.shutdown.borrow() { break; } }
+                signal = self.signals.recv() => { if let Some(signal) = signal { let mut outcome = self.control.signal(signal, &timestamp())?; self.publish(&mut outcome)?; } else { break; } }
+                request = self.requests.recv() => {
+                    if let Some(request) = request { self.request(request, u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?; } else { break; }
+                }
+                _instant = tick.tick() => {
+                    let mut outcome = self.control.expire(u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?, &timestamp())?; self.publish(&mut outcome)?;
+                    let disconnected: Vec<String> = self.subscribers.iter().filter(|(_, subscriber)| subscriber.events.is_closed()).map(|(application, _)| application.clone()).collect();
+                    for application in disconnected { self.subscribers.remove(&application); let mut outcome = self.control.unsubscribe(&application, &timestamp())?; self.publish(&mut outcome)?; }
+                }
+            }
+        }
+        let mut outcome = self.control.shutdown(&timestamp())?;
+        self.publish(&mut outcome)?;
+        Ok(())
+    }
+}
