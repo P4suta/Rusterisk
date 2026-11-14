@@ -180,15 +180,23 @@ fn documentation(
     if method != Method::GET {
         return Ok(None);
     }
-    let Some(resource) = uri
+    let location = uri
         .path()
         .strip_prefix("/ari/api-docs/")
-        .and_then(|path| path.strip_suffix(".json"))
-    else {
+        .map(|path| (rusterisk_api::DiscoveryFormat::Asterisk, path))
+        .or_else(|| {
+            uri.path()
+                .strip_prefix("/rusterisk/api-docs/")
+                .map(|path| (rusterisk_api::DiscoveryFormat::Standard, path))
+        });
+    let Some((format, resource)) = location.and_then(|(format, path)| {
+        path.strip_suffix(".json")
+            .map(|resource| (format, resource))
+    }) else {
         return Ok(None);
     };
     let mut document = if resource == "resources" {
-        rusterisk_api::resources()
+        rusterisk_api::resources_for(format)
     } else {
         if !rusterisk_api::OPERATIONS
             .iter()
@@ -196,7 +204,7 @@ fn documentation(
         {
             return Err(ControlError::NotFound("Resource not found"));
         }
-        rusterisk_api::swagger(resource)
+        rusterisk_api::swagger_for(resource, format)
             .map_err(|error| ControlError::Encoding(error.to_string()))?
     };
     let authority = match uri.authority() {
@@ -221,7 +229,12 @@ fn documentation(
         HttpScheme::Http => "http",
         HttpScheme::Https => "https",
     };
-    document["basePath"] = Value::String(format!("{scheme}://{authority}/ari"));
+    let base = if resource == "resources" && format == rusterisk_api::DiscoveryFormat::Standard {
+        "/rusterisk"
+    } else {
+        "/ari"
+    };
+    document["basePath"] = Value::String(format!("{scheme}://{authority}{base}"));
     Ok(Some(Json(document).into_response()))
 }
 

@@ -35,9 +35,11 @@ async fn discovery_documents_use_the_requested_authority_and_refuse_invalid_host
     let task = tokio::spawn(runner.run());
     let result = async {
         let app = router(controller.clone());
-        for path in [
-            "/ari/api-docs/resources.json",
-            "/ari/api-docs/channels.json",
+        for (path, version, base) in [
+            ("/ari/api-docs/resources.json", "1.1", "/ari"),
+            ("/ari/api-docs/channels.json", "1.1", "/ari"),
+            ("/rusterisk/api-docs/resources.json", "1.2", "/rusterisk"),
+            ("/rusterisk/api-docs/channels.json", "1.2", "/ari"),
         ] {
             let mut request = request("GET", path, Some("test"))?;
             request.headers_mut().insert(
@@ -61,7 +63,11 @@ async fn discovery_documents_use_the_requested_authority_and_refuse_invalid_host
                 .map_err(|error| ControlError::Adapter(error.to_string()))?
                 .to_bytes();
             let document: serde_json::Value = serde_json::from_slice(&bytes)?;
-            assert_eq!(document["basePath"], "http://pbx.example:8088/ari");
+            assert_eq!(
+                document["basePath"],
+                format!("http://pbx.example:8088{base}")
+            );
+            assert_eq!(document["swaggerVersion"], version);
         }
         for host in ["", "person@pbx.example", "pbx.example/path"] {
             let mut request = request("GET", "/ari/api-docs/resources.json", Some("test"))?;

@@ -946,6 +946,25 @@ fn json_array<const N: usize>(values: [Value; N]) -> Value {
 }
 
 pub fn swagger(resource: &str) -> Result<Value, SwaggerError> {
+    swagger_for(resource, DiscoveryFormat::Standard)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscoveryFormat {
+    Asterisk,
+    Standard,
+}
+
+impl DiscoveryFormat {
+    const fn version(self) -> &'static str {
+        match self {
+            Self::Asterisk => "1.1",
+            Self::Standard => "1.2",
+        }
+    }
+}
+
+pub fn swagger_for(resource: &str, format: DiscoveryFormat) -> Result<Value, SwaggerError> {
     let mut paths: std::collections::BTreeMap<&str, Vec<Value>> = std::collections::BTreeMap::new();
     for operation in OPERATIONS
         .iter()
@@ -956,26 +975,77 @@ pub fn swagger(resource: &str) -> Result<Value, SwaggerError> {
         } else {
             operation.response.into()
         };
-        let errors = json_array([
-            json!({"code": 400, "reason": "Invalid parameters"}),
-            json!({"code": 404, "reason": "Resource not found"}),
-            json!({"code": 409, "reason": "Invalid resource state"}),
-            json!({"code": 501, "reason": "Operation not supported"}),
-        ]);
-        paths.entry(operation.path).or_default().push(json!({"method": operation.method.upper(), "httpMethod": operation.method.upper(), "nickname": operation.nickname, "operationId": operation.id, "type": operation.response, "responseClass": response, "summary": operation.nickname, "parameters": parameters(operation, true), "errorResponses": errors}));
+        let message_field = match format {
+            DiscoveryFormat::Asterisk => "reason",
+            DiscoveryFormat::Standard => "message",
+        };
+        let errors: Vec<_> = [
+            (400, "Invalid parameters"),
+            (401, "Authentication required"),
+            (403, "Operation forbidden"),
+            (404, "Resource not found"),
+            (409, "Invalid resource state"),
+            (412, "Channel in invalid state"),
+            (500, "Operation failed"),
+            (501, "Operation not supported"),
+            (503, "Resource capacity exceeded"),
+        ]
+        .into_iter()
+        .map(|(code, message)| {
+            let mut error = json!({"code": code});
+            error[message_field] = Value::String(message.into());
+            error
+        })
+        .collect();
+        let mut definition = json!({"nickname": operation.nickname, "summary": operation.nickname, "parameters": parameters(operation, true)});
+        match format {
+            DiscoveryFormat::Asterisk => {
+                definition["httpMethod"] = Value::String(operation.method.upper().into());
+                definition["responseClass"] = Value::String(response);
+                definition["errorResponses"] = Value::Array(errors);
+            }
+            DiscoveryFormat::Standard => {
+                definition["method"] = Value::String(operation.method.upper().into());
+                definition["responseMessages"] = Value::Array(errors);
+                if let Some(item) = operation.response.strip_suffix("[]") {
+                    definition["type"] = Value::String("array".into());
+                    definition["items"] = json!({"$ref": item});
+                } else if operation.response == "binary" {
+                    definition["type"] = Value::String("string".into());
+                    definition["format"] = Value::String("byte".into());
+                    definition["produces"] =
+                        json_array([Value::String("application/octet-stream".into())]);
+                } else {
+                    definition["type"] = Value::String(operation.response.into());
+                }
+            }
+        }
+        paths.entry(operation.path).or_default().push(definition);
     }
     let apis: Vec<Value> = paths
         .into_iter()
         .map(|(path, operations)| json!({"path": path, "operations": operations}))
         .collect();
+    let resource_path = match format {
+        DiscoveryFormat::Asterisk => format!("/api-docs/{resource}.{{format}}"),
+        DiscoveryFormat::Standard => format!("/{resource}"),
+    };
     Ok(
-        json!({"swaggerVersion": "1.2", "apiVersion": "2.0.0", "basePath": "/ari", "resourcePath": format!("/api-docs/{resource}.{{format}}"), "apis": apis, "models": swagger::models()?}),
+        json!({"swaggerVersion": format.version(), "apiVersion": "2.0.0", "basePath": "/ari", "resourcePath": resource_path, "apis": apis, "models": swagger::models()?}),
     )
 }
 
 pub fn resources() -> Value {
+    resources_for(DiscoveryFormat::Standard)
+}
+
+pub fn resources_for(format: DiscoveryFormat) -> Value {
     let names: std::collections::BTreeSet<&str> =
         OPERATIONS.iter().map(Operation::resource).collect();
     let apis: Vec<Value> = names.into_iter().map(|resource| json!({"path": format!("/api-docs/{resource}.{{format}}"), "description": resource})).collect();
-    json!({"swaggerVersion": "1.2", "apiVersion": "2.0.0", "basePath": "/ari", "apis": apis})
+    let base = match format {
+        DiscoveryFormat::Asterisk => "/ari",
+        DiscoveryFormat::Standard => "/rusterisk",
+    };
+    json!({"swaggerVersion": format.version(), "apiVersion": "2.0.0", "basePath": base, "apis": apis})
 }

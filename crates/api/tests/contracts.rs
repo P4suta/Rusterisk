@@ -1,4 +1,5 @@
 use rusterisk_api::{openapi, swagger, ChannelId, Event, EventKind, OPERATIONS};
+use rusterisk_api::{resources_for, swagger_for, DiscoveryFormat};
 
 #[test]
 fn identifiers_are_bounded_path_segments() {
@@ -7,6 +8,50 @@ fn identifiers_are_bounded_path_segments() {
     }
     assert!(ChannelId::try_from("a".repeat(129)).is_err());
     assert!(ChannelId::try_from("custom-channel_123.45".to_owned()).is_ok());
+}
+
+#[test]
+fn discovery_formats_preserve_asterisk_lists_and_standard_array_types(
+) -> Result<(), rusterisk_api::SwaggerError> {
+    for format in [DiscoveryFormat::Asterisk, DiscoveryFormat::Standard] {
+        let document = swagger_for("channels", format)?;
+        let apis = document["apis"]
+            .as_array()
+            .ok_or_else(|| rusterisk_api::SwaggerError::Schema("apis".into()))?;
+        let operations = apis
+            .iter()
+            .find(|api| api["path"] == "/channels")
+            .and_then(|api| api["operations"].as_array())
+            .ok_or_else(|| rusterisk_api::SwaggerError::Schema("channels".into()))?;
+        let list = operations
+            .iter()
+            .find(|operation| operation["nickname"] == "list")
+            .ok_or_else(|| rusterisk_api::SwaggerError::Schema("list".into()))?;
+        match format {
+            DiscoveryFormat::Asterisk => {
+                assert_eq!(document["swaggerVersion"], "1.1");
+                assert_eq!(list["responseClass"], "List[Channel]");
+                assert!(list.get("type").is_none());
+                assert_eq!(list["httpMethod"], "GET");
+            }
+            DiscoveryFormat::Standard => {
+                assert_eq!(document["swaggerVersion"], "1.2");
+                assert_eq!(list["type"], "array");
+                assert_eq!(list["items"]["$ref"], "Channel");
+                assert_eq!(list["method"], "GET");
+                assert!(list["responseMessages"]
+                    .as_array()
+                    .is_some_and(|messages| messages
+                        .iter()
+                        .all(|message| message["message"].is_string())));
+            }
+        }
+        assert_eq!(
+            resources_for(format)["swaggerVersion"],
+            document["swaggerVersion"]
+        );
+    }
+    Ok(())
 }
 
 #[test]
