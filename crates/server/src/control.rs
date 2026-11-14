@@ -120,6 +120,7 @@ pub enum Effect {
         key: CallKey,
         endpoint: String,
         caller: String,
+        timeout: u32,
     },
     Release {
         key: CallKey,
@@ -141,6 +142,7 @@ pub enum Milestone {
 #[derive(Clone, Debug)]
 pub enum Signal {
     Milestone { key: CallKey, milestone: Milestone },
+    Terminated { key: CallKey, cause: u16 },
 }
 
 #[derive(Debug)]
@@ -360,6 +362,7 @@ impl Control {
                     },
                     endpoint,
                     caller,
+                    timeout,
                 });
                 self.channels.insert(
                     id,
@@ -576,10 +579,13 @@ impl Control {
             timestamp,
             EventKind::ChannelDestroyed {
                 cause,
-                cause_txt: if cause == 16 {
-                    "Normal Clearing"
-                } else {
-                    "No Answer"
+                cause_txt: match cause {
+                    16 => "Normal Clearing",
+                    17 => "User busy",
+                    19 => "User alerting, no answer",
+                    21 => "Call Rejected",
+                    102 => "Recover on timer expiry",
+                    _ => "Unknown",
                 }
                 .into(),
                 channel: entry.snapshot,
@@ -590,6 +596,19 @@ impl Control {
 
     pub fn signal(&mut self, signal: Signal, timestamp: &str) -> Result<Outcome, ControlError> {
         match signal {
+            Signal::Terminated { key, cause } => {
+                if self
+                    .channels
+                    .get(&key.id)
+                    .is_some_and(|entry| entry.call.generation() == key.generation)
+                {
+                    self.end(&key.id, timestamp, cause)
+                } else {
+                    let mut outcome = Outcome::empty();
+                    outcome.effects.push(Effect::Release { key });
+                    Ok(outcome)
+                }
+            }
             Signal::Milestone { key, milestone } => {
                 let Some(entry) = self.channels.get(&key.id) else {
                     let mut outcome = Outcome::empty();

@@ -136,6 +136,14 @@ impl Controller {
         self.shutdown.send_replace(true);
     }
 
+    pub fn shutdown_signal(&self) -> watch::Receiver<bool> {
+        self.shutdown.subscribe()
+    }
+
+    pub fn is_stopping(&self) -> bool {
+        *self.shutdown.borrow()
+    }
+
     pub async fn signal(&self, signal: Signal) -> Result<(), ControlError> {
         self.signals
             .try_send(signal)
