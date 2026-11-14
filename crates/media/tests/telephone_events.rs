@@ -1,5 +1,8 @@
-use rusterisk_core::DtmfDigit;
-use rusterisk_media::{MediaError, RtpPacket, TelephoneEvent, TelephoneReceiver};
+use rusterisk_core::{DtmfDigit, DtmfTone};
+use rusterisk_media::{
+    AudioFormat, Frame, MediaError, RtpPacket, RtpSender, TelephoneEvent, TelephoneReceiver,
+    TelephoneSender,
+};
 
 #[test]
 fn telephone_event_payloads_match_wire_bytes_and_ignore_the_reserved_receive_bit(
@@ -125,5 +128,153 @@ fn a_new_digit_closes_an_incomplete_event_and_invalid_packets_claim_no_source(
     assert_eq!(tones[1].digit, DtmfDigit::B);
     assert_eq!(tones[1].duration_ms, 40);
     assert!(receiver.expire(1000)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn telephone_transmission_shares_matching_clocks_and_repeats_the_final_report(
+) -> Result<(), MediaError> {
+    let mut audio = RtpSender::new(
+        AudioFormat::Pcmu,
+        0,
+        [0, 0, 0, 7, 255, 254, 255, 255, 255, 155],
+    )?;
+    let mut events = TelephoneSender::new(&audio, 101, 8000, [0; 10])?;
+    let first = audio.packet(Frame::new(&[0; 160], 8000)?)?;
+    assert_eq!(first.sequence(), 65534);
+    events.start(
+        DtmfTone {
+            digit: DtmfDigit::Hash,
+            duration_ms: 60,
+        },
+        0,
+        &audio,
+    )?;
+    assert!(events
+        .start(
+            DtmfTone {
+                digit: DtmfDigit::One,
+                duration_ms: 20
+            },
+            0,
+            &audio
+        )
+        .is_err());
+    assert!(events.poll(19, &mut audio)?.is_empty());
+    let packets = events.poll(20, &mut audio)?;
+    assert_eq!(packets.len(), 1);
+    assert_eq!(packets[0].sequence(), 65535);
+    assert_eq!(packets[0].ssrc(), 7);
+    assert_eq!(packets[0].timestamp(), 59);
+    assert!(packets[0].marker());
+    assert_eq!(TelephoneEvent::parse(packets[0].payload())?.duration(), 160);
+    assert_eq!(audio.packet(Frame::new(&[0; 160], 8000)?)?.sequence(), 0);
+    assert_eq!(events.poll(40, &mut audio)?[0].sequence(), 1);
+    let final_packet = events.poll(60, &mut audio)?;
+    assert!(events.ready());
+    for (index, now) in [60, 80, 100].into_iter().enumerate() {
+        let copies = if index == 0 {
+            final_packet.clone()
+        } else {
+            events.poll(now, &mut audio)?
+        };
+        assert_eq!(copies.len(), 1);
+        assert_eq!(copies[0].sequence(), 2 + index as u16);
+        assert_eq!(copies[0].timestamp(), 59);
+        assert!(!copies[0].marker());
+        let payload = TelephoneEvent::parse(copies[0].payload())?;
+        assert!(payload.ended());
+        assert_eq!(payload.duration(), 480);
+    }
+    assert!(events.poll(120, &mut audio)?.is_empty());
+    events.start(
+        DtmfTone {
+            digit: DtmfDigit::One,
+            duration_ms: 20,
+        },
+        120,
+        &audio,
+    )?;
+    events.cancel();
+    assert!(events.poll(1000, &mut audio)?.is_empty());
+    assert!(events
+        .start(
+            DtmfTone {
+                digit: DtmfDigit::One,
+                duration_ms: 0
+            },
+            1000,
+            &audio
+        )
+        .is_err());
+    Ok(())
+}
+
+#[test]
+fn different_event_clocks_use_distinct_sources_and_long_tones_span_segments(
+) -> Result<(), MediaError> {
+    let mut audio = RtpSender::new(AudioFormat::Opus, 111, [0; 10])?;
+    let mut separate = TelephoneSender::new(&audio, 101, 8000, [0; 10])?;
+    separate.start(
+        DtmfTone {
+            digit: DtmfDigit::A,
+            duration_ms: 20,
+        },
+        100,
+        &audio,
+    )?;
+    let packets = separate.poll(120, &mut audio)?;
+    assert_ne!(packets[0].ssrc(), 0);
+    assert_eq!(packets[0].timestamp(), 800);
+    assert_eq!(TelephoneEvent::parse(packets[0].payload())?.duration(), 160);
+    assert_eq!(audio.packet(Frame::new(&[0; 960], 48000)?)?.sequence(), 0);
+
+    let mut events = TelephoneSender::new(&audio, 102, 48000, [0; 10])?;
+    let mut receiver = TelephoneReceiver::new(102, 48000)?;
+    events.start(
+        DtmfTone {
+            digit: DtmfDigit::D,
+            duration_ms: 5000,
+        },
+        0,
+        &audio,
+    )?;
+    let mut received = Vec::new();
+    for now in [20, 1400, 2800, 4200, 5000, 5020, 5040] {
+        let packets = events.poll(now, &mut audio)?;
+        assert!(packets.len() <= 4);
+        for packet in packets {
+            received.extend(receiver.push(&packet, now)?.into_tones());
+        }
+    }
+    assert_eq!(
+        received,
+        [DtmfTone {
+            digit: DtmfDigit::D,
+            duration_ms: 5000
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn short_tones_cannot_overfill_the_terminal_repetition_queue() -> Result<(), MediaError> {
+    let mut audio = RtpSender::new(AudioFormat::Pcmu, 0, [0; 10])?;
+    let mut events = TelephoneSender::new(&audio, 101, 8000, [1; 10])?;
+    let tone = DtmfTone {
+        digit: DtmfDigit::One,
+        duration_ms: 1,
+    };
+    events.start(tone, 0, &audio)?;
+    assert_eq!(events.poll(1, &mut audio)?.len(), 1);
+    events.start(tone, 1, &audio)?;
+    assert_eq!(events.poll(2, &mut audio)?.len(), 1);
+    assert!(!events.ready());
+    assert!(events.start(tone, 2, &audio).is_err());
+    assert_eq!(events.poll(22, &mut audio)?.len(), 2);
+    assert_eq!(events.poll(42, &mut audio)?.len(), 2);
+    assert!(events.ready());
+    events.start(tone, 42, &audio)?;
+    assert_eq!(events.poll(43, &mut audio)?.len(), 1);
     Ok(())
 }

@@ -1,4 +1,5 @@
-use crate::{MediaError, RtpPacket};
+use crate::streams::PacketClock;
+use crate::{MediaError, RtpPacket, RtpSender};
 use rusterisk_core::{DtmfDigit, DtmfTone};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -221,5 +222,179 @@ impl TelephoneReceiver {
             self.active = Some(current);
         }
         Ok(output)
+    }
+}
+
+enum EventSource {
+    Shared,
+    Separate(PacketClock),
+}
+
+struct Transmission {
+    tone: DtmfTone,
+    started: u64,
+    timestamp: u32,
+    segment: u32,
+    next: u64,
+    first: bool,
+}
+
+struct Ending {
+    payload: [u8; 4],
+    timestamp: u32,
+    remaining: u8,
+    next: u64,
+}
+
+pub struct TelephoneSender {
+    payload_type: u8,
+    rate: u32,
+    source: EventSource,
+    active: Option<Transmission>,
+    endings: Vec<Ending>,
+}
+
+impl TelephoneSender {
+    pub fn new(
+        audio: &RtpSender,
+        payload_type: u8,
+        rate: u32,
+        seed: [u8; 10],
+    ) -> Result<Self, MediaError> {
+        if payload_type > 127 || !matches!(rate, 8000 | 48000) {
+            return Err(MediaError::Unsupported);
+        }
+        let source = if audio.rate() == rate {
+            EventSource::Shared
+        } else {
+            let mut clock = PacketClock::new(seed);
+            if clock.ssrc == audio.clock.ssrc {
+                clock.ssrc ^= 1;
+            }
+            EventSource::Separate(clock)
+        };
+        Ok(Self {
+            payload_type,
+            rate,
+            source,
+            active: None,
+            endings: Vec::with_capacity(2),
+        })
+    }
+
+    pub fn ready(&self) -> bool {
+        self.active.is_none() && self.endings.len() < 2
+    }
+
+    pub fn cancel(&mut self) {
+        self.active = None;
+        self.endings.clear();
+    }
+
+    pub fn start(&mut self, tone: DtmfTone, now: u64, audio: &RtpSender) -> Result<(), MediaError> {
+        if !self.ready() {
+            return Err(MediaError::Capacity);
+        }
+        if !(1..=5000).contains(&tone.duration_ms) {
+            return Err(MediaError::InvalidPacket);
+        }
+        now.checked_add(u64::from(tone.duration_ms) + 40)
+            .ok_or(MediaError::Capacity)?;
+        let timestamp = match &self.source {
+            EventSource::Shared => audio.clock.timestamp,
+            EventSource::Separate(clock) => clock
+                .timestamp
+                .wrapping_add(now.wrapping_mul(u64::from(self.rate) / 1000) as u32),
+        };
+        self.active = Some(Transmission {
+            tone,
+            started: now,
+            timestamp,
+            segment: 0,
+            next: now + u64::from(tone.duration_ms.min(20)),
+            first: true,
+        });
+        Ok(())
+    }
+
+    fn packet(
+        &mut self,
+        audio: &mut RtpSender,
+        timestamp: u32,
+        marker: bool,
+        payload: &[u8; 4],
+    ) -> Result<RtpPacket, MediaError> {
+        match &mut self.source {
+            EventSource::Shared => &mut audio.clock,
+            EventSource::Separate(clock) => clock,
+        }
+        .packet(self.payload_type, timestamp, marker, payload)
+    }
+
+    pub fn poll(&mut self, now: u64, audio: &mut RtpSender) -> Result<Vec<RtpPacket>, MediaError> {
+        let mut packets = Vec::with_capacity(4);
+        let mut index = 0;
+        while index < self.endings.len() {
+            if now < self.endings[index].next {
+                index += 1;
+                continue;
+            }
+            let next = now.checked_add(20).ok_or(MediaError::Capacity)?;
+            let timestamp = self.endings[index].timestamp;
+            let payload = self.endings[index].payload;
+            packets.push(self.packet(audio, timestamp, false, &payload)?);
+            self.endings[index].remaining -= 1;
+            self.endings[index].next = next;
+            if self.endings[index].remaining == 0 {
+                self.endings.remove(index);
+            } else {
+                index += 1;
+            }
+        }
+        let Some(mut active) = self.active.take() else {
+            return Ok(packets);
+        };
+        if now < active.next {
+            self.active = Some(active);
+            return Ok(packets);
+        }
+        let next = now.checked_add(20).ok_or(MediaError::Capacity)?;
+        let elapsed = now
+            .saturating_sub(active.started)
+            .min(u64::from(active.tone.duration_ms));
+        let ticks = (elapsed * u64::from(self.rate) / 1000) as u32;
+        let segment = ticks.saturating_sub(1) / u32::from(u16::MAX) * u32::from(u16::MAX);
+        if segment != active.segment {
+            let payload = TelephoneEvent::new(active.tone.digit, false, 10, u16::MAX)?.encode();
+            packets.push(self.packet(
+                audio,
+                active.timestamp.wrapping_add(active.segment),
+                active.first,
+                &payload,
+            )?);
+            active.first = false;
+            active.segment = segment;
+        }
+        let ended = elapsed == u64::from(active.tone.duration_ms);
+        let payload =
+            TelephoneEvent::new(active.tone.digit, ended, 10, (ticks - segment) as u16)?.encode();
+        let timestamp = active.timestamp.wrapping_add(segment);
+        packets.push(self.packet(audio, timestamp, active.first, &payload)?);
+        if ended {
+            if self.endings.len() >= 2 {
+                return Err(MediaError::Capacity);
+            }
+            self.endings.push(Ending {
+                payload,
+                timestamp,
+                remaining: 2,
+                next,
+            });
+        } else {
+            active.next = next;
+            active.first = false;
+            self.active = Some(active);
+        }
+        Ok(packets)
     }
 }

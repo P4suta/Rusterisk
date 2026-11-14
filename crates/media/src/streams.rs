@@ -80,10 +80,37 @@ pub struct RtpSender {
     format: AudioFormat,
     codec: Codec,
     payload_type: u8,
-    ssrc: u32,
-    sequence: u16,
-    timestamp: u32,
+    pub(crate) clock: PacketClock,
     first: bool,
+}
+
+pub(crate) struct PacketClock {
+    pub(crate) ssrc: u32,
+    sequence: u16,
+    pub(crate) timestamp: u32,
+}
+
+impl PacketClock {
+    pub(crate) fn new(seed: [u8; 10]) -> Self {
+        Self {
+            ssrc: u32::from_be_bytes([seed[0], seed[1], seed[2], seed[3]]),
+            sequence: u16::from_be_bytes([seed[4], seed[5]]),
+            timestamp: u32::from_be_bytes([seed[6], seed[7], seed[8], seed[9]]),
+        }
+    }
+
+    pub(crate) fn packet(
+        &mut self,
+        payload_type: u8,
+        timestamp: u32,
+        marker: bool,
+        payload: &[u8],
+    ) -> Result<RtpPacket, MediaError> {
+        let packet = RtpPacket::new(payload_type, self.sequence, timestamp, self.ssrc, payload)?
+            .with_marker(marker);
+        self.sequence = self.sequence.wrapping_add(1);
+        Ok(packet)
+    }
 }
 
 impl RtpSender {
@@ -95,9 +122,7 @@ impl RtpSender {
             format,
             codec: Codec::new(format)?,
             payload_type,
-            ssrc: u32::from_be_bytes([seed[0], seed[1], seed[2], seed[3]]),
-            sequence: u16::from_be_bytes([seed[4], seed[5]]),
-            timestamp: u32::from_be_bytes([seed[6], seed[7], seed[8], seed[9]]),
+            clock: PacketClock::new(seed),
             first: true,
         })
     }
@@ -105,18 +130,22 @@ impl RtpSender {
     pub fn packet(&mut self, frame: Frame) -> Result<RtpPacket, MediaError> {
         let samples = frame.resample(self.format.rate())?;
         let payload = self.codec.encode(samples)?;
-        let packet = RtpPacket::new(
+        let packet = self.clock.packet(
             self.payload_type,
-            self.sequence,
-            self.timestamp,
-            self.ssrc,
+            self.clock.timestamp,
+            self.first,
             &payload,
-        )?
-        .with_marker(self.first);
+        )?;
         self.first = false;
-        self.sequence = self.sequence.wrapping_add(1);
-        self.timestamp = self.timestamp.wrapping_add(samples.samples().len() as u32);
+        self.clock.timestamp = self
+            .clock
+            .timestamp
+            .wrapping_add(samples.samples().len() as u32);
         Ok(packet)
+    }
+
+    pub(crate) const fn rate(&self) -> u32 {
+        self.format.rate()
     }
 }
 
