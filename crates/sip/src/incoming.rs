@@ -263,7 +263,7 @@ impl Engine {
         peer: SocketAddr,
         now: u64,
     ) -> Result<Option<DialogReply>, SipError> {
-        if request.method != Method::Bye {
+        if !matches!(request.method, Method::Bye | Method::Info) {
             return Ok(None);
         }
         let Some(dialog) = self.incoming.get_mut(request.call_id_header()?.value()) else {
@@ -287,6 +287,19 @@ impl Engine {
                 "",
                 "",
             )?)));
+        }
+        if request.method == Method::Info {
+            if matches!(dialog.state, State::Terminated { .. }) {
+                return Ok(Some(DialogReply::Rejected(response(
+                    request,
+                    481,
+                    "Call/Transaction Does Not Exist",
+                    "",
+                    "",
+                )?)));
+            }
+            dialog.remote_cseq = sequence;
+            return crate::info::receive(request, &dialog.invite.id, dialog.generation).map(Some);
         }
         let events = match dialog.state {
             State::AwaitingAck { .. } | State::Established => [SipEvent::Ended {

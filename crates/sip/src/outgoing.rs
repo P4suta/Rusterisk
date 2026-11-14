@@ -672,13 +672,13 @@ impl Engine {
         })
     }
 
-    pub(crate) fn outgoing_bye(
+    pub(crate) fn outgoing_request(
         &mut self,
         request: &Request,
         peer: SocketAddr,
         now: u64,
     ) -> Result<Option<DialogReply>, SipError> {
-        if request.method != Method::Bye {
+        if !matches!(request.method, Method::Bye | Method::Info) {
             return Ok(None);
         }
         let Some(dialog) = self.outgoing.get_mut(request.call_id_header()?.value()) else {
@@ -712,6 +712,18 @@ impl Engine {
             )?)));
         }
         dialog.remote_cseq = Some(sequence);
+        if request.method == Method::Info {
+            if !matches!(dialog.state, State::Established(_)) {
+                return Ok(Some(DialogReply::Rejected(crate::response(
+                    request,
+                    481,
+                    "Call/Transaction Does Not Exist",
+                    "",
+                    "",
+                )?)));
+            }
+            return crate::info::receive(request, &dialog.id, dialog.generation).map(Some);
+        }
         let mut events = Vec::new();
         match dialog.state {
             State::Established(_) => events.push(SipEvent::Ended {

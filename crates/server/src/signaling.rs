@@ -179,6 +179,19 @@ impl Signaling {
         self.transmit(listener, output.datagrams).await?;
         for event in output.events {
             match event {
+                SipEvent::DtmfReceived {
+                    id,
+                    generation,
+                    digit,
+                    duration_ms,
+                } => {
+                    self.notify(Signal::DtmfReceived {
+                        key: key(id, generation)?,
+                        digit,
+                        duration_ms,
+                    })
+                    .await?;
+                }
                 SipEvent::Ringing { id, generation } => {
                     self.notify(Signal::Milestone {
                         key: key(id, generation)?,

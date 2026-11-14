@@ -1887,6 +1887,7 @@ dependencies = [
  "getrandom 0.4.3",
  "rsipstack",
  "rusterisk-config",
+ "rusterisk-core",
  "sha2",
  "subtle",
  "tokio",

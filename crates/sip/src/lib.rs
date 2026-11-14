@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use subtle::ConstantTimeEq;
 mod incoming;
+mod info;
 mod outgoing;
 mod transactions;
 pub use incoming::RejectReason;
@@ -208,6 +209,12 @@ impl Session {
 }
 
 pub enum SipEvent {
+    DtmfReceived {
+        id: String,
+        generation: u64,
+        digit: rusterisk_core::DtmfDigit,
+        duration_ms: u32,
+    },
     Ringing {
         id: String,
         generation: u64,
@@ -557,7 +564,7 @@ impl Engine {
         if request.method == Method::Cancel {
             return self.incoming_cancel(key, request, peer, now);
         }
-        if let Some(reply) = self.outgoing_bye(&request, peer, now)? {
+        if let Some(reply) = self.outgoing_request(&request, peer, now)? {
             match reply {
                 DialogReply::Accepted { bytes, events } => {
                     return self.cache_reply(key, request, peer, now, bytes, events);

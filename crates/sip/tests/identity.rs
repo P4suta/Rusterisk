@@ -328,7 +328,8 @@ fn rejected_invites_release_admission_and_retransmit_the_tagged_final_response(
     let (incoming, wire, _) = authenticated_invite(&mut engine)?;
     let id = match &incoming.events[0] {
         SipEvent::Incoming { id, .. } => id.clone(),
-        SipEvent::Ringing { .. }
+        SipEvent::DtmfReceived { .. }
+        | SipEvent::Ringing { .. }
         | SipEvent::Answered { .. }
         | SipEvent::Ended { .. }
         | SipEvent::IncomingEnded { .. } => return Err(SipError::InvalidPacket),
@@ -363,7 +364,8 @@ fn incoming_id(output: &rusterisk_sip::Output) -> Result<String, SipError> {
     match output.events.first() {
         Some(SipEvent::Incoming { id, .. }) => Ok(id.clone()),
         Some(
-            SipEvent::Ringing { .. }
+            SipEvent::DtmfReceived { .. }
+            | SipEvent::Ringing { .. }
             | SipEvent::Answered { .. }
             | SipEvent::Ended { .. }
             | SipEvent::IncomingEnded { .. },
@@ -700,5 +702,57 @@ fn pending_invitations_keep_their_last_response_until_a_final_decision() -> Resu
     assert!(engine.receive(wire.as_bytes(), peer, 64006)?.datagrams[0]
         .bytes
         .starts_with(b"SIP/2.0 401"));
+    Ok(())
+}
+
+#[test]
+fn incoming_info_reports_each_valid_digit_once_and_checks_dialog_ownership() -> Result<(), SipError>
+{
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (incoming, _, _) = authenticated_invite(&mut engine)?;
+    let id = incoming_id(&incoming)?;
+    let answer = engine.answer(&id, 9, "127.0.0.1:10000".parse()?, 10)?;
+    let info = incoming_request(&answer.datagrams[0].bytes, "INFO", 3)?;
+    let info = std::str::from_utf8(&info)?.replace("Content-Length: 0\r\n\r\n", "Content-Type: application/dtmf-relay\r\nContent-Length: 24\r\n\r\nSignal=5\r\nDuration=100\r\n");
+    let refused = engine.receive(info.as_bytes(), "127.0.0.1:5062".parse()?, 11)?;
+    assert!(refused.events.is_empty());
+    assert!(refused.datagrams[0].bytes.starts_with(b"SIP/2.0 481"));
+    let received = engine.receive(info.as_bytes(), peer, 12)?;
+    assert!(received.datagrams[0].bytes.starts_with(b"SIP/2.0 200"));
+    assert!(matches!(
+        &received.events[0],
+        SipEvent::DtmfReceived {
+            generation: 9,
+            digit: rusterisk_core::DtmfDigit::Five,
+            duration_ms: 100,
+            ..
+        }
+    ));
+    assert!(engine.receive(info.as_bytes(), peer, 13)?.events.is_empty());
+    Ok(())
+}
+
+#[test]
+fn empty_info_is_acknowledged_without_a_body_type_and_unknown_bodies_are_refused(
+) -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (incoming, _, _) = authenticated_invite(&mut engine)?;
+    let id = incoming_id(&incoming)?;
+    let answer = engine.answer(&id, 9, "127.0.0.1:10000".parse()?, 10)?;
+    let empty = incoming_request(&answer.datagrams[0].bytes, "INFO", 3)?;
+    let received = engine.receive(&empty, peer, 11)?;
+    assert!(received.events.is_empty());
+    assert!(received.datagrams[0].bytes.starts_with(b"SIP/2.0 200"));
+    let unknown = incoming_request(&answer.datagrams[0].bytes, "INFO", 4)?;
+    let unknown = std::str::from_utf8(&unknown)?.replace(
+        "Content-Length: 0\r\n\r\n",
+        "Content-Type: text/plain\r\nContent-Length: 7\r\n\r\nunknown",
+    );
+    let refused = engine.receive(unknown.as_bytes(), peer, 12)?;
+    assert!(refused.events.is_empty());
+    assert!(refused.datagrams[0].bytes.starts_with(b"SIP/2.0 415"));
+    assert!(engine.active_session(&id, 9).is_some());
     Ok(())
 }
