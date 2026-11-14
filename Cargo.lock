@@ -1839,6 +1839,7 @@ dependencies = [
  "opus",
  "rtcp-types",
  "rtp",
+ "rusterisk-core",
  "webrtc-srtp",
  "webrtc-util",
 ]

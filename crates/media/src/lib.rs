@@ -2,8 +2,10 @@ use bytes::Bytes;
 use webrtc_util::marshal::{Marshal, Unmarshal};
 mod mixing;
 mod streams;
+mod telephone_events;
 pub use mixing::{Gate, Mixer};
 pub use streams::{AudioFormat, RtpReceiver, RtpSender};
+pub use telephone_events::TelephoneEvent;
 
 pub const MAX_SAMPLES: usize = 960;
 pub const MAX_PACKET: usize = 1500;

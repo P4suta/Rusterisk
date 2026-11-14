@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+rusterisk-core = { version = "0.1.0", path = "../core" }
 bytes = "1.11.1"
 rtp = { version = "=0.13.0", git = "https://github.com/webrtc-rs/webrtc", rev = "4405c7ec7c6cce5815ebde8ae20e7630bdaf4327" }
 rtcp-types = "=0.3.0"
