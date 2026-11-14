@@ -1,0 +1,19 @@
+[package]
+name = "rusterisk-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes = "1.11.1"
+rtp = { version = "=0.13.0", git = "https://github.com/webrtc-rs/webrtc", rev = "4405c7ec7c6cce5815ebde8ae20e7630bdaf4327" }
+rtcp-types = "=0.3.0"
+webrtc-srtp = { version = "=0.15.0", git = "https://github.com/webrtc-rs/webrtc", rev = "4405c7ec7c6cce5815ebde8ae20e7630bdaf4327" }
+webrtc-util = { version = "=0.11.0", git = "https://github.com/webrtc-rs/webrtc", rev = "4405c7ec7c6cce5815ebde8ae20e7630bdaf4327", default-features = false, features = [
+  "marshal",
+] }
+opus = "=0.4.0"
+
+[lints]
+workspace = true

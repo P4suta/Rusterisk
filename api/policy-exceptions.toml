@@ -1,1 +1,6 @@
-exceptions = []
+[[exceptions]]
+path = "crates/media/src/lib.rs"
+item = "AudioSocket"
+lint = "clippy::large_enum_variant"
+adr = "docs/adr/serialize-call-decisions-in-a-pure-core.md"
+rationale = "Keep bounded frames inline."
