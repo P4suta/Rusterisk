@@ -165,7 +165,7 @@ fn telephone_transmission_shares_matching_clocks_and_repeats_the_final_report(
     assert_eq!(packets.len(), 1);
     assert_eq!(packets[0].sequence(), 65535);
     assert_eq!(packets[0].ssrc(), 7);
-    assert_eq!(packets[0].timestamp(), 59);
+    assert_eq!(packets[0].timestamp(), first.timestamp());
     assert!(packets[0].marker());
     assert_eq!(TelephoneEvent::parse(packets[0].payload())?.duration(), 160);
     assert_eq!(audio.packet(Frame::new(&[0; 160], 8000)?)?.sequence(), 0);
@@ -180,7 +180,7 @@ fn telephone_transmission_shares_matching_clocks_and_repeats_the_final_report(
         };
         assert_eq!(copies.len(), 1);
         assert_eq!(copies[0].sequence(), 2 + index as u16);
-        assert_eq!(copies[0].timestamp(), 59);
+        assert_eq!(copies[0].timestamp(), first.timestamp());
         assert!(!copies[0].marker());
         let payload = TelephoneEvent::parse(copies[0].payload())?;
         assert!(payload.ended());
@@ -276,5 +276,28 @@ fn short_tones_cannot_overfill_the_terminal_repetition_queue() -> Result<(), Med
     assert!(events.ready());
     events.start(tone, 42, &audio)?;
     assert_eq!(events.poll(43, &mut audio)?.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn repeated_digits_have_distinct_start_times_while_audio_is_silent() -> Result<(), MediaError> {
+    let mut audio = RtpSender::new(AudioFormat::Pcmu, 0, [0; 10])?;
+    let mut events = TelephoneSender::new(&audio, 101, 8000, [1; 10])?;
+    let mut receiver = TelephoneReceiver::new(101, 8000)?;
+    let tone = DtmfTone {
+        digit: DtmfDigit::One,
+        duration_ms: 20,
+    };
+    let mut received = Vec::new();
+    for start in [0, 100] {
+        events.start(tone, start, &audio)?;
+        for now in [start + 20, start + 40, start + 60] {
+            for packet in events.poll(now, &mut audio)? {
+                assert_eq!(packet.timestamp(), start as u32 * 8);
+                received.extend(receiver.push(&packet, now)?.into_tones());
+            }
+        }
+    }
+    assert_eq!(received, [tone, tone]);
     Ok(())
 }

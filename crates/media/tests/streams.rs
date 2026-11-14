@@ -80,3 +80,17 @@ fn telephone_packets_share_sequence_numbers_without_delaying_audio() -> Result<(
     assert!(!receiver.skip(&event)?);
     Ok(())
 }
+
+#[test]
+fn transport_timestamps_follow_capture_time_across_silence_and_wrap() -> Result<(), MediaError> {
+    let mut sender = RtpSender::new(AudioFormat::Pcmu, 0, [0, 0, 0, 7, 0, 1, 255, 255, 255, 155])?;
+    let first = sender.packet_at(Frame::new(&[0; 160], 8000)?, 0)?;
+    let later = sender.packet_at(Frame::new(&[0; 160], 8000)?, 100)?;
+    assert_eq!(later.sequence(), first.sequence() + 1);
+    assert_eq!(later.timestamp(), first.timestamp().wrapping_add(800));
+    assert_eq!(
+        sender.timestamp_at(200),
+        first.timestamp().wrapping_add(1600)
+    );
+    Ok(())
+}

@@ -318,12 +318,7 @@ impl TelephoneSender {
         }
         now.checked_add(u64::from(tone.duration_ms) + 40)
             .ok_or(MediaError::Capacity)?;
-        let timestamp = match &self.source {
-            EventSource::Shared => audio.clock.timestamp,
-            EventSource::Separate(clock) => clock
-                .timestamp
-                .wrapping_add(now.wrapping_mul(u64::from(self.rate) / 1000) as u32),
-        };
+        let timestamp = self.timestamp_at(now, audio);
         self.active = Some(Transmission {
             tone,
             started: now,
@@ -333,6 +328,15 @@ impl TelephoneSender {
             first: true,
         });
         Ok(())
+    }
+
+    pub fn timestamp_at(&self, now_ms: u64, audio: &RtpSender) -> u32 {
+        match &self.source {
+            EventSource::Shared => audio.timestamp_at(now_ms),
+            EventSource::Separate(clock) => clock
+                .timestamp
+                .wrapping_add(now_ms.wrapping_mul(u64::from(self.rate) / 1000) as u32),
+        }
     }
 
     fn packet(

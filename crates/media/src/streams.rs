@@ -81,6 +81,7 @@ pub struct RtpSender {
     codec: Codec,
     payload_type: u8,
     pub(crate) clock: PacketClock,
+    timestamp_base: u32,
     first: bool,
 }
 
@@ -123,24 +124,32 @@ impl RtpSender {
             codec: Codec::new(format)?,
             payload_type,
             clock: PacketClock::new(seed),
+            timestamp_base: u32::from_be_bytes([seed[6], seed[7], seed[8], seed[9]]),
             first: true,
         })
     }
 
     pub fn packet(&mut self, frame: Frame) -> Result<RtpPacket, MediaError> {
+        self.encode_packet(frame, self.clock.timestamp)
+    }
+
+    pub fn packet_at(&mut self, frame: Frame, now_ms: u64) -> Result<RtpPacket, MediaError> {
+        self.encode_packet(frame, self.timestamp_at(now_ms))
+    }
+
+    pub const fn timestamp_at(&self, now_ms: u64) -> u32 {
+        self.timestamp_base
+            .wrapping_add(now_ms.wrapping_mul(self.format.rate() as u64 / 1000) as u32)
+    }
+
+    fn encode_packet(&mut self, frame: Frame, timestamp: u32) -> Result<RtpPacket, MediaError> {
         let samples = frame.resample(self.format.rate())?;
         let payload = self.codec.encode(samples)?;
-        let packet = self.clock.packet(
-            self.payload_type,
-            self.clock.timestamp,
-            self.first,
-            &payload,
-        )?;
-        self.first = false;
-        self.clock.timestamp = self
+        let packet = self
             .clock
-            .timestamp
-            .wrapping_add(samples.samples().len() as u32);
+            .packet(self.payload_type, timestamp, self.first, &payload)?;
+        self.first = false;
+        self.clock.timestamp = timestamp.wrapping_add(samples.samples().len() as u32);
         Ok(packet)
     }
 
