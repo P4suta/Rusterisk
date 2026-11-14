@@ -73,12 +73,14 @@ async fn incoming_admission_publishes_stasis_before_reply_and_http_answer_waits_
             ("POST", "/ari/channels/incoming/mute?direction=both", AudioGate::Closed),
             ("DELETE", "/ari/channels/incoming/mute?direction=out", AudioGate::IncomingMuted),
             ("DELETE", "/ari/channels/incoming/mute?direction=in", AudioGate::Open),
+            ("POST", "/ari/channels/incoming/mute", AudioGate::Closed),
+            ("DELETE", "/ari/channels/incoming/mute", AudioGate::Open),
         ] {
             let response = router(controller.clone()).oneshot(http_request(method, path)?).await.map_err(failure)?;
             assert_eq!(response.status(), StatusCode::NO_CONTENT, "{path}");
             assert!(matches!(effects.try_recv().map_err(failure)?, Effect::Gate { gate, .. } if gate == expected));
         }
-        for path in ["/ari/channels/incoming/mute", "/ari/channels/incoming/mute?direction=unknown"] {
+        for path in ["/ari/channels/incoming/mute?direction=", "/ari/channels/incoming/mute?direction=unknown"] {
             let response = router(controller.clone()).oneshot(http_request("POST", path)?).await.map_err(failure)?;
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
         }

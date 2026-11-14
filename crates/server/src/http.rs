@@ -119,7 +119,11 @@ fn optional_id(
 }
 
 fn mute_direction(parameters: &BTreeMap<String, String>) -> Result<MuteDirection, ControlError> {
-    match required(parameters, "direction")? {
+    match parameters
+        .get("direction")
+        .map(String::as_str)
+        .unwrap_or("both")
+    {
         "in" => Ok(MuteDirection::Incoming),
         "out" => Ok(MuteDirection::Outgoing),
         "both" => Ok(MuteDirection::Both),
