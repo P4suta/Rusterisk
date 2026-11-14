@@ -219,3 +219,47 @@ fn repeated_late_answers_keep_the_original_invite_sequence_in_ack() -> Result<()
     }
     Ok(())
 }
+
+#[test]
+fn remote_hangup_requires_the_negotiated_peer_and_dialog_tags() -> Result<(), SipError> {
+    let mut config = config()?;
+    config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+    let mut engine = Engine::new(config, [9; 32]);
+    let wire = engine.originate(outbound(), 0)?.datagrams.remove(0).bytes;
+    let invite = request(&wire)?;
+    engine.receive(&answered(&wire)?, "127.0.0.1:5061".parse()?, 1)?;
+    let bye = format!("BYE sip:rusterisk@127.0.0.1:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-remote-bye\r\nFrom: {};tag=callee\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 1 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", invite.to_header()?.value(), invite.from_header()?.value(), invite.call_id_header()?.value());
+    for (packet, peer) in [
+        (&bye, "127.0.0.1:5999"),
+        (&bye.replace("tag=callee", "tag=intruder"), "127.0.0.1:5061"),
+    ] {
+        let rejected = engine.receive(packet.as_bytes(), peer.parse()?, 2)?;
+        assert!(rejected.events.is_empty());
+        assert!(rejected.datagrams[0].bytes.starts_with(b"SIP/2.0 481"));
+    }
+    let ended = engine.receive(bye.as_bytes(), "127.0.0.1:5061".parse()?, 3)?;
+    assert!(ended.datagrams[0].bytes.starts_with(b"SIP/2.0 200"));
+    assert!(matches!(
+        ended.events.as_slice(),
+        [SipEvent::Ended {
+            generation: 7,
+            cause: 16,
+            ..
+        }]
+    ));
+    let repeated = engine.receive(bye.as_bytes(), "127.0.0.1:5061".parse()?, 4)?;
+    assert!(repeated.events.is_empty());
+    assert_eq!(repeated.datagrams[0].bytes, ended.datagrams[0].bytes);
+    Ok(())
+}
+
+#[test]
+fn acknowledgements_never_receive_a_response() -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [9; 32]);
+    let ack = invite("", 1).replace("INVITE", "ACK");
+    assert!(engine
+        .receive(ack.as_bytes(), "127.0.0.1:5061".parse()?, 0)?
+        .datagrams
+        .is_empty());
+    Ok(())
+}

@@ -235,6 +235,14 @@ pub struct Output {
     pub events: Vec<SipEvent>,
 }
 
+enum DialogReply {
+    Accepted {
+        bytes: Vec<u8>,
+        events: Vec<SipEvent>,
+    },
+    Rejected(Vec<u8>),
+}
+
 impl Output {
     fn response(peer: SocketAddr, bytes: Vec<u8>) -> Self {
         Self {
@@ -431,12 +439,19 @@ impl Engine {
             SipMessage::Response(response) => return self.receive_response(response, peer, now),
         };
         if request.headers.iter().count() > 64
+            || request.cseq_header()?.typed()?.method != request.method
             || request
                 .headers
                 .iter()
                 .any(|header| header.value().contains(['\r', '\n']))
         {
             return Err(SipError::InvalidPacket);
+        }
+        if request.method == Method::Ack {
+            return Ok(Output {
+                datagrams: Vec::new(),
+                events: Vec::new(),
+            });
         }
         let key = format!(
             "{peer}:{}:{}:{}",
@@ -458,6 +473,14 @@ impl Engine {
                 peer,
                 response(&request, 503, "Service Unavailable", "", "")?,
             ));
+        }
+        if let Some(reply) = self.outgoing_bye(&request, peer, now)? {
+            match reply {
+                DialogReply::Accepted { bytes, events } => {
+                    return Ok(self.cache_reply(key, request, peer, now, bytes, events));
+                }
+                DialogReply::Rejected(bytes) => return Ok(Output::response(peer, bytes)),
+            }
         }
         let mut events = Vec::new();
         let reply = match request.method {
@@ -567,9 +590,10 @@ impl Engine {
                     self.challenge(&request, peer, now)?
                 }
             }
+            Method::Bye | Method::Cancel => {
+                response(&request, 481, "Call/Transaction Does Not Exist", "", "")?
+            }
             Method::Ack
-            | Method::Bye
-            | Method::Cancel
             | Method::Info
             | Method::Message
             | Method::Notify
@@ -580,6 +604,18 @@ impl Engine {
             | Method::Update
             | Method::Other(_) => response(&request, 501, "Not Implemented", "", "")?,
         };
+        Ok(self.cache_reply(key, request, peer, now, reply, events))
+    }
+
+    fn cache_reply(
+        &mut self,
+        key: String,
+        request: Request,
+        peer: SocketAddr,
+        now: u64,
+        reply: Vec<u8>,
+        events: Vec<SipEvent>,
+    ) -> Output {
         self.cache.insert(
             key,
             Cached {
@@ -589,10 +625,10 @@ impl Engine {
                 expires: now.saturating_add(32_000),
             },
         );
-        Ok(Output {
+        Output {
             datagrams: [Datagram { peer, bytes: reply }].into_iter().collect(),
             events,
-        })
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::{Datagram, Engine, Output, Session, SipError, SipEvent};
+use crate::{Datagram, DialogReply, Engine, Output, Session, SipError, SipEvent};
 use rsipstack::sip::{
     headers::untyped::ToTypedHeader, HeadersExt, Method, Request, Response, SipMessage, Uri,
 };
@@ -34,6 +34,7 @@ pub(crate) struct Outgoing {
     deadline: u64,
     state: State,
     cseq: u32,
+    remote_cseq: Option<u32>,
 }
 
 fn request(bytes: &str) -> Result<Request, SipError> {
@@ -173,6 +174,7 @@ impl Engine {
                 interval: 500,
             },
             cseq: 1,
+            remote_cseq: None,
         };
         self.outgoing.insert(call_id, dialog);
         Ok(Output::response(peer, bytes.into_bytes()))
@@ -371,5 +373,66 @@ impl Engine {
             }
             None
         })
+    }
+
+    pub(crate) fn outgoing_bye(
+        &mut self,
+        request: &Request,
+        peer: SocketAddr,
+        now: u64,
+    ) -> Result<Option<DialogReply>, SipError> {
+        if request.method != Method::Bye {
+            return Ok(None);
+        }
+        let Some(dialog) = self.outgoing.get_mut(request.call_id_header()?.value()) else {
+            return Ok(None);
+        };
+        let remote = rsipstack::sip::headers::typed::To::parse(&dialog.remote_to)?;
+        if dialog.peer != peer
+            || remote.tag().is_none()
+            || request.from_header()?.typed()?.tag() != remote.tag()
+            || request.to_header()?.typed()?.tag() != dialog.invite.from_header()?.typed()?.tag()
+        {
+            return Ok(Some(DialogReply::Rejected(crate::response(
+                request,
+                481,
+                "Call/Transaction Does Not Exist",
+                "",
+                "",
+            )?)));
+        }
+        let sequence = request.cseq_header()?.typed()?.seq;
+        if dialog
+            .remote_cseq
+            .is_some_and(|previous| sequence <= previous)
+        {
+            return Ok(Some(DialogReply::Rejected(crate::response(
+                request,
+                500,
+                "Server Internal Error",
+                "",
+                "",
+            )?)));
+        }
+        dialog.remote_cseq = Some(sequence);
+        let mut events = Vec::new();
+        match dialog.state {
+            State::Established(_) => events.push(SipEvent::Ended {
+                id: dialog.id.clone(),
+                generation: dialog.generation,
+                cause: 16,
+            }),
+            State::Calling { .. }
+            | State::Proceeding
+            | State::Cancelling { .. }
+            | State::Terminated { .. } => {}
+        }
+        dialog.state = State::Terminated {
+            expires: now.saturating_add(32_000),
+        };
+        Ok(Some(DialogReply::Accepted {
+            bytes: crate::response(request, 200, "OK", "", "")?,
+            events,
+        }))
     }
 }
