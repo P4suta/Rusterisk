@@ -146,6 +146,10 @@ fn valid_name(value: &str) -> bool {
 }
 
 impl Section {
+    fn position(&self, key: &str) -> usize {
+        self.options.get(key).map_or(self.line, |(line, _)| *line)
+    }
+
     fn value(&self, key: &str) -> Option<&str> {
         self.options.get(key).map(|(_, value)| value.as_str())
     }
@@ -445,15 +449,10 @@ impl Config {
                     .filter(|value| !value.is_empty())
                 {
                     let origin = origin.trim();
-                    if origin.len() > 256
-                        || !(origin.starts_with("https://")
-                            || origin.starts_with("http://localhost")
-                            || origin.starts_with("http://127.0.0.1"))
-                        || origin.contains('*')
-                    {
+                    if !valid_origin(origin) {
                         return Err(ConfigError::at(
                             "ari.conf",
-                            section.line,
+                            section.position("allowed_origins"),
                             "allowed_origins requires exact secure or loopback origins",
                         ));
                     }
@@ -771,6 +770,28 @@ impl Config {
             Reload::Apply
         }
     }
+}
+
+fn valid_origin(origin: &str) -> bool {
+    if origin.len() > 256 || origin.contains('*') {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(origin) else {
+        return false;
+    };
+    let loopback = match url.host() {
+        Some(url::Host::Domain("localhost")) => true,
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(_)) | None => false,
+    };
+    (url.scheme() == "https" || (url.scheme() == "http" && loopback))
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.origin().ascii_serialization() == origin
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

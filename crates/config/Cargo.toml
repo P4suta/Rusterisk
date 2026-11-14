@@ -5,5 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[dependencies]
+url = "2.5.8"
+
 [lints]
 workspace = true

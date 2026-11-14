@@ -59,6 +59,49 @@ fn external_management_requires_tls() {
 }
 
 #[test]
+fn accepts_canonical_secure_and_loopback_origins() -> Result<(), ConfigError> {
+    for origin in [
+        "https://phone.example",
+        "https://phone.example:8443",
+        "http://localhost:8088",
+        "http://127.0.0.2:8088",
+        "http://[::1]:8088",
+    ] {
+        let ari = ARI.replace("https://localhost", origin);
+        let config = Config::parse(HTTP, &ari, SIP, "", "")?;
+        assert_eq!(config.origins, [origin], "{origin}");
+    }
+    Ok(())
+}
+
+#[test]
+fn rejects_noncanonical_origins_and_misleading_loopback_names() {
+    for origin in [
+        "http://localhost.evil.example",
+        "http://127.0.0.1.evil.example",
+        "http://localhost@evil.example",
+        "https://user@phone.example",
+        "https://phone.example/path",
+        "https://phone.example/",
+        "https://phone.example?query",
+        "https://phone.example#fragment",
+        "https://phone.example:443",
+        "https://PHONE.example",
+        "https://*.example",
+        "http://phone.example",
+        "https://",
+        "null",
+    ] {
+        let ari = ARI.replace("https://localhost", origin);
+        let result = Config::parse(HTTP, &ari, SIP, "", "");
+        assert!(
+            matches!(result, Err(ConfigError { line: 3, .. })),
+            "{origin}: {result:?}"
+        );
+    }
+}
+
+#[test]
 fn reload_is_transactional_and_listener_changes_require_restart() -> Result<(), ConfigError> {
     let first = Config::parse(HTTP, ARI, SIP, "", "")?;
     let changed_auth = Config::parse(

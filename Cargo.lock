@@ -1823,6 +1823,9 @@ dependencies = [
 [[package]]
 name = "rusterisk-config"
 version = "0.1.0"
+dependencies = [
+ "url",
+]
 
 [[package]]
 name = "rusterisk-core"
