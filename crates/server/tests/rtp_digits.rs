@@ -3,7 +3,7 @@ use rusterisk_media::{
     mulaw_decode, AudioFormat, ControlKind, Frame, MediaError, OpusCodec, RtpPacket,
     TelephoneEvent, TelephoneFormat,
 };
-use rusterisk_server::rtp::{RtpChannels, RtpLink, RtpSession, SocketPair};
+use rusterisk_server::rtp::{RtpChannels, RtpDigitCommand, RtpLink, RtpSession, SocketPair};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
@@ -24,6 +24,7 @@ async fn outgoing_digits_share_or_separate_clocks_and_close_every_reported_sourc
         let (digits, _digits) = mpsc::channel(16);
         let (outgoing, output) = mpsc::channel(3);
         let (tones, tone_input) = mpsc::channel(16);
+        let (completed, _completed) = mpsc::channel(8);
         let (stop, stopped) = watch::channel(false);
         let link = RtpLink::new(
             sockets,
@@ -37,7 +38,8 @@ async fn outgoing_digits_share_or_separate_clocks_and_close_every_reported_sourc
                 incoming,
                 digits,
                 outgoing: output,
-                tones: tone_input,
+                commands: tone_input,
+                completed,
                 stop: stopped,
             },
         )?;
@@ -49,10 +51,10 @@ async fn outgoing_digits_share_or_separate_clocks_and_close_every_reported_sourc
                 .await
                 .map_err(failure)?;
             tones
-                .send(DtmfTone {
+                .send(RtpDigitCommand::Tone(DtmfTone {
                     digit: DtmfDigit::Hash,
                     duration_ms: 60,
-                })
+                }))
                 .await
                 .map_err(failure)?;
             tokio::time::timeout(Duration::from_secs(2), async {

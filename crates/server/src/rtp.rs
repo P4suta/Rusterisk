@@ -1,4 +1,4 @@
-use rusterisk_core::DtmfTone;
+use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone};
 use rusterisk_media::{
     AudioFormat, Frame, MediaError, RtpPacket, RtpReceiver, RtpSender, SourceReport,
     TelephoneFormat, TelephoneReceiver, TelephoneSender, MAX_PACKET,
@@ -95,7 +95,8 @@ pub struct RtpChannels {
     pub incoming: mpsc::Sender<Frame>,
     pub digits: mpsc::Sender<DtmfTone>,
     pub outgoing: mpsc::Receiver<Frame>,
-    pub tones: mpsc::Receiver<DtmfTone>,
+    pub commands: mpsc::Receiver<RtpDigitCommand>,
+    pub completed: mpsc::Sender<DtmfToken>,
     pub stop: watch::Receiver<bool>,
 }
 
@@ -104,6 +105,11 @@ pub struct LinkStats {
     pub packets_received: u64,
     pub packets_sent: u64,
     pub dropped: u64,
+}
+
+pub enum RtpDigitCommand {
+    Tone(DtmfTone),
+    Sequence(DtmfCommand),
 }
 
 pub struct RtpLink {
@@ -239,6 +245,7 @@ impl RtpLink {
         let mut stats = LinkStats::default();
         let started = tokio::time::Instant::now();
         let mut sources = Vec::with_capacity(2);
+        let mut active: Option<RtpDigitCommand> = None;
         let control_peer =
             SocketAddr::new(self.session.remote.ip(), self.session.remote.port() + 1);
         loop {
@@ -271,11 +278,8 @@ impl RtpLink {
                     record(&mut sources, &packet, self.session.format.rate(), packet.timestamp(), sampled)?;
                     stats.packets_sent += 1;
                 }
-                tone = self.channels.tones.recv(), if self.telephone.as_ref().is_some_and(|telephone| telephone.sender.ready()) && (!self.channels.tones.is_closed() || !self.channels.tones.is_empty()) => {
-                    if let Some(tone) = tone {
-                        let now = started.elapsed().as_millis() as u64;
-                        self.telephone.as_mut().ok_or(MediaError::Unsupported)?.sender.start(tone, now, &self.sender)?;
-                    }
+                command = self.channels.commands.recv(), if active.is_none() && self.telephone.is_some() && (!self.channels.commands.is_closed() || !self.channels.commands.is_empty()) => {
+                    active = command;
                 }
                 _instant = playout.tick() => {
                     if let Some(telephone) = &mut self.telephone {
@@ -289,6 +293,28 @@ impl RtpLink {
                             let timestamp = telephone.sender.timestamp_at(now, &self.sender);
                             record(&mut sources, &packet, telephone.format.rate(), timestamp, sampled)?;
                             stats.packets_sent += 1;
+                        }
+                        if let Some(command) = &mut active {
+                            match command {
+                                RtpDigitCommand::Tone(tone) => {
+                                    if telephone.sender.ready() {
+                                        telephone.sender.start(*tone, now, &self.sender)?;
+                                        active = None;
+                                    }
+                                }
+                                RtpDigitCommand::Sequence(command) => {
+                                    let mut sequence = command.sequence;
+                                    let tone = sequence.advance(now).map_err(|error| MediaError::Transport(format!("digit schedule: {error:?}")))?;
+                                    if tone.is_none() || telephone.sender.ready() {
+                                        if let Some(tone) = tone { telephone.sender.start(tone, now, &self.sender)?; }
+                                        command.sequence = sequence;
+                                        if sequence.finished() {
+                                            self.channels.completed.try_send(command.token).map_err(|_| MediaError::Capacity)?;
+                                            active = None;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     match self.receiver.pop() {

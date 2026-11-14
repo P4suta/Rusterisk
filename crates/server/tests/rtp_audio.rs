@@ -18,7 +18,8 @@ async fn real_datagrams_carry_known_audio_in_both_directions_and_release_ports(
     let (incoming, mut received) = mpsc::channel(3);
     let (digits, _digits) = mpsc::channel(16);
     let (outgoing, sent) = mpsc::channel(3);
-    let (_tones, tones) = mpsc::channel(16);
+    let (_commands, commands) = mpsc::channel(8);
+    let (completed, _completed) = mpsc::channel(8);
     let (stop, stopped) = watch::channel(false);
     let link = RtpLink::new(
         sockets,
@@ -32,7 +33,8 @@ async fn real_datagrams_carry_known_audio_in_both_directions_and_release_ports(
             incoming,
             digits,
             outgoing: sent,
-            tones,
+            commands,
+            completed,
             stop: stopped,
         },
     )?;

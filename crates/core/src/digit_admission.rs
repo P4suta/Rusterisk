@@ -43,10 +43,7 @@ impl DtmfOutbox {
             Admission::Ended => return Err(DtmfError::Ended),
         };
         let sequence = DtmfSequence::new(digits, timing)?;
-        if digits
-            .iter()
-            .any(|digit| events & (1 << digit.event()) == 0)
-        {
+        if !sequence.supported_by(events) {
             return Err(DtmfError::Unsupported);
         }
         let slot = self

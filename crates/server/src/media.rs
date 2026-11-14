@@ -1,6 +1,6 @@
-use crate::rtp::{LinkStats, RtpChannels, RtpLink, RtpSession, SocketPair};
+use crate::rtp::{LinkStats, RtpChannels, RtpDigitCommand, RtpLink, RtpSession, SocketPair};
 use crate::CallKey;
-use rusterisk_core::DtmfTone;
+use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone};
 use rusterisk_media::{Frame, Gate, MediaError, Mixer, TelephoneFormat};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -8,6 +8,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 
 pub enum MediaNotice {
+    DtmfFinished {
+        key: CallKey,
+        token: DtmfToken,
+    },
     Dtmf {
         key: CallKey,
         tone: DtmfTone,
@@ -22,9 +26,9 @@ pub enum MediaNotice {
 }
 
 enum Command {
-    Tone {
+    Digits {
         key: CallKey,
-        tone: DtmfTone,
+        command: RtpDigitCommand,
         reply: oneshot::Sender<Result<(), MediaError>>,
     },
     Attach {
@@ -56,9 +60,26 @@ impl MediaPort {
         if !(1..=5000).contains(&tone.duration_ms) {
             return Err(MediaError::InvalidPacket);
         }
+        self.send_digits(key, RtpDigitCommand::Tone(tone)).await
+    }
+
+    pub async fn send_sequence(
+        &self,
+        key: CallKey,
+        command: DtmfCommand,
+    ) -> Result<(), MediaError> {
+        self.send_digits(key, RtpDigitCommand::Sequence(command))
+            .await
+    }
+
+    async fn send_digits(&self, key: CallKey, command: RtpDigitCommand) -> Result<(), MediaError> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .try_send(Command::Tone { key, tone, reply })
+            .try_send(Command::Digits {
+                key,
+                command,
+                reply,
+            })
             .map_err(|_| MediaError::Capacity)?;
         tokio::time::timeout(Duration::from_secs(5), response)
             .await
@@ -113,7 +134,8 @@ struct Port {
     incoming: mpsc::Receiver<Frame>,
     digits: mpsc::Receiver<DtmfTone>,
     outgoing: mpsc::Sender<Frame>,
-    tones: mpsc::Sender<DtmfTone>,
+    commands: mpsc::Sender<RtpDigitCommand>,
+    completed: mpsc::Receiver<DtmfToken>,
     telephone: Option<TelephoneFormat>,
     stop: watch::Sender<bool>,
     connection: Connection,
@@ -179,7 +201,8 @@ impl MediaHub {
         let (incoming, input) = mpsc::channel(3);
         let (digits, digit_input) = mpsc::channel(16);
         let (outgoing, output) = mpsc::channel(3);
-        let (tones, tone_input) = mpsc::channel(16);
+        let (commands, command_input) = mpsc::channel(8);
+        let (completed, completions) = mpsc::channel(8);
         let (stop, stopped) = watch::channel(false);
         let link = RtpLink::new(
             sockets,
@@ -188,7 +211,8 @@ impl MediaHub {
                 incoming,
                 digits,
                 outgoing: output,
-                tones: tone_input,
+                commands: command_input,
+                completed,
                 stop: stopped,
             },
         )?;
@@ -199,7 +223,8 @@ impl MediaHub {
                 incoming: input,
                 digits: digit_input,
                 outgoing,
-                tones,
+                commands,
+                completed: completions,
                 telephone: session.telephone,
                 stop,
                 connection: Connection::Waiting,
@@ -211,20 +236,30 @@ impl MediaHub {
 
     fn command(&mut self, command: Command) -> Result<(), MediaError> {
         match command {
-            Command::Tone { key, tone, reply } => {
+            Command::Digits {
+                key,
+                command,
+                reply,
+            } => {
                 if !reply.is_closed() {
                     let result = self
                         .ports
                         .get(&key)
                         .ok_or(MediaError::UnknownStream)
                         .and_then(|port| {
-                            if !port
-                                .telephone
-                                .is_some_and(|format| format.supports(tone.digit))
-                            {
+                            let format = port.telephone.ok_or(MediaError::Unsupported)?;
+                            let supported = match &command {
+                                RtpDigitCommand::Tone(tone) => format.supports(tone.digit),
+                                RtpDigitCommand::Sequence(command) => {
+                                    command.sequence.supported_by(format.events())
+                                }
+                            };
+                            if !supported {
                                 return Err(MediaError::Unsupported);
                             }
-                            port.tones.try_send(tone).map_err(|_| MediaError::Capacity)
+                            port.commands
+                                .try_send(command)
+                                .map_err(|_| MediaError::Capacity)
                         });
                     if reply.send(result).is_err() {
                         tracing::debug!(channel = %key.id, generation = key.generation, "tone admission receiver closed");
@@ -270,6 +305,20 @@ impl MediaHub {
 
     fn tick(&mut self) -> Result<(), MediaError> {
         for (key, port) in &mut self.ports {
+            for _ in 0..8 {
+                match port.completed.try_recv() {
+                    Ok(token) => self
+                        .notices
+                        .try_send(MediaNotice::DtmfFinished {
+                            key: key.clone(),
+                            token,
+                        })
+                        .map_err(|_| MediaError::Capacity)?,
+                    Err(
+                        mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
+                    ) => break,
+                }
+            }
             for _ in 0..16 {
                 match port.digits.try_recv() {
                     Ok(tone) => self

@@ -22,8 +22,28 @@ struct Listener {
 struct Active {
     listener: usize,
     pending: Option<SocketPair>,
-    dtmf: Dtmf,
-    digits: VecDeque<DtmfCommand>,
+    digits: DigitDelivery,
+}
+
+enum DigitDelivery {
+    Media,
+    Signaling(VecDeque<DtmfCommand>),
+}
+
+impl DigitDelivery {
+    fn new(mode: Dtmf) -> Self {
+        match mode {
+            Dtmf::Rfc4733 => Self::Media,
+            Dtmf::Info => Self::Signaling(VecDeque::with_capacity(8)),
+        }
+    }
+
+    fn queue_mut(&mut self) -> Option<&mut VecDeque<DtmfCommand>> {
+        match self {
+            Self::Media => None,
+            Self::Signaling(queue) => Some(queue),
+        }
+    }
 }
 struct Received {
     listener: usize,
@@ -242,10 +262,14 @@ impl Signaling {
                             .await
                         {
                             Ok(()) => {
-                                let mode = self.calls.get(&key).ok_or(ControlError::Capacity)?.dtmf;
-                                let events = match mode {
-                                    Dtmf::Info => Some(u16::MAX),
-                                    Dtmf::Rfc4733 => {
+                                let events = match &self
+                                    .calls
+                                    .get(&key)
+                                    .ok_or(ControlError::Capacity)?
+                                    .digits
+                                {
+                                    DigitDelivery::Signaling(_) => Some(u16::MAX),
+                                    DigitDelivery::Media => {
                                         session.telephone.map(|format| format.events())
                                     }
                                 };
@@ -383,8 +407,7 @@ impl Signaling {
             Active {
                 listener,
                 pending: None,
-                dtmf,
-                digits: VecDeque::with_capacity(8),
+                digits: DigitDelivery::new(dtmf),
             },
         );
         Ok(())
@@ -452,8 +475,7 @@ impl Signaling {
             Active {
                 listener,
                 pending: Some(sockets),
-                dtmf,
-                digits: VecDeque::with_capacity(8),
+                digits: DigitDelivery::new(dtmf),
             },
         );
         self.output(listener, output, now).await
@@ -462,16 +484,34 @@ impl Signaling {
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
             Effect::Dtmf { key, command } => {
-                if let Some(call) = self.calls.get_mut(&key) {
-                    if call
-                        .digits
-                        .iter()
-                        .any(|pending| pending.token == command.token)
-                    {
+                if self
+                    .calls
+                    .get(&key)
+                    .is_some_and(|call| matches!(call.digits, DigitDelivery::Media))
+                {
+                    match self.media.send_sequence(key.clone(), command).await {
+                        Ok(()) => return Ok(()),
+                        Err(error) => {
+                            tracing::warn!(channel = %key.id, generation = key.generation, %error, "digit command admission failed")
+                        }
+                    }
+                    self.notify(Signal::DtmfFinished {
+                        key,
+                        token: command.token,
+                    })
+                    .await?;
+                    return Ok(());
+                }
+                if let Some(queue) = self
+                    .calls
+                    .get_mut(&key)
+                    .and_then(|call| call.digits.queue_mut())
+                {
+                    if queue.iter().any(|pending| pending.token == command.token) {
                         return Ok(());
                     }
-                    if call.digits.len() < 8 {
-                        call.digits.push_back(command);
+                    if queue.len() < 8 {
+                        queue.push_back(command);
                         return Ok(());
                     }
                     tracing::warn!(channel = %key.id, generation = key.generation, "digit command queue full");
@@ -617,31 +657,23 @@ impl Signaling {
             let Some(call) = self.calls.get_mut(&key) else {
                 continue;
             };
-            let Some(command) = call.digits.front_mut() else {
+            let Some(command) = call.digits.queue_mut().and_then(|queue| queue.front_mut()) else {
                 continue;
             };
             let tone = command.sequence.advance(now).map_err(ControlError::from)?;
             let mut finished = command.sequence.finished();
             let token = command.token;
             let listener = call.listener;
-            let mode = call.dtmf;
             if let Some(tone) = tone {
-                let result = match mode {
-                    Dtmf::Rfc4733 => self
-                        .media
-                        .send_tone(key.clone(), tone)
-                        .await
-                        .map_err(failure),
-                    Dtmf::Info => match self.listeners[listener].engine.send_info(
-                        key.id.as_str(),
-                        key.generation,
-                        tone.digit,
-                        tone.duration_ms,
-                        now,
-                    ) {
-                        Ok(output) => self.transmit(listener, output.datagrams).await,
-                        Err(error) => Err(failure(error)),
-                    },
+                let result = match self.listeners[listener].engine.send_info(
+                    key.id.as_str(),
+                    key.generation,
+                    tone.digit,
+                    tone.duration_ms,
+                    now,
+                ) {
+                    Ok(output) => self.transmit(listener, output.datagrams).await,
+                    Err(error) => Err(failure(error)),
                 };
                 if let Err(error) = result {
                     tracing::warn!(channel = %key.id, generation = key.generation, %error, "digit command failed");
@@ -653,6 +685,8 @@ impl Signaling {
                     .get_mut(&key)
                     .ok_or(ControlError::Capacity)?
                     .digits
+                    .queue_mut()
+                    .ok_or(ControlError::Conflict("Signaling owns digit timing"))?
                     .pop_front();
                 self.notify(Signal::DtmfFinished { key, token }).await?;
             }
@@ -689,6 +723,7 @@ impl Signaling {
                     }
                 }
                 notice = self.notices.recv() => match notice {
+                    Some(MediaNotice::DtmfFinished { key, token }) => self.notify(Signal::DtmfFinished { key, token }).await?,
                     Some(MediaNotice::Dtmf { key, tone }) => self.notify(Signal::DtmfReceived { key, digit: tone.digit, duration_ms: tone.duration_ms }).await?,
                     Some(MediaNotice::Connected { key }) => self.notify(Signal::Milestone { key, milestone: Milestone::MediaConnected }).await?,
                     Some(MediaNotice::Stopped { key, result }) => {

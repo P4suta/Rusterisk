@@ -118,16 +118,18 @@ async fn receive_outgoing_digits(
             let mut receiver = TelephoneReceiver::new(101, 8000).map_err(failure)?;
             let mut bytes = [0; 1501];
             let mut digits = String::new();
+            let mut ends = 0;
             for now in 0..100 {
                 let (size, _) = audio.data().recv_from(&mut bytes).await.map_err(failure)?;
                 let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
                 if packet.payload_type() == 101 {
+                    if TelephoneEvent::parse(packet.payload()).map_err(failure)?.ended() { ends += 1; }
                     for tone in receiver.push(&packet, now).map_err(failure)?.into_tones() {
                         assert_eq!(tone.duration_ms, 60);
                         digits.push(tone.digit.symbol());
                     }
                 }
-                if digits.len() == 2 { assert_eq!(digits, "11"); return Ok(()); }
+                if digits.len() == 2 && ends == 6 { assert_eq!(digits, "11"); return Ok(()); }
             }
             Err(ControlError::Capacity)
         };
@@ -152,6 +154,71 @@ async fn receive_outgoing_digits(
         tokio::try_join!(received_audio, received_info)?;
         Ok(())
     }).await.map_err(failure)?
+}
+
+async fn send_digits(
+    controller: &Controller,
+    channel: &ChannelId,
+    digits: &str,
+    between: u32,
+    duration: u32,
+) -> Result<(), ControlError> {
+    let query = serde_urlencoded::to_string([
+        ("dtmf", digits.to_owned()),
+        ("between", between.to_string()),
+        ("duration", duration.to_string()),
+    ])
+    .map_err(failure)?;
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("/ari/channels/{channel}/dtmf?{query}"))
+        .header(
+            "Authorization",
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode("app:test-password")
+            ),
+        )
+        .body(Body::empty())
+        .map_err(failure)?;
+    let response = rusterisk_server::http::router(controller.clone())
+        .oneshot(request)
+        .await
+        .map_err(failure)?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    Ok(())
+}
+
+async fn receive_bulk_digits(audio: &SocketPair) -> Result<(), ControlError> {
+    let mut receiver = TelephoneReceiver::new(101, 8000).map_err(failure)?;
+    let mut bytes = [0; 1501];
+    let mut received = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    for now in 0..1000 {
+        let packet = tokio::time::timeout_at(deadline, audio.data().recv_from(&mut bytes)).await;
+        let (size, _) = match packet {
+            Ok(result) => result.map_err(failure)?,
+            Err(_) => {
+                return Err(ControlError::Adapter(format!(
+                    "Expected 64 short digits, received {received}"
+                )))
+            }
+        };
+        let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
+        if packet.payload_type() == 101 {
+            for tone in receiver.push(&packet, now).map_err(failure)?.into_tones() {
+                assert_eq!(tone.digit, DtmfDigit::One);
+                assert_eq!(tone.duration_ms, 1);
+                received += 1;
+            }
+        }
+        if received == 64 {
+            return Ok(());
+        }
+    }
+    Err(ControlError::Adapter(format!(
+        "Expected 64 short digits, received {received}"
+    )))
 }
 
 struct AudioPeer<'a> {
@@ -533,12 +600,7 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
         }
         let body = "Signal=#\r\nDuration=120\r\n";
         for (channel, digits) in [(incoming.clone(), "11"), (id("bob")?, "7#")] {
-            let query = serde_urlencoded::to_string([("dtmf", digits), ("between", "20"), ("duration", "60")]).map_err(failure)?;
-            let request = Request::builder().method("POST").uri(format!("/ari/channels/{channel}/dtmf?{query}"))
-                .header("Authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("app:test-password")))
-                .body(Body::empty()).map_err(failure)?;
-            let response = rusterisk_server::http::router(controller.clone()).oneshot(request).await.map_err(failure)?;
-            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            send_digits(&controller, &channel, digits, 20, 60).await?;
         }
         receive_outgoing_digits(&alice_audio, &bob).await?;
         let info = ack.replace("ACK sip:", "INFO sip:")
@@ -564,6 +626,10 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
             phone.data().send_to(&bytes, target).await.map_err(failure)?;
         }
         tokio::try_join!(receive_audio(&alice_audio, -7000), receive_audio(&bob_audio, 4000))?;
+        for _ in 0..2 {
+            send_digits(&controller, &incoming, "11111111111111111111111111111111", 0, 1).await?;
+        }
+        receive_bulk_digits(&alice_audio).await?;
         controller.execute(credentials()?, None, Action::Hangup(incoming)).await?;
         controller.execute(credentials()?, None, Action::Hangup(id("bob")?)).await?;
         Ok(())

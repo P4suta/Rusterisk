@@ -4,6 +4,8 @@ use rusterisk_core::{DtmfDigit, DtmfError, DtmfSequence, DtmfTiming};
 fn digit_timing_uses_actual_start_times_and_cancellation_is_terminal() -> Result<(), DtmfError> {
     let timing = DtmfTiming::new(100, 50, 100, 80)?;
     let mut sequence = DtmfSequence::new(&[DtmfDigit::One, DtmfDigit::Hash], timing)?;
+    assert!(sequence.supported_by((1 << DtmfDigit::One.event()) | (1 << DtmfDigit::Hash.event())));
+    assert!(!sequence.supported_by(1 << DtmfDigit::One.event()));
     assert!(sequence.advance(0)?.is_none());
     assert!(sequence.advance(99)?.is_none());
     let first = sequence.advance(100)?.ok_or(DtmfError::Empty)?;

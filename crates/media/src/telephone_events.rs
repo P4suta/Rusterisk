@@ -39,6 +39,10 @@ impl TelephoneFormat {
     pub const fn supports(self, digit: DtmfDigit) -> bool {
         self.events & (1 << digit.event()) != 0
     }
+
+    pub const fn events(self) -> u16 {
+        self.events
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

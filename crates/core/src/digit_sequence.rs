@@ -83,6 +83,12 @@ impl DtmfSequence {
         self.phase = Phase::Ended;
     }
 
+    pub fn supported_by(&self, events: u16) -> bool {
+        self.digits[..self.len]
+            .iter()
+            .all(|digit| events & (1 << digit.event()) != 0)
+    }
+
     pub const fn finished(&self) -> bool {
         matches!(self.phase, Phase::Ended)
     }
