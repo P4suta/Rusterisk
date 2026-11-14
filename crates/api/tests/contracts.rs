@@ -88,10 +88,18 @@ fn event_wire_shape_preserves_asterisk_discriminator() -> Result<(), serde_json:
         r#"{"type":"StasisStart","timestamp":"2026-11-15T00:00:00.000+0900","application":"test","args":[],"channel":{"id":"phone","name":"PJSIP/phone-1","state":"Up","accountcode":"","caller":{"name":"","number":"100"},"connected":{"name":"","number":""},"dialplan":{"context":"internal","exten":"100","priority":1,"app_name":"Stasis","app_data":"test"},"creationtime":"2026-11-15T00:00:00.000+0900","language":"en"}}"#,
     )?;
     assert!(matches!(event.kind, EventKind::StasisStart { .. }));
-    let json = serde_json::to_value(event)?;
+    let mut json = serde_json::to_value(event)?;
     assert_eq!(json["type"], "StasisStart");
     assert_eq!(json["channel"]["state"], "Up");
     assert!(json.get("kind").is_none());
+    json["type"] = "ApplicationMoveFailed".into();
+    json["destination"] = "missing".into();
+    json["args"] = serde_json::to_value(["retry"])?;
+    let failed: Event = serde_json::from_value(json.clone())?;
+    assert!(
+        matches!(&failed.kind, EventKind::ApplicationMoveFailed { destination, args, .. } if destination == "missing" && args == &["retry"])
+    );
+    assert_eq!(serde_json::to_value(failed)?, json);
     Ok(())
 }
 
@@ -181,6 +189,14 @@ fn swagger_event_models_use_wire_discriminators_and_model_identifiers(
         "string"
     );
     assert_eq!(models["Channel"]["id"], "Channel");
+    assert_eq!(
+        models["ApplicationMoveFailed"]["properties"]["destination"]["type"],
+        "string"
+    );
+    assert_eq!(
+        models["ApplicationMoveFailed"]["properties"]["channel"]["$ref"],
+        "Channel"
+    );
     assert_eq!(models["Channel"]["properties"]["state"]["type"], "string");
     assert!(models["Channel"]["properties"]["state"]["enum"]
         .as_array()

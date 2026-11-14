@@ -285,6 +285,11 @@ pub enum EventKind {
         recording: LiveRecording,
     },
     ApplicationReplaced {},
+    ApplicationMoveFailed {
+        channel: Channel,
+        destination: String,
+        args: Vec<String>,
+    },
     Dial {
         caller: Channel,
         peer: Channel,

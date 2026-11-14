@@ -398,6 +398,7 @@ impl Calls {
                 (channel, None, Some(CallCompletion::Ended))
             }
             api::EventKind::ChannelCreated { channel }
+            | api::EventKind::ApplicationMoveFailed { channel, .. }
             | api::EventKind::ChannelCallerId { channel, .. }
             | api::EventKind::ChannelHangupRequest { channel, .. }
             | api::EventKind::ChannelEnteredBridge { channel, .. }
