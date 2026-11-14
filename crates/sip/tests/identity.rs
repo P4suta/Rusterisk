@@ -2,6 +2,7 @@ use rsipstack::sip::{
     headers::{
         auth::{Algorithm, AuthQop},
         typed::WwwAuthenticate,
+        untyped::ToTypedHeader,
     },
     services::DigestGenerator,
     Method, Uri,
@@ -160,5 +161,61 @@ fn an_answer_from_the_wrong_peer_is_not_a_call_milestone() -> Result<(), SipErro
     assert!(answer.events.iter().any(
         |event| matches!(event, SipEvent::Answered { id, generation: 7, .. } if id == "outgoing")
     ));
+    Ok(())
+}
+
+fn request(bytes: &[u8]) -> Result<rsipstack::sip::Request, SipError> {
+    match SipMessage::try_from(bytes)? {
+        SipMessage::Request(request) => Ok(request),
+        SipMessage::Response(_) => Err(SipError::InvalidPacket),
+    }
+}
+
+#[test]
+fn successful_ack_and_bye_have_distinct_transaction_branches() -> Result<(), SipError> {
+    let mut config = config()?;
+    config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+    let mut engine = Engine::new(config, [9; 32]);
+    let invite = engine.originate(outbound(), 0)?.datagrams.remove(0).bytes;
+    let invite_branch = request(&invite)?
+        .top_via_header()?
+        .typed()?
+        .branch()
+        .cloned();
+    let answer = engine.receive(&answered(&invite)?, "127.0.0.1:5061".parse()?, 1)?;
+    let ack = request(&answer.datagrams[0].bytes)?;
+    assert_ne!(
+        ack.top_via_header()?.typed()?.branch(),
+        invite_branch.as_ref()
+    );
+    let bye = engine.cancel("outgoing", 7, 2)?.datagrams.remove(0).bytes;
+    assert_ne!(
+        request(&bye)?.top_via_header()?.typed()?.branch(),
+        ack.top_via_header()?.typed()?.branch()
+    );
+    Ok(())
+}
+
+#[test]
+fn repeated_late_answers_keep_the_original_invite_sequence_in_ack() -> Result<(), SipError> {
+    let mut config = config()?;
+    config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+    let mut engine = Engine::new(config, [9; 32]);
+    let invite = engine.originate(outbound(), 0)?.datagrams.remove(0).bytes;
+    let cancelled = engine.cancel("outgoing", 7, 1)?;
+    assert_eq!(
+        request(&cancelled.datagrams[0].bytes)?
+            .top_via_header()?
+            .typed()?
+            .branch(),
+        request(&invite)?.top_via_header()?.typed()?.branch()
+    );
+    for now in [2, 3, 4] {
+        let output = engine.receive(&answered(&invite)?, "127.0.0.1:5061".parse()?, now)?;
+        let ack = request(&output.datagrams[0].bytes)?;
+        assert_eq!(ack.method, Method::Ack);
+        assert_eq!(ack.cseq_header()?.typed()?.seq, 1);
+        assert!(output.events.is_empty());
+    }
     Ok(())
 }

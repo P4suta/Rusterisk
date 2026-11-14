@@ -1,5 +1,7 @@
 use crate::{Datagram, Engine, Output, Session, SipError, SipEvent};
-use rsipstack::sip::{HeadersExt, Method, Request, Response, SipMessage, Uri};
+use rsipstack::sip::{
+    headers::untyped::ToTypedHeader, HeadersExt, Method, Request, Response, SipMessage, Uri,
+};
 use rusterisk_config::Codec;
 use std::net::SocketAddr;
 
@@ -50,11 +52,14 @@ fn related(
 ) -> Result<Vec<u8>, SipError> {
     let via = dialog.invite.top_via_header()?;
     let via = if fresh_branch {
-        format!("{}-{}-{cseq}", via.value(), method)
+        let via = via.typed()?;
+        let branch = via.branch().ok_or(SipError::InvalidPacket)?;
+        let branch = format!("{branch}-{method}-{cseq}");
+        via.with_branch(branch.into()).to_string()
     } else {
         via.value().into()
     };
-    let uri = if matches!(method, Method::Cancel) {
+    let uri = if matches!(method, Method::Cancel) || (method == Method::Ack && !fresh_branch) {
         &dialog.invite.uri
     } else {
         &dialog.remote_contact
@@ -314,7 +319,7 @@ impl Engine {
                 dialog,
                 Method::Ack,
                 &dialog.remote_to,
-                dialog.cseq,
+                dialog.invite.cseq_header()?.typed()?.seq,
                 code < 300,
             )?,
         });
