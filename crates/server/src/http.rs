@@ -14,9 +14,25 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
 pub fn router(controller: Controller) -> Router {
+    router_for_scheme(controller, HttpScheme::Http)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum HttpScheme {
+    Http,
+    Https,
+}
+
+pub(crate) fn router_for_scheme(controller: Controller, scheme: HttpScheme) -> Router {
+    let handler =
+        move |State(controller): State<Controller>,
+              method: Method,
+              uri: Uri,
+              headers: HeaderMap,
+              body: Bytes| { api(controller, scheme, method, uri, headers, body) };
     Router::new()
         .route("/ari/events", get(crate::websocket::upgrade))
-        .fallback(any(api))
+        .fallback(any(handler))
         .layer(DefaultBodyLimit::max(16384))
         .with_state(controller)
 }
@@ -155,6 +171,60 @@ fn response(outcome: Outcome) -> Response {
     }
 }
 
+fn documentation(
+    method: &Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    scheme: HttpScheme,
+) -> Result<Option<Response>, ControlError> {
+    if method != Method::GET {
+        return Ok(None);
+    }
+    let Some(resource) = uri
+        .path()
+        .strip_prefix("/ari/api-docs/")
+        .and_then(|path| path.strip_suffix(".json"))
+    else {
+        return Ok(None);
+    };
+    let mut document = if resource == "resources" {
+        rusterisk_api::resources()
+    } else {
+        if !rusterisk_api::OPERATIONS
+            .iter()
+            .any(|operation| operation.resource() == resource)
+        {
+            return Err(ControlError::NotFound("Resource not found"));
+        }
+        rusterisk_api::swagger(resource)
+            .map_err(|error| ControlError::Encoding(error.to_string()))?
+    };
+    let authority = match uri.authority() {
+        Some(authority) => authority.as_str(),
+        None => headers
+            .get("Host")
+            .ok_or(ControlError::Invalid("Missing request authority"))?
+            .to_str()
+            .map_err(|_| ControlError::Invalid("Invalid request authority"))?,
+    };
+    if authority.len() > 512 || authority.contains('@') {
+        return Err(ControlError::Invalid("Invalid request authority"));
+    }
+    let authority: axum::http::uri::Authority = authority
+        .parse()
+        .map_err(|_| ControlError::Invalid("Invalid request authority"))?;
+    if authority.host().is_empty() || (authority.port().is_some() && authority.port_u16().is_none())
+    {
+        return Err(ControlError::Invalid("Invalid request authority"));
+    }
+    let scheme = match scheme {
+        HttpScheme::Http => "http",
+        HttpScheme::Https => "https",
+    };
+    document["basePath"] = Value::String(format!("{scheme}://{authority}/ari"));
+    Ok(Some(Json(document).into_response()))
+}
+
 async fn dispatch(
     controller: &Controller,
     credentials: Credentials,
@@ -165,9 +235,6 @@ async fn dispatch(
     body: &[u8],
 ) -> Result<Response, ControlError> {
     let path = uri.path();
-    if method == Method::GET && path == "/ari/api-docs/resources.json" {
-        return Ok(Json(rusterisk_api::resources()).into_response());
-    }
     if method == Method::GET && path == "/rusterisk/openapi.json" {
         return Ok(Json(rusterisk_api::openapi()).into_response());
     }
@@ -188,24 +255,6 @@ async fn dispatch(
             json!({"reference": rusterisk_api::REFERENCE_VERSION, "operations": operations}),
         )
         .into_response());
-    }
-    if method == Method::GET {
-        if let Some(resource) = path
-            .strip_prefix("/ari/api-docs/")
-            .and_then(|value| value.strip_suffix(".json"))
-        {
-            if !rusterisk_api::OPERATIONS
-                .iter()
-                .any(|operation| operation.resource() == resource)
-            {
-                return Err(ControlError::NotFound("Resource not found"));
-            }
-            return Ok(Json(
-                rusterisk_api::swagger(resource)
-                    .map_err(|error| ControlError::Encoding(error.to_string()))?,
-            )
-            .into_response());
-        }
     }
     if !body.is_empty() {
         let value: Value =
@@ -296,7 +345,8 @@ async fn dispatch(
 }
 
 async fn api(
-    State(controller): State<Controller>,
+    controller: Controller,
+    scheme: HttpScheme,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
@@ -313,6 +363,9 @@ async fn api(
         controller
             .authorize(credentials.clone(), origin.clone(), method == Method::GET)
             .await?;
+        if let Some(response) = documentation(&method, &uri, &headers, scheme)? {
+            return Ok(response);
+        }
         dispatch(
             &controller,
             credentials,

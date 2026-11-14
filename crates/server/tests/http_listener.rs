@@ -128,6 +128,23 @@ async fn encrypted_requests_use_a_trusted_certificate_and_shutdown_releases_the_
         assert_eq!(response.version(), reqwest::Version::HTTP_2);
         let ping: rusterisk_api::AsteriskPing = response.json().await.map_err(failure)?;
         assert_eq!(ping.ping, "pong");
+        for path in ["resources", "channels"] {
+            let response = client
+                .get(format!(
+                    "https://localhost:{}/ari/api-docs/{path}.json",
+                    address.port()
+                ))
+                .basic_auth("app", Some("test-password"))
+                .send()
+                .await
+                .map_err(failure)?;
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            let document: serde_json::Value = response.json().await.map_err(failure)?;
+            assert_eq!(
+                document["basePath"],
+                format!("https://localhost:{}/ari", address.port())
+            );
+        }
         Ok(())
     }
     .await;

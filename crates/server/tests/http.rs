@@ -29,6 +29,68 @@ fn request(method: &str, path: &str, user: Option<&str>) -> Result<Request<Body>
 }
 
 #[tokio::test]
+async fn discovery_documents_use_the_requested_authority_and_refuse_invalid_hosts(
+) -> Result<(), ControlError> {
+    let (controller, runner, _effects) = Controller::new(config()?, 1);
+    let task = tokio::spawn(runner.run());
+    let result = async {
+        let app = router(controller.clone());
+        for path in [
+            "/ari/api-docs/resources.json",
+            "/ari/api-docs/channels.json",
+        ] {
+            let mut request = request("GET", path, Some("test"))?;
+            request.headers_mut().insert(
+                "Host",
+                "pbx.example:8088".parse().map_err(
+                    |error: axum::http::header::InvalidHeaderValue| {
+                        ControlError::Adapter(error.to_string())
+                    },
+                )?,
+            );
+            let response = app
+                .clone()
+                .oneshot(request)
+                .await
+                .map_err(|error| ControlError::Adapter(error.to_string()))?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = response
+                .into_body()
+                .collect()
+                .await
+                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .to_bytes();
+            let document: serde_json::Value = serde_json::from_slice(&bytes)?;
+            assert_eq!(document["basePath"], "http://pbx.example:8088/ari");
+        }
+        for host in ["", "person@pbx.example", "pbx.example/path"] {
+            let mut request = request("GET", "/ari/api-docs/resources.json", Some("test"))?;
+            request.headers_mut().insert(
+                "Host",
+                host.parse()
+                    .map_err(|error: axum::http::header::InvalidHeaderValue| {
+                        ControlError::Adapter(error.to_string())
+                    })?,
+            );
+            assert_eq!(
+                app.clone()
+                    .oneshot(request)
+                    .await
+                    .map_err(|error| ControlError::Adapter(error.to_string()))?
+                    .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        Ok(())
+    }
+    .await;
+    controller.shutdown();
+    task.await
+        .map_err(|error| ControlError::Adapter(error.to_string()))??;
+    result
+}
+
+#[tokio::test]
 async fn authentication_origin_and_read_only_permissions_apply_to_all_resources(
 ) -> Result<(), ControlError> {
     let (controller, runner, _effects) = Controller::new(config()?, 8);

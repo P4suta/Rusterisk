@@ -102,10 +102,13 @@ impl HttpServer {
             None => None,
         };
         let listener = TcpListener::bind(config.bind).await.map_err(failure)?;
-        let application = http::router(controller.clone()).layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(10),
-        ));
+        let scheme = match &encryption {
+            Some(_) => http::HttpScheme::Https,
+            None => http::HttpScheme::Http,
+        };
+        let application = http::router_for_scheme(controller.clone(), scheme).layer(
+            TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(10)),
+        );
         Ok(Self {
             listener,
             application,
