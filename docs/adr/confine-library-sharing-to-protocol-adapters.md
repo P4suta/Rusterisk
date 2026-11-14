@@ -17,7 +17,9 @@ Limit Tokio sharing to bounded transport and Axum sharing to immutable routing.
 
 Use the concrete rtcp-types writers and borrowed packet enum.
 Avoid `CompoundBuilder`, which stores boxed trait objects.
-Keep webrtc-srtp dispatch inside one context per direction with replay protection.
+Keep webrtc-srtp dispatch inside an owned context per stream and direction with replay protection.
+Bound each direction to four authenticated stream contexts.
+Publish a stream slot only after authentication succeeds.
 Use opus 0.4's bundled libopus through opusic-sys.
 
 ## Alternatives
