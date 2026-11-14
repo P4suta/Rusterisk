@@ -174,8 +174,49 @@ fn outbound() -> rusterisk_sip::Outbound {
         endpoint: "phone".into(),
         caller: "100".into(),
         local_rtp: std::net::SocketAddr::from(([127, 0, 0, 1], 10000)),
-        timeout_ms: 30_000,
+        timeout_ms: Some(30_000),
     }
+}
+
+#[test]
+fn calls_without_a_dial_deadline_keep_ringing_after_provisional_responses() -> Result<(), SipError>
+{
+    for timeout in [None, Some(30_000)] {
+        let mut config = config()?;
+        config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+        let mut engine = Engine::new(config, [9; 32]);
+        let mut call = outbound();
+        call.timeout_ms = timeout;
+        let invite = engine.originate(call, 0)?.datagrams.remove(0).bytes;
+        engine.receive(&provisional(&invite)?, "127.0.0.1:5061".parse()?, 100)?;
+        let later = engine.tick(60_000)?;
+        match timeout {
+            None => {
+                assert!(later.events.is_empty());
+                assert!(later.datagrams.is_empty());
+                let ended = engine.cancel("outgoing", 7, 60_001)?;
+                assert!(ended
+                    .datagrams
+                    .iter()
+                    .any(|packet| packet.bytes.starts_with(b"CANCEL ")));
+            }
+            Some(_) => assert!(matches!(
+                &later.events[..],
+                [SipEvent::Ended { cause: 19, .. }]
+            )),
+        }
+    }
+    let mut config = config()?;
+    config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+    let mut engine = Engine::new(config, [9; 32]);
+    let mut call = outbound();
+    call.timeout_ms = None;
+    engine.originate(call, 0)?;
+    assert!(matches!(
+        &engine.tick(32_000)?.events[..],
+        [SipEvent::Ended { cause: 19, .. }]
+    ));
+    Ok(())
 }
 
 #[test]

@@ -432,7 +432,7 @@ impl Signaling {
                     endpoint: endpoint.name.clone(),
                     caller,
                     local_rtp,
-                    timeout_ms: u64::from(timeout) * 1000,
+                    timeout_ms: Some(u64::from(timeout) * 1000),
                 },
                 now,
             )

@@ -17,7 +17,7 @@ pub struct Outbound {
     pub endpoint: String,
     pub caller: String,
     pub local_rtp: SocketAddr,
-    pub timeout_ms: u64,
+    pub timeout_ms: Option<u64>,
 }
 
 enum State {
@@ -49,7 +49,7 @@ pub(crate) struct Outgoing {
     remote_to: String,
     remote_contact: Uri,
     codecs: Vec<Codec>,
-    deadline: u64,
+    deadline: Option<u64>,
     transaction_deadline: u64,
     state: State,
     cseq: u32,
@@ -70,7 +70,7 @@ fn authenticate(
     now: u64,
 ) -> Result<Option<Vec<u8>>, SipError> {
     if dialog.challenges.len() >= 4
-        || dialog.deadline <= now
+        || dialog.deadline.is_some_and(|deadline| deadline <= now)
         || !matches!(dialog.state, State::Calling { .. } | State::Proceeding)
     {
         return Ok(None);
@@ -336,8 +336,9 @@ impl Engine {
                 .caller
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"+*-#._".contains(&byte))
-            || outbound.timeout_ms == 0
-            || outbound.timeout_ms > 3_600_000
+            || outbound
+                .timeout_ms
+                .is_some_and(|timeout| timeout == 0 || timeout > 65_535_000)
         {
             return Err(SipError::Capacity);
         }
@@ -348,6 +349,11 @@ impl Engine {
         {
             return Err(SipError::InvalidPacket);
         }
+        let deadline = outbound
+            .timeout_ms
+            .map(|timeout| now.checked_add(timeout).ok_or(SipError::Capacity))
+            .transpose()?;
+        let transaction_deadline = now.checked_add(32_000).ok_or(SipError::Capacity)?;
         let endpoint = self
             .config
             .endpoints
@@ -401,8 +407,8 @@ impl Engine {
             invite,
             bytes: bytes.as_bytes().to_vec(),
             codecs: endpoint.codecs,
-            deadline: now.saturating_add(outbound.timeout_ms),
-            transaction_deadline: now.saturating_add(32_000),
+            deadline,
+            transaction_deadline,
             state: State::Calling {
                 retry: now.saturating_add(500),
                 interval: 500,
@@ -500,7 +506,11 @@ impl Engine {
                 .retain(|challenge| challenge.expires > now);
             match &mut dialog.state {
                 State::Calling { retry, interval }
-                    if dialog.deadline.min(dialog.transaction_deadline) > now =>
+                    if dialog
+                        .deadline
+                        .map(|deadline| deadline.min(dialog.transaction_deadline))
+                        .unwrap_or(dialog.transaction_deadline)
+                        > now =>
                 {
                     if *retry <= now {
                         output.datagrams.push(Datagram {
@@ -524,7 +534,11 @@ impl Engine {
                     }
                 }
                 State::Calling { retry, interval }
-                    if dialog.deadline.min(dialog.transaction_deadline) <= now =>
+                    if dialog
+                        .deadline
+                        .map(|deadline| deadline.min(dialog.transaction_deadline))
+                        .unwrap_or(dialog.transaction_deadline)
+                        <= now =>
                 {
                     output.events.push(SipEvent::Ended {
                         id: dialog.id.clone(),
@@ -543,7 +557,7 @@ impl Engine {
                         }
                     };
                 }
-                State::Proceeding if dialog.deadline <= now => {
+                State::Proceeding if dialog.deadline.is_some_and(|deadline| deadline <= now) => {
                     output.datagrams.push(Datagram {
                         peer: dialog.peer,
                         bytes: related(
