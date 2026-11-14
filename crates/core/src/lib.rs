@@ -1,6 +1,8 @@
 #![no_std]
 
+mod digit_sequence;
 mod digits;
+pub use digit_sequence::{DtmfError, DtmfSequence, DtmfTiming, DtmfTone};
 pub use digits::DtmfDigit;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
