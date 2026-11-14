@@ -24,6 +24,49 @@ pub enum MediaConnection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MuteDirection {
+    Incoming,
+    Outgoing,
+    Both,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioGate {
+    Open,
+    IncomingMuted,
+    OutgoingMuted,
+    Closed,
+}
+
+impl AudioGate {
+    const fn mute(self, direction: MuteDirection) -> Self {
+        match (self, direction) {
+            (Self::Open | Self::IncomingMuted, MuteDirection::Incoming) => Self::IncomingMuted,
+            (Self::OutgoingMuted | Self::Closed, MuteDirection::Incoming) => Self::Closed,
+            (Self::Open | Self::OutgoingMuted, MuteDirection::Outgoing) => Self::OutgoingMuted,
+            (Self::IncomingMuted | Self::Closed, MuteDirection::Outgoing) => Self::Closed,
+            (
+                Self::Open | Self::IncomingMuted | Self::OutgoingMuted | Self::Closed,
+                MuteDirection::Both,
+            ) => Self::Closed,
+        }
+    }
+
+    const fn unmute(self, direction: MuteDirection) -> Self {
+        match (self, direction) {
+            (Self::Open | Self::IncomingMuted, MuteDirection::Incoming) => Self::Open,
+            (Self::OutgoingMuted | Self::Closed, MuteDirection::Incoming) => Self::OutgoingMuted,
+            (Self::Open | Self::OutgoingMuted, MuteDirection::Outgoing) => Self::Open,
+            (Self::IncomingMuted | Self::Closed, MuteDirection::Outgoing) => Self::IncomingMuted,
+            (
+                Self::Open | Self::IncomingMuted | Self::OutgoingMuted | Self::Closed,
+                MuteDirection::Both,
+            ) => Self::Open,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallEvent {
     Ring,
     Answer,
@@ -55,6 +98,7 @@ pub struct Call {
     state: CallState,
     media: MediaState,
     connection: MediaConnection,
+    mute: AudioGate,
     bridge: Option<u64>,
 }
 
@@ -85,6 +129,7 @@ impl Call {
             state: CallState::Down,
             media: MediaState::Waiting,
             connection: MediaConnection::Pending,
+            mute: AudioGate::Open,
             bridge: None,
         }
     }
@@ -99,6 +144,29 @@ impl Call {
 
     pub const fn media(self) -> MediaState {
         self.media
+    }
+
+    pub const fn audio_gate(self) -> AudioGate {
+        match self.media {
+            MediaState::Active => self.mute,
+            MediaState::Waiting | MediaState::Held | MediaState::Released => AudioGate::Closed,
+        }
+    }
+
+    pub fn mute(mut self, direction: MuteDirection) -> Result<Self, CoreError> {
+        if self.state == CallState::Ended {
+            return Err(CoreError::Ended);
+        }
+        self.mute = self.mute.mute(direction);
+        Ok(self)
+    }
+
+    pub fn unmute(mut self, direction: MuteDirection) -> Result<Self, CoreError> {
+        if self.state == CallState::Ended {
+            return Err(CoreError::Ended);
+        }
+        self.mute = self.mute.unmute(direction);
+        Ok(self)
     }
 
     pub const fn media_connection(self) -> MediaConnection {
@@ -144,6 +212,7 @@ impl Call {
                 self.state = CallState::Ended;
                 self.media = MediaState::Released;
                 self.connection = MediaConnection::Released;
+                self.mute = AudioGate::Closed;
                 self.bridge = None;
                 Transition::Release
             }

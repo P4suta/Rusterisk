@@ -1,4 +1,6 @@
-use rusterisk_core::{Call, CallEvent, CallState, CoreError, MediaState, Transition};
+use rusterisk_core::{
+    AudioGate, Call, CallEvent, CallState, CoreError, MediaState, MuteDirection, Transition,
+};
 
 #[test]
 fn cancellation_wins_over_a_late_answer() {
@@ -69,4 +71,41 @@ fn a_channel_can_only_belong_to_one_bridge() {
         assert_eq!(ended.bridge(), None);
         assert_eq!(ended.join(11), Err(CoreError::Ended));
     }
+}
+
+#[test]
+fn hold_and_terminal_cleanup_preserve_directional_mute_invariants() -> Result<(), CoreError> {
+    let call = Call::incoming(9);
+    assert_eq!(call.audio_gate(), AudioGate::Closed);
+    let call = call
+        .mute(MuteDirection::Incoming)?
+        .apply(CallEvent::Answer)
+        .call();
+    assert_eq!(call.audio_gate(), AudioGate::IncomingMuted);
+    let held = call.hold()?;
+    assert_eq!(held.audio_gate(), AudioGate::Closed);
+    assert_eq!(held.resume()?.audio_gate(), AudioGate::IncomingMuted);
+    let both = call.mute(MuteDirection::Outgoing)?;
+    assert_eq!(both.audio_gate(), AudioGate::Closed);
+    assert_eq!(
+        both.unmute(MuteDirection::Incoming)?.audio_gate(),
+        AudioGate::OutgoingMuted
+    );
+    assert_eq!(
+        both.unmute(MuteDirection::Outgoing)?.audio_gate(),
+        AudioGate::IncomingMuted
+    );
+    assert_eq!(
+        both.unmute(MuteDirection::Both)?.audio_gate(),
+        AudioGate::Open
+    );
+    assert_eq!(
+        call.mute(MuteDirection::Both)?.audio_gate(),
+        AudioGate::Closed
+    );
+    let ended = both.apply(CallEvent::Hangup).call();
+    assert_eq!(ended.audio_gate(), AudioGate::Closed);
+    assert_eq!(ended.unmute(MuteDirection::Both), Err(CoreError::Ended));
+    assert_eq!(ended.mute(MuteDirection::Incoming), Err(CoreError::Ended));
+    Ok(())
 }
