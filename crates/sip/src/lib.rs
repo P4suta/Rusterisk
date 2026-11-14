@@ -12,7 +12,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use subtle::ConstantTimeEq;
+mod incoming;
 mod outgoing;
+pub use incoming::RejectReason;
 pub use outgoing::Outbound;
 
 pub const MAX_MESSAGE: usize = 16384;
@@ -21,6 +23,7 @@ pub enum SipError {
     InvalidPacket,
     Capacity,
     Unsupported,
+    Entropy,
     Config(rusterisk_config::ConfigError),
     Parse(rsipstack::sip::Error),
     Address(std::net::AddrParseError),
@@ -36,6 +39,7 @@ impl std::fmt::Display for SipError {
             }
             Self::Capacity => f.write_str("Signaling capacity exceeded"),
             Self::Unsupported => f.write_str("Unsupported signaling or media"),
+            Self::Entropy => f.write_str("Signaling entropy unavailable"),
             Self::Config(error) => write!(f, "{error}"),
             Self::Address(error) => write!(f, "{error}"),
             Self::Io(error) => write!(f, "{error}"),
@@ -639,6 +643,22 @@ fn response(
     extra: &str,
     body: &str,
 ) -> Result<Vec<u8>, SipError> {
+    let mut to = request.to_header()?.typed()?;
+    if code != 100 && to.tag().is_none() {
+        let mut bytes = [0; 16];
+        getrandom::fill(&mut bytes).map_err(|_| SipError::Entropy)?;
+        let alphabet = b"0123456789abcdef";
+        let tag: String = bytes
+            .iter()
+            .flat_map(|byte| {
+                [
+                    alphabet[usize::from(byte >> 4)] as char,
+                    alphabet[usize::from(byte & 15)] as char,
+                ]
+            })
+            .collect();
+        to = to.with_tag(tag.into());
+    }
     let mut output = format!("SIP/2.0 {code} {phrase}\r\n");
     for via in request
         .headers
@@ -650,7 +670,7 @@ fn response(
     output.push_str(&format!(
         "From: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nServer: Rusterisk\r\n{extra}",
         request.from_header()?.value(),
-        request.to_header()?.value(),
+        to,
         request.call_id_header()?.value(),
         request.cseq_header()?.value()
     ));

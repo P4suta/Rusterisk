@@ -20,10 +20,9 @@ fn invite(authorization: &str, sequence: u32) -> String {
     format!("INVITE sip:100@localhost SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-{sequence};rport\r\nFrom: Admin <sip:spoofed@localhost>;tag=caller\r\nTo: <sip:100@localhost>\r\nCall-ID: test-call\r\nCSeq: {sequence} INVITE\r\nContact: <sip:phone@127.0.0.1:5061>\r\nMax-Forwards: 70\r\n{authorization}Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", body.len())
 }
 
-#[test]
-fn authenticated_identity_is_distinct_from_caller_id_and_retransmission_is_idempotent(
-) -> Result<(), SipError> {
-    let mut engine = Engine::new(config()?, [7; 32]);
+fn authenticated_invite(
+    engine: &mut Engine,
+) -> Result<(rusterisk_sip::Output, String, String), SipError> {
     let peer = "127.0.0.1:5061".parse()?;
     let challenged = engine.receive(invite("", 1).as_bytes(), peer, 0)?;
     assert!(challenged.events.is_empty());
@@ -53,6 +52,15 @@ fn authenticated_identity_is_distinct_from_caller_id_and_retransmission_is_idemp
     let auth = format!("Authorization: Digest username=\"phone\", realm=\"{}\", nonce=\"{}\", uri=\"sip:100@localhost\", response=\"{digest}\", algorithm=MD5, qop=auth, cnonce=\"test-client\", nc=00000001\r\n", challenge.realm, challenge.nonce);
     let wire = invite(&auth, 2);
     let accepted = engine.receive(wire.as_bytes(), peer, 1)?;
+    Ok((accepted, wire, auth))
+}
+
+#[test]
+fn authenticated_identity_is_distinct_from_caller_id_and_retransmission_is_idempotent(
+) -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (accepted, wire, auth) = authenticated_invite(&mut engine)?;
     assert_eq!(accepted.events.len(), 1);
     assert!(
         matches!(&accepted.events[0], SipEvent::Incoming { identity, caller, context, .. } if identity == "phone" && caller == "spoofed" && context == "internal")
@@ -261,5 +269,34 @@ fn acknowledgements_never_receive_a_response() -> Result<(), SipError> {
         .receive(ack.as_bytes(), "127.0.0.1:5061".parse()?, 0)?
         .datagrams
         .is_empty());
+    Ok(())
+}
+
+#[test]
+fn rejected_invites_release_admission_and_retransmit_the_tagged_final_response(
+) -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let (incoming, wire, _) = authenticated_invite(&mut engine)?;
+    let id = match &incoming.events[0] {
+        SipEvent::Incoming { id, .. } => id.clone(),
+        SipEvent::Ringing { .. } | SipEvent::Answered { .. } | SipEvent::Ended { .. } => {
+            return Err(SipError::InvalidPacket)
+        }
+    };
+    let rejected = engine.reject(&id, rusterisk_sip::RejectReason::NoRoute, 2)?;
+    assert!(engine.pending(&id).is_none());
+    let response = match SipMessage::try_from(rejected.datagrams[0].bytes.as_slice())? {
+        SipMessage::Response(response) => response,
+        SipMessage::Request(_) => return Err(SipError::InvalidPacket),
+    };
+    assert_eq!(response.status_code.code(), 404);
+    assert!(response.to_header()?.typed()?.tag().is_some());
+    assert_eq!(
+        engine
+            .receive(wire.as_bytes(), "127.0.0.1:5061".parse()?, 3)?
+            .datagrams[0]
+            .bytes,
+        rejected.datagrams[0].bytes
+    );
     Ok(())
 }

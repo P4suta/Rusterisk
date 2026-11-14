@@ -12,6 +12,7 @@ tokio.workspace = true
 sha2 = "0.11.0"
 subtle = "2.6.1"
 base64 = "0.22.1"
+getrandom = "0.4.3"
 
 [lints]
 workspace = true
