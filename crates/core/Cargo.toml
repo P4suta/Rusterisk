@@ -1,0 +1,9 @@
+[package]
+name = "rusterisk-core"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.89"
+license.workspace = true
+
+[lints]
+workspace = true
