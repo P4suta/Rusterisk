@@ -1,0 +1,109 @@
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
+use base64::Engine;
+use rusterisk_api::{ChannelId, EventKind};
+use rusterisk_config::Config;
+use rusterisk_server::{
+    http::router, ControlError, Controller, Credentials, IncomingCall, IncomingTarget,
+};
+use std::time::Duration;
+use tower::ServiceExt;
+
+fn failure(error: impl std::fmt::Display) -> ControlError {
+    ControlError::Adapter(error.to_string())
+}
+
+fn request(path: &str) -> Result<Request<Body>, ControlError> {
+    Request::builder()
+        .method("POST")
+        .uri(path)
+        .header(
+            "Authorization",
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode("app:password")
+            ),
+        )
+        .body(Body::empty())
+        .map_err(failure)
+}
+
+#[tokio::test]
+async fn http_continuation_validates_positions_before_leaving_and_resumes_without_blocking_events(
+) -> Result<(), ControlError> {
+    let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=password\n", "", "", "[internal]\nexten => 200,1,Stasis(app,first)\nsame => n,Stasis(app,second)\n[other]\nexten => s,1,Stasis(app,moved)\n").map_err(failure)?;
+    let (controller, runner, _effects) = Controller::new(config, 4);
+    let task = tokio::spawn(runner.run());
+    let result = async {
+        let mut subscription = controller
+            .subscribe(
+                Credentials::new("app".into(), "password".into())?,
+                None,
+                "app".into(),
+            )
+            .await?;
+        controller
+            .incoming(IncomingCall {
+                id: ChannelId::try_from("incoming".to_owned())?,
+                endpoint: "phone".into(),
+                caller: "100".into(),
+                context: "internal".into(),
+                extension: "200".into(),
+                target: IncomingTarget::Dialplan,
+            })
+            .await?;
+        subscription
+            .events
+            .recv()
+            .await
+            .ok_or(ControlError::Capacity)?;
+        subscription
+            .events
+            .recv()
+            .await
+            .ok_or(ControlError::Capacity)?;
+        let app = router(controller.clone());
+        for priority in ["-1", "text", "65536"] {
+            let response = app
+                .clone()
+                .oneshot(request(&format!(
+                    "/ari/channels/incoming/continue?priority={priority}"
+                ))?)
+                .await
+                .map_err(failure)?;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert!(subscription.events.try_recv().is_err());
+        }
+        for (query, expected) in [("", "second"), ("?context=other", "moved")] {
+            let response = app
+                .clone()
+                .oneshot(request(&format!("/ari/channels/incoming/continue{query}"))?)
+                .await
+                .map_err(failure)?;
+            assert_eq!(response.status(), StatusCode::NO_CONTENT);
+            let ended = tokio::time::timeout(Duration::from_secs(1), subscription.events.recv())
+                .await
+                .map_err(failure)?
+                .ok_or(ControlError::Capacity)?;
+            assert!(matches!(ended.kind, EventKind::StasisEnd { .. }));
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while let Some(event) = subscription.events.recv().await {
+                    if let EventKind::StasisStart { args, .. } = event.kind {
+                        assert_eq!(args, [expected]);
+                        return Ok(());
+                    }
+                }
+                Err(ControlError::Capacity)
+            })
+            .await
+            .map_err(failure)??;
+        }
+        Ok(())
+    }
+    .await;
+    controller.shutdown();
+    task.await.map_err(failure)??;
+    result
+}

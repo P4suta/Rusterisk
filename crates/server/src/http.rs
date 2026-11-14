@@ -308,6 +308,16 @@ async fn dispatch(
         ("GET", ["ari", "channels", channel]) => Action::GetChannel(id(channel)?),
         ("POST", ["ari", "channels", channel, "answer"]) => Action::Answer(id(channel)?),
         ("POST", ["ari", "channels", channel, "ring"]) => Action::Ring(id(channel)?),
+        ("POST", ["ari", "channels", channel, "continue"]) => Action::Continue {
+            channel: id(channel)?,
+            context: parameters.get("context").cloned(),
+            extension: parameters.get("extension").cloned(),
+            priority: parameters
+                .get("priority")
+                .map(|value| value.parse())
+                .transpose()
+                .map_err(|_| ControlError::Invalid("Invalid dialplan priority"))?,
+        },
         ("POST", ["ari", "channels", channel, "dtmf"]) => Action::SendDtmf {
             channel: id(channel)?,
             digits: required(parameters, "dtmf")?.into(),
