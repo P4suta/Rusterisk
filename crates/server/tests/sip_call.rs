@@ -15,7 +15,7 @@ use rusterisk_server::media::MediaHub;
 use rusterisk_server::rtp::SocketPair;
 use rusterisk_server::signaling::Signaling;
 use rusterisk_server::{Action, ControlError, Controller, Credentials};
-use rusterisk_sip::{Direction, Session};
+use rusterisk_sip::{Direction, DtmfFormat, Session};
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -362,7 +362,7 @@ async fn invite(
         remote: audio.local_addr().map_err(failure)?,
         codec: Codec::Pcmu,
         payload_type: 0,
-        dtmf_payload: Some(101),
+        telephone: Some(DtmfFormat::new(101, 8000).map_err(failure)?),
         direction: Direction::SendRecv,
     }
     .answer(audio.local_addr().map_err(failure)?, 1);

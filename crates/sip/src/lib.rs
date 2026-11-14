@@ -15,9 +15,11 @@ use subtle::ConstantTimeEq;
 mod incoming;
 mod info;
 mod outgoing;
+mod telephone;
 mod transactions;
 pub use incoming::RejectReason;
 pub use outgoing::Outbound;
+pub use telephone::DtmfFormat;
 
 pub const MAX_MESSAGE: usize = 16384;
 
@@ -93,7 +95,7 @@ pub struct Session {
     pub remote: SocketAddr,
     pub codec: Codec,
     pub payload_type: u8,
-    pub dtmf_payload: Option<u8>,
+    pub telephone: Option<DtmfFormat>,
     pub direction: Direction,
 }
 
@@ -108,7 +110,8 @@ impl Session {
         let mut mappings = BTreeMap::new();
         mappings.insert(0, Codec::Pcmu);
         mappings.insert(8, Codec::Pcma);
-        let mut dtmf = None;
+        let mut dtmf = BTreeMap::new();
+        let mut parameters = BTreeMap::new();
         let mut direction = Direction::SendRecv;
         for line in source.lines().map(str::trim) {
             if let Some(connection) = line
@@ -130,11 +133,18 @@ impl Session {
                 }
                 port = Some(number.parse::<u16>().map_err(|_| SipError::InvalidPacket)?);
                 for format in formats {
-                    payloads.push(format.parse().map_err(|_| SipError::InvalidPacket)?);
+                    let payload = format.parse::<u8>().map_err(|_| SipError::InvalidPacket)?;
+                    if payload > 127 {
+                        return Err(SipError::InvalidPacket);
+                    }
+                    payloads.push(payload);
                 }
             } else if let Some(mapping) = line.strip_prefix("a=rtpmap:") {
                 let (payload, format) = mapping.split_once(' ').ok_or(SipError::InvalidPacket)?;
                 let payload: u8 = payload.parse().map_err(|_| SipError::InvalidPacket)?;
+                if payload > 127 {
+                    return Err(SipError::InvalidPacket);
+                }
                 let lower = format.to_ascii_lowercase();
                 match lower.as_str() {
                     "pcmu/8000" | "pcmu/8000/1" => {
@@ -146,8 +156,19 @@ impl Session {
                     "opus/48000/2" | "opus/48000/1" => {
                         mappings.insert(payload, Codec::Opus);
                     }
-                    "telephone-event/8000" => dtmf = Some(payload),
+                    "telephone-event/8000" => {
+                        dtmf.insert(payload, 8000);
+                    }
+                    "telephone-event/48000" => {
+                        dtmf.insert(payload, 48000);
+                    }
                     _ => {}
+                }
+            } else if let Some(parameter) = line.strip_prefix("a=fmtp:") {
+                let (payload, value) = parameter.split_once(' ').ok_or(SipError::InvalidPacket)?;
+                let payload: u8 = payload.parse().map_err(|_| SipError::InvalidPacket)?;
+                if payload > 127 || parameters.insert(payload, value).is_some() {
+                    return Err(SipError::InvalidPacket);
                 }
             } else {
                 match line {
@@ -169,11 +190,33 @@ impl Session {
                 .iter()
                 .find(|payload| mappings.get(payload) == Some(codec))
             {
+                let rate = match codec {
+                    Codec::Pcmu | Codec::Pcma => 8000,
+                    Codec::Opus => 48000,
+                };
+                let mut formats = Vec::with_capacity(dtmf.len());
+                for (payload, clock) in &dtmf {
+                    if payloads.contains(payload) && payload != payload_type {
+                        let mut format = DtmfFormat::new(*payload, *clock)?;
+                        if let Some(value) = parameters.get(payload) {
+                            format = format.with_parameters(value)?;
+                        }
+                        if format.events() != 0 {
+                            formats.push(format);
+                        }
+                    }
+                }
+                let telephone = formats
+                    .iter()
+                    .find(|format| format.rate() == rate)
+                    .or_else(|| formats.iter().find(|format| format.rate() == 8000))
+                    .or_else(|| formats.first())
+                    .copied();
                 return Ok(Self {
                     remote,
                     codec: *codec,
                     payload_type: *payload_type,
-                    dtmf_payload: dtmf.filter(|payload| payloads.contains(payload)),
+                    telephone,
                     direction,
                 });
             }
@@ -189,13 +232,16 @@ impl Session {
             Codec::Opus => "opus/48000/2",
         };
         let mut output = format!("v=0\r\no=rusterisk {session_id} {session_id} IN {family} {}\r\ns=Rusterisk\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {}", local.ip(), local.ip(), local.port(), self.payload_type);
-        if let Some(payload) = self.dtmf_payload {
-            output.push_str(&format!(" {payload}"));
+        if let Some(format) = self.telephone {
+            output.push_str(&format!(" {}", format.payload_type()));
         }
         output.push_str(&format!("\r\na=rtpmap:{} {format}\r\n", self.payload_type));
-        if let Some(payload) = self.dtmf_payload {
+        if let Some(format) = self.telephone {
+            let payload = format.payload_type();
             output.push_str(&format!(
-                "a=rtpmap:{payload} telephone-event/8000\r\na=fmtp:{payload} 0-16\r\n"
+                "a=rtpmap:{payload} telephone-event/{}\r\na=fmtp:{payload} {}\r\n",
+                format.rate(),
+                format.parameters()
             ));
         }
         output.push_str(match self.direction {

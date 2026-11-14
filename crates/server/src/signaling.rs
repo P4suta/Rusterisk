@@ -225,8 +225,13 @@ impl Signaling {
                                     format,
                                     payload_type: session.payload_type,
                                     telephone: session
-                                        .dtmf_payload
-                                        .map(|payload| TelephoneFormat::new(payload, 8000))
+                                        .telephone
+                                        .map(|format| {
+                                            TelephoneFormat::new(
+                                                format.payload_type(),
+                                                format.rate(),
+                                            )
+                                        })
                                         .transpose()
                                         .map_err(failure)?,
                                 },
