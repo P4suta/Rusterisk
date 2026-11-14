@@ -9,6 +9,7 @@ use axum::{
 };
 use base64::Engine;
 use rusterisk_api::ChannelId;
+use rusterisk_core::MuteDirection;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
@@ -116,6 +117,15 @@ fn optional_id(
         .unwrap_or(&uuid::Uuid::new_v4().to_string()))
 }
 
+fn mute_direction(parameters: &BTreeMap<String, String>) -> Result<MuteDirection, ControlError> {
+    match required(parameters, "direction")? {
+        "in" => Ok(MuteDirection::Incoming),
+        "out" => Ok(MuteDirection::Outgoing),
+        "both" => Ok(MuteDirection::Both),
+        _ => Err(ControlError::Invalid("Invalid direction specified")),
+    }
+}
+
 fn response(outcome: Outcome) -> Response {
     match outcome.body {
         Some(body) => (StatusCode::OK, Json(body)).into_response(),
@@ -201,6 +211,16 @@ async fn dispatch(
         ("GET", ["ari", "channels", channel]) => Action::GetChannel(id(channel)?),
         ("POST", ["ari", "channels", channel, "answer"]) => Action::Answer(id(channel)?),
         ("POST", ["ari", "channels", channel, "ring"]) => Action::Ring(id(channel)?),
+        ("POST", ["ari", "channels", channel, "hold"]) => Action::Hold(id(channel)?),
+        ("DELETE", ["ari", "channels", channel, "hold"]) => Action::Unhold(id(channel)?),
+        ("POST", ["ari", "channels", channel, "mute"]) => Action::Mute {
+            channel: id(channel)?,
+            direction: mute_direction(parameters)?,
+        },
+        ("DELETE", ["ari", "channels", channel, "mute"]) => Action::Unmute {
+            channel: id(channel)?,
+            direction: mute_direction(parameters)?,
+        },
         ("DELETE", ["ari", "channels", channel]) => Action::Hangup(id(channel)?),
         ("GET", ["ari", "bridges"]) => Action::ListBridges,
         ("POST", ["ari", "bridges"]) => Action::CreateBridge {
