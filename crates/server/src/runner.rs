@@ -1,4 +1,4 @@
-use crate::{Action, Control, ControlError, Effect, Outcome, Signal};
+use crate::{Action, CallKey, Control, ControlError, Effect, IncomingCall, Outcome, Signal};
 use rusterisk_api::{Event, EventKind};
 use rusterisk_config::Config;
 use std::collections::BTreeMap;
@@ -26,6 +26,10 @@ impl Credentials {
 }
 
 enum Request {
+    Incoming {
+        call: IncomingCall,
+        reply: oneshot::Sender<Result<CallKey, ControlError>>,
+    },
     Authorize {
         credentials: Credentials,
         origin: Option<String>,
@@ -121,6 +125,14 @@ async fn receive<T>(
 }
 
 impl Controller {
+    pub async fn incoming(&self, call: IncomingCall) -> Result<CallKey, ControlError> {
+        let (reply, receiver) = oneshot::channel();
+        self.requests
+            .try_send(Request::Incoming { call, reply })
+            .map_err(|_| ControlError::Capacity)?;
+        receive(receiver).await
+    }
+
     pub fn new(config: Config, capacity: usize) -> (Self, Runner, mpsc::Receiver<Effect>) {
         let (requests, request_receiver) = mpsc::channel(128);
         let (signals, signal_receiver) = mpsc::channel(128);
@@ -319,6 +331,32 @@ impl Runner {
 
     fn request(&mut self, request: Request, now_ms: u64) -> Result<(), ControlError> {
         match request {
+            Request::Incoming { call, reply } => {
+                if reply.is_closed() {
+                    return Ok(());
+                }
+                let id = call.id.clone();
+                let result = match self.control.incoming(call, &timestamp()) {
+                    Ok(mut outcome) => {
+                        if let Err(error) = self.publish(&mut outcome) {
+                            if reply.send(Err(error.clone())).is_err() {
+                                tracing::debug!(
+                                    "incoming admission requester disconnected during overload"
+                                );
+                            }
+                            return Err(error);
+                        }
+                        self.control.key(&id)
+                    }
+                    Err(error) => Err(error),
+                };
+                if let Err(Ok(key)) = reply.send(result) {
+                    let mut cleanup =
+                        self.control
+                            .apply(Action::Hangup(key.id), &timestamp(), now_ms)?;
+                    self.publish(&mut cleanup)?;
+                }
+            }
             Request::Authorize {
                 credentials,
                 origin,

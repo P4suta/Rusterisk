@@ -199,6 +199,8 @@ async fn dispatch(
                 .unwrap_or(30),
         },
         ("GET", ["ari", "channels", channel]) => Action::GetChannel(id(channel)?),
+        ("POST", ["ari", "channels", channel, "answer"]) => Action::Answer(id(channel)?),
+        ("POST", ["ari", "channels", channel, "ring"]) => Action::Ring(id(channel)?),
         ("DELETE", ["ari", "channels", channel]) => Action::Hangup(id(channel)?),
         ("GET", ["ari", "bridges"]) => Action::ListBridges,
         ("POST", ["ari", "bridges"]) => Action::CreateBridge {
