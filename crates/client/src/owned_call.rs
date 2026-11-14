@@ -187,6 +187,9 @@ pub(crate) async fn originate(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Work {
     Originating,
+    EarlyCleaning,
+    EarlyCleaned,
+    Settling,
     Idle,
     Cleaning,
     Done,
@@ -329,6 +332,9 @@ impl Calls {
         if let Some(entry) = self.entries.get_mut(&channel.id) {
             entry.progress.send_modify(|snapshot| {
                 if snapshot.progress.completion().is_some() {
+                    if snapshot.channel.is_none() {
+                        snapshot.channel = Some(channel.clone());
+                    }
                     return;
                 }
                 snapshot.channel = Some(channel.clone());
@@ -343,6 +349,7 @@ impl Calls {
                 }
             });
         }
+        self.tick();
     }
 
     pub fn tick(&mut self) {
@@ -355,8 +362,30 @@ impl Calls {
                 }
                 Err(oneshot::error::TryRecvError::Empty) => {}
             }
-            if entry.work == Work::Idle && entry.progress.borrow().progress.completion().is_some() {
-                entry.work = Work::Cleaning;
+            let cleanup = {
+                let snapshot = entry.progress.borrow();
+                if snapshot.progress.completion().is_none() {
+                    false
+                } else {
+                    match entry.work {
+                        Work::Originating if snapshot.channel.is_some() => {
+                            entry.work = Work::EarlyCleaning;
+                            true
+                        }
+                        Work::Idle => {
+                            entry.work = Work::Cleaning;
+                            true
+                        }
+                        Work::Originating
+                        | Work::EarlyCleaning
+                        | Work::EarlyCleaned
+                        | Work::Settling
+                        | Work::Cleaning
+                        | Work::Done => false,
+                    }
+                }
+            };
+            if cleanup {
                 let id = id.clone();
                 let client = self.client.clone();
                 self.cleanups.spawn(async move {
@@ -371,7 +400,11 @@ impl Calls {
 
     pub fn originated(&mut self, id: api::ChannelId, result: Result<api::Channel, Error>) {
         if let Some(entry) = self.entries.get_mut(&id) {
-            entry.work = Work::Idle;
+            entry.work = match entry.work {
+                Work::Originating | Work::EarlyCleaned => Work::Idle,
+                Work::EarlyCleaning => Work::Settling,
+                Work::Settling | Work::Idle | Work::Cleaning | Work::Done => return,
+            };
             entry.progress.send_modify(|snapshot| match result {
                 Ok(channel) if channel.id == id => {
                     snapshot.progress = snapshot.progress.observe(CallMilestone::Accepted);
@@ -394,8 +427,12 @@ impl Calls {
                             ..
                         }
                     ) {
-                        entry.work = Work::Done;
-                        snapshot.cleanup = Cleanup::Complete;
+                        if entry.work == Work::Settling {
+                            entry.work = Work::Cleaning;
+                        } else {
+                            entry.work = Work::Done;
+                            snapshot.cleanup = Cleanup::Complete;
+                        }
                     }
                     snapshot.progress = snapshot.progress.finish(CallCompletion::Failed);
                     snapshot.failure = Some(error.into());
@@ -407,6 +444,24 @@ impl Calls {
 
     pub fn cleaned(&mut self, id: api::ChannelId, result: Result<(), Error>) {
         if let Some(entry) = self.entries.get_mut(&id) {
+            match entry.work {
+                Work::EarlyCleaning | Work::Settling => {
+                    entry.work = if entry.work == Work::EarlyCleaning {
+                        Work::EarlyCleaned
+                    } else {
+                        Work::Idle
+                    };
+                    if let Err(error) = result {
+                        if !matches!(error, Error::Api { status: 404, .. }) {
+                            tracing::debug!(channel = %id, %error, "early hangup needs confirmation after originate completes");
+                        }
+                    }
+                    self.tick();
+                    return;
+                }
+                Work::Cleaning => {}
+                Work::Originating | Work::EarlyCleaned | Work::Idle | Work::Done => return,
+            }
             entry.work = Work::Done;
             entry.progress.send_modify(|snapshot| match result {
                 Ok(()) | Err(Error::Api { status: 404, .. }) => {

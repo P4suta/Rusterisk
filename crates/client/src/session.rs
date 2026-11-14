@@ -88,7 +88,13 @@ pub(crate) async fn connect(
     let (events, received) = broadcast::channel(64);
     let (stop, stopped) = watch::channel(false);
     let (commands, calls) = Calls::new(client.clone(), application.clone());
-    let task = tokio::spawn(run(socket, events, stopped, calls));
+    let task = tokio::spawn(async move {
+        let result = run(socket, events, stopped, calls).await;
+        if let Err(error) = &result {
+            tracing::warn!(%error, "client session stopped with an error");
+        }
+        result
+    });
     Ok(Session {
         commands,
         events: received,
