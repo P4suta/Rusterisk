@@ -1,7 +1,11 @@
-use crate::{api, Client, Error};
+use crate::{
+    api,
+    owned_call::{self, Calls, Command},
+    Client, Error, Originate, OwnedCall,
+};
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest, protocol::WebSocketConfig, Message,
 };
@@ -10,12 +14,16 @@ type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 pub struct Session {
+    commands: mpsc::Sender<Command>,
     events: broadcast::Receiver<api::Event>,
     stop: watch::Sender<bool>,
     task: Option<tokio::task::JoinHandle<Result<(), Error>>>,
 }
 
 impl Session {
+    pub async fn originate(&self, options: Originate) -> Result<OwnedCall, Error> {
+        owned_call::originate(&self.commands, options).await
+    }
     pub async fn next_event(&mut self) -> Result<api::Event, Error> {
         self.events.recv().await.map_err(|error| match error {
             broadcast::error::RecvError::Closed => Error::Closed,
@@ -79,8 +87,10 @@ pub(crate) async fn connect(
     }
     let (events, received) = broadcast::channel(64);
     let (stop, stopped) = watch::channel(false);
-    let task = tokio::spawn(run(socket, events, stopped));
+    let (commands, calls) = Calls::new(client.clone(), application.clone());
+    let task = tokio::spawn(run(socket, events, stopped, calls));
     Ok(Session {
+        commands,
         events: received,
         stop,
         task: Some(task),
@@ -91,15 +101,26 @@ async fn run(
     mut socket: Socket,
     events: broadcast::Sender<api::Event>,
     mut stop: watch::Receiver<bool>,
+    mut calls: Calls,
 ) -> Result<(), Error> {
     let period = Duration::from_secs(20);
     let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_received = tokio::time::Instant::now();
+    let mut lifetime_tick = tokio::time::interval(Duration::from_millis(20));
+    lifetime_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = async {
         loop {
             if *stop.borrow() { break; }
             tokio::select! {
+                command = calls.commands.recv() => match command { Some(command) => calls.submit(command), None => break },
+                worker = calls.originates.join_next(), if !calls.originates.is_empty() => {
+                    if let Some(worker) = worker { let (id, result) = worker.map_err(|_| Error::Closed)?; calls.originated(id, result); }
+                }
+                worker = calls.cleanups.join_next(), if !calls.cleanups.is_empty() => {
+                    if let Some(worker) = worker { let (id, result) = worker.map_err(|_| Error::Closed)?; calls.cleaned(id, result); }
+                }
+                _instant = lifetime_tick.tick() => calls.tick(),
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { break; },
                 message = socket.next() => {
                     let message = message.ok_or(Error::Closed)??;
@@ -107,6 +128,7 @@ async fn run(
                     match message {
                         Message::Text(text) => {
                             let event = serde_json::from_str(&text)?;
+                            calls.event(&event);
                             events.send(event).map_err(|_| Error::Closed)?;
                         }
                         Message::Ping(bytes) => send(&mut socket, Message::Pong(bytes)).await?,
@@ -123,8 +145,9 @@ async fn run(
         }
         Ok(())
     }.await;
+    let cleanup = calls.close().await;
     let close = send(&mut socket, Message::Close(None)).await;
-    result.and(close)
+    result.and(cleanup).and(close)
 }
 
 async fn send(socket: &mut Socket, message: Message) -> Result<(), Error> {

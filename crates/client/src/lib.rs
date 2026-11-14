@@ -7,6 +7,9 @@ use std::time::Duration;
 const MAX_RESPONSE: usize = 1024 * 1024;
 mod session;
 pub use session::Session;
+mod owned_call;
+pub use owned_call::{CallFailure, CallSnapshot, Cleanup, Originate, OwnedCall};
+pub use rusterisk_core::{CallCompletion, CallMilestone, OwnedCallProgress};
 
 #[derive(Debug)]
 pub enum Error {
@@ -21,6 +24,9 @@ pub enum Error {
     Timeout,
     WebSocket(String),
     EventLagged(u64),
+    CallEnded(CallCompletion),
+    CallFailed(CallFailure),
+    Cleanup(String),
 }
 
 impl std::fmt::Display for Error {
@@ -37,6 +43,9 @@ impl std::fmt::Display for Error {
             Self::Timeout => f.write_str("client deadline expired"),
             Self::WebSocket(message) => write!(f, "event transport: {message}"),
             Self::EventLagged(count) => write!(f, "event consumer missed {count} events"),
+            Self::CallEnded(completion) => write!(f, "call completed: {completion:?}"),
+            Self::CallFailed(failure) => f.write_str(&failure.message),
+            Self::Cleanup(message) => write!(f, "call cleanup: {message}"),
         }
     }
 }

@@ -1830,12 +1830,14 @@ dependencies = [
  "reqwest",
  "rusterisk-api",
  "rusterisk-config",
+ "rusterisk-core",
  "rusterisk-server",
  "serde",
  "serde_json",
  "tokio",
  "tokio-tungstenite",
  "url",
+ "uuid",
 ]
 
 [[package]]
