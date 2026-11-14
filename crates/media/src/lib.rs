@@ -1,9 +1,11 @@
 use bytes::Bytes;
 use webrtc_util::marshal::{Marshal, Unmarshal};
 mod mixing;
+mod rtcp;
 mod streams;
 mod telephone_events;
 pub use mixing::{Gate, Mixer};
+pub use rtcp::{goodbye_reports, sender_reports, SourceReport};
 pub use streams::{AudioFormat, RtpReceiver, RtpSender};
 pub use telephone_events::{
     TelephoneEvent, TelephoneEvents, TelephoneFormat, TelephoneReceiver, TelephoneSender,
@@ -481,35 +483,16 @@ pub fn sender_report(
     octets: u32,
     cname: &str,
 ) -> Result<Vec<u8>, MediaError> {
-    use rtcp_types::prelude::{RtcpPacketWriter, RtcpPacketWriterExt};
-    if cname.len() > 128 {
-        return Err(MediaError::Capacity);
-    }
-    let report = rtcp_types::SenderReport::builder(ssrc)
-        .ntp_timestamp(ntp)
-        .rtp_timestamp(timestamp)
-        .packet_count(packets)
-        .octet_count(octets);
-    let description = rtcp_types::Sdes::builder().add_chunk(
-        rtcp_types::SdesChunk::builder(ssrc).add_item(rtcp_types::SdesItem::builder(1, cname)),
-    );
-    let report_size = report
-        .calculate_size()
-        .map_err(|error| MediaError::Control(error.to_string()))?;
-    let description_size = description
-        .calculate_size()
-        .map_err(|error| MediaError::Control(error.to_string()))?;
-    if report_size + description_size > MAX_PACKET {
-        return Err(MediaError::Capacity);
-    }
-    let mut output = vec![0; report_size + description_size];
-    report
-        .write_into(&mut output[..report_size])
-        .map_err(|error| MediaError::Control(error.to_string()))?;
-    description
-        .write_into(&mut output[report_size..])
-        .map_err(|error| MediaError::Control(error.to_string()))?;
-    Ok(output)
+    sender_reports(
+        &[SourceReport {
+            ssrc,
+            timestamp,
+            packets,
+            octets,
+        }],
+        ntp,
+        cname,
+    )
 }
 
 pub struct Srtp {

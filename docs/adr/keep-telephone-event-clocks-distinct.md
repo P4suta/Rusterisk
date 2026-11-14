@@ -24,6 +24,7 @@ One source with different rates would violate the selected reporting rules.
 ## Consequences
 
 Compound control reports describe both clocks with one canonical name.
+Use one description packet per source because [the library parser](https://docs.rs/rtcp-types/0.3.0/src/rtcp_types/sdes.rs.html) treats leading zeros in subsequent identifiers as padding.
 Shutdown releases both sources.
 Reference testing must resolve whether source changes disrupt Asterisk's audio processing.
 
