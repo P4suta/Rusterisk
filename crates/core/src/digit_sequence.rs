@@ -6,6 +6,8 @@ pub enum DtmfError {
     Capacity,
     Timing,
     Clock,
+    Unsupported,
+    Ended,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
