@@ -87,6 +87,9 @@ pub struct Client {
 
 impl Client {
     pub fn new(address: &str, username: &str, password: &str) -> Result<Self, Error> {
+        if address.len() > 2048 {
+            return Err(Error::Invalid("server address exceeds 2048 bytes"));
+        }
         let base =
             url::Url::parse(address).map_err(|_| Error::Invalid("invalid server address"))?;
         let loopback = match base.host() {
@@ -147,6 +150,13 @@ impl Client {
         path: &[(&str, &str)],
         query: &[(&str, &str)],
     ) -> Result<T, Error> {
+        if query.len() > 32
+            || query
+                .iter()
+                .any(|(name, value)| name.len() > 128 || value.len() > 4096)
+        {
+            return Err(Error::Capacity);
+        }
         let operation = api::OPERATIONS
             .iter()
             .find(|entry| entry.id == operation)
@@ -162,6 +172,9 @@ impl Client {
         let mut url = self.base.clone();
         url.set_path(&format!("/ari{resource}"));
         url.query_pairs_mut().extend_pairs(query.iter().copied());
+        if url.as_str().len() > 4096 {
+            return Err(Error::Capacity);
+        }
         let method = reqwest::Method::from_bytes(operation.method.upper().as_bytes())
             .map_err(|_| Error::Invalid("invalid operation method"))?;
         let mut response = self.http.request(method, url).send().await?;

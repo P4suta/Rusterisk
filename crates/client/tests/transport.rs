@@ -23,6 +23,27 @@ fn client_settings_reject_credential_urls_and_insecure_external_management() {
 }
 
 #[tokio::test]
+async fn request_limits_are_checked_before_connecting_to_the_server() -> Result<(), Error> {
+    let client = Client::new("http://127.0.0.1:9", "app", "password")?;
+    let id = ChannelId::try_from("conversation".to_owned())?;
+    for name in ["A".repeat(4097), "&".repeat(1400)] {
+        assert!(matches!(
+            client.create_bridge(&id, &name).await,
+            Err(Error::Capacity)
+        ));
+    }
+    assert!(matches!(
+        Client::new(
+            &format!("https://{}.example", "a".repeat(2050)),
+            "app",
+            "password"
+        ),
+        Err(Error::Invalid(_))
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn typed_client_authenticates_and_roundtrips_server_resources() -> Result<(), Error> {
     let config = rusterisk_config::Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
