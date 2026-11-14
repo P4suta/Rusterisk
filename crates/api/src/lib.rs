@@ -1,6 +1,8 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+mod swagger;
+pub use swagger::SwaggerError;
 
 pub const REFERENCE_VERSION: &str = "22.9.0";
 
@@ -943,7 +945,7 @@ fn json_array<const N: usize>(values: [Value; N]) -> Value {
     Value::Array(values.into_iter().collect())
 }
 
-pub fn swagger(resource: &str) -> Value {
+pub fn swagger(resource: &str) -> Result<Value, SwaggerError> {
     let mut paths: std::collections::BTreeMap<&str, Vec<Value>> = std::collections::BTreeMap::new();
     for operation in OPERATIONS
         .iter()
@@ -966,7 +968,9 @@ pub fn swagger(resource: &str) -> Value {
         .into_iter()
         .map(|(path, operations)| json!({"path": path, "operations": operations}))
         .collect();
-    json!({"swaggerVersion": "1.2", "apiVersion": "2.0.0", "basePath": "/ari", "resourcePath": format!("/api-docs/{resource}.{{format}}"), "apis": apis, "models": schemas()})
+    Ok(
+        json!({"swaggerVersion": "1.2", "apiVersion": "2.0.0", "basePath": "/ari", "resourcePath": format!("/api-docs/{resource}.{{format}}"), "apis": apis, "models": swagger::models()?}),
+    )
 }
 
 pub fn resources() -> Value {

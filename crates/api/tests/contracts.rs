@@ -23,7 +23,8 @@ fn event_wire_shape_preserves_asterisk_discriminator() -> Result<(), serde_json:
 }
 
 #[test]
-fn both_descriptions_cover_the_authoritative_operation_set() {
+fn both_descriptions_cover_the_authoritative_operation_set(
+) -> Result<(), rusterisk_api::SwaggerError> {
     let openapi = openapi();
     assert_eq!(openapi["openapi"], "3.1.0");
     let mut ids = std::collections::BTreeSet::new();
@@ -34,7 +35,7 @@ fn both_descriptions_cover_the_authoritative_operation_set() {
             operation.id
         );
         let resource = operation.resource();
-        let definition = swagger(resource);
+        let definition = swagger(resource)?;
         assert_eq!(definition["swaggerVersion"], "1.2");
         let apis = definition["apis"].as_array();
         assert!(
@@ -45,6 +46,7 @@ fn both_descriptions_cover_the_authoritative_operation_set() {
                     .any(|item| item["nickname"] == operation.nickname))))
         );
     }
+    Ok(())
 }
 
 #[test]
@@ -81,4 +83,111 @@ fn openapi_references_resolve_and_body_parameters_use_request_body() {
     }
     let document = openapi();
     verify(&document, &document);
+}
+
+#[test]
+fn swagger_event_models_use_wire_discriminators_and_model_identifiers(
+) -> Result<(), rusterisk_api::SwaggerError> {
+    let document = swagger("events")?;
+    let models = &document["models"];
+    assert_eq!(
+        models["StasisStart"]["id"], "StasisStart",
+        "event schema: {}",
+        models["Event"]
+    );
+    assert_eq!(
+        models["StasisStart"]["properties"]["channel"]["$ref"],
+        "Channel"
+    );
+    assert_eq!(
+        models["StasisStart"]["properties"]["args"]["items"]["type"],
+        "string"
+    );
+    assert_eq!(
+        models["ChannelDtmfReceived"]["properties"]["digit"]["type"],
+        "string"
+    );
+    assert_eq!(models["Channel"]["id"], "Channel");
+    assert_eq!(models["Channel"]["properties"]["state"]["type"], "string");
+    assert!(models["Channel"]["properties"]["state"]["enum"]
+        .as_array()
+        .is_some_and(|values| values.iter().any(|value| value == "Up")));
+    Ok(())
+}
+
+#[test]
+fn swagger_models_resolve_flat_references_and_keep_inheritance_disjoint(
+) -> Result<(), rusterisk_api::SwaggerError> {
+    fn property(value: &serde_json::Value, models: &serde_json::Map<String, serde_json::Value>) {
+        for unsupported in ["properties", "oneOf", "anyOf", "allOf", "const", "$schema"] {
+            assert!(
+                value.get(unsupported).is_none(),
+                "unsupported property field {unsupported}: {value}"
+            );
+        }
+        if let Some(reference) = value.get("$ref").and_then(serde_json::Value::as_str) {
+            assert!(models.contains_key(reference), "unknown model {reference}");
+        } else {
+            assert!(value
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| matches!(
+                    kind,
+                    "string" | "integer" | "number" | "boolean" | "array"
+                )));
+        }
+        for bound in ["minimum", "maximum"] {
+            if let Some(value) = value.get(bound) {
+                assert!(value.is_string());
+            }
+        }
+        if let Some(items) = value.get("items") {
+            assert_ne!(items["type"], "array");
+            property(items, models);
+        }
+    }
+    let document = swagger("events")?;
+    let models = document["models"]
+        .as_object()
+        .ok_or(rusterisk_api::SwaggerError::Capacity)?;
+    for (name, model) in models {
+        assert_eq!(model["id"], *name);
+        let properties = model["properties"]
+            .as_object()
+            .ok_or(rusterisk_api::SwaggerError::Capacity)?;
+        for value in properties.values() {
+            property(value, models);
+        }
+        if let Some(required) = model["required"].as_array() {
+            assert!(required.iter().all(|name| name
+                .as_str()
+                .is_some_and(|name| properties.contains_key(name))));
+        }
+        if let Some(subtypes) = model["subTypes"].as_array() {
+            assert_eq!(model["discriminator"], "type");
+            assert!(model["required"]
+                .as_array()
+                .is_some_and(|values| values.iter().any(|value| value == "type")));
+            for subtype in subtypes {
+                let subtype = subtype
+                    .as_str()
+                    .ok_or(rusterisk_api::SwaggerError::Capacity)?;
+                let fields = models[subtype]["properties"]
+                    .as_object()
+                    .ok_or(rusterisk_api::SwaggerError::Capacity)?;
+                assert!(fields.keys().all(|name| !properties.contains_key(name)));
+            }
+        }
+    }
+    let source = rusterisk_api::schemas();
+    let branches = source["Event"]["oneOf"]
+        .as_array()
+        .ok_or(rusterisk_api::SwaggerError::Capacity)?;
+    for branch in branches {
+        let name = branch["properties"]["type"]["const"]
+            .as_str()
+            .ok_or(rusterisk_api::SwaggerError::Capacity)?;
+        assert!(models.contains_key(name));
+    }
+    Ok(())
 }

@@ -200,7 +200,11 @@ async fn dispatch(
             {
                 return Err(ControlError::NotFound("Resource not found"));
             }
-            return Ok(Json(rusterisk_api::swagger(resource)).into_response());
+            return Ok(Json(
+                rusterisk_api::swagger(resource)
+                    .map_err(|error| ControlError::Encoding(error.to_string()))?,
+            )
+            .into_response());
         }
     }
     if !body.is_empty() {
