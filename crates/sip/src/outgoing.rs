@@ -111,7 +111,7 @@ impl Engine {
         if self
             .outgoing
             .values()
-            .any(|dialog| dialog.id == outbound.id)
+            .any(|dialog| dialog.id == outbound.id && dialog.generation == outbound.generation)
         {
             return Err(SipError::InvalidPacket);
         }

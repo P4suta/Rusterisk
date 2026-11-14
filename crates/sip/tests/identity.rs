@@ -101,6 +101,23 @@ fn answered(invite: &[u8]) -> Result<Vec<u8>, SipError> {
     Ok(format!("SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=callee\r\nCall-ID: {}\r\nCSeq: {}\r\nContact: <sip:phone@127.0.0.1:5061>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", request.top_via_header()?.value(), request.from_header()?.value(), request.to_header()?.value(), request.call_id_header()?.value(), request.cseq_header()?.value(), body.len()).into_bytes())
 }
 
+#[test]
+fn a_cancelled_generation_does_not_prevent_reusing_the_channel_identifier() -> Result<(), SipError>
+{
+    let mut config = config()?;
+    config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+    let mut engine = Engine::new(config, [9; 32]);
+    engine.originate(outbound(), 0)?;
+    engine.cancel("outgoing", 7, 1)?;
+    let mut replacement = outbound();
+    replacement.generation = 8;
+    assert!(engine.originate(replacement, 2)?.datagrams[0]
+        .bytes
+        .starts_with(b"INVITE "));
+    assert!(engine.cancel("outgoing", 7, 3)?.datagrams.is_empty());
+    Ok(())
+}
+
 fn outbound() -> rusterisk_sip::Outbound {
     rusterisk_sip::Outbound {
         id: "outgoing".into(),
