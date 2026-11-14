@@ -1,0 +1,88 @@
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Command {
+    Help,
+    Version,
+    Check { directory: PathBuf },
+    Run { directory: PathBuf },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CliError {
+    UnknownOption,
+    MissingDirectory,
+    DuplicateOption,
+    Capacity,
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::UnknownOption => "Unknown option",
+            Self::MissingDirectory => "A configuration directory is required",
+            Self::DuplicateOption => "Duplicate option",
+            Self::Capacity => "Command arguments exceed capacity",
+        })
+    }
+}
+impl std::error::Error for CliError {}
+
+enum Mode {
+    Run,
+    Check,
+}
+
+impl Command {
+    pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Self, CliError> {
+        let arguments: Vec<OsString> = arguments.into_iter().take(17).collect();
+        if arguments
+            .iter()
+            .any(|value| value == "--help" || value == "-h")
+        {
+            return Ok(Self::Help);
+        }
+        if arguments
+            .iter()
+            .any(|value| value == "--version" || value == "-V")
+        {
+            return Ok(Self::Version);
+        }
+        if arguments.len() > 16 {
+            return Err(CliError::Capacity);
+        }
+        let mut arguments = arguments.into_iter();
+        let mut directory = None;
+        let mut mode = Mode::Run;
+        while let Some(argument) = arguments.next() {
+            match argument.to_str() {
+                Some("--config-dir") => {
+                    if directory.is_some() {
+                        return Err(CliError::DuplicateOption);
+                    }
+                    let path = arguments.next().ok_or(CliError::MissingDirectory)?;
+                    if path.is_empty() {
+                        return Err(CliError::MissingDirectory);
+                    }
+                    if path.as_encoded_bytes().len() > 4096 {
+                        return Err(CliError::Capacity);
+                    }
+                    directory = Some(PathBuf::from(path));
+                }
+                Some("--check-config") => match mode {
+                    Mode::Run => mode = Mode::Check,
+                    Mode::Check => return Err(CliError::DuplicateOption),
+                },
+                Some(_) | None => return Err(CliError::UnknownOption),
+            }
+        }
+        let directory = directory.unwrap_or_else(|| PathBuf::from("config"));
+        Ok(match mode {
+            Mode::Run => Self::Run { directory },
+            Mode::Check => Self::Check { directory },
+        })
+    }
+}
+
+pub const HELP: &str = "Rusterisk call server.\n\nUsage: rusterisk [--config-dir PATH] [--check-config]\n\n--config-dir PATH  Read Asterisk configuration from PATH (default: config).\n--check-config     Validate configuration and exit.\n-h, --help         Print usage and exit.\n-V, --version      Print the version and exit.\n";

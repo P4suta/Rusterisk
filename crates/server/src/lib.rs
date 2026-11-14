@@ -1,3 +1,4 @@
+pub mod cli;
 mod control;
 mod encryption;
 pub mod http;
