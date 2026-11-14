@@ -9,6 +9,7 @@ license.workspace = true
 rusterisk-api = { version = "0.1.0", path = "../api" }
 rusterisk-core = { version = "0.1.0", path = "../core" }
 rusterisk-config = { version = "0.1.0", path = "../config" }
+rusterisk-media = { version = "0.1.0", path = "../media" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
@@ -19,6 +20,7 @@ axum = { version = "0.8.8", features = ["ws", "macros"] }
 base64 = "0.22.1"
 serde_urlencoded = "0.7.1"
 uuid = { version = "1.22.0", features = ["v4"] }
+getrandom = "0.4.3"
 
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }
