@@ -153,3 +153,73 @@ fn assignments_expand_current_values_and_keep_variables_with_their_call() -> Res
     assert!(matches!(refused, Err(ControlError::Conflict(_))));
     Ok(())
 }
+
+#[test]
+fn answer_suspends_until_the_response_and_media_or_its_deadline() -> Result<(), ControlError> {
+    for receive_media in [false, true] {
+        let mut control = Control::new(4);
+        control.subscribe("calls")?;
+        let key = incoming(&mut control, "first")?;
+        let program = Dialplan::parse(
+            "[internal]\nexten => 200,1,Answer()\nsame => n,Answer()\nsame => n,Stasis(calls)\n",
+        )
+        .map_err(failure)?;
+        let started = control.start_dialplan(&key, program, 0, "now")?;
+        assert!(
+            matches!(&started.effects[..], [Effect::Answer { key: answered }] if answered == &key)
+        );
+        assert!(started.events.is_empty());
+        assert!(control.tick_dialplans(1000, "later")?.events.is_empty());
+        control.signal(
+            rusterisk_server::Signal::Milestone {
+                key: key.clone(),
+                milestone: rusterisk_server::Milestone::Answered,
+            },
+            "later",
+        )?;
+        assert!(control.tick_dialplans(1000, "later")?.events.is_empty());
+        assert!(control.tick_dialplans(1499, "later")?.events.is_empty());
+        if receive_media {
+            control.signal(
+                rusterisk_server::Signal::Milestone {
+                    key: key.clone(),
+                    milestone: rusterisk_server::Milestone::MediaConnected,
+                },
+                "later",
+            )?;
+        }
+        let entered = control.tick_dialplans(if receive_media { 1499 } else { 1500 }, "later")?;
+        assert!(entered.effects.is_empty());
+        assert!(
+            matches!(&entered.events[1].kind, EventKind::StasisStart { channel, .. } if channel.state == rusterisk_api::ChannelState::Up && channel.dialplan.priority == 3)
+        );
+        assert!(control.tick_dialplans(2000, "later")?.events.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
+fn hangup_cancels_a_suspended_answer_before_late_milestones() -> Result<(), ControlError> {
+    let mut control = Control::new(4);
+    control.subscribe("calls")?;
+    let key = incoming(&mut control, "first")?;
+    control.start_dialplan(
+        &key,
+        Dialplan::parse("[internal]\nexten => 200,1,Answer()\nsame => n,Stasis(calls)\n")
+            .map_err(failure)?,
+        0,
+        "now",
+    )?;
+    control.apply(Action::Hangup(key.id.clone()), "later", 1)?;
+    let late = control.signal(
+        rusterisk_server::Signal::Milestone {
+            key: key.clone(),
+            milestone: rusterisk_server::Milestone::Answered,
+        },
+        "later",
+    )?;
+    assert!(matches!(&late.effects[..], [Effect::Release { key: released }] if released == &key));
+    assert!(late.events.is_empty());
+    assert!(control.tick_dialplans(2000, "later")?.events.is_empty());
+    Ok(())
+}

@@ -1,14 +1,15 @@
-use super::{CallKey, Control, ControlError, Outcome, VariableAccess};
+use super::{CallKey, Control, ControlError, Effect, Outcome, VariableAccess};
 use rusterisk_api::EventKind;
 use rusterisk_config::{expand_variables, Application, Dialplan, ExpansionError};
 use rusterisk_core::{
-    DialplanContinuation, DialplanDispatch, DialplanError, DialplanInstruction, DialplanMachine,
-    DialplanState,
+    AnswerProgress, AnswerStatus, CallState, DialplanContinuation, DialplanDispatch, DialplanError,
+    DialplanInstruction, DialplanMachine, DialplanState,
 };
 
 pub(super) struct DialplanFrame {
     program: Dialplan,
     machine: DialplanMachine,
+    answer: Option<AnswerProgress>,
 }
 
 fn core_error(error: DialplanError) -> ControlError {
@@ -58,7 +59,11 @@ impl Control {
         .ok_or(ControlError::NotFound("Extension not found"))?;
         let length = u16::try_from(program.steps.len()).map_err(|_| ControlError::Capacity)?;
         let machine = DialplanMachine::new(key.generation, index, length).map_err(core_error)?;
-        entry.dialplan = Some(DialplanFrame { program, machine });
+        entry.dialplan = Some(DialplanFrame {
+            program,
+            machine,
+            answer: None,
+        });
         self.advance_dialplan(key, now, timestamp)
     }
 
@@ -142,6 +147,30 @@ impl Control {
         outcome: &mut Outcome,
     ) -> Result<(), ControlError> {
         loop {
+            if let Some(answer) = &mut frame.answer {
+                let entry = self
+                    .channels
+                    .get(&key.id)
+                    .ok_or(ControlError::NotFound("Channel not found"))?;
+                match answer
+                    .observe(now, entry.call.state(), entry.call.media_connection())
+                    .map_err(core_error)?
+                {
+                    AnswerStatus::Pending => return Ok(()),
+                    AnswerStatus::Ready => {
+                        let DialplanState::Awaiting { token, .. } = frame.machine.state() else {
+                            return Err(ControlError::Conflict(
+                                "Answer lost its dialplan operation",
+                            ));
+                        };
+                        if !frame.machine.complete(token, DialplanContinuation::Advance) {
+                            return Err(ControlError::Conflict("Answer completion changed"));
+                        }
+                        frame.answer = None;
+                    }
+                    AnswerStatus::Cancelled => frame.machine.cancel(),
+                }
+            }
             let index = match frame.machine.state() {
                 DialplanState::Ready { position } => position,
                 DialplanState::Awaiting { .. } | DialplanState::Waiting { .. } => return Ok(()),
@@ -224,6 +253,18 @@ impl Control {
                         VariableAccess::Dialplan,
                     )?);
                 }
+                Application::Answer => {
+                    self.set_dialplan_location(key, "Answer", String::new())?;
+                    let entry = self
+                        .channels
+                        .get(&key.id)
+                        .ok_or(ControlError::NotFound("Channel not found"))?;
+                    if entry.call.state() != CallState::Up {
+                        frame.answer = Some(AnswerProgress::new());
+                        outcome.effects.push(Effect::Answer { key: key.clone() });
+                        return Ok(());
+                    }
+                }
                 Application::Goto {
                     context,
                     extension,
@@ -294,7 +335,7 @@ impl Control {
                     outcome.append(self.end(&key.id, timestamp, 16)?);
                     return Ok(());
                 }
-                Application::Answer | Application::Dial { .. } | Application::Playback(_) => {
+                Application::Dial { .. } | Application::Playback(_) => {
                     return Err(ControlError::Unsupported)
                 }
             }

@@ -696,3 +696,52 @@ async fn disconnecting_the_stasis_app_rejects_an_unanswered_invitation() -> Resu
     hub.await.map_err(failure)?.map_err(failure)?;
     result
 }
+
+#[tokio::test]
+async fn dialplan_answer_wait_and_hangup_finish_a_real_invitation_without_stasis(
+) -> Result<(), ControlError> {
+    let phone = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(failure)?;
+    let audio = SocketPair::bind(IpAddr::V4(Ipv4Addr::LOCALHOST), 0, 0).map_err(failure)?;
+    let sip = "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[contact]\ntype=aor\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=contact\ncontext=internal\nallow=ulaw\n";
+    let config = Config::parse(
+        "[general]\nbindaddr=127.0.0.1\n",
+        "[app]\ntype=user\npassword=test-password\n",
+        sip,
+        "",
+        "[internal]\nexten => 100,1,Answer()\nsame => n,Wait(1)\nsame => n,Hangup()\n",
+    )
+    .map_err(failure)?;
+    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (media, hub, notices) = MediaHub::new(4);
+    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let target = signaling.listeners()?[0].1;
+    let runner = tokio::spawn(runner.run());
+    let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
+    let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
+    let result = async {
+        invite(&phone, target, &audio).await?;
+        let answered = response(&phone).await?;
+        assert_eq!(answered.status_code.code(), 200);
+        let ack = format!("ACK sip:100@{target} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-answer-ack;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", phone.local_addr().map_err(failure)?, answered.from_header().map_err(failure)?.value(), answered.to_header().map_err(failure)?.value(), answered.call_id_header().map_err(failure)?.value());
+        phone.send_to(ack.as_bytes(), target).await.map_err(failure)?;
+        let channels = controller.execute(credentials()?, None, Action::ListChannels).await?.body.ok_or(ControlError::Capacity)?;
+        assert_eq!(channels[0]["state"], "Up");
+        assert_eq!(channels[0]["dialplan"]["app_name"], "Answer");
+        let mut bytes = [0; 16385];
+        let (size, peer) = tokio::time::timeout(Duration::from_secs(3), phone.recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
+        let SipMessage::Request(request) = SipMessage::try_from(&bytes[..size]).map_err(failure)? else { return Err(ControlError::Invalid("Expected hangup request")); };
+        assert_eq!(request.method, Method::Bye);
+        let response = format!("SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n", request.top_via_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.to_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value(), request.cseq_header().map_err(failure)?.value());
+        phone.send_to(response.as_bytes(), peer).await.map_err(failure)?;
+        let channels = controller.execute(credentials()?, None, Action::ListChannels).await?.body.ok_or(ControlError::Capacity)?;
+        assert_eq!(channels, serde_json::json!([]));
+        Ok(())
+    }.await;
+    controller.shutdown();
+    runner.await.map_err(failure)??;
+    signaling.await.map_err(failure)??;
+    hub.await.map_err(failure)?.map_err(failure)?;
+    result
+}
