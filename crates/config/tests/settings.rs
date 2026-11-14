@@ -128,6 +128,28 @@ fn dialplan_accepts_parallel_pjsip_and_rejects_unsupported_applications() -> Res
 }
 
 #[test]
+fn dial_without_a_timeout_keeps_the_reference_indefinite_wait() -> Result<(), ConfigError> {
+    for (arguments, expected) in [
+        ("PJSIP/alice", None),
+        ("PJSIP/alice,", None),
+        ("PJSIP/alice,15", Some(15)),
+    ] {
+        let dialplan = Dialplan::parse(&format!("[internal]\nexten => 100,1,Dial({arguments})\n"))?;
+        assert!(
+            matches!(&dialplan.steps[0].application, rusterisk_config::Application::Dial { timeout, .. } if *timeout == expected)
+        );
+    }
+    for arguments in ["PJSIP/alice,0", "PJSIP/alice,15,g", "PJSIP/alice,invalid"] {
+        let error = Dialplan::parse(&format!("[internal]\nexten => 100,1,Dial({arguments})\n"));
+        assert!(error.is_err());
+        if let Err(error) = error {
+            assert_eq!(error.line, 2);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn dialplan_assignments_accept_the_supported_caller_identification_fields(
 ) -> Result<(), ConfigError> {
     for target in ["CALLERID(num)", "CALLERID(name)", "CALLERID(all)"] {

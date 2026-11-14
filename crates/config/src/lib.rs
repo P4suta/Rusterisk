@@ -833,7 +833,7 @@ pub enum Application {
     Answer,
     Dial {
         destinations: Vec<String>,
-        timeout: u16,
+        timeout: Option<u16>,
     },
     Stasis {
         application: String,
@@ -970,10 +970,11 @@ impl Dialplan {
                     }
                     let timeout = parts
                         .next()
-                        .unwrap_or("30")
-                        .parse()
+                        .filter(|value| !value.is_empty())
+                        .map(str::parse)
+                        .transpose()
                         .map_err(|_| error("invalid Dial timeout"))?;
-                    if timeout == 0 || parts.next().is_some() {
+                    if timeout == Some(0) || parts.next().is_some() {
                         return Err(error("unsupported Dial arguments"));
                     }
                     Application::Dial {
