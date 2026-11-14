@@ -110,3 +110,46 @@ fn looping_priorities_yield_to_channel_controls_each_turn() -> Result<(), Contro
     assert!(control.tick_dialplans(300, "later")?.effects.is_empty());
     Ok(())
 }
+
+#[test]
+fn assignments_expand_current_values_and_keep_variables_with_their_call() -> Result<(), ControlError>
+{
+    let mut control = Control::new(4);
+    control.subscribe("calls")?;
+    let first = incoming(&mut control, "first")?;
+    let second = incoming(&mut control, "second")?;
+    let program = Dialplan::parse(
+        "[internal]\nexten => 200,1,Set(X=${CALLERID(num)}-${EXTEN}-${PRIORITY})\nsame => n,Set(CALLERID(name)=Desk ${X})\nsame => n,Set(CALLERID(num)=300)\nsame => n,Stasis(calls,${X},${MISSING},${CALLERID(all)})\n",
+    ).map_err(failure)?;
+    let started = control.start_dialplan(&first, program, 0, "now")?;
+    assert_eq!(started.events.len(), 2);
+    assert!(
+        matches!(&started.events[1].kind, EventKind::StasisStart { args, .. } if args == &["100-200-1", "", "\"Desk 100-200-1\" <300>"])
+    );
+    assert_eq!(control.channel(&first.id)?.caller.number, "300");
+    assert_eq!(control.channel(&second.id)?.caller.number, "100");
+    assert_eq!(control.key(&first.id)?, first);
+    let variable = control.apply(
+        Action::GetVariable {
+            channel: first.id.clone(),
+            variable: "X".into(),
+        },
+        "now",
+        0,
+    )?;
+    assert_eq!(
+        variable.body,
+        Some(serde_json::json!({"value": "100-200-1"}))
+    );
+    let refused = control.apply(
+        Action::SetVariable {
+            channel: second.id,
+            variable: "X".into(),
+            value: Some("outside".into()),
+        },
+        "now",
+        0,
+    );
+    assert!(matches!(refused, Err(ControlError::Conflict(_))));
+    Ok(())
+}

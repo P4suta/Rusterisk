@@ -408,6 +408,23 @@ enum CallerField {
     Number,
     All,
 }
+
+#[derive(Clone, Copy)]
+enum VariableAccess {
+    Stasis,
+    Dialplan,
+}
+
+impl VariableAccess {
+    fn check(self, membership: StasisMembership) -> Result<(), ControlError> {
+        match self {
+            Self::Stasis if !matches!(membership, StasisMembership::Entered(_)) => {
+                Err(ControlError::Conflict("Channel not in Stasis application"))
+            }
+            Self::Stasis | Self::Dialplan => Ok(()),
+        }
+    }
+}
 struct BridgeEntry {
     token: u64,
     snapshot: Bridge,
@@ -663,7 +680,7 @@ impl Control {
                 channel,
                 variable,
                 value,
-            } => self.set_variable(&channel, variable, value, timestamp),
+            } => self.set_variable(&channel, variable, value, timestamp, VariableAccess::Stasis),
             Action::Originate {
                 id,
                 endpoint,
@@ -944,6 +961,7 @@ impl Control {
         variable: String,
         value: Option<String>,
         timestamp: &str,
+        access: VariableAccess,
     ) -> Result<Outcome, ControlError> {
         let field = match variable.as_str() {
             "CALLERID(name)" => Some(CallerField::Name),
@@ -952,7 +970,7 @@ impl Control {
             _ => None,
         };
         if let Some(field) = field {
-            return self.set_caller(id, field, value.as_deref().unwrap_or(""), timestamp);
+            return self.set_caller(id, field, value.as_deref().unwrap_or(""), timestamp, access);
         }
         validate_variable(&variable)?;
         if matches!(
@@ -971,9 +989,7 @@ impl Control {
             .channels
             .get_mut(id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
-        if !matches!(entry.call.stasis(), StasisMembership::Entered(_)) {
-            return Err(ControlError::Conflict("Channel not in Stasis application"));
-        }
+        access.check(entry.call.stasis())?;
         if let Some(value) = &value {
             if entry.variables.len() >= 64 && !entry.variables.contains_key(&variable) {
                 return Err(ControlError::Capacity);
@@ -1001,6 +1017,7 @@ impl Control {
         field: CallerField,
         value: &str,
         timestamp: &str,
+        access: VariableAccess,
     ) -> Result<Outcome, ControlError> {
         if value.len() > 4096 || value.chars().any(char::is_control) {
             return Err(ControlError::Invalid("Invalid caller identification"));
@@ -1009,9 +1026,7 @@ impl Control {
             .channels
             .get_mut(id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
-        if !matches!(entry.call.stasis(), StasisMembership::Entered(_)) {
-            return Err(ControlError::Conflict("Channel not in Stasis application"));
-        }
+        access.check(entry.call.stasis())?;
         let mut caller = entry.snapshot.caller.clone();
         match field {
             CallerField::Name => caller.name = value.into(),

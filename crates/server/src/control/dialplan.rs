@@ -1,4 +1,4 @@
-use super::{CallKey, Control, ControlError, Outcome};
+use super::{CallKey, Control, ControlError, Outcome, VariableAccess};
 use rusterisk_api::EventKind;
 use rusterisk_config::{expand_variables, Application, Dialplan, ExpansionError};
 use rusterisk_core::{
@@ -213,6 +213,17 @@ impl Control {
                     let data = self.expand(key, &value)?;
                     self.set_dialplan_location(key, "NoOp", data)?;
                 }
+                Application::Set { variable, value } => {
+                    let value = self.expand(key, &value)?;
+                    self.set_dialplan_location(key, "Set", format!("{variable}={value}"))?;
+                    outcome.append(self.set_variable(
+                        &key.id,
+                        variable,
+                        Some(value),
+                        timestamp,
+                        VariableAccess::Dialplan,
+                    )?);
+                }
                 Application::Goto {
                     context,
                     extension,
@@ -283,10 +294,9 @@ impl Control {
                     outcome.append(self.end(&key.id, timestamp, 16)?);
                     return Ok(());
                 }
-                Application::Set { .. }
-                | Application::Answer
-                | Application::Dial { .. }
-                | Application::Playback(_) => return Err(ControlError::Unsupported),
+                Application::Answer | Application::Dial { .. } | Application::Playback(_) => {
+                    return Err(ControlError::Unsupported)
+                }
             }
             if !frame
                 .machine
