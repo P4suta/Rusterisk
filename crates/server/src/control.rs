@@ -155,6 +155,30 @@ pub enum Action {
 }
 
 impl Action {
+    pub(crate) const fn effect_budget(&self) -> usize {
+        match self {
+            Self::ListChannels
+            | Self::GetChannel(_)
+            | Self::GetVariable { .. }
+            | Self::SetVariable { .. }
+            | Self::ListBridges
+            | Self::GetBridge(_)
+            | Self::CreateBridge { .. } => 0,
+            Self::Hangup(_) => 2,
+            Self::Originate { .. }
+            | Self::SendDtmf { .. }
+            | Self::Answer(_)
+            | Self::Ring(_)
+            | Self::Hold(_)
+            | Self::Unhold(_)
+            | Self::Mute { .. }
+            | Self::Unmute { .. }
+            | Self::DestroyBridge(_)
+            | Self::AddChannels { .. }
+            | Self::RemoveChannels { .. } => 1,
+        }
+    }
+
     pub const fn read_only(&self) -> bool {
         match self {
             Self::ListChannels

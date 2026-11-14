@@ -381,7 +381,12 @@ impl Runner {
                 }
                 let result = self
                     .authorize(&credentials, origin.as_deref(), action.read_only())
-                    .and_then(|()| self.control.apply(action, &timestamp(), now_ms));
+                    .and_then(|()| {
+                        if self.effects.capacity() < action.effect_budget() {
+                            return Err(ControlError::Capacity);
+                        }
+                        self.control.apply(action, &timestamp(), now_ms)
+                    });
                 let result = match result {
                     Ok(mut outcome) => {
                         if let Err(error) = self.publish(&mut outcome) {
