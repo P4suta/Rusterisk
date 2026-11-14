@@ -1,7 +1,7 @@
 use rusterisk_core::DtmfTone;
 use rusterisk_media::{
-    AudioFormat, Frame, MediaError, RtpPacket, RtpReceiver, RtpSender, TelephoneFormat,
-    TelephoneReceiver, MAX_PACKET,
+    AudioFormat, Frame, MediaError, RtpPacket, RtpReceiver, RtpSender, SourceReport,
+    TelephoneFormat, TelephoneReceiver, TelephoneSender, MAX_PACKET,
 };
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -95,6 +95,7 @@ pub struct RtpChannels {
     pub incoming: mpsc::Sender<Frame>,
     pub digits: mpsc::Sender<DtmfTone>,
     pub outgoing: mpsc::Receiver<Frame>,
+    pub tones: mpsc::Receiver<DtmfTone>,
     pub stop: watch::Receiver<bool>,
 }
 
@@ -111,7 +112,57 @@ pub struct RtpLink {
     channels: RtpChannels,
     receiver: RtpReceiver,
     sender: RtpSender,
-    telephone: Option<TelephoneReceiver>,
+    telephone: Option<TelephoneTransport>,
+}
+
+struct TelephoneTransport {
+    receiver: TelephoneReceiver,
+    sender: TelephoneSender,
+    format: TelephoneFormat,
+}
+
+struct SentSource {
+    report: SourceReport,
+    rate: u32,
+    sampled: tokio::time::Instant,
+}
+
+fn record(
+    sources: &mut Vec<SentSource>,
+    packet: &RtpPacket,
+    rate: u32,
+    timestamp: u32,
+    sampled: tokio::time::Instant,
+) -> Result<(), MediaError> {
+    let mut source = if let Some(index) = sources
+        .iter()
+        .position(|source| source.report.ssrc == packet.ssrc())
+    {
+        sources.remove(index)
+    } else {
+        if sources.len() >= 2 {
+            return Err(MediaError::Capacity);
+        }
+        SentSource {
+            report: SourceReport {
+                ssrc: packet.ssrc(),
+                timestamp,
+                packets: 0,
+                octets: 0,
+            },
+            rate,
+            sampled,
+        }
+    };
+    source.report.timestamp = timestamp;
+    source.report.packets = source.report.packets.wrapping_add(1);
+    source.report.octets = source
+        .report
+        .octets
+        .wrapping_add(packet.payload().len() as u32);
+    source.sampled = sampled;
+    sources.insert(0, source);
+    Ok(())
 }
 
 fn failure(error: impl std::fmt::Display) -> MediaError {
@@ -155,13 +206,22 @@ impl RtpLink {
         }
         let mut seed = [0; 10];
         getrandom::fill(&mut seed).map_err(failure)?;
+        let sender = RtpSender::new(session.format, session.payload_type, seed)?;
+        let telephone = session
+            .telephone
+            .map(|format| {
+                getrandom::fill(&mut seed).map_err(failure)?;
+                Ok::<_, MediaError>(TelephoneTransport {
+                    receiver: TelephoneReceiver::new(format.payload_type(), format.rate())?,
+                    sender: TelephoneSender::with_format(&sender, format, seed)?,
+                    format,
+                })
+            })
+            .transpose()?;
         Ok(Self {
-            telephone: session
-                .telephone
-                .map(|format| TelephoneReceiver::new(format.payload_type(), format.rate()))
-                .transpose()?,
+            telephone,
             receiver: RtpReceiver::new(session.format, session.payload_type)?,
-            sender: RtpSender::new(session.format, session.payload_type, seed)?,
+            sender,
             sockets,
             session,
             channels,
@@ -178,8 +238,7 @@ impl RtpLink {
         let mut control = [0; MAX_PACKET + 1];
         let mut stats = LinkStats::default();
         let started = tokio::time::Instant::now();
-        let mut last_sent = None;
-        let mut octets = 0u32;
+        let mut sources = Vec::with_capacity(2);
         let control_peer =
             SocketAddr::new(self.session.remote.ip(), self.session.remote.port() + 1);
         loop {
@@ -205,16 +264,31 @@ impl RtpLink {
                 }
                 frame = self.channels.outgoing.recv() => {
                     let Some(frame) = frame else { break; };
-                    let packet = self.sender.packet(frame)?;
+                    let sampled = tokio::time::Instant::now();
+                    let now = sampled.duration_since(started).as_millis() as u64;
+                    let packet = self.sender.packet_at(frame, now)?;
                     send(&self.sockets.data, &packet.encode()?, self.session.remote).await?;
-                    last_sent = Some((packet.ssrc(), packet.timestamp(), std::time::Instant::now()));
-                    octets = octets.wrapping_add(packet.payload().len() as u32);
+                    record(&mut sources, &packet, self.session.format.rate(), packet.timestamp(), sampled)?;
                     stats.packets_sent += 1;
+                }
+                tone = self.channels.tones.recv(), if self.telephone.as_ref().is_some_and(|telephone| telephone.sender.ready()) && (!self.channels.tones.is_closed() || !self.channels.tones.is_empty()) => {
+                    if let Some(tone) = tone {
+                        let now = started.elapsed().as_millis() as u64;
+                        self.telephone.as_mut().ok_or(MediaError::Unsupported)?.sender.start(tone, now, &self.sender)?;
+                    }
                 }
                 _instant = playout.tick() => {
                     if let Some(telephone) = &mut self.telephone {
-                        if let Some(tone) = telephone.expire(started.elapsed().as_millis() as u64)? {
+                        let sampled = tokio::time::Instant::now();
+                        let now = sampled.duration_since(started).as_millis() as u64;
+                        if let Some(tone) = telephone.receiver.expire(now)? {
                             self.channels.digits.try_send(tone).map_err(|_| MediaError::Capacity)?;
+                        }
+                        for packet in telephone.sender.poll(now, &mut self.sender)? {
+                            send(&self.sockets.data, &packet.encode()?, self.session.remote).await?;
+                            let timestamp = telephone.sender.timestamp_at(now, &self.sender);
+                            record(&mut sources, &packet, telephone.format.rate(), timestamp, sampled)?;
+                            stats.packets_sent += 1;
                         }
                     }
                     match self.receiver.pop() {
@@ -228,18 +302,19 @@ impl RtpLink {
                     }
                 }
                 () = tokio::time::sleep_until(report_at) => {
-                    if let Some((ssrc, timestamp, sent_at)) = last_sent {
-                        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(failure)?;
-                        let ntp = (now.as_secs().wrapping_add(2_208_988_800) << 32)
-                            | ((u64::from(now.subsec_nanos()) << 32) / 1_000_000_000);
-                        let elapsed = sent_at.elapsed().as_nanos() * u128::from(self.session.format.rate()) / 1_000_000_000;
-                        let timestamp = timestamp.wrapping_add(elapsed as u32);
-                        let bytes = rusterisk_media::sender_report(ssrc, ntp, timestamp, stats.packets_sent as u32, octets, "rusterisk")?;
+                    if !sources.is_empty() {
+                        let (reports, ntp) = reports(&sources)?;
+                        let bytes = rusterisk_media::sender_reports(&reports, ntp, "rusterisk")?;
                         send(&self.sockets.control, &bytes, control_peer).await?;
                     }
                     report_at = tokio::time::Instant::now() + report_delay(false)?;
                 }
             }
+        }
+        if !sources.is_empty() {
+            let (reports, ntp) = reports(&sources)?;
+            let bytes = rusterisk_media::goodbye_reports(&reports, ntp, "rusterisk")?;
+            send(&self.sockets.control, &bytes, control_peer).await?;
         }
         Ok(stats)
     }
@@ -251,7 +326,7 @@ impl RtpLink {
             .is_some_and(|format| packet.payload_type() == format.payload_type())
         {
             let telephone = self.telephone.as_mut().ok_or(MediaError::Unsupported)?;
-            for tone in telephone.push(packet, now)?.into_tones() {
+            for tone in telephone.receiver.push(packet, now)?.into_tones() {
                 self.channels
                     .digits
                     .try_send(tone)
@@ -263,4 +338,26 @@ impl RtpLink {
             self.receiver.push(packet)
         }
     }
+}
+
+fn reports(sources: &[SentSource]) -> Result<(Vec<SourceReport>, u64), MediaError> {
+    let sampled = tokio::time::Instant::now();
+    let wall = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(failure)?;
+    let ntp = (wall.as_secs().wrapping_add(2_208_988_800) << 32)
+        | ((u64::from(wall.subsec_nanos()) << 32) / 1_000_000_000);
+    let reports = sources
+        .iter()
+        .map(|source| {
+            let elapsed = sampled.duration_since(source.sampled).as_nanos()
+                * u128::from(source.rate)
+                / 1_000_000_000;
+            SourceReport {
+                timestamp: source.report.timestamp.wrapping_add(elapsed as u32),
+                ..source.report
+            }
+        })
+        .collect();
+    Ok((reports, ntp))
 }

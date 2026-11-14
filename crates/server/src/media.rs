@@ -1,7 +1,7 @@
 use crate::rtp::{LinkStats, RtpChannels, RtpLink, RtpSession, SocketPair};
 use crate::CallKey;
 use rusterisk_core::DtmfTone;
-use rusterisk_media::{Frame, Gate, MediaError, Mixer};
+use rusterisk_media::{Frame, Gate, MediaError, Mixer, TelephoneFormat};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -22,6 +22,11 @@ pub enum MediaNotice {
 }
 
 enum Command {
+    Tone {
+        key: CallKey,
+        tone: DtmfTone,
+        reply: oneshot::Sender<Result<(), MediaError>>,
+    },
     Attach {
         key: CallKey,
         sockets: SocketPair,
@@ -47,6 +52,19 @@ pub struct MediaPort {
 }
 
 impl MediaPort {
+    pub async fn send_tone(&self, key: CallKey, tone: DtmfTone) -> Result<(), MediaError> {
+        if !(1..=5000).contains(&tone.duration_ms) {
+            return Err(MediaError::InvalidPacket);
+        }
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .try_send(Command::Tone { key, tone, reply })
+            .map_err(|_| MediaError::Capacity)?;
+        tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+    }
     pub async fn attach(
         &self,
         key: CallKey,
@@ -95,6 +113,8 @@ struct Port {
     incoming: mpsc::Receiver<Frame>,
     digits: mpsc::Receiver<DtmfTone>,
     outgoing: mpsc::Sender<Frame>,
+    tones: mpsc::Sender<DtmfTone>,
+    telephone: Option<TelephoneFormat>,
     stop: watch::Sender<bool>,
     connection: Connection,
 }
@@ -159,6 +179,7 @@ impl MediaHub {
         let (incoming, input) = mpsc::channel(3);
         let (digits, digit_input) = mpsc::channel(16);
         let (outgoing, output) = mpsc::channel(3);
+        let (tones, tone_input) = mpsc::channel(16);
         let (stop, stopped) = watch::channel(false);
         let link = RtpLink::new(
             sockets,
@@ -167,6 +188,7 @@ impl MediaHub {
                 incoming,
                 digits,
                 outgoing: output,
+                tones: tone_input,
                 stop: stopped,
             },
         )?;
@@ -177,6 +199,8 @@ impl MediaHub {
                 incoming: input,
                 digits: digit_input,
                 outgoing,
+                tones,
+                telephone: session.telephone,
                 stop,
                 connection: Connection::Waiting,
             },
@@ -187,6 +211,26 @@ impl MediaHub {
 
     fn command(&mut self, command: Command) -> Result<(), MediaError> {
         match command {
+            Command::Tone { key, tone, reply } => {
+                if !reply.is_closed() {
+                    let result = self
+                        .ports
+                        .get(&key)
+                        .ok_or(MediaError::UnknownStream)
+                        .and_then(|port| {
+                            if !port
+                                .telephone
+                                .is_some_and(|format| format.supports(tone.digit))
+                            {
+                                return Err(MediaError::Unsupported);
+                            }
+                            port.tones.try_send(tone).map_err(|_| MediaError::Capacity)
+                        });
+                    if reply.send(result).is_err() {
+                        tracing::debug!(channel = %key.id, generation = key.generation, "tone admission receiver closed");
+                    }
+                }
+            }
             Command::Attach {
                 key,
                 sockets,

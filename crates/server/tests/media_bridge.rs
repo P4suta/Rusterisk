@@ -1,5 +1,5 @@
 use rusterisk_api::ChannelId;
-use rusterisk_core::DtmfDigit;
+use rusterisk_core::{DtmfDigit, DtmfTone};
 use rusterisk_media::{
     mulaw_decode, AudioFormat, Frame, MediaError, RtpPacket, RtpSender, TelephoneEvent,
     TelephoneFormat,
@@ -147,6 +147,36 @@ async fn telephone_datagrams_emit_one_digit_without_claiming_an_audio_connection
             .map_err(failure)?;
         assert!(matches!(notice, Some(MediaNotice::Connected { .. })));
         assert!(notices.try_recv().is_err());
+        media
+            .send_tone(
+                key("alice")?,
+                DtmfTone {
+                    digit: DtmfDigit::One,
+                    duration_ms: 60,
+                },
+            )
+            .await?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut bytes = [0; 1501];
+            let mut ends = 0;
+            for _ in 0..100 {
+                let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
+                let packet = RtpPacket::parse(&bytes[..size])?;
+                if packet.payload_type() == 101 {
+                    let tone = TelephoneEvent::parse(packet.payload())?;
+                    assert_eq!(tone.digit(), DtmfDigit::One);
+                    if tone.ended() {
+                        ends += 1;
+                    }
+                    if ends == 3 {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(MediaError::InvalidPacket)
+        })
+        .await
+        .map_err(failure)??;
         Ok(())
     }
     .await;
