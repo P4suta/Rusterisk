@@ -255,6 +255,12 @@ impl Signaling {
                     }
                     self.transmit(listener, rejected.datagrams).await?;
                 }
+                SipEvent::IncomingEnded { id, cause } => {
+                    let key = self.calls.keys().find(|key| key.id.as_str() == id).cloned();
+                    if let Some(key) = key {
+                        self.notify(Signal::Terminated { key, cause }).await?;
+                    }
+                }
             }
         }
         Ok(())

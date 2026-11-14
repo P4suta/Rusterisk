@@ -72,7 +72,64 @@ fn tagged(request: &Request, tag: &str) -> Result<Request, SipError> {
     Ok(request)
 }
 
+fn same_invite(
+    invite: &PendingInvite,
+    request: &Request,
+    peer: SocketAddr,
+) -> Result<bool, SipError> {
+    Ok(invite.peer == peer
+        && invite.request.uri == request.uri
+        && invite.request.cseq_header()?.typed()?.seq == request.cseq_header()?.typed()?.seq
+        && invite.request.top_via_header()?.typed()? == request.top_via_header()?.typed()?
+        && invite.request.from_header()?.typed()? == request.from_header()?.typed()?
+        && invite.request.to_header()?.typed()? == request.to_header()?.typed()?)
+}
+
 impl Engine {
+    pub(crate) fn incoming_cancel(
+        &mut self,
+        key: String,
+        request: Request,
+        peer: SocketAddr,
+        now: u64,
+    ) -> Result<Output, SipError> {
+        let call_id = request.call_id_header()?.value().to_owned();
+        let invite = self
+            .pending
+            .get(&call_id)
+            .or_else(|| self.incoming.get(&call_id).map(|dialog| &dialog.invite));
+        let Some(invite) = invite else {
+            return Ok(Output::response(
+                peer,
+                response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
+            ));
+        };
+        if !same_invite(invite, &request, peer)? {
+            return Ok(Output::response(
+                peer,
+                response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
+            ));
+        }
+        let bytes = response(&tagged(&request, &invite.local_tag)?, 200, "OK", "", "")?;
+        let mut output = self.cache_reply(key, request, peer, now, bytes, Vec::new());
+        if let Some(invite) = self.pending.remove(&call_id) {
+            let bytes = response(
+                &tagged(&invite.request, &invite.local_tag)?,
+                487,
+                "Request Terminated",
+                "",
+                "",
+            )?;
+            self.update_invite_reply(&invite, &bytes, now);
+            output.datagrams.push(Datagram { peer, bytes });
+            output.events.push(SipEvent::IncomingEnded {
+                id: invite.id,
+                cause: 16,
+            });
+        }
+        Ok(output)
+    }
+
     fn update_invite_reply(&mut self, invite: &PendingInvite, bytes: &[u8], now: u64) {
         for cached in self
             .cache

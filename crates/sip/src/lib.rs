@@ -229,6 +229,10 @@ pub enum SipEvent {
         extension: String,
         session: Session,
     },
+    IncomingEnded {
+        id: String,
+        cause: u16,
+    },
 }
 pub struct Datagram {
     pub peer: SocketAddr,
@@ -481,6 +485,9 @@ impl Engine {
                 peer,
                 response(&request, 503, "Service Unavailable", "", "")?,
             ));
+        }
+        if request.method == Method::Cancel {
+            return self.incoming_cancel(key, request, peer, now);
         }
         if let Some(reply) = self.outgoing_bye(&request, peer, now)? {
             match reply {

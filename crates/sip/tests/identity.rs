@@ -325,9 +325,10 @@ fn rejected_invites_release_admission_and_retransmit_the_tagged_final_response(
     let (incoming, wire, _) = authenticated_invite(&mut engine)?;
     let id = match &incoming.events[0] {
         SipEvent::Incoming { id, .. } => id.clone(),
-        SipEvent::Ringing { .. } | SipEvent::Answered { .. } | SipEvent::Ended { .. } => {
-            return Err(SipError::InvalidPacket)
-        }
+        SipEvent::Ringing { .. }
+        | SipEvent::Answered { .. }
+        | SipEvent::Ended { .. }
+        | SipEvent::IncomingEnded { .. } => return Err(SipError::InvalidPacket),
     };
     let rejected = engine.reject(&id, rusterisk_sip::RejectReason::NoRoute, 2)?;
     assert!(engine.pending(&id).is_none());
@@ -350,7 +351,12 @@ fn rejected_invites_release_admission_and_retransmit_the_tagged_final_response(
 fn incoming_id(output: &rusterisk_sip::Output) -> Result<String, SipError> {
     match output.events.first() {
         Some(SipEvent::Incoming { id, .. }) => Ok(id.clone()),
-        Some(SipEvent::Ringing { .. } | SipEvent::Answered { .. } | SipEvent::Ended { .. })
+        Some(
+            SipEvent::Ringing { .. }
+            | SipEvent::Answered { .. }
+            | SipEvent::Ended { .. }
+            | SipEvent::IncomingEnded { .. },
+        )
         | None => Err(SipError::InvalidPacket),
     }
 }
@@ -441,5 +447,42 @@ fn an_unacknowledged_incoming_answer_expires_and_terminates_the_peer() -> Result
     assert!(expired.datagrams[0].bytes.starts_with(b"BYE "));
     assert!(engine.active_session(&id, 9).is_none());
     assert!(engine.tick(32011)?.events.is_empty());
+    Ok(())
+}
+
+#[test]
+fn cancellation_requires_the_original_invite_transaction_and_releases_pending_admission(
+) -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (incoming, wire, _) = authenticated_invite(&mut engine)?;
+    let id = incoming_id(&incoming)?;
+    let cancel = wire.replace("INVITE", "CANCEL");
+    let wrong_branch = cancel.replace("z9hG4bK-2", "z9hG4bK-other");
+    for (packet, address) in [
+        (wrong_branch.as_str(), peer),
+        (cancel.as_str(), "127.0.0.1:5062".parse()?),
+    ] {
+        assert!(engine.receive(packet.as_bytes(), address, 2)?.datagrams[0]
+            .bytes
+            .starts_with(b"SIP/2.0 481"));
+        assert!(engine.pending(&id).is_some());
+    }
+    let cancelled = engine.receive(cancel.as_bytes(), peer, 3)?;
+    assert_eq!(cancelled.datagrams.len(), 2);
+    assert!(cancelled.datagrams[0].bytes.starts_with(b"SIP/2.0 200"));
+    assert!(cancelled.datagrams[1].bytes.starts_with(b"SIP/2.0 487"));
+    assert_eq!(cancelled.events.len(), 1);
+    assert!(engine.pending(&id).is_none());
+    assert!(engine
+        .answer(&id, 9, "127.0.0.1:10000".parse()?, 4)
+        .is_err());
+    let repeated = engine.receive(cancel.as_bytes(), peer, 5)?;
+    assert_eq!(repeated.datagrams[0].bytes, cancelled.datagrams[0].bytes);
+    assert!(repeated.events.is_empty());
+    assert_eq!(
+        engine.receive(wire.as_bytes(), peer, 6)?.datagrams[0].bytes,
+        cancelled.datagrams[1].bytes
+    );
     Ok(())
 }
