@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
+mod expansion;
+pub use expansion::{expand_variables, ExpansionError};
 
 const MAX_FILE: usize = 1024 * 1024;
 const MAX_SECTIONS: usize = 256;
