@@ -1,7 +1,8 @@
 use rusterisk_api::{Bridge, Caller, Channel, ChannelId, ChannelState, Dialplan, Event, EventKind};
 use rusterisk_core::{
     AudioGate, Call, CallEvent, CallState, DtmfCommand, DtmfDigit, DtmfError, DtmfOutbox,
-    DtmfTiming, DtmfToken, MediaConnection, MediaState, MuteDirection, Transition,
+    DtmfTiming, DtmfToken, MediaConnection, MediaState, MuteDirection, StasisApplication,
+    StasisMembership, Transition,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -300,6 +301,12 @@ impl Outcome {
             kind,
         });
     }
+    fn optional_event(&mut self, application: Option<&str>, timestamp: &str, kind: EventKind) {
+        if let Some(application) = application {
+            self.event(application, timestamp, kind);
+        }
+    }
+
     pub(crate) fn append(&mut self, mut other: Self) {
         self.effects.append(&mut other.effects);
         self.events.append(&mut other.events);
@@ -309,10 +316,8 @@ impl Outcome {
 struct ChannelEntry {
     call: Call,
     snapshot: Channel,
-    application: String,
     arguments: Vec<String>,
     deadline: Option<u64>,
-    stasis: Stasis,
     variables: BTreeMap<String, String>,
     dtmf: Option<DtmfOutbox>,
 }
@@ -361,10 +366,22 @@ fn validate_variable(name: &str) -> Result<(), ControlError> {
     Ok(())
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Stasis {
-    Pending,
-    Entered,
+fn application_name(
+    applications: &BTreeMap<String, StasisApplication>,
+    membership: StasisMembership,
+) -> Result<Option<&str>, ControlError> {
+    match membership {
+        StasisMembership::Outside | StasisMembership::Released => Ok(None),
+        StasisMembership::Pending(application) | StasisMembership::Entered(application) => {
+            applications
+                .iter()
+                .find_map(|(name, current)| (*current == application).then_some(name.as_str()))
+                .map(Some)
+                .ok_or_else(|| {
+                    ControlError::Adapter("Stasis application ownership is missing".into())
+                })
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -390,7 +407,7 @@ pub struct Control {
     generation: u64,
     channels: BTreeMap<ChannelId, ChannelEntry>,
     bridges: BTreeMap<ChannelId, BridgeEntry>,
-    applications: BTreeSet<String>,
+    applications: BTreeMap<String, StasisApplication>,
 }
 
 impl Control {
@@ -407,9 +424,11 @@ impl Control {
         if self.channels.len() >= self.capacity {
             return Err(ControlError::Capacity);
         }
-        if !self.applications.contains(&incoming.app) {
-            return Err(ControlError::NotFound("Application not found"));
-        }
+        let application = self
+            .applications
+            .get(&incoming.app)
+            .copied()
+            .ok_or(ControlError::NotFound("Application not found"))?;
         ChannelId::try_from(incoming.endpoint.clone())?;
         if incoming.caller.len() > 128
             || incoming.context.is_empty()
@@ -464,12 +483,13 @@ impl Control {
         self.channels.insert(
             incoming.id,
             ChannelEntry {
-                call: Call::incoming(generation).apply(CallEvent::Ring).call(),
+                call: Call::incoming(generation)
+                    .apply(CallEvent::Ring)
+                    .call()
+                    .enter_stasis(application)?,
                 snapshot,
-                application: incoming.app,
                 arguments: incoming.args,
                 deadline: None,
-                stasis: Stasis::Entered,
                 variables: BTreeMap::new(),
                 dtmf: None,
             },
@@ -491,7 +511,7 @@ impl Control {
             generation: 0,
             channels: BTreeMap::new(),
             bridges: BTreeMap::new(),
-            applications: BTreeSet::new(),
+            applications: BTreeMap::new(),
         }
     }
 
@@ -505,25 +525,27 @@ impl Control {
 
     pub fn subscribe(&mut self, name: &str) -> Result<(), ControlError> {
         ChannelId::try_from(name.to_owned())?;
-        if !self.applications.contains(name) && self.applications.len() >= 32 {
+        if self.applications.contains_key(name) {
+            return Ok(());
+        }
+        if self.applications.len() >= 32 {
             return Err(ControlError::Capacity);
         }
-        self.applications.insert(name.into());
+        let application = StasisApplication::new(self.generation()?);
+        self.applications.insert(name.into(), application);
         Ok(())
     }
 
     pub fn unsubscribe(&mut self, name: &str, timestamp: &str) -> Result<Outcome, ControlError> {
-        self.applications.remove(name);
-        let ids: Vec<ChannelId> = self
-            .channels
-            .iter()
-            .filter(|(_, entry)| entry.application == name)
-            .map(|(id, _)| id.clone())
-            .collect();
+        let Some(application) = self.applications.get(name).copied() else {
+            return Ok(Outcome::empty());
+        };
+        let ids: Vec<ChannelId> = self.channels.iter().filter(|(_, entry)| matches!(entry.call.stasis(), StasisMembership::Pending(current) | StasisMembership::Entered(current) if current == application)).map(|(id, _)| id.clone()).collect();
         let mut outcome = Outcome::empty();
         for id in ids {
             outcome.append(self.end(&id, timestamp, 16)?);
         }
+        self.applications.remove(name);
         Ok(outcome)
     }
 
@@ -574,7 +596,7 @@ impl Control {
                     .channels
                     .get_mut(&channel)
                     .ok_or(ControlError::NotFound("Channel not found"))?;
-                if entry.stasis != Stasis::Entered {
+                if !matches!(entry.call.stasis(), StasisMembership::Entered(_)) {
                     return Err(ControlError::Conflict("Channel not in Stasis application"));
                 }
                 if entry.call.state() != CallState::Up {
@@ -629,9 +651,11 @@ impl Control {
                 if self.channels.len() >= self.capacity {
                     return Err(ControlError::Capacity);
                 }
-                if !self.applications.contains(&app) {
-                    return Err(ControlError::NotFound("Application not found"));
-                }
+                let application = self
+                    .applications
+                    .get(&app)
+                    .copied()
+                    .ok_or(ControlError::NotFound("Application not found"))?;
                 if endpoint.len() > 256
                     || !endpoint.starts_with("PJSIP/")
                     || endpoint.len() <= 6
@@ -689,12 +713,10 @@ impl Control {
                 self.channels.insert(
                     id,
                     ChannelEntry {
-                        call: Call::outgoing(generation),
+                        call: Call::outgoing(generation).reserve_stasis(application)?,
                         snapshot,
-                        application: app,
                         arguments: args,
                         deadline: Some(deadline),
-                        stasis: Stasis::Pending,
                         variables: BTreeMap::new(),
                         dtmf: None,
                     },
@@ -715,7 +737,7 @@ impl Control {
                     .channels
                     .get(&id)
                     .ok_or(ControlError::NotFound("Channel not found"))?;
-                if entry.stasis != Stasis::Entered {
+                if !matches!(entry.call.stasis(), StasisMembership::Entered(_)) {
                     return Err(ControlError::Conflict("Channel not in Stasis application"));
                 }
                 let mut outcome = Outcome::empty();
@@ -731,7 +753,7 @@ impl Control {
                     .channels
                     .get(&id)
                     .ok_or(ControlError::NotFound("Channel not found"))?;
-                if entry.stasis != Stasis::Entered {
+                if !matches!(entry.call.stasis(), StasisMembership::Entered(_)) {
                     return Err(ControlError::Conflict("Channel not in Stasis application"));
                 }
                 let mut outcome = Outcome::empty();
@@ -769,7 +791,7 @@ impl Control {
                     video_mode: "none".into(),
                 };
                 let mut outcome = Outcome::json(&snapshot)?;
-                for app in &self.applications {
+                for app in self.applications.keys() {
                     outcome.event(
                         app,
                         timestamp,
@@ -788,7 +810,7 @@ impl Control {
                     .bridges
                     .remove(&id)
                     .ok_or(ControlError::NotFound("Bridge not found"))?;
-                for app in &self.applications {
+                for app in self.applications.keys() {
                     outcome.event(
                         app,
                         timestamp,
@@ -868,7 +890,11 @@ impl Control {
                     channel: entry.snapshot.clone(),
                 }
             };
-            outcome.event(&entry.application, timestamp, kind);
+            outcome.optional_event(
+                application_name(&self.applications, entry.call.stasis())?,
+                timestamp,
+                kind,
+            );
         }
         let keys = snapshot
             .channels
@@ -912,7 +938,7 @@ impl Control {
             .channels
             .get_mut(id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
-        if entry.stasis != Stasis::Entered {
+        if !matches!(entry.call.stasis(), StasisMembership::Entered(_)) {
             return Err(ControlError::Conflict("Channel not in Stasis application"));
         }
         if let Some(value) = &value {
@@ -924,8 +950,8 @@ impl Control {
             entry.variables.remove(&variable);
         }
         let mut outcome = Outcome::empty();
-        outcome.event(
-            &entry.application,
+        outcome.optional_event(
+            application_name(&self.applications, entry.call.stasis())?,
             timestamp,
             EventKind::ChannelVarset {
                 variable,
@@ -950,7 +976,7 @@ impl Control {
             .channels
             .get_mut(id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
-        if entry.stasis != Stasis::Entered {
+        if !matches!(entry.call.stasis(), StasisMembership::Entered(_)) {
             return Err(ControlError::Conflict("Channel not in Stasis application"));
         }
         let mut caller = entry.snapshot.caller.clone();
@@ -982,8 +1008,8 @@ impl Control {
         }
         entry.snapshot.caller = caller;
         let mut outcome = Outcome::empty();
-        outcome.event(
-            &entry.application,
+        outcome.optional_event(
+            application_name(&self.applications, entry.call.stasis())?,
             timestamp,
             EventKind::ChannelCallerId {
                 caller_presentation: 0,
@@ -1004,6 +1030,9 @@ impl Control {
             .channels
             .remove(id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
+        let application =
+            application_name(&self.applications, entry.call.stasis())?.map(str::to_owned);
+        let was_in_stasis = matches!(entry.call.stasis(), StasisMembership::Entered(_));
         let mut outcome = Outcome::empty();
         if let Some(token) = entry.call.bridge() {
             for bridge in self
@@ -1012,8 +1041,8 @@ impl Control {
                 .filter(|bridge| bridge.token == token)
             {
                 bridge.snapshot.channels.retain(|value| value != id);
-                outcome.event(
-                    &entry.application,
+                outcome.optional_event(
+                    application.as_deref(),
                     timestamp,
                     EventKind::ChannelLeftBridge {
                         bridge: bridge.snapshot.clone(),
@@ -1047,17 +1076,17 @@ impl Control {
                 generation: entry.call.generation(),
             },
         });
-        if entry.stasis == Stasis::Entered {
-            outcome.event(
-                &entry.application,
+        if was_in_stasis {
+            outcome.optional_event(
+                application.as_deref(),
                 timestamp,
                 EventKind::StasisEnd {
                     channel: entry.snapshot.clone(),
                 },
             );
         }
-        outcome.event(
-            &entry.application,
+        outcome.optional_event(
+            application.as_deref(),
             timestamp,
             EventKind::ChannelDestroyed {
                 cause,
@@ -1086,7 +1115,7 @@ impl Control {
             .channels
             .get_mut(id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
-        if entry.stasis != Stasis::Entered {
+        if !matches!(entry.call.stasis(), StasisMembership::Entered(_)) {
             return Err(ControlError::Conflict("Channel not in Stasis application"));
         }
         let mut outcome = Outcome::empty();
@@ -1114,15 +1143,15 @@ impl Control {
             });
         }
         match operation {
-            MediaOperation::Hold => outcome.event(
-                &entry.application,
+            MediaOperation::Hold => outcome.optional_event(
+                application_name(&self.applications, entry.call.stasis())?,
                 timestamp,
                 EventKind::ChannelHold {
                     channel: entry.snapshot.clone(),
                 },
             ),
-            MediaOperation::Unhold => outcome.event(
-                &entry.application,
+            MediaOperation::Unhold => outcome.optional_event(
+                application_name(&self.applications, entry.call.stasis())?,
                 timestamp,
                 EventKind::ChannelUnhold {
                     channel: entry.snapshot.clone(),
@@ -1168,10 +1197,10 @@ impl Control {
                 if let Some(entry) = self.channels.get(&key.id).filter(|entry| {
                     entry.call.generation() == key.generation
                         && entry.call.state() == CallState::Up
-                        && entry.stasis == Stasis::Entered
+                        && matches!(entry.call.stasis(), StasisMembership::Entered(_))
                 }) {
-                    outcome.event(
-                        &entry.application,
+                    outcome.optional_event(
+                        application_name(&self.applications, entry.call.stasis())?,
                         timestamp,
                         EventKind::ChannelDtmfReceived {
                             digit: digit.symbol().to_string(),
@@ -1240,22 +1269,25 @@ impl Control {
                                     gate: entry.call.audio_gate(),
                                 });
                             }
-                            outcome.event(
-                                &entry.application,
+                            outcome.optional_event(
+                                application_name(&self.applications, entry.call.stasis())?,
                                 timestamp,
                                 EventKind::ChannelStateChange {
                                     channel: entry.snapshot.clone(),
                                 },
                             );
-                            if entry.call.state() == CallState::Up
-                                && entry.stasis == Stasis::Pending
+                            if let (CallState::Up, StasisMembership::Pending(application)) =
+                                (entry.call.state(), entry.call.stasis())
                             {
-                                entry.stasis = Stasis::Entered;
+                                entry.call = entry.call.enter_stasis(application)?;
                                 entry.deadline = None;
                                 entry.snapshot.dialplan.app_name = "Stasis".into();
-                                entry.snapshot.dialplan.app_data = entry.application.clone();
-                                outcome.event(
-                                    &entry.application,
+                                entry.snapshot.dialplan.app_data =
+                                    application_name(&self.applications, entry.call.stasis())?
+                                        .ok_or(ControlError::NotFound("Application not found"))?
+                                        .into();
+                                outcome.optional_event(
+                                    application_name(&self.applications, entry.call.stasis())?,
                                     timestamp,
                                     EventKind::StasisStart {
                                         args: entry.arguments.clone(),
@@ -1269,8 +1301,8 @@ impl Control {
                         let decision = entry.call.connect_media();
                         entry.call = decision.call();
                         if decision.transition() == Transition::Notify {
-                            outcome.event(
-                                &entry.application,
+                            outcome.optional_event(
+                                application_name(&self.applications, entry.call.stasis())?,
                                 timestamp,
                                 EventKind::ChannelVarset {
                                     variable: "RUSTERISK_MEDIA_CONNECTED".into(),
