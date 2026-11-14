@@ -1,5 +1,8 @@
 #![no_std]
 
+mod digits;
+pub use digits::DtmfDigit;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallState {
     Down,
