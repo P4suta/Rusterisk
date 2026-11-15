@@ -329,3 +329,65 @@ fn senders_refuse_digits_outside_the_negotiated_event_set() -> Result<(), MediaE
     assert!(TelephoneFormat::new(101, 8000)?.with_events(0).is_err());
     Ok(())
 }
+
+#[test]
+fn discarding_pending_events_preserves_end_history_and_suppresses_continuations(
+) -> Result<(), MediaError> {
+    let mut receiver = TelephoneReceiver::new(101, 8000)?;
+    let first = packet(DtmfDigit::Hash, 1000, 480, true, 1)?;
+    assert_eq!(receiver.push(&first, 60)?.into_tones().count(), 1);
+    receiver.discard_pending();
+    assert_eq!(
+        receiver
+            .push(&packet(DtmfDigit::Hash, 1000, 480, true, 2)?, 80)?
+            .into_tones()
+            .count(),
+        0
+    );
+    receiver.push(&packet(DtmfDigit::One, 1800, 160, false, 3)?, 100)?;
+    receiver.discard_pending();
+    assert!(receiver.expire(1000)?.is_none());
+    let segment = 1800 + u32::from(u16::MAX);
+    assert_eq!(
+        receiver
+            .push(&packet(DtmfDigit::One, segment, 800, true, 4)?, 1100)?
+            .into_tones()
+            .count(),
+        0
+    );
+    let next: Vec<_> = receiver
+        .push(
+            &packet(DtmfDigit::One, segment + 1600, 480, true, 5)?.with_marker(true),
+            1300,
+        )?
+        .into_tones()
+        .collect();
+    assert_eq!(
+        next,
+        [DtmfTone {
+            digit: DtmfDigit::One,
+            duration_ms: 60
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn a_distinct_event_replaces_a_discarded_event_with_a_missing_ending() -> Result<(), MediaError> {
+    let mut receiver = TelephoneReceiver::new(101, 8000)?;
+    receiver.push(&packet(DtmfDigit::One, 1000, 160, false, 1)?, 0)?;
+    receiver.discard_pending();
+    let next: Vec<_> = receiver
+        .push(&packet(DtmfDigit::Two, 1800, 320, true, 2)?, 40)?
+        .into_tones()
+        .collect();
+    assert_eq!(
+        next,
+        [DtmfTone {
+            digit: DtmfDigit::Two,
+            duration_ms: 40
+        }]
+    );
+    assert!(receiver.expire(1000)?.is_none());
+    Ok(())
+}

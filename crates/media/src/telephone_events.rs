@@ -139,6 +139,34 @@ impl Reception {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PendingReception {
+    Active(Reception),
+    Discarded(Reception),
+}
+
+impl PendingReception {
+    fn event(self) -> Reception {
+        match self {
+            Self::Active(event) | Self::Discarded(event) => event,
+        }
+    }
+
+    fn updated(self, event: Reception) -> Self {
+        match self {
+            Self::Active(_) => Self::Active(event),
+            Self::Discarded(_) => Self::Discarded(event),
+        }
+    }
+
+    fn tone(self, rate: u32) -> Result<Option<DtmfTone>, MediaError> {
+        match self {
+            Self::Active(event) => event.tone(rate).map(Some),
+            Self::Discarded(_) => Ok(None),
+        }
+    }
+}
+
 pub struct TelephoneEvents {
     previous: Option<DtmfTone>,
     current: Option<DtmfTone>,
@@ -154,7 +182,7 @@ pub struct TelephoneReceiver {
     payload_type: u8,
     rate: u32,
     source: Option<u32>,
-    active: Option<Reception>,
+    active: Option<PendingReception>,
     completed: [Option<Reception>; 16],
     cursor: usize,
 }
@@ -178,16 +206,22 @@ impl TelephoneReceiver {
     }
 
     pub fn expire(&mut self, now: u64) -> Result<Option<DtmfTone>, MediaError> {
-        let Some(event) = self
-            .active
-            .filter(|event| now.saturating_sub(event.updated) >= 150)
-        else {
+        let Some(PendingReception::Active(event)) = self.active else {
             return Ok(None);
         };
+        if now.saturating_sub(event.updated) < 150 {
+            return Ok(None);
+        }
         let tone = event.tone(self.rate)?;
         self.remember(event);
         self.active = None;
         Ok(Some(tone))
+    }
+
+    pub fn discard_pending(&mut self) {
+        if let Some(active) = self.active {
+            self.active = Some(PendingReception::Discarded(active.event()));
+        }
     }
 
     pub fn push(&mut self, packet: &RtpPacket, now: u64) -> Result<TelephoneEvents, MediaError> {
@@ -209,7 +243,7 @@ impl TelephoneReceiver {
         {
             return Ok(output);
         }
-        let mut current = Reception {
+        let mut current = PendingReception::Active(Reception {
             ssrc: packet.ssrc(),
             digit: payload.digit(),
             start: packet.timestamp(),
@@ -218,8 +252,9 @@ impl TelephoneReceiver {
             duration: payload.duration(),
             sequence: packet.sequence(),
             updated: now,
-        };
-        if let Some(mut active) = self.active {
+        });
+        if let Some(pending) = self.active {
+            let mut active = pending.event();
             let distance = packet.sequence().wrapping_sub(active.sequence);
             if distance == 0 || distance >= 32768 {
                 return Ok(output);
@@ -235,7 +270,7 @@ impl TelephoneReceiver {
                 active.duration = payload.duration();
                 active.sequence = packet.sequence();
                 active.updated = now;
-                current = active;
+                current = pending.updated(active);
             } else if active.digit == payload.digit()
                 && !packet.marker()
                 && segment_distance.is_multiple_of(u32::from(u16::MAX))
@@ -248,16 +283,16 @@ impl TelephoneReceiver {
                 active.duration = payload.duration();
                 active.sequence = packet.sequence();
                 active.updated = now;
-                current = active;
+                current = pending.updated(active);
             } else {
-                output.previous = Some(active.tone(self.rate)?);
+                output.previous = pending.tone(self.rate)?;
                 self.remember(active);
             }
         }
         self.source = Some(packet.ssrc());
         if payload.ended() {
-            output.current = Some(current.tone(self.rate)?);
-            self.remember(current);
+            output.current = current.tone(self.rate)?;
+            self.remember(current.event());
             self.active = None;
         } else {
             self.active = Some(current);

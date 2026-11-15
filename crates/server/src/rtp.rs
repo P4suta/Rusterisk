@@ -240,13 +240,13 @@ impl RtpLink {
                     self.receiver.discard_pending();
                     if !self.channels.direction.borrow().can_send() {
                         if let Some(telephone) = &mut self.telephone {
-                            telephone.receiver = TelephoneReceiver::new(telephone.format.payload_type(), telephone.format.rate())?;
+                            telephone.receiver.discard_pending();
                         }
                     }
                 }
                 packet = self.sockets.data.recv_from(&mut data) => {
                     let (size, peer) = packet.map_err(failure)?;
-                    if peer != self.session.remote || size > MAX_PACKET || !self.channels.direction.borrow().can_send() { stats.dropped += 1; continue; }
+                    if peer != self.session.remote || size > MAX_PACKET { stats.dropped += 1; continue; }
                     let now = started.elapsed().as_millis() as u64;
                     match RtpPacket::parse(&data[..size]).and_then(|packet| self.receive(&packet, now)) {
                         Ok(true) => stats.packets_received += 1,
@@ -344,7 +344,12 @@ impl RtpLink {
             .is_some_and(|format| packet.payload_type() == format.payload_type())
         {
             let telephone = self.telephone.as_mut().ok_or(MediaError::Unsupported)?;
-            for tone in telephone.receiver.push(packet, now)?.into_tones() {
+            let events = telephone.receiver.push(packet, now)?;
+            if !self.channels.direction.borrow().can_send() {
+                telephone.receiver.discard_pending();
+                return Ok(false);
+            }
+            for tone in events.into_tones() {
                 self.channels
                     .digits
                     .try_send(tone)
@@ -352,8 +357,10 @@ impl RtpLink {
             }
             self.receiver.skip(packet)?;
             Ok(true)
-        } else {
+        } else if self.channels.direction.borrow().can_send() {
             self.receiver.push(packet)
+        } else {
+            Ok(false)
         }
     }
 }
