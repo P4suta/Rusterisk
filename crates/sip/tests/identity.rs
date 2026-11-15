@@ -166,6 +166,146 @@ fn tagged_invitation(wire: &str, tag: &str, sequence: u32) -> Result<String, Sip
     )
 }
 
+fn direction_offer(
+    wire: &str,
+    answer: &[u8],
+    sequence: u32,
+    version: u64,
+    direction: &str,
+) -> Result<String, SipError> {
+    let tag = response_tag(answer)?.ok_or(SipError::InvalidPacket)?;
+    let offered = tagged_invitation(wire, &tag, sequence)?
+        .replace("o=- 1 1 IN", &format!("o=- 1 {version} IN"))
+        .replace("a=sendrecv", &format!("a={direction}"));
+    let mut offered = request(offered.as_bytes())?;
+    offered
+        .headers
+        .unique_push(rsipstack::sip::Header::ContentLength(
+            offered.body.len().to_string().into(),
+        ));
+    Ok(offered.to_string())
+}
+
+#[test]
+fn incoming_direction_updates_preserve_the_dialog_and_repeat_answers_until_ack(
+) -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (incoming, wire, _) = authenticated_invite(&mut engine)?;
+    let id = incoming_id(&incoming)?;
+    let answered = engine.answer(&id, 7, "127.0.0.1:10000".parse()?, 3)?;
+    engine.receive(
+        &incoming_request(&answered.datagrams[0].bytes, "ACK", 2)?,
+        peer,
+        4,
+    )?;
+    for (sequence, version, offered, expected, answer_direction) in [
+        (
+            3,
+            2,
+            "sendonly",
+            rusterisk_sip::Direction::SendOnly,
+            "recvonly",
+        ),
+        (
+            4,
+            3,
+            "inactive",
+            rusterisk_sip::Direction::Inactive,
+            "inactive",
+        ),
+        (
+            5,
+            4,
+            "sendrecv",
+            rusterisk_sip::Direction::SendRecv,
+            "sendrecv",
+        ),
+    ] {
+        let offer = direction_offer(
+            &wire,
+            &answered.datagrams[0].bytes,
+            sequence,
+            version,
+            offered,
+        )?;
+        let now = u64::from(sequence) * 1000;
+        let updated = engine.receive(offer.as_bytes(), peer, now)?;
+        assert!(updated.datagrams[0].bytes.starts_with(b"SIP/2.0 200"));
+        let response = std::str::from_utf8(&updated.datagrams[0].bytes)?;
+        assert!(response.contains(&format!("a={answer_direction}\r\n")));
+        assert_eq!(
+            engine
+                .active_session(&id, 7)
+                .ok_or(SipError::InvalidPacket)?
+                .direction,
+            expected
+        );
+        assert_eq!(updated.events.len(), 1);
+        let repeated = engine.receive(offer.as_bytes(), peer, now + 1)?;
+        assert_eq!(repeated.datagrams[0].bytes, updated.datagrams[0].bytes);
+        assert!(repeated.events.is_empty());
+        assert_eq!(
+            engine.tick(now + 500)?.datagrams[0].bytes,
+            updated.datagrams[0].bytes
+        );
+        engine.receive(
+            &incoming_request(&updated.datagrams[0].bytes, "ACK", sequence)?,
+            peer,
+            now + 501,
+        )?;
+        assert!(engine.tick(now + 999)?.datagrams.is_empty());
+    }
+    let ended = engine.receive(
+        &incoming_request(&answered.datagrams[0].bytes, "BYE", 6)?,
+        peer,
+        6000,
+    )?;
+    assert!(
+        matches!(&ended.events[..], [SipEvent::Ended { id: actual, generation: 7, .. }] if actual == &id)
+    );
+    Ok(())
+}
+
+#[test]
+fn unsupported_direction_offers_leave_the_active_session_unchanged() -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (incoming, wire, _) = authenticated_invite(&mut engine)?;
+    let id = incoming_id(&incoming)?;
+    let answered = engine.answer(&id, 7, "127.0.0.1:10000".parse()?, 3)?;
+    engine.receive(
+        &incoming_request(&answered.datagrams[0].bytes, "ACK", 2)?,
+        peer,
+        4,
+    )?;
+    let original = engine
+        .active_session(&id, 7)
+        .ok_or(SipError::InvalidPacket)?
+        .clone();
+    for (sequence, version, replacement) in [
+        (3, 1, None),
+        (4, 2, Some(("10002", "10004"))),
+        (5, 2, Some(("o=- 1", "o=- 2"))),
+    ] {
+        let mut offer = direction_offer(
+            &wire,
+            &answered.datagrams[0].bytes,
+            sequence,
+            version,
+            "sendonly",
+        )?;
+        if let Some((from, to)) = replacement {
+            offer = offer.replace(from, to);
+        }
+        let rejected = engine.receive(offer.as_bytes(), peer, u64::from(sequence) * 1000)?;
+        assert!(rejected.datagrams[0].bytes.starts_with(b"SIP/2.0 488"));
+        assert!(rejected.events.is_empty());
+        assert_eq!(engine.active_session(&id, 7), Some(&original));
+    }
+    Ok(())
+}
+
 #[test]
 fn tagged_invitations_never_enter_initial_call_admission() -> Result<(), SipError> {
     let mut engine = Engine::new(config()?, [7; 32]);
@@ -195,9 +335,9 @@ fn tagged_invitations_never_enter_initial_call_admission() -> Result<(), SipErro
         .value()
         .to_owned();
     let update = tagged_invitation(&wire, &tag, 4)?;
-    let unsupported = engine.receive(update.as_bytes(), peer, 5)?;
-    assert!(unsupported.datagrams[0].bytes.starts_with(b"SIP/2.0 501"));
-    assert!(unsupported.events.is_empty());
+    let refreshed = engine.receive(update.as_bytes(), peer, 5)?;
+    assert!(refreshed.datagrams[0].bytes.starts_with(b"SIP/2.0 200"));
+    assert!(refreshed.events.is_empty());
     assert!(engine.active_session(&id, 7).is_some());
     let ended = engine.receive(
         &incoming_request(&answered.datagrams[0].bytes, "BYE", 5)?,
@@ -608,6 +748,7 @@ fn rejected_invites_release_admission_and_retransmit_the_tagged_final_response(
     let id = match &incoming.events[0] {
         SipEvent::Incoming { id, .. } => id.clone(),
         SipEvent::DtmfReceived { .. }
+        | SipEvent::PeerDirection { .. }
         | SipEvent::Ringing { .. }
         | SipEvent::Answered { .. }
         | SipEvent::Ended { .. }
@@ -644,6 +785,7 @@ fn incoming_id(output: &rusterisk_sip::Output) -> Result<String, SipError> {
         Some(SipEvent::Incoming { id, .. }) => Ok(id.clone()),
         Some(
             SipEvent::DtmfReceived { .. }
+            | SipEvent::PeerDirection { .. }
             | SipEvent::Ringing { .. }
             | SipEvent::Answered { .. }
             | SipEvent::Ended { .. }

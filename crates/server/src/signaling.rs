@@ -213,6 +213,23 @@ impl Signaling {
         self.transmit(listener, output.datagrams).await?;
         for event in output.events {
             match event {
+                SipEvent::PeerDirection {
+                    id,
+                    generation,
+                    direction,
+                } => {
+                    let direction = match direction {
+                        rusterisk_sip::Direction::SendRecv => PeerMediaDirection::SendReceive,
+                        rusterisk_sip::Direction::SendOnly => PeerMediaDirection::SendOnly,
+                        rusterisk_sip::Direction::RecvOnly => PeerMediaDirection::ReceiveOnly,
+                        rusterisk_sip::Direction::Inactive => PeerMediaDirection::Inactive,
+                    };
+                    self.notify(Signal::PeerDirection {
+                        key: key(id, generation)?,
+                        direction,
+                    })
+                    .await?;
+                }
                 SipEvent::DtmfReceived {
                     id,
                     generation,

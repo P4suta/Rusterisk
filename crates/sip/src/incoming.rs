@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 
 enum State {
     AwaitingAck {
+        sequence: u32,
         retry: u64,
         interval: u64,
         deadline: u64,
@@ -23,6 +24,10 @@ pub(crate) struct Incoming {
     state: State,
     local_cseq: u32,
     remote_cseq: u32,
+    local_media: SocketAddr,
+    answer_version: u64,
+    offer: Vec<u8>,
+    remote_target: rsipstack::sip::Uri,
 }
 
 impl Incoming {
@@ -42,7 +47,7 @@ impl Incoming {
             .filter(|sequence| *sequence < 1 << 31)
             .ok_or(SipError::Capacity)?;
         let invite = tagged(&self.invite.request, &self.invite.local_tag)?;
-        let target = invite.contact_header()?.typed()?.uri;
+        let target = &self.remote_target;
         let packet = format!("{method} {target} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-{}-{method}-{};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {} {method}\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", self.invite.local, self.invite.local_tag, self.local_cseq, invite.to_header()?.value(), invite.from_header()?.value(), invite.call_id_header()?.value(), self.local_cseq);
         match SipMessage::try_from(packet.as_str())? {
             SipMessage::Request(request) => Ok(request),
@@ -97,6 +102,66 @@ fn same_invite(
         && invite.request.top_via_header()?.typed()? == request.top_via_header()?.typed()?
         && invite.request.from_header()?.typed()? == request.from_header()?.typed()?
         && invite.request.to_header()?.typed()? == request.to_header()?.typed()?)
+}
+
+fn origin(source: &str) -> Result<([&str; 5], u64), SipError> {
+    let mut origins = source.lines().filter_map(|line| line.strip_prefix("o="));
+    let line = origins.next().ok_or(SipError::InvalidPacket)?;
+    if origins.next().is_some() {
+        return Err(SipError::InvalidPacket);
+    }
+    let fields: Vec<&str> = line.split_whitespace().take(7).collect();
+    let [user, id, version, network, family, address] = fields.as_slice() else {
+        return Err(SipError::InvalidPacket);
+    };
+    id.parse::<i64>()
+        .ok()
+        .filter(|id| *id >= 0)
+        .ok_or(SipError::InvalidPacket)?;
+    let version = version
+        .parse::<i64>()
+        .ok()
+        .filter(|version| *version >= 0)
+        .ok_or(SipError::InvalidPacket)?;
+    Ok(([*user, *id, *network, *family, *address], version as u64))
+}
+
+fn unchanged_field(line: &&str) -> bool {
+    !line.starts_with("o=")
+        && !matches!(
+            *line,
+            "a=sendrecv" | "a=sendonly" | "a=recvonly" | "a=inactive"
+        )
+}
+
+fn direction_update(
+    previous: &[u8],
+    offered: &[u8],
+    session: &Session,
+) -> Result<Session, SipError> {
+    let previous = std::str::from_utf8(previous)?;
+    let offered = std::str::from_utf8(offered)?;
+    let (old_identity, old_version) = origin(previous)?;
+    let (identity, version) = origin(offered)?;
+    if identity != old_identity
+        || (version == old_version && previous != offered)
+        || (version != old_version && old_version.checked_add(1) != Some(version))
+        || !previous
+            .lines()
+            .filter(unchanged_field)
+            .eq(offered.lines().filter(unchanged_field))
+    {
+        return Err(SipError::Unsupported);
+    }
+    let updated = Session::parse(offered, &[session.codec])?;
+    if updated.remote != session.remote
+        || updated.codec != session.codec
+        || updated.payload_type != session.payload_type
+        || updated.telephone != session.telephone
+    {
+        return Err(SipError::Unsupported);
+    }
+    Ok(updated)
 }
 
 impl Engine {
@@ -238,6 +303,8 @@ impl Engine {
             &invite.session.answer(local, generation),
         )?;
         let sequence = invite.request.cseq_header()?.typed()?.seq;
+        let remote_target = invite.request.contact_header()?.typed()?.uri;
+        let offer = invite.request.body.clone();
         let invite = self.pending.remove(&key).ok_or(SipError::InvalidPacket)?;
         self.update_invite_reply(&invite, &bytes, now)?;
         let mut output = Output::response(invite.peer, bytes.clone());
@@ -253,12 +320,17 @@ impl Engine {
                 generation,
                 bytes,
                 state: State::AwaitingAck {
+                    sequence,
                     retry: now.saturating_add(500),
                     interval: 500,
                     deadline: now.saturating_add(32_000),
                 },
                 local_cseq: 0,
                 remote_cseq: sequence,
+                local_media: local,
+                answer_version: generation,
+                offer,
+                remote_target,
             },
         );
         Ok(output)
@@ -287,9 +359,7 @@ impl Engine {
         }
         for dialog in self.incoming.values_mut() {
             if dialog.matches(request, peer)?
-                && request.cseq_header()?.typed()?.seq
-                    == dialog.invite.request.cseq_header()?.typed()?.seq
-                && matches!(dialog.state, State::AwaitingAck { .. })
+                && matches!(dialog.state, State::AwaitingAck { sequence, .. } if request.cseq_header()?.typed()?.seq == sequence)
             {
                 dialog.state = State::Established;
             }
@@ -306,6 +376,7 @@ impl Engine {
         if !matches!(request.method, Method::Bye | Method::Info | Method::Invite) {
             return Ok(None);
         }
+        let retry_after = self.seed[0] % 11;
         let mut matched = None;
         for dialog in self.incoming.values_mut() {
             if dialog.matches(request, peer)? {
@@ -327,13 +398,89 @@ impl Engine {
             )?)));
         }
         if request.method == Method::Invite {
-            let (code, phrase) = match dialog.state {
-                State::Terminated { .. } => (481, "Call/Transaction Does Not Exist"),
-                State::AwaitingAck { .. } | State::Established => (501, "Not Implemented"),
+            match dialog.state {
+                State::Terminated { .. } => {
+                    return Ok(Some(DialogReply::Rejected(response(
+                        request,
+                        481,
+                        "Call/Transaction Does Not Exist",
+                        "",
+                        "",
+                    )?)))
+                }
+                State::AwaitingAck { .. } => {
+                    return Ok(Some(DialogReply::Rejected(response(
+                        request,
+                        500,
+                        "Server Internal Error",
+                        &format!("Retry-After: {retry_after}\r\n"),
+                        "",
+                    )?)))
+                }
+                State::Established => {}
+            }
+            let updated =
+                match direction_update(&dialog.offer, &request.body, &dialog.invite.session) {
+                    Ok(updated) => updated,
+                    Err(_) => return Ok(Some(DialogReply::Rejected(response(
+                        request,
+                        488,
+                        "Not Acceptable Here",
+                        "Warning: 399 rusterisk \"Only media direction changes are supported\"\r\n",
+                        "",
+                    )?))),
+                };
+            let target = request
+                .headers
+                .iter()
+                .find(|header| header.name().eq_ignore_ascii_case("Contact"))
+                .map(|header| rsipstack::sip::headers::typed::Contact::parse(header.value()))
+                .transpose()?
+                .map(|contact| contact.uri);
+            let changed = updated.direction != dialog.invite.session.direction;
+            let version = if changed {
+                dialog
+                    .answer_version
+                    .checked_add(1)
+                    .filter(|version| *version <= i64::MAX as u64)
+                    .ok_or(SipError::Capacity)?
+            } else {
+                dialog.answer_version
             };
-            return Ok(Some(DialogReply::Rejected(response(
-                request, code, phrase, "", "",
-            )?)));
+            let extra = format!("Contact: <sip:rusterisk@{}>\r\n", dialog.invite.local);
+            let bytes = response(
+                request,
+                200,
+                "OK",
+                &extra,
+                &updated.answer_with_version(dialog.local_media, dialog.generation, version),
+            )?;
+            let events = if changed {
+                [SipEvent::PeerDirection {
+                    id: dialog.invite.id.clone(),
+                    generation: dialog.generation,
+                    direction: updated.direction,
+                }]
+                .into_iter()
+                .collect()
+            } else {
+                Vec::new()
+            };
+            dialog.invite.session = updated;
+            dialog.offer = request.body.clone();
+            dialog.answer_version = version;
+            dialog.remote_cseq = sequence;
+            if let Some(target) = target {
+                dialog.remote_target = target;
+            }
+            dialog.bytes = bytes.clone();
+            dialog.state = State::AwaitingAck {
+                sequence,
+                retry: now.saturating_add(500),
+                interval: 500,
+                deadline: now.saturating_add(32_000),
+            };
+            return Ok(Some(DialogReply::Accepted { bytes, events }));
         }
         if request.method == Method::Info {
             if matches!(dialog.state, State::Terminated { .. }) {

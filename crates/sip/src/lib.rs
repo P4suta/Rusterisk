@@ -228,13 +228,22 @@ impl Session {
     }
 
     pub fn answer(&self, local: SocketAddr, session_id: u64) -> String {
+        self.answer_with_version(local, session_id, session_id)
+    }
+
+    pub(crate) fn answer_with_version(
+        &self,
+        local: SocketAddr,
+        session_id: u64,
+        version: u64,
+    ) -> String {
         let family = if local.is_ipv4() { "IP4" } else { "IP6" };
         let format = match self.codec {
             Codec::Pcmu => "PCMU/8000",
             Codec::Pcma => "PCMA/8000",
             Codec::Opus => "opus/48000/2",
         };
-        let mut output = format!("v=0\r\no=rusterisk {session_id} {session_id} IN {family} {}\r\ns=Rusterisk\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {}", local.ip(), local.ip(), local.port(), self.payload_type);
+        let mut output = format!("v=0\r\no=rusterisk {session_id} {version} IN {family} {}\r\ns=Rusterisk\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {}", local.ip(), local.ip(), local.port(), self.payload_type);
         if let Some(format) = self.telephone {
             output.push_str(&format!(" {}", format.payload_type()));
         }
@@ -258,6 +267,11 @@ impl Session {
 }
 
 pub enum SipEvent {
+    PeerDirection {
+        id: String,
+        generation: u64,
+        direction: Direction,
+    },
     DtmfReceived {
         id: String,
         generation: u64,
