@@ -32,6 +32,7 @@ base64 = "0.22.1"
 url = "2.5.8"
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["process"] }
 axum = "0.8.8"
 rusterisk-server = { version = "0.1.0", path = "../server" }
 rusterisk-config = { version = "0.1.0", path = "../config" }

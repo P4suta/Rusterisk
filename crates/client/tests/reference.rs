@@ -12,12 +12,37 @@ fn rejection<T>(result: Result<T, Error>) -> Result<(u16, ApiError), Error> {
     }
 }
 
+async fn compare_existing_client(actual: &str, reference: &str) -> Result<(), Error> {
+    let scenario = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/interop/node-ari-client/scenario.ts");
+    let mut child = tokio::process::Command::new("node")
+        .arg(scenario)
+        .env("RUSTERISK_ACTUAL_URL", actual)
+        .env("RUSTERISK_REFERENCE_URL", reference)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
+        Ok(status) => status?,
+        Err(_) => {
+            child.kill().await?;
+            return Err(Error::Timeout);
+        }
+    };
+    if status.success() {
+        Ok(())
+    } else {
+        eprintln!("Existing client comparison failed: {status}");
+        Err(Error::Invalid("existing client comparison failed"))
+    }
+}
+
 #[tokio::test]
 #[ignore = "Requires the isolated Asterisk 22.9.0 reference."]
 async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<(), Error> {
-    let reference = std::env::var("RUSTERISK_REFERENCE_URL")
+    let reference_address = std::env::var("RUSTERISK_REFERENCE_URL")
         .map_err(|_| Error::Invalid("reference URL is required"))?;
-    let reference = Client::new(&reference, "app", "test-password")?;
+    let reference = Client::new(&reference_address, "app", "test-password")?;
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             if reference.ping().await.is_ok() {
@@ -106,6 +131,7 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
         );
         reference_session.shutdown().await?;
         actual_session.shutdown().await?;
+        compare_existing_client(&format!("http://{address}"), &reference_address).await?;
         Ok(())
     }
     .await;
