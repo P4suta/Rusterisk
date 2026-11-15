@@ -18,7 +18,8 @@ Preserve licenses and checksum.
 Add source-specific sending queues and optional bounded receiving contexts.
 Share four receiving slots between declarations and authenticated history.
 Reject failed authentication without replacing contexts.
-Keep authentication, replay protection, rollover, and control reports per source.
+Keep source-specific replay protection and control reports.
+Deliver unseen authenticated packets within each source's replay window.
 Compare reversed-patch file hashes with the published archive.
 Require unchanged public key fixtures before exact-path secret exclusions.
 Capture the dependency and provenance in verification snapshots.
@@ -37,5 +38,5 @@ Reconsider after a published release passes identical tests.
 
 ## Confirmation
 
-Encrypted sending and receiving tests must preserve authentication, replay protection, rollover, replacement behavior, and duplex audio with distinct clocks.
+Require encrypted duplex audio, distinct clocks, authentication, replay protection, rollover, and replacement tests.
 Require formatting, source integrity, dependency, license, Rust 1.89, and browser checks.
