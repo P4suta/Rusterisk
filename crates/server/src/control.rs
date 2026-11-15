@@ -152,6 +152,16 @@ pub enum IncomingTarget {
 
 #[derive(Clone, Debug)]
 pub enum Action {
+    ExternalWebSocket {
+        id: ChannelId,
+        app: String,
+        connection_id: ChannelId,
+        format: rusterisk_api::MediaFormat,
+        control_format: rusterisk_api::MediaControlFormat,
+        direction: rusterisk_api::MediaDirection,
+        auto_answer: bool,
+        data: String,
+    },
     ExternalAudioSocket {
         id: ChannelId,
         app: String,
@@ -305,6 +315,7 @@ impl Action {
             | Self::Move { .. } => 0,
             Self::Hangup(_) | Self::Continue { .. } | Self::DestroyBridge(_) => 2,
             Self::Originate { .. }
+            | Self::ExternalWebSocket { .. }
             | Self::ExternalRtp { .. }
             | Self::ExternalAudioSocket { .. }
             | Self::RecordChannel { .. }
@@ -340,6 +351,7 @@ impl Action {
             | Self::ListBridges
             | Self::GetBridge(_) => true,
             Self::Originate { .. }
+            | Self::ExternalWebSocket { .. }
             | Self::ExternalRtp { .. }
             | Self::ExternalAudioSocket { .. }
             | Self::FilterApplication { .. }
@@ -373,6 +385,9 @@ impl Action {
 
 #[derive(Clone, Debug)]
 pub enum Effect {
+    ReserveWebSocket {
+        key: CallKey,
+    },
     ConnectAudioSocket {
         key: CallKey,
         target: rusterisk_api::AudioSocketTarget,
@@ -610,6 +625,8 @@ enum ChannelKind {
     ExternalRtpAdmitted,
     AudioSocketPending,
     AudioSocketAdmitted,
+    WebSocketPending,
+    WebSocketClaimed,
 }
 
 struct ChannelEntry {
@@ -735,6 +752,7 @@ pub struct Control {
     recordings: BTreeMap<ChannelId, recording::RecordingEntry>,
     dialplan_program: rusterisk_config::Dialplan,
     endpoints: Endpoints,
+    media_connections: BTreeMap<ChannelId, (CallKey, crate::media_websocket::MediaLinkOptions)>,
 }
 
 impl Control {
@@ -895,6 +913,7 @@ impl Control {
             recordings: BTreeMap::new(),
             dialplan_program: program,
             endpoints: Endpoints::default(),
+            media_connections: BTreeMap::new(),
         }
     }
 
@@ -971,6 +990,32 @@ impl Control {
         now_ms: u64,
     ) -> Result<Outcome, ControlError> {
         match action {
+            Action::ExternalWebSocket {
+                id,
+                app,
+                connection_id,
+                format,
+                control_format,
+                direction,
+                auto_answer,
+                data,
+            } => self.external_media(
+                id.clone(),
+                app,
+                external_media::Target::WebSocket(crate::media_websocket::MediaLinkOptions {
+                    connection_id,
+                    channel_id: id,
+                    channel: String::new(),
+                    format,
+                    control_format,
+                    direction,
+                    auto_answer,
+                    channel_variables: BTreeMap::new(),
+                }),
+                data,
+                timestamp,
+                now_ms,
+            ),
             Action::ExternalRtp {
                 id,
                 app,
@@ -1572,6 +1617,8 @@ impl Control {
             .channels
             .remove(id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
+        self.media_connections
+            .retain(|_, (key, _)| key.id != *id || key.generation != entry.call.generation());
         let application =
             application_name(&self.applications, entry.call.stasis())?.map(str::to_owned);
         let was_in_stasis = matches!(entry.call.stasis(), StasisMembership::Entered(_));
@@ -1912,12 +1959,13 @@ impl Control {
                     return self.end_at(&key.id, timestamp, 16, now);
                 }
                 match entry.kind {
-                    ChannelKind::ExternalRtpPending | ChannelKind::AudioSocketPending => {
-                        return Ok(Outcome::empty())
-                    }
+                    ChannelKind::ExternalRtpPending
+                    | ChannelKind::AudioSocketPending
+                    | ChannelKind::WebSocketPending => return Ok(Outcome::empty()),
                     ChannelKind::Sip
                     | ChannelKind::ExternalRtpAdmitted
-                    | ChannelKind::AudioSocketAdmitted => {}
+                    | ChannelKind::AudioSocketAdmitted
+                    | ChannelKind::WebSocketClaimed => {}
                 }
                 let entry = self
                     .channels

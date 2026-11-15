@@ -7,6 +7,7 @@ use rusterisk_media::{alaw_encode, mulaw_encode, Frame, MediaError};
 use std::{collections::BTreeMap, time::Duration};
 use tokio::sync::mpsc;
 
+#[derive(Clone)]
 pub struct MediaLinkOptions {
     pub connection_id: ChannelId,
     pub channel_id: ChannelId,

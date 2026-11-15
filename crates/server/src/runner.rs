@@ -525,6 +525,7 @@ impl Runner {
                                 })
                             }
                             Effect::ControlRecording { .. }
+                            | Effect::ReserveWebSocket { .. }
                             | Effect::EndRecording { .. }
                             | Effect::PlayMedia { .. }
                             | Effect::ControlPlayback { .. }

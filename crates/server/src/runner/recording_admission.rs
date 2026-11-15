@@ -319,6 +319,7 @@ mod tests {
                     Effect::RecordMedia { owner, token, .. } => recordings.push((owner, token)),
                     Effect::Ring { .. } => {}
                     Effect::ControlRecording { .. }
+                    | Effect::ReserveWebSocket { .. }
                     | Effect::EndRecording {
                         mode: crate::media::RecordingEnd::Finish,
                         ..

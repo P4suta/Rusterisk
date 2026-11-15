@@ -561,6 +561,14 @@ impl Signaling {
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
+            Effect::ReserveWebSocket { key } => {
+                self.external_media.insert(key.clone());
+                self.notify(Signal::DtmfReady {
+                    key,
+                    events: u16::MAX,
+                })
+                .await?;
+            }
             Effect::ConnectAudioSocket { key, target } => {
                 if let Err(error) = self.start_audio_socket(key.clone(), target) {
                     self.notify(Signal::AudioSocketAdmitted {

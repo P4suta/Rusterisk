@@ -10,6 +10,7 @@ use std::{collections::BTreeMap, net::SocketAddr};
 pub(super) enum Target {
     Rtp(ExternalRtpTarget),
     AudioSocket(rusterisk_api::AudioSocketTarget),
+    WebSocket(crate::media_websocket::MediaLinkOptions),
 }
 
 impl Control {
@@ -22,6 +23,14 @@ impl Control {
         timestamp: &str,
         now: u64,
     ) -> Result<Outcome, ControlError> {
+        if let Target::WebSocket(options) = &target {
+            if options.format == rusterisk_api::MediaFormat::Opus {
+                return Err(ControlError::Unsupported);
+            }
+            if self.media_connections.contains_key(&options.connection_id) {
+                return Err(ControlError::Conflict("Media connection already exists"));
+            }
+        }
         if self.channels.contains_key(&id) {
             return Err(ControlError::Conflict("Channel already exists"));
         }
@@ -40,13 +49,37 @@ impl Control {
             .get(&app)
             .copied()
             .ok_or(ControlError::NotFound("Application not found"))?;
-        let deadline = now.checked_add(5000).ok_or(ControlError::Capacity)?;
+        let timeout = match &target {
+            Target::WebSocket(_) => 30000,
+            Target::Rtp(_) | Target::AudioSocket(_) => 5000,
+        };
+        let deadline = now.checked_add(timeout).ok_or(ControlError::Capacity)?;
         let generation = self.generation()?;
         let key = CallKey {
             id: id.clone(),
             generation,
         };
+        let mut variables = BTreeMap::new();
+        let mut websocket = None;
         let (kind, name, effect) = match target {
+            Target::WebSocket(mut options) => {
+                let name = format!("WebSocket/INCOMING/{generation:08x}");
+                options.channel = name.clone();
+                variables.insert(
+                    "MEDIA_WEBSOCKET_CONNECTION_ID".into(),
+                    options.connection_id.to_string(),
+                );
+                variables.insert(
+                    "MEDIA_WEBSOCKET_OPTIMAL_FRAME_SIZE".into(),
+                    options.format.optimal_frame_size().to_string(),
+                );
+                websocket = Some(options);
+                (
+                    ChannelKind::WebSocketPending,
+                    name,
+                    Effect::ReserveWebSocket { key: key.clone() },
+                )
+            }
             Target::Rtp(target) => (
                 ChannelKind::ExternalRtpPending,
                 format!("UnicastRTP/{}-{generation:08x}", target.remote()),
@@ -80,7 +113,7 @@ impl Control {
             },
             creationtime: timestamp.into(),
             language: "en".into(),
-            channelvars: None,
+            channelvars: (!variables.is_empty()).then(|| variables.clone()),
         };
         let mut outcome = Outcome::json(&snapshot)?;
         outcome.history.push(CallHistoryEvent::Started {
@@ -95,6 +128,10 @@ impl Control {
             },
         );
         outcome.effects.push(effect);
+        if let Some(options) = websocket {
+            self.media_connections
+                .insert(options.connection_id.clone(), (key.clone(), options));
+        }
         self.channels.insert(
             id,
             ChannelEntry {
@@ -108,7 +145,7 @@ impl Control {
                     data.split(',').map(str::to_owned).collect()
                 },
                 deadline: Some(deadline),
-                variables: BTreeMap::new(),
+                variables,
                 dtmf: None,
                 dialplan: None,
                 media_tasks: MediaTasks::new(generation),
@@ -136,7 +173,9 @@ impl Control {
             ChannelKind::Sip
             | ChannelKind::ExternalRtpAdmitted
             | ChannelKind::AudioSocketPending
-            | ChannelKind::AudioSocketAdmitted => return Ok(Outcome::empty()),
+            | ChannelKind::AudioSocketAdmitted
+            | ChannelKind::WebSocketPending
+            | ChannelKind::WebSocketClaimed => return Ok(Outcome::empty()),
             ChannelKind::ExternalRtpPending => {}
         }
         let local = match result {
@@ -176,7 +215,9 @@ impl Control {
             ChannelKind::Sip
             | ChannelKind::ExternalRtpPending
             | ChannelKind::ExternalRtpAdmitted
-            | ChannelKind::AudioSocketAdmitted => return Ok(Outcome::empty()),
+            | ChannelKind::AudioSocketAdmitted
+            | ChannelKind::WebSocketPending
+            | ChannelKind::WebSocketClaimed => return Ok(Outcome::empty()),
         }
         match result {
             Ok(()) => {}
@@ -184,5 +225,34 @@ impl Control {
         }
         entry.kind = ChannelKind::AudioSocketAdmitted;
         Outcome::json(&entry.snapshot)
+    }
+
+    pub fn claim_media_connection(
+        &mut self,
+        connection_id: &ChannelId,
+    ) -> Result<(CallKey, crate::media_websocket::MediaLinkOptions), ControlError> {
+        let (key, options) = self
+            .media_connections
+            .get(connection_id)
+            .ok_or(ControlError::NotFound("WebSocket instance not found"))?;
+        let entry = self
+            .channels
+            .get_mut(&key.id)
+            .filter(|entry| entry.call.generation() == key.generation)
+            .ok_or(ControlError::NotFound("WebSocket instance not found"))?;
+        match entry.call.connection_claim() {
+            rusterisk_core::ConnectionClaim::Available => {}
+            rusterisk_core::ConnectionClaim::Claimed => {
+                return Err(ControlError::Conflict(
+                    "Another websocket connection exists for this connection id",
+                ))
+            }
+            rusterisk_core::ConnectionClaim::Released => {
+                return Err(ControlError::NotFound("WebSocket instance not found"))
+            }
+        }
+        entry.call = entry.call.claim_connection()?;
+        entry.kind = ChannelKind::WebSocketClaimed;
+        Ok((key.clone(), options.clone()))
     }
 }
