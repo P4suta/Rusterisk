@@ -18,9 +18,13 @@ mod external_media;
 #[cfg(test)]
 mod negotiation_tests;
 mod recording;
+pub(crate) mod sip_websocket;
 #[cfg(test)]
 mod stream_tests;
 mod transport;
+pub use sip_websocket::SipWebSocketPort;
+#[cfg(test)]
+mod sip_websocket_tests;
 mod websocket;
 
 struct Listener {
@@ -104,6 +108,10 @@ fn peer_direction(direction: rusterisk_sip::Direction) -> PeerMediaDirection {
 }
 
 impl Signaling {
+    pub fn websocket_port(&self) -> SipWebSocketPort {
+        self.network.websocket_port(self.config.origins.clone())
+    }
+
     pub fn with_storage(mut self, storage: StoragePort) -> Self {
         self.storage = Some(storage);
         self

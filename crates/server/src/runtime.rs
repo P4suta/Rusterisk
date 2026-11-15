@@ -48,7 +48,7 @@ impl Server {
     }
 
     pub async fn bind(
-        config: Config,
+        mut config: Config,
         capacity: usize,
         data_directory: PathBuf,
     ) -> Result<Self, ControlError> {
@@ -59,6 +59,10 @@ impl Server {
         let (media_port, media, notices) = MediaHub::new(capacity);
         let listeners: Result<(Runner, Signaling, HttpServer), ControlError> = async {
             let control = control.with_storage(storage_port.clone())?;
+            let http = HttpServer::bind(&config.http, controller.clone())
+                .await?
+                .with_media(media_port.clone());
+            config.http.bind = http.local_addr()?;
             let signaling = Signaling::bind(
                 config.clone(),
                 controller.clone(),
@@ -68,9 +72,7 @@ impl Server {
             )
             .await?
             .with_storage(storage_port);
-            let http = HttpServer::bind(&config.http, controller.clone())
-                .await?
-                .with_media(media_port);
+            let http = http.with_signaling(signaling.websocket_port());
             Ok((control, signaling, http))
         }
         .await;

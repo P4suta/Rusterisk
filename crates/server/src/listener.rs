@@ -20,6 +20,8 @@ pub struct HttpServer {
     application: Router,
     encryption: Option<TlsContext>,
     controller: Controller,
+    media: Option<crate::media::MediaPort>,
+    signaling: Option<crate::signaling::SipWebSocketPort>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -36,6 +38,7 @@ async fn connection<I: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
     io: I,
     application: Router,
     mut stop: watch::Receiver<bool>,
+    peer: SocketAddr,
 ) -> Result<(), ControlError> {
     if *stop.borrow() {
         return Ok(());
@@ -54,7 +57,10 @@ async fn connection<I: AsyncRead + AsyncWrite + Send + Unpin + 'static>(
         .max_header_list_size(16384)
         .max_send_buf_size(65536);
     let (headers, mut header_receiver) = mpsc::channel(1);
-    let service = service_fn(move |request: hyper::Request<hyper::body::Incoming>| {
+    let service = service_fn(move |mut request: hyper::Request<hyper::body::Incoming>| {
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(peer));
         let application = application.clone();
         let headers = headers.clone();
         async move {
@@ -114,6 +120,8 @@ impl HttpServer {
             application,
             encryption,
             controller,
+            media: None,
+            signaling: None,
         })
     }
 
@@ -122,18 +130,38 @@ impl HttpServer {
     }
 
     pub fn with_media(mut self, media: crate::media::MediaPort) -> Self {
+        self.media = Some(media);
+        self.application();
+        self
+    }
+
+    pub fn with_signaling(mut self, signaling: crate::signaling::SipWebSocketPort) -> Self {
+        self.signaling = Some(signaling);
+        self.application();
+        self
+    }
+
+    fn application(&mut self) {
         let scheme = match &self.encryption {
             Some(_) => http::HttpScheme::Https,
             None => http::HttpScheme::Http,
         };
-        self.application =
-            http::router_with_media_for_scheme(self.controller.clone(), media, scheme).layer(
-                TimeoutLayer::with_status_code(
-                    StatusCode::REQUEST_TIMEOUT,
-                    Duration::from_secs(10),
-                ),
-            );
-        self
+        let application = match &self.media {
+            Some(media) => {
+                http::router_with_media_for_scheme(self.controller.clone(), media.clone(), scheme)
+            }
+            None => http::router_for_scheme(self.controller.clone(), scheme),
+        };
+        let application = match &self.signaling {
+            Some(signaling) => {
+                crate::signaling::sip_websocket::router(application, signaling.clone(), scheme)
+            }
+            None => application,
+        };
+        self.application = application.layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(10),
+        ));
     }
 
     pub async fn run(self) -> Result<(), ControlError> {
@@ -152,9 +180,9 @@ impl HttpServer {
                     let stop = self.controller.shutdown_signal();
                     connections.spawn(async move {
                         let result = match encryption {
-                            None => connection(stream, application, stop).await,
+                            None => connection(stream, application, stop, peer).await,
                             Some(encryption) => match encryption.accept(stream).await {
-                                Ok(stream) => connection(stream, application, stop).await,
+                                Ok(stream) => connection(stream, application, stop, peer).await,
                                 Err(error) => Err(error),
                             },
                         };

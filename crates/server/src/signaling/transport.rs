@@ -1,3 +1,4 @@
+use super::sip_websocket::{Scheme, SipWebSocketPort, UpgradeRequest};
 use super::{failure, Received};
 use crate::{
     encryption::{TlsClientContext, TlsContext},
@@ -14,6 +15,7 @@ use tokio::{
 };
 #[cfg(test)]
 mod tests;
+mod websocket;
 
 enum ListenerSocket {
     Datagram(UdpSocket),
@@ -22,6 +24,10 @@ enum ListenerSocket {
         listener: TcpListener,
         context: TlsContext,
         client: TlsClientContext,
+    },
+    WebSocket {
+        address: SocketAddr,
+        scheme: Scheme,
     },
 }
 
@@ -90,6 +96,8 @@ pub(super) struct Network {
     sender: mpsc::Sender<StreamPacket>,
     received: mpsc::Receiver<StreamPacket>,
     generation: u64,
+    upgrades: mpsc::Receiver<UpgradeRequest>,
+    upgrade_requests: mpsc::Sender<UpgradeRequest>,
 }
 
 async fn listen(listeners: &[ListenerSocket]) -> Result<ListenerInput, ControlError> {
@@ -97,6 +105,7 @@ async fn listen(listeners: &[ListenerSocket]) -> Result<ListenerInput, ControlEr
         let mut bytes = [0; MAX_MESSAGE + 1];
         for (index, listener) in listeners.iter().enumerate() {
             let result = match listener {
+                ListenerSocket::WebSocket { .. } => continue,
                 ListenerSocket::Datagram(socket) => {
                     let mut buffer = ReadBuf::new(&mut bytes);
                     match socket.poll_recv_from(context, &mut buffer) {
@@ -154,9 +163,17 @@ impl Network {
                     .await?,
                     client: TlsClientContext::load(transport.ca_list_file.as_deref())?,
                 },
-                Protocol::Ws | Protocol::Wss => return Err(ControlError::Unsupported),
+                Protocol::Ws => ListenerSocket::WebSocket {
+                    address: config.http.bind,
+                    scheme: Scheme::Ws,
+                },
+                Protocol::Wss => ListenerSocket::WebSocket {
+                    address: config.http.bind,
+                    scheme: Scheme::Wss,
+                },
             };
             transport.bind = match &listener {
+                ListenerSocket::WebSocket { address, .. } => Ok(*address),
                 ListenerSocket::Datagram(socket) => socket.local_addr(),
                 ListenerSocket::Stream(socket)
                 | ListenerSocket::Encrypted {
@@ -167,6 +184,7 @@ impl Network {
             listeners.push(listener);
         }
         let (sender, received) = mpsc::channel(128);
+        let (upgrade_requests, upgrades) = mpsc::channel(64);
         Ok(Self {
             listeners,
             ports: BTreeMap::new(),
@@ -174,7 +192,13 @@ impl Network {
             sender,
             received,
             generation: 0,
+            upgrades,
+            upgrade_requests,
         })
+    }
+
+    pub(super) fn websocket_port(&self, origins: Vec<String>) -> SipWebSocketPort {
+        SipWebSocketPort::new(self.upgrade_requests.clone(), origins)
     }
 
     pub(super) fn local_addr(&self, listener: usize) -> Result<SocketAddr, ControlError> {
@@ -183,6 +207,7 @@ impl Network {
             .get(listener)
             .ok_or(ControlError::Invalid("Unknown listener"))?
         {
+            ListenerSocket::WebSocket { address, .. } => return Ok(*address),
             ListenerSocket::Datagram(socket) => socket.local_addr(),
             ListenerSocket::Stream(socket)
             | ListenerSocket::Encrypted {
@@ -226,6 +251,24 @@ impl Network {
         })
     }
 
+    fn upgrade(
+        &mut self,
+        scheme: Scheme,
+        peer: SocketAddr,
+    ) -> Result<tokio::sync::oneshot::Sender<axum::extract::ws::WebSocket>, ControlError> {
+        let listener = self.listeners.iter().position(|listener| matches!(listener, ListenerSocket::WebSocket { scheme: configured, .. } if *configured == scheme)).ok_or(ControlError::Unsupported)?;
+        let Reserved { key, packets, stop } = self.reserve(listener, peer)?;
+        let (socket, received) = tokio::sync::oneshot::channel();
+        let sender = self.sender.clone();
+        self.jobs.spawn(async move {
+            (
+                key,
+                websocket::connection(received, key, packets, sender, stop).await,
+            )
+        });
+        Ok(socket)
+    }
+
     fn accepted(
         &mut self,
         listener: usize,
@@ -235,7 +278,7 @@ impl Network {
         let encryption = match &self.listeners[listener] {
             ListenerSocket::Stream(_) => None,
             ListenerSocket::Encrypted { context, .. } => Some(context.clone()),
-            ListenerSocket::Datagram(_) => {
+            ListenerSocket::Datagram(_) | ListenerSocket::WebSocket { .. } => {
                 return Err(ControlError::Invalid(
                     "Stream accepted on datagram listener",
                 ));
@@ -267,7 +310,9 @@ impl Network {
         let encryption = match &self.listeners[listener] {
             ListenerSocket::Stream(_) => None,
             ListenerSocket::Encrypted { client, .. } => Some(client.clone()),
-            ListenerSocket::Datagram(_) => return Err(ControlError::Unsupported),
+            ListenerSocket::Datagram(_) | ListenerSocket::WebSocket { .. } => {
+                return Err(ControlError::Unsupported)
+            }
         };
         let local = SocketAddr::new(self.local_addr(listener)?.ip(), 0);
         let socket = if peer.is_ipv4() {
@@ -356,6 +401,11 @@ impl Network {
     pub(super) async fn next(&mut self) -> Result<Input, ControlError> {
         loop {
             tokio::select! {
+                upgrade = self.upgrades.recv() => {
+                    let request = upgrade.ok_or(ControlError::Capacity)?;
+                    let result = self.upgrade(request.scheme, request.peer);
+                    if request.reply.send(result).is_err() { tracing::debug!("Signaling upgrade requester closed"); }
+                },
                 received = listen(&self.listeners) => match received? {
                     ListenerInput::Datagram(packet) => return Ok(Input::Packet(packet)),
                     ListenerInput::Accepted { listener, peer, stream } => {
@@ -396,6 +446,12 @@ impl Network {
     }
 
     pub(super) async fn close(&mut self) -> Result<(), ControlError> {
+        self.upgrades.close();
+        while let Ok(request) = self.upgrades.try_recv() {
+            if request.reply.send(Err(ControlError::Capacity)).is_err() {
+                tracing::debug!("Signaling upgrade requester stopped");
+            }
+        }
         for port in self.ports.values() {
             port.stop.send_replace(true);
         }
