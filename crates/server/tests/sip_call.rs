@@ -839,6 +839,41 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
             let finished = tokio::time::timeout(Duration::from_secs(2), subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
             assert!(matches!(finished.kind, EventKind::PlaybackFinished { playback } if playback.id.as_str() == name && playback.state == rusterisk_api::PlaybackState::Done));
         }
+        let request = Request::builder().method("POST").uri(format!("/ari/channels/{channel}/record?name=received&format=wav"))
+            .header("Authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("app:test-password"))).body(Body::empty()).map_err(failure)?;
+        assert_eq!(app.clone().oneshot(request).await.map_err(failure)?.status(), StatusCode::CREATED);
+        let started = tokio::time::timeout(Duration::from_secs(2), subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
+        assert!(matches!(started.kind, EventKind::RecordingStarted { recording } if recording.name == "received"));
+        let destination = Session::parse(std::str::from_utf8(&answered.body).map_err(failure)?, &[Codec::Pcmu]).map_err(failure)?.remote;
+        let mut sender = RtpSender::new(AudioFormat::Pcmu, 0, [19; 10]).map_err(failure)?;
+        let mut period = tokio::time::interval(Duration::from_millis(20));
+        period.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        for _ in 0..20 {
+            period.tick().await;
+            let packet = sender.packet(Frame::new(&[1234; 160], 8000).map_err(failure)?).map_err(failure)?.encode().map_err(failure)?;
+            audio.data().send_to(&packet, destination).await.map_err(failure)?;
+        }
+        let request = Request::builder().method("POST").uri("/ari/recordings/live/received/stop")
+            .header("Authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("app:test-password"))).body(Body::empty()).map_err(failure)?;
+        assert_eq!(app.clone().oneshot(request).await.map_err(failure)?.status(), StatusCode::NO_CONTENT);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = subscription.events.recv().await {
+                if let EventKind::RecordingFinished { recording } = event.kind {
+                    assert_eq!(recording.name, "received");
+                    assert_eq!(recording.state, rusterisk_api::RecordingState::Done);
+                    return Ok(());
+                }
+            }
+            Err(ControlError::Capacity)
+        }).await.map_err(failure)??;
+        let mut saved = rusterisk_storage::WaveReader::open(&directory.path().join("recordings/received.wav")).map_err(failure)?;
+        let mut consecutive = 0;
+        let mut longest = 0;
+        while let Some(frame) = saved.read_frame().map_err(failure)? {
+            consecutive = if frame.samples().iter().all(|sample| (i32::from(*sample) - 1234).abs() < 300) { consecutive + 1 } else { 0 };
+            longest = longest.max(consecutive);
+        }
+        assert!(longest >= 6);
         controller.execute(credentials()?, None, Action::CreateBridge { id: id("playback-mix")?, name: String::new() }).await?;
         controller.execute(credentials()?, None, Action::AddChannels { bridge: id("playback-mix")?, channels: [channel.clone()].into_iter().collect() }).await?;
         for _ in 0..2 { subscription.events.recv().await.ok_or(ControlError::Capacity)?; }
