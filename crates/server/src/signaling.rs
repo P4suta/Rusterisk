@@ -555,6 +555,22 @@ impl Signaling {
                 Some(storage) if self.playbacks.len() < 64 && self.calls.contains_key(&key) => {
                     let storage = storage.clone();
                     let port = self.media.clone();
+                    let completed = match port
+                        .reserve_playback(AudioTarget::Channel(key.clone()), token)
+                        .await
+                    {
+                        Ok(completed) => completed,
+                        Err(error) => {
+                            tracing::warn!(channel = %key.id, generation = key.generation, ?token, %error, "playback reservation failed");
+                            self.notify(Signal::PlaybackFinished {
+                                key,
+                                token,
+                                completion: crate::PlaybackCompletion::Failed,
+                            })
+                            .await?;
+                            return Ok(());
+                        }
+                    };
                     self.playbacks.spawn(async move {
                         let result = async {
                             let name = ChannelId::try_from(media)?;
@@ -562,13 +578,18 @@ impl Signaling {
                                 .play(PlaybackMedia::Sound(name))
                                 .await
                                 .map_err(failure)?;
-                            let completed = port
-                                .play(AudioTarget::Channel(key.clone()), token, source)
+                            port
+                                .attach_playback(token, source)
                                 .await
                                 .map_err(failure)?;
                             completed.await.map_err(failure)?.map_err(failure)
                         }
                         .await;
+                        if result.is_err() {
+                            if let Err(error) = port.stop_playback(token) {
+                                tracing::warn!(channel = %key.id, generation = key.generation, ?token, %error, "failed playback reservation cleanup deferred");
+                            }
+                        }
                         (key, token, result)
                     });
                 }

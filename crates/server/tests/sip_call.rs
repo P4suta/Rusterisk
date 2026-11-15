@@ -747,7 +747,7 @@ async fn dialplan_answer_wait_and_hangup_finish_a_real_invitation_without_stasis
 }
 
 #[tokio::test]
-async fn dialplan_playback_sends_a_stored_sound_and_resumes_after_received_audio(
+async fn dialplan_playback_continues_after_a_missing_sound_and_resumes_after_received_audio(
 ) -> Result<(), ControlError> {
     let directory = tempfile::tempdir().map_err(failure)?;
     let mut recording =
@@ -778,7 +778,7 @@ async fn dialplan_playback_sends_a_stored_sound_and_resumes_after_received_audio
         "[app]\ntype=user\npassword=test-password\n",
         sip,
         "",
-        "[internal]\nexten => 100,1,Playback(welcome)\nsame => n,Stasis(app,${PLAYBACKSTATUS})\n",
+        "[internal]\nexten => 100,1,Playback(missing)\nsame => n,Playback(welcome)\nsame => n,Stasis(app,${PLAYBACKSTATUS})\n",
     )
     .map_err(failure)?;
     let (controller, runner, effects) = Controller::new(config.clone(), 4);
