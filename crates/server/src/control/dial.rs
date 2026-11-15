@@ -447,6 +447,7 @@ impl Control {
                 },
                 creationtime: timestamp.into(),
                 language: snapshot.language.clone(),
+                channelvars: None,
             };
             self.channels.insert(
                 id,

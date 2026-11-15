@@ -115,6 +115,8 @@ pub struct Channel {
     pub dialplan: Dialplan,
     pub creationtime: String,
     pub language: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channelvars: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

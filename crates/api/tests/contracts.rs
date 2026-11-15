@@ -1,6 +1,22 @@
 use rusterisk_api::{openapi, swagger, ChannelId, Event, EventKind, OPERATIONS};
 
 #[test]
+fn channel_snapshots_preserve_optional_transport_variables() -> Result<(), serde_json::Error> {
+    let value: serde_json::Value = serde_json::from_str(
+        r#"{"id":"external","name":"UnicastRTP/peer","state":"Up","accountcode":"","caller":{"name":"","number":""},"connected":{"name":"","number":""},"dialplan":{"context":"default","exten":"s","priority":1,"app_name":"Stasis","app_data":"calls"},"creationtime":"now","language":"en","channelvars":{"UNICASTRTP_LOCAL_ADDRESS":"127.0.0.1","UNICASTRTP_LOCAL_PORT":"10000"}}"#,
+    )?;
+    let channel: rusterisk_api::Channel = serde_json::from_value(value.clone())?;
+    assert_eq!(serde_json::to_value(channel)?, value);
+    let mut omitted = value;
+    assert!(omitted
+        .as_object_mut()
+        .is_some_and(|object| object.remove("channelvars").is_some()));
+    let channel: rusterisk_api::Channel = serde_json::from_value(omitted.clone())?;
+    assert_eq!(serde_json::to_value(channel)?, omitted);
+    Ok(())
+}
+
+#[test]
 fn endpoint_state_events_preserve_the_complete_resource_snapshot() -> Result<(), serde_json::Error>
 {
     let value = serde_json::json!({"type":"EndpointStateChange", "application":"calls", "timestamp":"now", "endpoint":{"technology":"PJSIP", "resource":"phone", "state":"online", "channel_ids":[]}});

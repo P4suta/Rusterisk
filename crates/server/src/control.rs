@@ -775,6 +775,7 @@ impl Control {
             },
             creationtime: timestamp.into(),
             language: "en".into(),
+            channelvars: None,
         };
         let mut outcome = Outcome::json(&snapshot)?;
         outcome.history.push(CallHistoryEvent::Started {
@@ -1091,6 +1092,7 @@ impl Control {
                     },
                     creationtime: timestamp.into(),
                     language: "en".into(),
+                    channelvars: None,
                 };
                 let mut outcome = Outcome::json(&snapshot)?;
                 outcome.history.push(CallHistoryEvent::Started {
