@@ -119,12 +119,19 @@ async fn typed_client_authenticates_and_roundtrips_server_resources() -> Result<
             client.application("../calls").await,
             Err(Error::Id(_))
         ));
-        session.shutdown().await?;
         let id = ChannelId::try_from("conversation".to_owned())?;
         let bridge = client.create_bridge(&id, "Conversation").await?;
         assert_eq!(bridge.id, id);
         assert_eq!(client.bridge(&id).await?, bridge);
         assert_eq!(client.bridges().await?, [bridge]);
+        let source = rusterisk_client::api::EventSource::Bridge(id.clone());
+        let subscribed = client
+            .subscribe_resources("calls", std::slice::from_ref(&source))
+            .await?;
+        assert_eq!(subscribed.bridge_ids, std::slice::from_ref(&id));
+        let unsubscribed = client.unsubscribe_resources("calls", &[source]).await?;
+        assert!(unsubscribed.bridge_ids.is_empty());
+        session.shutdown().await?;
         client.destroy_bridge(&id).await?;
         assert!(matches!(
             client.bridge(&id).await,

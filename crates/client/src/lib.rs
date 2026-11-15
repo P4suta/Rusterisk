@@ -255,6 +255,46 @@ impl Client {
     pub async fn endpoints(&self) -> Result<Vec<api::Endpoint>, Error> {
         self.request("endpoints.list", &[], &[]).await
     }
+    pub async fn subscribe_resources(
+        &self,
+        application: &str,
+        sources: &[api::EventSource],
+    ) -> Result<api::Application, Error> {
+        self.resource_subscription("applications.subscribe", application, sources)
+            .await
+    }
+    pub async fn unsubscribe_resources(
+        &self,
+        application: &str,
+        sources: &[api::EventSource],
+    ) -> Result<api::Application, Error> {
+        self.resource_subscription("applications.unsubscribe", application, sources)
+            .await
+    }
+    async fn resource_subscription(
+        &self,
+        operation: &str,
+        application: &str,
+        sources: &[api::EventSource],
+    ) -> Result<api::Application, Error> {
+        if sources.is_empty() {
+            return Err(Error::Invalid("event sources are required"));
+        }
+        if sources.len() > 32 {
+            return Err(Error::Capacity);
+        }
+        let sources = sources
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        self.request(
+            operation,
+            &[("applicationName", application)],
+            &[("eventSource", &sources)],
+        )
+        .await
+    }
     pub async fn endpoints_by_technology(
         &self,
         technology: &str,
