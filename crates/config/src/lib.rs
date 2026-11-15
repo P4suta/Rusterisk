@@ -341,7 +341,7 @@ impl Config {
                     if error.kind() == std::io::ErrorKind::NotFound
                         && matches!(missing, Missing::Empty) =>
                 {
-                    return Ok(String::new())
+                    return Ok(String::new());
                 }
                 Err(error) => return Err(ConfigError::at(file, 0, error.to_string())),
             };
@@ -583,10 +583,31 @@ impl Config {
                             file,
                             section.line,
                             "unsupported transport protocol",
-                        ))
+                        ));
                     }
                 };
-                let tls = if matches!(protocol, Protocol::Tls | Protocol::Wss) {
+                let websocket = matches!(protocol, Protocol::Ws | Protocol::Wss);
+                if websocket {
+                    if matches!(protocol, Protocol::Wss) != self.http.tls.is_some() {
+                        return Err(ConfigError::at(
+                            file,
+                            section.position("protocol"),
+                            "WebSocket transport does not match the configured HTTP listener scheme",
+                        ));
+                    }
+                    if self
+                        .transports
+                        .iter()
+                        .any(|transport| transport.protocol == protocol)
+                    {
+                        return Err(ConfigError::at(
+                            file,
+                            section.position("protocol"),
+                            "WebSocket transport metadata is ambiguous for the HTTP listener",
+                        ));
+                    }
+                }
+                let tls = if protocol == Protocol::Tls {
                     Some(TlsFiles {
                         certificate: section.required(file, "cert_file")?.into(),
                         private_key: section.required(file, "priv_key_file")?.into(),
@@ -594,19 +615,41 @@ impl Config {
                 } else {
                     for key in ["cert_file", "priv_key_file", "ca_list_file"] {
                         if section.value(key).is_some() {
-                            return Err(ConfigError::at(file, section.position(key), format!("{key} requires an encrypted transport")));
+                            let reason = if websocket {
+                                "WebSocket encryption must be configured in http.conf".into()
+                            } else {
+                                format!("{key} requires an encrypted transport")
+                            };
+                            return Err(ConfigError::at(file, section.position(key), reason));
                         }
                     }
                     None
                 };
                 let ca_list_file = section.value("ca_list_file").map(str::to_owned);
                 if ca_list_file.as_ref().is_some_and(String::is_empty) {
-                    return Err(ConfigError::at(file, section.position("ca_list_file"), "empty certificate authority list path"));
+                    return Err(ConfigError::at(
+                        file,
+                        section.position("ca_list_file"),
+                        "empty certificate authority list path",
+                    ));
                 }
-                let bind = section
-                    .required(file, "bind")?
-                    .parse()
-                    .map_err(|_| ConfigError::at(file, section.line, "invalid transport bind"))?;
+                let configured_bind = section.required(file, "bind")?;
+                let bind = if websocket {
+                    if configured_bind.parse::<SocketAddr>().is_err()
+                        && configured_bind.parse::<IpAddr>().is_err()
+                    {
+                        return Err(ConfigError::at(
+                            file,
+                            section.position("bind"),
+                            "invalid transport bind",
+                        ));
+                    }
+                    self.http.bind
+                } else {
+                    configured_bind.parse().map_err(|_| {
+                        ConfigError::at(file, section.position("bind"), "invalid transport bind")
+                    })?
+                };
                 let external_media_address = section
                     .value("external_media_address")
                     .map(|value| {
@@ -749,7 +792,7 @@ impl Config {
                     file,
                     section.line,
                     "unsupported object type",
-                ))
+                ));
             }
         }
         Ok(())
@@ -816,6 +859,11 @@ impl Config {
         if self.http != replacement.http
             || self.transports != replacement.transports
             || self.rtp != replacement.rtp
+            || (self.origins != replacement.origins
+                && self
+                    .transports
+                    .iter()
+                    .any(|transport| matches!(transport.protocol, Protocol::Ws | Protocol::Wss)))
         {
             Reload::RestartRequired
         } else {
