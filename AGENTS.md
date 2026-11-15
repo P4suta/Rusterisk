@@ -9,6 +9,8 @@ Use Red, Green, Refactor for behavior, adapters, settings, clients, examples, an
 Observe the intended test failure before adding production behavior.
 Use `mise x -- just check` for formatting, the source policy, strict Clippy, types, and workspace tests.
 Use `mise x -- just security` for dependency, license, and secret checks.
+The fast gate checks the locked JavaScript fixture's types, source rules, formatting, and tests.
+Use `mise x -- just node-check` to run those checks directly.
 Inspect the diff, affected workflows, and maintained commands before completion and every push.
 Run applicable checks and repair failures before reporting success.
 Keep integration and release checks at their declared stages.

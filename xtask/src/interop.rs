@@ -48,6 +48,7 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
         .map_err(|error| TaskError::Contract(error.to_string()))?;
     let start = plan.start();
     let cleanup = plan.cleanup();
+    println!("preflight: node-check");
     for step in [&start, &plan.port()] {
         println!(
             "budget={}s docker {}",
@@ -74,6 +75,7 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
     if !execute {
         return Ok(());
     }
+    super::node_check()?;
     let result = (|| {
         perform(&start)?;
         let address = address(&plan, &identity)?;

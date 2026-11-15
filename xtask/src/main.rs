@@ -141,10 +141,12 @@ fn execute() -> Result<(), TaskError> {
         [task, mode] if task == "reference-build" && mode == "--run" => reference_build(true),
         [task] if task == "policy" => policy(),
         [task] if task == "core-msrv" => core_msrv(),
+        [task] if task == "node-check" => node_check(),
         [task] if task == "check" => {
             run("cargo", &["fmt", "--all", "--", "--check"])?;
             policy()?;
             core_msrv()?;
+            node_check()?;
             run(
                 "cargo",
                 &[
@@ -177,9 +179,29 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|security|reference-build --dry-run|reference-build --run|interop [--dry-run]>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|security|reference-build --dry-run|reference-build --run|interop [--dry-run]>".into(),
         )),
     }
+}
+
+fn node_check() -> Result<(), TaskError> {
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    run(
+        npm,
+        &[
+            "ci",
+            "--prefix",
+            "tests/interop/node-ari-client",
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+        ],
+    )?;
+    run(
+        npm,
+        &["--prefix", "tests/interop/node-ari-client", "run", "check"],
+    )?;
+    run(npm, &["--prefix", "tests/interop/node-ari-client", "test"])
 }
 
 fn execution_identity(execute: bool) -> Result<String, TaskError> {

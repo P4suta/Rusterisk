@@ -12,6 +12,9 @@ policy:
 core-msrv:
     cargo run --locked --target-dir target/xtask --package xtask -- core-msrv
 
+node-check:
+    cargo run --locked --target-dir target/xtask --package xtask -- node-check
+
 security:
     cargo run --locked --target-dir target/xtask --package xtask -- security
 

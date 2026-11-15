@@ -8,8 +8,8 @@
     "node": "26.13.1"
   },
   "scripts": {
-    "check": "tsc --noEmit && eslint . --max-warnings=0",
-    "test": "node --test *.test.ts"
+    "check": "tsc --noEmit && eslint . --max-warnings=0 && biome check .",
+    "test": "node --test --test-timeout=15000 *.test.ts"
   },
   "overrides": {
     "@typescript-eslint/typescript-estree": {
@@ -17,6 +17,7 @@
     }
   },
   "devDependencies": {
+    "@biomejs/biome": "2.6.2",
     "@eslint/js": "10.0.1",
     "@types/ari-client": "2.2.14",
     "@types/node": "26.6.6",
