@@ -1,11 +1,15 @@
 use crate::rtp::{LinkStats, RtpChannels, RtpDigitCommand, RtpLink, RtpSession, SocketPair};
+use crate::storage::{RecordingSink, WorkerError};
 use crate::CallKey;
-use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone};
+use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone, MediaTaskToken};
 use rusterisk_media::{Frame, Gate, MediaError, Mixer, TelephoneFormat};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
+mod recording;
+use recording::Recordings;
+pub use recording::{RecordingEnd, RecordingTarget};
 
 pub enum MediaNotice {
     DtmfFinished {
@@ -26,6 +30,17 @@ pub enum MediaNotice {
 }
 
 enum Command {
+    Record {
+        token: MediaTaskToken,
+        target: RecordingTarget,
+        sink: RecordingSink,
+        completed: oneshot::Sender<Result<(), WorkerError>>,
+        reply: oneshot::Sender<Result<(), MediaError>>,
+    },
+    EndRecording {
+        token: MediaTaskToken,
+        mode: RecordingEnd,
+    },
     Digits {
         key: CallKey,
         command: RtpDigitCommand,
@@ -56,6 +71,40 @@ pub struct MediaPort {
 }
 
 impl MediaPort {
+    pub async fn record(
+        &self,
+        target: RecordingTarget,
+        token: MediaTaskToken,
+        sink: RecordingSink,
+    ) -> Result<oneshot::Receiver<Result<(), WorkerError>>, MediaError> {
+        let (completed, completion) = oneshot::channel();
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .try_send(Command::Record {
+                token,
+                target,
+                sink,
+                completed,
+                reply,
+            })
+            .map_err(|_| MediaError::Capacity)?;
+        tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+            .map_err(|error| MediaError::Transport(error.to_string()))??;
+        Ok(completion)
+    }
+
+    pub fn stop_recording(
+        &self,
+        token: MediaTaskToken,
+        mode: RecordingEnd,
+    ) -> Result<(), MediaError> {
+        self.commands
+            .try_send(Command::EndRecording { token, mode })
+            .map_err(|_| MediaError::Capacity)
+    }
+
     pub async fn send_tone(&self, key: CallKey, tone: DtmfTone) -> Result<(), MediaError> {
         if !(1..=5000).contains(&tone.duration_ms) {
             return Err(MediaError::InvalidPacket);
@@ -149,6 +198,7 @@ pub struct MediaHub {
     ports: BTreeMap<CallKey, Port>,
     workers: JoinSet<(CallKey, Result<LinkStats, MediaError>)>,
     dropped: u64,
+    recordings: Recordings,
 }
 
 impl MediaHub {
@@ -165,6 +215,7 @@ impl MediaHub {
                 ports: BTreeMap::new(),
                 workers: JoinSet::new(),
                 dropped: 0,
+                recordings: Recordings::new(),
             },
             events,
         )
@@ -177,6 +228,7 @@ impl MediaHub {
     }
 
     fn remove(&mut self, key: &CallKey) -> Result<(), MediaError> {
+        self.recordings.release(key);
         if let Some(port) = self.ports.remove(key) {
             port.stop.send_replace(true);
             if !self.mixer.remove(key) {
@@ -236,6 +288,30 @@ impl MediaHub {
 
     fn command(&mut self, command: Command) -> Result<(), MediaError> {
         match command {
+            Command::Record {
+                token,
+                target,
+                sink,
+                completed,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let valid = match &target {
+                        RecordingTarget::Channel(key) => self.ports.contains_key(key),
+                        RecordingTarget::Bridge(_) => true,
+                    };
+                    let result = if valid {
+                        self.recordings.begin(token, target, sink, completed)
+                    } else {
+                        Err(MediaError::UnknownStream)
+                    };
+                    let admitted = result.is_ok();
+                    if reply.send(result).is_err() && admitted {
+                        self.recordings.end(token, RecordingEnd::Cancel);
+                    }
+                }
+            }
+            Command::EndRecording { token, mode } => self.recordings.end(token, mode),
             Command::Digits {
                 key,
                 command,
@@ -335,17 +411,20 @@ impl MediaHub {
             }
             for _ in 0..3 {
                 match port.incoming.try_recv() {
-                    Ok(frame) => match self.mixer.push(key, frame) {
-                        Ok(()) => {
-                            if matches!(port.connection, Connection::Waiting) {
-                                port.connection = Connection::Connected;
-                                self.notices
-                                    .try_send(MediaNotice::Connected { key: key.clone() })
-                                    .map_err(|_| MediaError::Capacity)?;
+                    Ok(frame) => {
+                        self.recordings.channel(key, frame);
+                        match self.mixer.push(key, frame) {
+                            Ok(()) => {
+                                if matches!(port.connection, Connection::Waiting) {
+                                    port.connection = Connection::Connected;
+                                    self.notices
+                                        .try_send(MediaNotice::Connected { key: key.clone() })
+                                        .map_err(|_| MediaError::Capacity)?;
+                                }
                             }
+                            Err(_) => self.dropped += 1,
                         }
-                        Err(_) => self.dropped += 1,
-                    },
+                    }
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => {
                         port.stop.send_replace(true);
@@ -354,7 +433,9 @@ impl MediaHub {
                 }
             }
         }
-        for (key, frame) in self.mixer.tick()? {
+        let audio = self.mixer.tick_with_recordings()?;
+        self.recordings.bridges(&audio.bridges)?;
+        for (key, frame) in audio.channels {
             let port = self.ports.get(&key).ok_or(MediaError::UnknownStream)?;
             match port.outgoing.try_send(frame) {
                 Ok(()) => {}
@@ -388,6 +469,9 @@ impl MediaHub {
                         self.notice(MediaNotice::Stopped { key, result })?;
                     }
                 }
+                result = self.recordings.workers.join_next(), if !self.recordings.workers.is_empty() => {
+                    result.ok_or(MediaError::InvalidRoute)?.map_err(|error| MediaError::Transport(error.to_string()))?;
+                }
                 _instant = tick.tick() => self.tick()?,
             }
         }
@@ -399,7 +483,7 @@ impl MediaHub {
             port.stop.send_replace(true);
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut failure = None;
+        let mut failure = self.recordings.close().await.err();
         while !self.workers.is_empty() {
             match tokio::time::timeout_at(deadline, self.workers.join_next()).await {
                 Ok(Some(Ok((_, Ok(_))))) | Ok(None) => {}
