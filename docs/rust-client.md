@@ -45,6 +45,9 @@ Adoption requires an observation in the session's app and rejects unknown, depar
 An adopted call has no HTTP acceptance milestone.
 Wait for each of `Stasis`, `Answered`, and `MediaConnected`, and close the handle or shut down the session to end a call that remains under client control.
 A destination session can adopt the channel after observing its own `StasisStart` event following an app move.
+Use `Client::move_channel` to select a subscribed destination app and its arguments.
+Supply at most 32 nonempty arguments, each limited to 256 bytes and containing no commas or control characters.
+The client sends up to 4096 bytes of joined arguments in the JSON request body.
 
 `MediaConnected` observes Rusterisk's `RUSTERISK_MEDIA_CONNECTED` channel variable event.
 The milestone means the server received an audio frame.
