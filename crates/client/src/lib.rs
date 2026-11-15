@@ -11,6 +11,7 @@ mod owned_call;
 pub use owned_call::{CallFailure, CallSnapshot, Cleanup, Originate, OwnedCall};
 pub use rusterisk_core::{CallCompletion, CallMilestone, OwnedCallProgress};
 pub use rusterisk_core::{DtmfDigit, DtmfTiming, MuteDirection};
+mod bridges;
 mod controls;
 mod external_media;
 mod recordings;
