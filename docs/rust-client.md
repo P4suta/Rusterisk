@@ -130,6 +130,16 @@ The driver then aborts and joins any remaining workers.
 
 ## Download stored audio
 
+Use `record_channel` or `record_bridge` with a recording name, format, and `RecordingOptions` to start recording.
+The typed options select duration, silence detection, conflict handling, the start prompt, and the termination digit.
+The methods return a `LiveRecording`.
+Request acceptance doesn't certify recorded audio.
+As defined by the [reference recording contract](https://github.com/asterisk/asterisk/blob/22.9.0/rest-api/api-docs/channels.json), channel recording captures received audio, while bridge recording captures the bridge mix.
+Use `live_recording` to inspect recording state, `pause_recording` and `resume_recording` to control progress, and `mute_recording` and `unmute_recording` to control captured input.
+Use `stop_recording` to request completion and publication.
+Use `cancel_recording` to request removal of the live recording.
+Observe `RecordingFinished` before reading the completed file.
+
 Use `stored_recordings` and `stored_recording` to inspect completed recordings.
 Use `copy_stored_recording` to copy completed audio to an unused recording name.
 Use `download_stored_recording` with an asynchronous output writer to stream the stored bytes.
