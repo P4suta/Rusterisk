@@ -21,6 +21,11 @@ name = "webpki-root-certs"
 version = "=1.0.12"
 allow = ["CDLA-Permissive-2.0"]
 
+[[licenses.exceptions]]
+name = "libfuzzer-sys"
+version = "=0.4.13"
+allow = ["NCSA"]
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
