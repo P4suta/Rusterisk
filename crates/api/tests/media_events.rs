@@ -1,4 +1,4 @@
-use rusterisk_api::{MediaControlFormat, MediaEvent};
+use rusterisk_api::{ChannelId, MediaControlFormat, MediaEvent};
 
 #[test]
 fn websocket_media_events_preserve_reference_fields_in_both_formats(
@@ -15,9 +15,28 @@ fn websocket_media_events_preserve_reference_fields_in_both_formats(
         (r#"{"event":"STATUS","channel_id":"channel","queue_length":3,"xon_level":800,"xoff_level":900,"queue_full":false,"bulk_media":true,"media_paused":false}"#, "STATUS channel_id:channel queue_length:3 xon_level:800 xoff_level:900 queue_full:false bulk_media:true media_paused:false"),
     ] {
         let event: MediaEvent = serde_json::from_str(json)?;
+        let channel = ChannelId::try_from("channel".to_owned()).map_err(serde::de::Error::custom)?;
+        assert_eq!(MediaEvent::parse(plain, MediaControlFormat::PlainText, &channel).map_err(serde::de::Error::custom)?, event);
+        assert_eq!(MediaEvent::parse(json, MediaControlFormat::Json, &channel).map_err(serde::de::Error::custom)?, event);
         assert_eq!(serde_json::to_value(&event)?, serde_json::from_str::<serde_json::Value>(json)?);
         assert_eq!(event.encode(MediaControlFormat::PlainText).map_err(serde::de::Error::custom)?, plain);
         assert_eq!(serde_json::from_str::<serde_json::Value>(&event.encode(MediaControlFormat::Json).map_err(serde::de::Error::custom)?)?, serde_json::from_str::<serde_json::Value>(json)?);
+    }
+    Ok(())
+}
+
+#[test]
+fn media_events_reject_malformed_fields_and_foreign_channels() -> Result<(), serde_json::Error> {
+    let channel = ChannelId::try_from("channel".to_owned()).map_err(serde::de::Error::custom)?;
+    for text in ["", "UNKNOWN", "DTMF_END digit:! channel_id:channel", "DTMF_END digit:12 channel_id:channel", "DTMF_END digit:1 channel_id:foreign", "DTMF_END digit:1 digit:2 channel_id:channel", "STATUS channel_id:channel queue_length:-1", "MEDIA_START connection_id:connection channel:peer channel_id:foreign format:ulaw optimal_frame_size:160 ptime:20", &"x".repeat(65501)] {
+        assert!(MediaEvent::parse(text, MediaControlFormat::PlainText, &channel).is_err(), "{text}");
+    }
+    for json in [
+        r#"{"event":"DTMF_END","channel_id":"foreign","digit":"1"}"#,
+        r#"{"event":"DTMF_END","channel_id":"channel","digit":"!"}"#,
+        r#"{"event":"STATUS","channel_id":"channel","queue_length":-1}"#,
+    ] {
+        assert!(MediaEvent::parse(json, MediaControlFormat::Json, &channel).is_err());
     }
     Ok(())
 }
