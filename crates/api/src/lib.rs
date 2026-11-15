@@ -123,7 +123,19 @@ pub struct Bridge {
     pub name: String,
     pub channels: Vec<ChannelId>,
     pub creationtime: String,
-    pub video_mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_mode: Option<BridgeVideoMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub video_source_id: Option<ChannelId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum BridgeVideoMode {
+    None,
+    Talker,
+    Sfu,
+    Single,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

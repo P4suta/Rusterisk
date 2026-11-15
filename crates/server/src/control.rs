@@ -1154,7 +1154,8 @@ impl Control {
                     name,
                     channels: Vec::new(),
                     creationtime: timestamp.into(),
-                    video_mode: "none".into(),
+                    video_mode: Some(rusterisk_api::BridgeVideoMode::None),
+                    video_source_id: None,
                 };
                 let mut outcome = Outcome::json(&snapshot)?;
                 for app in self.applications.keys() {

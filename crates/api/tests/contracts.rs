@@ -1,6 +1,25 @@
 use rusterisk_api::{openapi, swagger, ChannelId, Event, EventKind, OPERATIONS};
 
 #[test]
+fn bridge_video_fields_are_optional_and_keep_the_reference_modes() -> Result<(), serde_json::Error>
+{
+    let minimal = serde_json::json!({"id":"bridge", "technology":"simple_bridge", "bridge_type":"mixing", "bridge_class":"stasis", "creator":"Stasis", "name":"Conversation", "channels":[], "creationtime":"now"});
+    let bridge: rusterisk_api::Bridge = serde_json::from_value(minimal.clone())?;
+    assert_eq!(serde_json::to_value(bridge)?, minimal);
+    for mode in ["none", "talker", "sfu", "single"] {
+        let mut value = minimal.clone();
+        value["video_mode"] = mode.into();
+        value["video_source_id"] = "phone".into();
+        let bridge: rusterisk_api::Bridge = serde_json::from_value(value.clone())?;
+        assert_eq!(serde_json::to_value(bridge)?, value);
+    }
+    let mut invalid = minimal;
+    invalid["video_mode"] = "active".into();
+    assert!(serde_json::from_value::<rusterisk_api::Bridge>(invalid).is_err());
+    Ok(())
+}
+
+#[test]
 fn endpoint_availability_is_optional_and_accepts_only_reference_states(
 ) -> Result<(), serde_json::Error> {
     let minimal = serde_json::json!({"technology":"PJSIP", "resource":"phone", "channel_ids":[]});
