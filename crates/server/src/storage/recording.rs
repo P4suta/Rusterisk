@@ -1,5 +1,5 @@
 use super::{receive, Command, StoragePort, WorkerError};
-use rusterisk_api::ChannelId;
+use rusterisk_api::{ChannelId, RecordingIfExists};
 use rusterisk_media::Frame;
 use rusterisk_storage::{Recorder, StorageError, Store};
 use std::collections::BTreeMap;
@@ -97,6 +97,16 @@ impl RecordingSink {
 
 impl StoragePort {
     pub async fn record(&self, name: ChannelId, rate: u32) -> Result<RecordingSink, WorkerError> {
+        self.record_with_policy(name, rate, RecordingIfExists::Fail)
+            .await
+    }
+
+    pub async fn record_with_policy(
+        &self,
+        name: ChannelId,
+        rate: u32,
+        policy: RecordingIfExists,
+    ) -> Result<RecordingSink, WorkerError> {
         let (frames, input) = mpsc::channel(3);
         let (lifetime, lifetime_receiver) = oneshot::channel();
         let lease = Lease {
@@ -108,6 +118,7 @@ impl StoragePort {
         self.send(Command::Record {
             name,
             rate,
+            policy,
             input,
             lifetime: lifetime_receiver,
             reply,
@@ -143,6 +154,7 @@ impl RecordingSet {
         &mut self,
         name: ChannelId,
         rate: u32,
+        policy: RecordingIfExists,
         input: mpsc::Receiver<Frame>,
         lifetime: oneshot::Receiver<()>,
     ) -> Result<RecordingKey, StorageError> {
@@ -156,7 +168,7 @@ impl RecordingSet {
             .generation
             .checked_add(1)
             .ok_or(StorageError::Capacity)?;
-        let recorder = Recorder::create(&self.root, name.as_str(), rate)?;
+        let recorder = Recorder::create_with_policy(&self.root, name.as_str(), rate, policy)?;
         self.generation = generation;
         let key = RecordingKey { name, generation };
         self.entries.insert(
@@ -284,13 +296,25 @@ mod tests {
         let mut recordings = RecordingSet::new(directory.path().to_owned());
         let (_frames, input) = mpsc::channel(3);
         let (lifetime, receiver) = oneshot::channel();
-        let stale = recordings.begin(name()?, 8000, input, receiver)?;
+        let stale = recordings.begin(
+            name()?,
+            8000,
+            rusterisk_api::RecordingIfExists::Fail,
+            input,
+            receiver,
+        )?;
         drop(lifetime);
         recordings.pump();
         assert!(!directory.path().join("recordings/bounded.partial").exists());
         let (frames, input) = mpsc::channel(3);
         let (_lifetime, receiver) = oneshot::channel();
-        let fresh = recordings.begin(name()?, 8000, input, receiver)?;
+        let fresh = recordings.begin(
+            name()?,
+            8000,
+            rusterisk_api::RecordingIfExists::Fail,
+            input,
+            receiver,
+        )?;
         assert!(matches!(
             recordings.cancel(&stale),
             Err(StorageError::InvalidState)

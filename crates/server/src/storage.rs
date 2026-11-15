@@ -86,6 +86,7 @@ enum Command {
     Record {
         name: ChannelId,
         rate: u32,
+        policy: rusterisk_api::RecordingIfExists,
         input: mpsc::Receiver<Frame>,
         lifetime: oneshot::Receiver<()>,
         reply: oneshot::Sender<Result<RecordingKey, StorageError>>,
@@ -253,12 +254,13 @@ fn command(
         Command::Record {
             name,
             rate,
+            policy,
             input,
             lifetime,
             reply,
         } => {
             if !reply.is_closed() {
-                let result = recordings.begin(name, rate, input, lifetime);
+                let result = recordings.begin(name, rate, policy, input, lifetime);
                 if let Err(result) = reply.send(result) {
                     match result {
                         Ok(key) => {
