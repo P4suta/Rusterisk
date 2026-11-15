@@ -224,3 +224,85 @@ impl RecordingSet {
             .cancel()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Lease, RecordingKey, RecordingSet, RecordingSink, SinkState};
+    use crate::storage::{StoragePort, WorkerError};
+    use rusterisk_api::ChannelId;
+    use rusterisk_media::Frame;
+    use rusterisk_storage::{StorageError, Store};
+    use tokio::sync::{mpsc, oneshot, watch};
+
+    fn name() -> Result<ChannelId, WorkerError> {
+        ChannelId::try_from("bounded".to_owned()).map_err(|_| WorkerError::Invalid)
+    }
+
+    #[tokio::test]
+    async fn an_overflow_is_terminal_even_when_audio_capacity_becomes_available(
+    ) -> Result<(), WorkerError> {
+        let (commands, _receiver) = mpsc::channel(64);
+        let (_stop, stopped) = watch::channel(false);
+        let port = StoragePort {
+            commands,
+            stop: stopped,
+        };
+        let (frames, mut input) = mpsc::channel(3);
+        let (lifetime, mut owner) = oneshot::channel();
+        let mut sink = RecordingSink {
+            key: RecordingKey {
+                name: name()?,
+                generation: 1,
+            },
+            lease: Lease {
+                state: SinkState::Active(frames),
+                lifetime: Some(lifetime),
+                port,
+            },
+        };
+        let frame = Frame::new(&[1; 160], 8000).map_err(StorageError::from)?;
+        for _ in 0..3 {
+            sink.try_write(frame)?;
+        }
+        assert!(matches!(sink.try_write(frame), Err(WorkerError::Capacity)));
+        assert!(input.try_recv().is_ok());
+        assert!(matches!(sink.try_write(frame), Err(WorkerError::Capacity)));
+        assert!(matches!(sink.finish().await, Err(WorkerError::Capacity)));
+        assert!(matches!(
+            owner.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn stale_operations_cannot_remove_a_reused_recording_name() -> Result<(), WorkerError> {
+        let directory = tempfile::tempdir()?;
+        let mut store = Store::open(directory.path())?;
+        let mut recordings = RecordingSet::new(directory.path().to_owned());
+        let (_frames, input) = mpsc::channel(3);
+        let (lifetime, receiver) = oneshot::channel();
+        let stale = recordings.begin(name()?, 8000, input, receiver)?;
+        drop(lifetime);
+        recordings.pump();
+        assert!(!directory.path().join("recordings/bounded.partial").exists());
+        let (frames, input) = mpsc::channel(3);
+        let (_lifetime, receiver) = oneshot::channel();
+        let fresh = recordings.begin(name()?, 8000, input, receiver)?;
+        assert!(matches!(
+            recordings.cancel(&stale),
+            Err(StorageError::InvalidState)
+        ));
+        assert!(matches!(
+            recordings.finish(&stale, &mut store),
+            Err(StorageError::InvalidState)
+        ));
+        frames
+            .try_send(Frame::new(&[2; 160], 8000).map_err(StorageError::from)?)
+            .map_err(|_| WorkerError::Capacity)?;
+        recordings.pump();
+        recordings.finish(&fresh, &mut store)?;
+        assert_eq!(store.recordings()?.len(), 1);
+        Ok(())
+    }
+}
