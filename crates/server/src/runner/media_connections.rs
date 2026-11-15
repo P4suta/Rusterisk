@@ -4,7 +4,13 @@ use rusterisk_api::ChannelId;
 use tokio::sync::{mpsc, oneshot};
 
 pub struct MediaConnectionLease {
-    _lifetime: mpsc::Sender<()>,
+    lifetime: mpsc::Sender<()>,
+}
+
+impl MediaConnectionLease {
+    pub fn is_released(&self) -> bool {
+        self.lifetime.is_closed()
+    }
 }
 
 pub struct ClaimedMediaConnection {
@@ -33,7 +39,7 @@ impl Controller {
         Ok(ClaimedMediaConnection {
             key,
             options,
-            lease: MediaConnectionLease { _lifetime: sender },
+            lease: MediaConnectionLease { lifetime: sender },
         })
     }
 }

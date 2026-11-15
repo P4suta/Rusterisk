@@ -427,7 +427,7 @@ enum DigitSupport {
     Stream,
 }
 struct Port {
-    _connection_lease: Option<crate::MediaConnectionLease>,
+    connection_lease: Option<crate::MediaConnectionLease>,
     answers: Option<mpsc::Receiver<()>>,
     incoming: mpsc::Receiver<Frame>,
     digits: mpsc::Receiver<DtmfTone>,
@@ -726,6 +726,14 @@ impl MediaHub {
 
     fn tick(&mut self) -> Result<(), MediaError> {
         for (key, port) in &mut self.ports {
+            if port
+                .connection_lease
+                .as_ref()
+                .is_some_and(crate::MediaConnectionLease::is_released)
+            {
+                port.stop.send_replace(true);
+                continue;
+            }
             if let Some(answers) = &mut port.answers {
                 for _ in 0..8 {
                     match answers.try_recv() {

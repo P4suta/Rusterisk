@@ -28,7 +28,7 @@ impl Port {
         let (direction, directed) = watch::channel(initial_direction);
         (
             Self {
-                _connection_lease: None,
+                connection_lease: None,
                 answers: None,
                 incoming: input,
                 digits: digit_input,
@@ -126,6 +126,12 @@ impl MediaHub {
         options: MediaLinkOptions,
         lease: Option<crate::MediaConnectionLease>,
     ) -> Result<(), MediaError> {
+        if lease
+            .as_ref()
+            .is_some_and(crate::MediaConnectionLease::is_released)
+        {
+            return Err(MediaError::UnknownStream);
+        }
         self.check_link(&key)?;
         if options.channel_id != key.id {
             return Err(MediaError::InvalidRoute);
@@ -133,7 +139,7 @@ impl MediaHub {
         let (mut port, channels) = Port::new(PeerMediaDirection::SendReceive, DigitSupport::Stream);
         let (answer, answers) = mpsc::channel(8);
         port.answers = Some(answers);
-        port._connection_lease = lease;
+        port.connection_lease = lease;
         let link = WebSocketMediaLink::new(socket, channels, options, answer)?;
         self.install_link(key.clone(), port, PeerMediaDirection::SendReceive)?;
         self.workers.spawn(async move { (key, link.run().await) });
