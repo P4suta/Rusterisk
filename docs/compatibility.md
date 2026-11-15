@@ -54,7 +54,10 @@ External media supports bidirectional unicast datagrams with numeric destination
 Creation returns bound transport variables after socket admission.
 Stasis participation and received audio remain independent milestones.
 The Rust client exposes typed external datagram targets and bounded bridge membership operations.
-AudioSocket and external WebSocket services remain pending.
+AudioSocket supports client connections with numeric destinations, binary session identifiers, and 8 kHz signed linear audio through `format=slin`.
+Connection attempts have deadlines and preserve signaling progress.
+Cancelling admission closes the owned connection without reviving the channel.
+External WebSocket services remain pending.
 
 ## Configuration and persistence
 
@@ -79,6 +82,7 @@ The private historical JavaScript fixture uses a [scoped dependency assessment](
 Datagram tests compare received audio through actual sockets and bridges, including peer hold, resume, and mixed packet durations.
 The local `just interop` gate compares bridge lifecycle, endpoint resources, routing availability, app subscriptions, external channel admission, and resource errors with Asterisk 22.9.0.
 Both servers bridge known external audio samples in both directions with `PCMU` and `PCMA`.
+AudioSocket comparisons also check session identifiers and exact received samples through both servers.
 The reference distinguishes case-sensitive technology lists from case-insensitive endpoint detail queries.
 See [reference comparisons](reference-comparisons.md) for scope and resource limits.
 Reference signaling calls, browser audio, supported-platform distributions, and physical `HT813` observations remain unverified.

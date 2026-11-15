@@ -62,7 +62,9 @@ The [audio bridge decision](adr/report-bridge-video-mode-within-supported-media.
 External channel comparisons check bound transport variables and Stasis participation.
 Audio comparisons connect two external channels to a bridge on each server.
 Both directions send distinct known samples and check received sample values for `PCMU` and `PCMA`.
+AudioSocket comparisons check binary session identifiers, Stasis participation, bridge membership, and exact received samples in both directions.
 The runner inspects its reference container's private address and requires direct container routing.
+Stream callbacks use the reference's resolution of `host.docker.internal` and ephemeral host listener ports.
 The local rehearsal used OrbStack on macOS ARM64.
 
 The scenario doesn't certify complete operation compatibility.
