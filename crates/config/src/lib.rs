@@ -9,6 +9,7 @@ pub use websocket::{WebSocketClient, WebSocketConfig, WebSocketControlFormat};
 const MAX_FILE: usize = 1024 * 1024;
 const MAX_SECTIONS: usize = 256;
 const MAX_OPTIONS: usize = 128;
+pub const MAX_TRANSPORTS: usize = 16;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret(String);
@@ -560,6 +561,13 @@ impl Config {
         let file = "pjsip.conf";
         match section.required(file, "type")? {
             "transport" => {
+                if self.transports.len() == MAX_TRANSPORTS {
+                    return Err(ConfigError::at(
+                        file,
+                        section.line,
+                        "too many signaling transports",
+                    ));
+                }
                 section.check(
                     file,
                     &[
