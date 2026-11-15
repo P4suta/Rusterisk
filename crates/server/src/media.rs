@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
+#[cfg(test)]
+mod admission_tests;
 mod playback;
 mod recording;
 mod streams;
@@ -527,6 +529,19 @@ impl MediaHub {
         Ok(())
     }
 
+    fn complete_attachment(
+        &mut self,
+        key: &CallKey,
+        result: Result<(), MediaError>,
+        reply: oneshot::Sender<Result<(), MediaError>>,
+    ) -> Result<(), MediaError> {
+        let admitted = result.is_ok();
+        if reply.send(result).is_err() && admitted {
+            self.remove(key)?;
+        }
+        Ok(())
+    }
+
     fn command(&mut self, command: Command) -> Result<(), MediaError> {
         match command {
             Command::ReceivedDigit { key, digit } => {
@@ -668,9 +683,7 @@ impl MediaHub {
             } => {
                 if !reply.is_closed() {
                     let result = self.attach(key.clone(), sockets, session, direction);
-                    if reply.send(result).is_err() {
-                        self.remove(&key)?;
-                    }
+                    self.complete_attachment(&key, result, reply)?;
                 }
             }
             Command::Release { key } => self.remove(&key)?,
@@ -682,9 +695,7 @@ impl MediaHub {
             } => {
                 if !reply.is_closed() {
                     let result = self.attach_audiosocket(key.clone(), socket, rate);
-                    if reply.send(result).is_err() {
-                        self.remove(&key)?;
-                    }
+                    self.complete_attachment(&key, result, reply)?;
                 }
             }
             Command::ReleaseBridge { id } => {
