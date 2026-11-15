@@ -461,6 +461,9 @@ async fn compare_resources(
         );
         compare_external_admission(&actual, &mut actual_session, app.as_str()).await?;
         compare_external_admission(&reference, &mut reference_session, app.as_str()).await?;
+        request_bodies::initial_variables(&actual, &format!("http://{address}"), app.as_str())
+            .await?;
+        request_bodies::initial_variables(&reference, &reference_address, app.as_str()).await?;
         external_audio::compare(
             &actual,
             &mut actual_session,

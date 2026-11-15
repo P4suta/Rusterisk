@@ -1,5 +1,5 @@
 use rusterisk_client::{
-    api::{Bridge, BridgeVideoMode},
+    api::{Bridge, BridgeVideoMode, Channel},
     Client, Error,
 };
 use std::time::Duration;
@@ -55,4 +55,38 @@ pub async fn compare(
         assert_eq!(snapshots[0], snapshots[1]);
     }
     Ok(())
+}
+
+pub async fn initial_variables(
+    client: &Client,
+    address: &str,
+    application: &str,
+) -> Result<(), Error> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let mut url = reqwest::Url::parse(&format!("{address}/ari/channels/externalMedia"))
+        .map_err(|_| Error::Invalid("reference address"))?;
+    url.query_pairs_mut().extend_pairs([
+        ("channelId", "json-variables"),
+        ("app", application),
+        ("external_host", "127.0.0.1:12000"),
+        ("format", "ulaw"),
+    ]);
+    let response = http.post(url)
+        .basic_auth("app", Some("test-password"))
+        .json(&serde_json::json!({"variables": {"FIRST": "value /&=test", "EMPTY": "", "CALLERID(name)": "Alice"}}))
+        .send().await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let channel: Channel = response.json().await?;
+    assert_eq!(channel.caller.name, "Alice");
+    for (name, expected) in [
+        ("FIRST", "value /&=test"),
+        ("EMPTY", ""),
+        ("CALLERID(name)", "Alice"),
+    ] {
+        assert_eq!(client.variable(&channel.id, name).await?.value, expected);
+    }
+    client.hangup(&channel.id).await
 }
