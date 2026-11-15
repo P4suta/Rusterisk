@@ -113,7 +113,7 @@ impl Control {
         technology: Option<&str>,
     ) -> Result<Vec<Endpoint>, ControlError> {
         if let Some(technology) = technology {
-            if !technology.eq_ignore_ascii_case("PJSIP") || self.endpoints.routes.is_empty() {
+            if technology != "PJSIP" || self.endpoints.routes.is_empty() {
                 return Err(ControlError::EndpointTechnology(technology.into()));
             }
         }

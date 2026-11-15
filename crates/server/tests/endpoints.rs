@@ -124,7 +124,7 @@ fn endpoint_queries_keep_contact_availability_and_call_lifetimes_independent(
     ));
     let listed = control.apply(
         Action::ListEndpoints {
-            technology: Some("pjsip".into()),
+            technology: Some("PJSIP".into()),
         },
         "now",
         0,
@@ -133,6 +133,18 @@ fn endpoint_queries_keep_contact_availability_and_call_lifetimes_independent(
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0].resource, "phone");
     assert_eq!(listed[1].resource, "phone-extra");
+    for technology in ["pjsip", "Pjsip"] {
+        assert!(matches!(
+            control.apply(
+                Action::ListEndpoints {
+                    technology: Some(technology.into())
+                },
+                "now",
+                0
+            ),
+            Err(ControlError::EndpointTechnology(_))
+        ));
+    }
     Ok(())
 }
 
