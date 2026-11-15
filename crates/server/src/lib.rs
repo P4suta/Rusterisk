@@ -12,6 +12,7 @@ mod runner;
 pub mod runtime;
 pub mod signaling;
 pub mod storage;
+pub mod webrtc;
 mod websocket;
 pub use control::{
     Action, CallHistoryEvent, CallKey, Control, ControlError, Effect, EndpointKey, IncomingCall,
