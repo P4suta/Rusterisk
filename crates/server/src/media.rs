@@ -122,7 +122,8 @@ enum Command {
 #[derive(Clone)]
 pub struct MediaPort {
     commands: mpsc::Sender<Command>,
-    websocket: mpsc::Sender<streams::WebSocketAttachment>,
+    websocket: mpsc::Sender<streams::WebSocketAttachment<axum::extract::ws::WebSocket>>,
+    client_websocket: mpsc::Sender<streams::WebSocketAttachment<streams::ClientSocket>>,
 }
 
 impl MediaPort {
@@ -443,7 +444,8 @@ struct Port {
 pub struct MediaHub {
     capacity: usize,
     commands: mpsc::Receiver<Command>,
-    websocket: mpsc::Receiver<streams::WebSocketAttachment>,
+    websocket: mpsc::Receiver<streams::WebSocketAttachment<axum::extract::ws::WebSocket>>,
+    client_websocket: mpsc::Receiver<streams::WebSocketAttachment<streams::ClientSocket>>,
     notices: mpsc::Sender<MediaNotice>,
     mixer: Mixer<CallKey>,
     ports: BTreeMap<CallKey, Port>,
@@ -457,16 +459,19 @@ impl MediaHub {
     pub fn new(capacity: usize) -> (MediaPort, Self, mpsc::Receiver<MediaNotice>) {
         let (commands, receiver) = mpsc::channel(128);
         let (websocket, websocket_receiver) = mpsc::channel(8);
+        let (client_websocket, client_websocket_receiver) = mpsc::channel(8);
         let (notices, events) = mpsc::channel(128);
         (
             MediaPort {
                 commands,
                 websocket,
+                client_websocket,
             },
             Self {
                 capacity: capacity.min(64),
                 commands: receiver,
                 websocket: websocket_receiver,
+                client_websocket: client_websocket_receiver,
                 notices,
                 mixer: Mixer::new(capacity),
                 ports: BTreeMap::new(),
@@ -834,6 +839,10 @@ impl MediaHub {
                     None => break,
                 },
                 attachment = self.websocket.recv() => match attachment {
+                    Some(attachment) => self.websocket_attachment(attachment)?,
+                    None => break,
+                },
+                attachment = self.client_websocket.recv() => match attachment {
                     Some(attachment) => self.websocket_attachment(attachment)?,
                     None => break,
                 },

@@ -2,13 +2,16 @@ use super::{
     AudioSocketLink, Connection, DigitSupport, Gate, MediaError, MediaHub, PeerMediaDirection,
     Port, RtpChannels,
 };
-use crate::media_websocket::{MediaLinkOptions, WebSocketMediaLink};
+use crate::media_websocket::{MediaLinkOptions, MediaSocket, WebSocketMediaLink};
 use crate::CallKey;
 use tokio::sync::{mpsc, watch};
 
-pub(super) struct WebSocketAttachment {
+pub(super) type ClientSocket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+pub(super) struct WebSocketAttachment<S> {
     key: CallKey,
-    socket: axum::extract::ws::WebSocket,
+    socket: S,
     options: MediaLinkOptions,
     lease: Option<crate::MediaConnectionLease>,
     reply: tokio::sync::oneshot::Sender<Result<(), MediaError>>,
@@ -54,9 +57,9 @@ impl Port {
 }
 
 impl MediaHub {
-    pub(super) fn websocket_attachment(
+    pub(super) fn websocket_attachment<S: MediaSocket + 'static>(
         &mut self,
-        attachment: WebSocketAttachment,
+        attachment: WebSocketAttachment<S>,
     ) -> Result<(), MediaError> {
         let WebSocketAttachment {
             key,
@@ -119,10 +122,10 @@ impl MediaHub {
         Ok(())
     }
 
-    pub(super) fn attach_websocket(
+    pub(super) fn attach_websocket<S: MediaSocket + 'static>(
         &mut self,
         key: CallKey,
-        socket: axum::extract::ws::WebSocket,
+        socket: S,
         options: MediaLinkOptions,
         lease: Option<crate::MediaConnectionLease>,
     ) -> Result<(), MediaError> {
@@ -154,7 +157,18 @@ impl super::MediaPort {
         socket: axum::extract::ws::WebSocket,
         options: MediaLinkOptions,
     ) -> Result<(), MediaError> {
-        self.attach_media_socket(key, socket, options, None).await
+        self.attach_media_socket(&self.websocket, key, socket, options, None)
+            .await
+    }
+
+    pub async fn attach_client_websocket(
+        &self,
+        key: CallKey,
+        socket: ClientSocket,
+        options: MediaLinkOptions,
+    ) -> Result<(), MediaError> {
+        self.attach_media_socket(&self.client_websocket, key, socket, options, None)
+            .await
     }
 
     pub async fn attach_claimed_websocket(
@@ -162,19 +176,26 @@ impl super::MediaPort {
         claimed: crate::ClaimedMediaConnection,
         socket: axum::extract::ws::WebSocket,
     ) -> Result<(), MediaError> {
-        self.attach_media_socket(claimed.key, socket, claimed.options, Some(claimed.lease))
-            .await
+        self.attach_media_socket(
+            &self.websocket,
+            claimed.key,
+            socket,
+            claimed.options,
+            Some(claimed.lease),
+        )
+        .await
     }
 
-    async fn attach_media_socket(
+    async fn attach_media_socket<S: Send>(
         &self,
+        sender: &mpsc::Sender<WebSocketAttachment<S>>,
         key: CallKey,
-        socket: axum::extract::ws::WebSocket,
+        socket: S,
         options: MediaLinkOptions,
         lease: Option<crate::MediaConnectionLease>,
     ) -> Result<(), MediaError> {
         let (reply, response) = tokio::sync::oneshot::channel();
-        self.websocket
+        sender
             .try_send(WebSocketAttachment {
                 key,
                 socket,
