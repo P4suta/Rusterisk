@@ -1,5 +1,6 @@
 use syn::parse::Parser;
 use syn::visit::{self, Visit};
+pub mod core_proofs;
 pub mod legacy_audit;
 pub mod process;
 pub mod reference;
