@@ -12,16 +12,17 @@ The locked [digest helper](https://github.com/restsend/rsipstack/blob/ca99be1e73
 
 ## Decision
 
-Validate URI, realm, nonce, algorithm, protection mode, and counters before computing authentication.
+Validate URI, realm, nonce, algorithm, protection, and counters before hashing.
 Bound text and use concrete hash primitives.
 Support MD5, SHA-256, and SHA-512-256.
-Compute integrity body hashes with the selected algorithm, including empty bodies.
+Use the selected algorithm for integrity body hashes, including empty bodies.
 Treat session derivation explicitly.
-Keep unsupported algorithms distinct from absent algorithms.
-Unsupported challenges never become MD5 authentication.
-Select supported offers according to the server's order and configured realm.
-Keep authentication identity separate from caller identification.
-Share digest calculation and validation across registration and call authentication.
+Distinguish unsupported algorithms from absent algorithms.
+Select supported offers in server order using the configured realm.
+Separate authentication identity from caller identification.
+Keep unspecified realms for role-dependent evaluation.
+Use [Asterisk's](https://github.com/asterisk/asterisk/blob/22.9.0/res/res_pjsip/config_global.c) inbound default and an outbound wildcard.
+Share registration and call authentication.
 Compare decoded responses in constant time.
 
 ## Alternatives
