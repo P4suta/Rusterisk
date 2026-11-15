@@ -387,6 +387,9 @@ impl Runner {
         }
         let mut disconnected = Vec::new();
         for event in outcome.events.drain(..) {
+            if !self.control.event_permitted(&event) {
+                continue;
+            }
             if let Some(subscriber) = self.subscribers.get(&event.application) {
                 let application = event.application.clone();
                 if subscriber.events.try_send(event).is_err()

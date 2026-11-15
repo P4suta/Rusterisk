@@ -193,6 +193,10 @@ pub enum Action {
     GetChannel(ChannelId),
     ListApplications,
     GetApplication(String),
+    FilterApplication {
+        application: String,
+        update: Option<rusterisk_api::EventFilterRequest>,
+    },
     ListEndpoints {
         technology: Option<String>,
     },
@@ -264,6 +268,7 @@ impl Action {
             Self::ListChannels
             | Self::ListApplications
             | Self::GetApplication(_)
+            | Self::FilterApplication { .. }
             | Self::ListEndpoints { .. }
             | Self::GetEndpoint { .. }
             | Self::GetRecording(_)
@@ -310,6 +315,7 @@ impl Action {
             | Self::ListBridges
             | Self::GetBridge(_) => true,
             Self::Originate { .. }
+            | Self::FilterApplication { .. }
             | Self::RecordChannel { .. }
             | Self::RecordBridge { .. }
             | Self::ControlRecording { .. }
@@ -657,6 +663,7 @@ pub struct Control {
     channels: BTreeMap<ChannelId, ChannelEntry>,
     bridges: BTreeMap<ChannelId, BridgeEntry>,
     applications: BTreeMap<String, StasisApplication>,
+    event_filters: BTreeMap<StasisApplication, stasis::EventFilters>,
     playbacks: BTreeMap<ChannelId, playback::PlaybackEntry>,
     recordings: BTreeMap<ChannelId, recording::RecordingEntry>,
     dialplan_program: rusterisk_config::Dialplan,
@@ -813,6 +820,7 @@ impl Control {
             channels: BTreeMap::new(),
             bridges: BTreeMap::new(),
             applications: BTreeMap::new(),
+            event_filters: BTreeMap::new(),
             playbacks: BTreeMap::new(),
             recordings: BTreeMap::new(),
             dialplan_program: program,
@@ -853,6 +861,7 @@ impl Control {
             }
         }
         self.applications.remove(name);
+        self.event_filters.remove(&application);
         Ok(outcome)
     }
 
@@ -956,6 +965,10 @@ impl Control {
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             Action::GetApplication(name) => Outcome::json(self.application(&name)?),
+            Action::FilterApplication {
+                application,
+                update,
+            } => self.filter_application(&application, update),
             Action::ListEndpoints { technology } => {
                 Outcome::json(self.endpoint_list(technology.as_deref())?)
             }

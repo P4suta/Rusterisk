@@ -312,6 +312,40 @@ async fn dispatch(
         )
         .into_response());
     }
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    if let ("PUT", ["ari", "applications", application, "eventFilter"]) =
+        (method.as_str(), segments.as_slice())
+    {
+        let update = if body.is_empty() {
+            None
+        } else {
+            let value: Value = serde_json::from_slice(body)
+                .map_err(|_| ControlError::Invalid("Invalid format definition"))?;
+            let object = value
+                .as_object()
+                .ok_or(ControlError::Invalid("Invalid format definition"))?;
+            if object.is_empty() {
+                None
+            } else {
+                Some(
+                    serde_json::from_value(value)
+                        .map_err(|_| ControlError::Invalid("Invalid format definition"))?,
+                )
+            }
+        };
+        return response(
+            controller
+                .execute(
+                    credentials,
+                    origin,
+                    Action::FilterApplication {
+                        application: id(application)?.to_string(),
+                        update,
+                    },
+                )
+                .await?,
+        );
+    }
     if !body.is_empty() {
         let value: Value =
             serde_json::from_slice(body).map_err(|_| ControlError::Invalid("Invalid JSON body"))?;
@@ -329,7 +363,6 @@ async fn dispatch(
             },
         );
     }
-    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let stored = match (method.as_str(), segments.as_slice()) {
         ("GET", ["ari", "recordings", "stored"]) => Some(crate::StoredRecordingOperation::List),
         ("GET", ["ari", "recordings", "stored", name]) => {

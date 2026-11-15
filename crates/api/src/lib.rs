@@ -355,6 +355,38 @@ pub enum EventKind {
     },
 }
 
+impl EventKind {
+    pub const fn event_type(&self) -> &'static str {
+        match self {
+            Self::StasisStart { .. } => "StasisStart",
+            Self::StasisEnd { .. } => "StasisEnd",
+            Self::ChannelCreated { .. } => "ChannelCreated",
+            Self::ChannelStateChange { .. } => "ChannelStateChange",
+            Self::ChannelCallerId { .. } => "ChannelCallerId",
+            Self::ChannelDestroyed { .. } => "ChannelDestroyed",
+            Self::ChannelHangupRequest { .. } => "ChannelHangupRequest",
+            Self::ChannelEnteredBridge { .. } => "ChannelEnteredBridge",
+            Self::ChannelLeftBridge { .. } => "ChannelLeftBridge",
+            Self::BridgeCreated { .. } => "BridgeCreated",
+            Self::BridgeDestroyed { .. } => "BridgeDestroyed",
+            Self::ChannelDtmfReceived { .. } => "ChannelDtmfReceived",
+            Self::ChannelHold { .. } => "ChannelHold",
+            Self::ChannelUnhold { .. } => "ChannelUnhold",
+            Self::ChannelVarset { .. } => "ChannelVarset",
+            Self::PlaybackStarted { .. } => "PlaybackStarted",
+            Self::PlaybackContinuing { .. } => "PlaybackContinuing",
+            Self::PlaybackFinished { .. } => "PlaybackFinished",
+            Self::RecordingStarted { .. } => "RecordingStarted",
+            Self::RecordingFinished { .. } => "RecordingFinished",
+            Self::RecordingFailed { .. } => "RecordingFailed",
+            Self::ApplicationReplaced { .. } => "ApplicationReplaced",
+            Self::ApplicationMoveFailed { .. } => "ApplicationMoveFailed",
+            Self::Dial { .. } => "Dial",
+            Self::ChannelUserevent { .. } => "ChannelUserevent",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Method {
     Get,
