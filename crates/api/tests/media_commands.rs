@@ -1,4 +1,4 @@
-use rusterisk_api::{MediaCommand, MediaControlFormat};
+use rusterisk_api::{MediaCommand, MediaCommandError, MediaControlFormat, MediaDirection};
 
 #[test]
 fn media_commands_roundtrip_both_reference_control_formats() -> Result<(), serde_json::Error> {
@@ -24,18 +24,6 @@ fn media_commands_roundtrip_both_reference_control_formats() -> Result<(), serde
         (
             "REPORT_QUEUE_DRAINED",
             r#"{"command":"REPORT_QUEUE_DRAINED"}"#,
-        ),
-        (
-            "SET_MEDIA_DIRECTION in",
-            r#"{"command":"SET_MEDIA_DIRECTION","direction":"in"}"#,
-        ),
-        (
-            "SET_MEDIA_DIRECTION out",
-            r#"{"command":"SET_MEDIA_DIRECTION","direction":"out"}"#,
-        ),
-        (
-            "SET_MEDIA_DIRECTION both",
-            r#"{"command":"SET_MEDIA_DIRECTION","direction":"both"}"#,
         ),
     ] {
         let expected: serde_json::Value = serde_json::from_str(json)?;
@@ -81,5 +69,40 @@ fn media_commands_roundtrip_both_reference_control_formats() -> Result<(), serde
         "x".repeat(100)
     ))?;
     assert!(long_marker.encode(MediaControlFormat::Json).is_err());
+    Ok(())
+}
+
+#[test]
+fn media_direction_commands_require_json_control_messages() -> Result<(), serde_json::Error> {
+    for direction in [
+        MediaDirection::In,
+        MediaDirection::Out,
+        MediaDirection::Both,
+    ] {
+        let command = MediaCommand::SetMediaDirection { direction };
+        let json = command
+            .encode(MediaControlFormat::Json)
+            .map_err(serde::de::Error::custom)?;
+        assert_eq!(
+            MediaCommand::parse(&json, MediaControlFormat::Json)
+                .map_err(serde::de::Error::custom)?,
+            command
+        );
+        assert!(matches!(
+            command.encode(MediaControlFormat::PlainText),
+            Err(MediaCommandError::UnsupportedFormat)
+        ));
+    }
+    for text in [
+        "SET_MEDIA_DIRECTION",
+        "SET_MEDIA_DIRECTION sideways",
+        "SET_MEDIA_DIRECTION both",
+        " SET_MEDIA_DIRECTION in ",
+    ] {
+        assert!(matches!(
+            MediaCommand::parse(text, MediaControlFormat::PlainText),
+            Err(MediaCommandError::UnsupportedFormat)
+        ));
+    }
     Ok(())
 }

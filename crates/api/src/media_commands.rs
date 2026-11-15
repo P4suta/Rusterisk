@@ -55,6 +55,7 @@ pub enum MediaCommand {
 pub enum MediaCommandError {
     Capacity,
     Invalid,
+    UnsupportedFormat,
     Json(serde_json::Error),
 }
 
@@ -63,6 +64,9 @@ impl std::fmt::Display for MediaCommandError {
         match self {
             Self::Capacity => formatter.write_str("media command capacity exceeded"),
             Self::Invalid => formatter.write_str("invalid media command"),
+            Self::UnsupportedFormat => {
+                formatter.write_str("media command requires JSON control messages")
+            }
             Self::Json(error) => error.fmt(formatter),
         }
     }
@@ -127,15 +131,7 @@ impl MediaCommand {
                     },
                     ("GET_STATUS", _) => Self::GetStatus,
                     ("REPORT_QUEUE_DRAINED", _) => Self::ReportQueueDrained,
-                    ("SET_MEDIA_DIRECTION", "both") => Self::SetMediaDirection {
-                        direction: MediaDirection::Both,
-                    },
-                    ("SET_MEDIA_DIRECTION", "in") => Self::SetMediaDirection {
-                        direction: MediaDirection::In,
-                    },
-                    ("SET_MEDIA_DIRECTION", "out") => Self::SetMediaDirection {
-                        direction: MediaDirection::Out,
-                    },
+                    ("SET_MEDIA_DIRECTION", _) => return Err(MediaCommandError::UnsupportedFormat),
                     _ => return Err(MediaCommandError::Invalid),
                 }
             }
@@ -168,8 +164,8 @@ impl MediaCommand {
                     Self::MarkMedia { correlation_id } => ("MARK_MEDIA", correlation_id.as_deref()),
                     Self::GetStatus => ("GET_STATUS", None),
                     Self::ReportQueueDrained => ("REPORT_QUEUE_DRAINED", None),
-                    Self::SetMediaDirection { direction } => {
-                        ("SET_MEDIA_DIRECTION", Some(direction.as_str()))
+                    Self::SetMediaDirection { .. } => {
+                        return Err(MediaCommandError::UnsupportedFormat)
                     }
                 };
                 let text = match data {
