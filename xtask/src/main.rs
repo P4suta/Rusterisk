@@ -133,8 +133,17 @@ fn run(program: &str, arguments: &[&str]) -> Result<(), TaskError> {
 }
 
 fn execute() -> Result<(), TaskError> {
-    let arguments: Vec<String> = std::env::args().skip(1).take(5).collect();
+    let arguments: Vec<String> = std::env::args().skip(1).take(6).collect();
     match arguments.as_slice() {
+        [task, scope, mode, flag, image] if task == "input-fuzz" && flag == "--image" => {
+            let scope = xtask::input_fuzz::Scope::parse(scope).map_err(|error| TaskError::Contract(error.to_string()))?;
+            let execution = match mode.as_str() {
+                "--dry-run" => xtask::input_fuzz::Execution::DryRun,
+                "--run" => xtask::input_fuzz::Execution::Run,
+                _ => return Err(TaskError::Contract("input-fuzz requires --dry-run or --run".into())),
+            };
+            xtask::input_fuzz::execute(scope, execution, image).map_err(|error| TaskError::Contract(error.to_string()))
+        }
         [task, mode, flag, image] if (task == "core-miri" || task == "core-mutation") && flag == "--image" => {
             let kind = if task == "core-miri" { xtask::core_assurance::Task::Miri } else { xtask::core_assurance::Task::Mutation };
             let execution = match mode.as_str() {
@@ -196,7 +205,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|security|reference-build --dry-run|reference-build --run|interop [--dry-run]|(core-proofs|core-miri|core-mutation) <--dry-run|--run> --image <name@sha256:digest>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|security|reference-build --dry-run|reference-build --run|interop [--dry-run]|(core-proofs|core-miri|core-mutation) <--dry-run|--run> --image <name@sha256:digest>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest>>".into(),
         )),
     }
 }
