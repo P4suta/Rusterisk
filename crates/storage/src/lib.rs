@@ -4,7 +4,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 mod history;
+mod preparation;
 pub use history::{CallHistoryChange, CallRecord};
+pub use preparation::RecordingPreparation;
 
 const MAX_RECORDING: u64 = 1024 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 4096;
@@ -142,16 +144,16 @@ impl Store {
             if entry.file_type()?.is_symlink() {
                 return Err(StorageError::InvalidName);
             }
-            if entry
-                .path()
-                .extension()
-                .is_some_and(|value| value == "partial" || value == "replacement")
-            {
+            if entry.path().extension().is_some_and(|value| {
+                value == "partial" || value == "replacement" || value == "append"
+            }) {
                 interrupted.push(entry.path());
             }
         }
         for path in interrupted {
-            recover(&path)?;
+            if !recover(&path)? {
+                continue;
+            }
             let name = path
                 .file_stem()
                 .and_then(|name| name.to_str())
@@ -313,14 +315,26 @@ impl Recorder {
         rate: u32,
         policy: RecordingIfExists,
     ) -> Result<Self, StorageError> {
+        let mut preparation = RecordingPreparation::create(root, name, rate, policy)?;
+        while !preparation.is_ready() {
+            preparation.advance()?;
+        }
+        preparation.into_recorder()
+    }
+
+    fn stage(
+        root: &Path,
+        name: &str,
+        rate: u32,
+        policy: RecordingIfExists,
+    ) -> Result<(Self, Option<WaveReader>), StorageError> {
         validate_name(name)?;
         if !matches!(rate, 8000 | 12000 | 16000 | 24000 | 32000 | 44100 | 48000) {
             return Err(StorageError::InvalidWave);
         }
         let publication = match policy {
             RecordingIfExists::Fail => Publication::Create,
-            RecordingIfExists::Overwrite => Publication::Replace,
-            RecordingIfExists::Append => return Err(StorageError::Unsupported),
+            RecordingIfExists::Overwrite | RecordingIfExists::Append => Publication::Replace,
         };
         let directory = root.join("recordings");
         std::fs::create_dir_all(&directory)?;
@@ -335,13 +349,32 @@ impl Recorder {
         {
             return Err(StorageError::Exists);
         }
-        let (extension, other, additional) = match publication {
-            Publication::Create => ("partial", "replacement", 2),
-            Publication::Replace => ("replacement", "partial", 1),
+        let (extension, additional) = match policy {
+            RecordingIfExists::Fail => ("partial", 2),
+            RecordingIfExists::Overwrite => ("replacement", 1),
+            RecordingIfExists::Append => ("append", 1),
         };
-        if directory.join(format!("{name}.{other}")).try_exists()? {
-            return Err(StorageError::Exists);
+        for staging in ["partial", "replacement", "append"] {
+            if directory.join(format!("{name}.{staging}")).try_exists()? {
+                return Err(StorageError::Exists);
+            }
         }
+        let completed = directory.join(format!("{name}.wav"));
+        let source = if policy == RecordingIfExists::Append && completed.try_exists()? {
+            if std::fs::symlink_metadata(&completed)?
+                .file_type()
+                .is_symlink()
+            {
+                return Err(StorageError::InvalidName);
+            }
+            let source = WaveReader::open(&completed)?;
+            if source.rate != rate {
+                return Err(StorageError::InvalidWave);
+            }
+            Some(source)
+        } else {
+            None
+        };
         reserve_directory_entries(&directory, additional)?;
         let path = directory.join(format!("{name}.{extension}"));
         let mut file = OpenOptions::new()
@@ -356,15 +389,21 @@ impl Recorder {
                     StorageError::Io(error)
                 }
             })?;
-        file.write_all(&header(rate, 0))?;
-        file.sync_all()?;
-        Ok(Self {
-            file,
-            path,
+        file.write_all(&header(
             rate,
-            bytes: 0,
-            publication,
-        })
+            source.as_ref().map(|source| source.remaining).unwrap_or(0),
+        ))?;
+        file.sync_all()?;
+        Ok((
+            Self {
+                file,
+                path,
+                rate,
+                bytes: 0,
+                publication,
+            },
+            source,
+        ))
     }
 
     pub fn write(&mut self, frame: Frame) -> Result<(), StorageError> {
@@ -405,23 +444,32 @@ impl Recorder {
     }
 }
 
-fn recover(path: &Path) -> Result<(), StorageError> {
+fn recover(path: &Path) -> Result<bool, StorageError> {
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     let length = file.metadata()?.len();
     if !(44..=MAX_RECORDING + 44).contains(&length) {
         return Err(StorageError::InvalidWave);
     }
-    let (rate, _) = read_header(&mut file)?;
+    let (rate, declared) = read_header(&mut file)?;
+    if path.extension().is_some_and(|value| value == "append") && length < u64::from(declared) + 44
+    {
+        drop(file);
+        std::fs::remove_file(path)?;
+        return Ok(false);
+    }
     let bytes = (length - 44) / 2 * 2;
     file.set_len(bytes + 44)?;
     file.seek(SeekFrom::Start(0))?;
     file.write_all(&header(rate, bytes as u32))?;
     file.sync_all()?;
     let destination = path.with_extension("wav");
-    if path.extension().is_some_and(|value| value == "replacement") {
+    if path
+        .extension()
+        .is_some_and(|value| value == "replacement" || value == "append")
+    {
         drop(file);
         std::fs::rename(path, destination)?;
-        return Ok(());
+        return Ok(true);
     }
     match std::fs::hard_link(path, &destination) {
         Ok(()) => {}
@@ -448,7 +496,7 @@ fn recover(path: &Path) -> Result<(), StorageError> {
     }
     drop(file);
     std::fs::remove_file(path)?;
-    Ok(())
+    Ok(true)
 }
 
 pub struct WaveReader {

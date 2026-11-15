@@ -98,11 +98,6 @@ fn failed_replacement_publication_keeps_recoverable_audio_and_other_policies_can
     let directory = tempfile::tempdir()?;
     let root = directory.path();
     write(root, 1234)?;
-    assert!(matches!(
-        Recorder::create_with_policy(root, "call", 8000, RecordingIfExists::Append),
-        Err(StorageError::Unsupported)
-    ));
-    assert_eq!(samples(root)?.samples(), [1234; 160]);
     let mut replacement =
         Recorder::create_with_policy(root, "call", 8000, RecordingIfExists::Overwrite)?;
     replacement.write(Frame::new(&[7777; 160], 8000)?)?;
