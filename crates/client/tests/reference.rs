@@ -8,6 +8,8 @@ use rusterisk_client::{
 use std::{future::IntoFuture, net::Ipv4Addr, time::Duration};
 #[path = "reference/external_audio.rs"]
 mod external_audio;
+#[path = "reference/external_streams.rs"]
+mod external_streams;
 
 async fn compare_external_admission(
     client: &Client,
@@ -437,6 +439,24 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
             &mut reference_session,
             app.as_str(),
             reference_media_ip,
+        )
+        .await?;
+        external_streams::compare(
+            &actual,
+            &mut actual_session,
+            app.as_str(),
+            Ipv4Addr::LOCALHOST,
+        )
+        .await?;
+        let callback_ip = std::env::var("RUSTERISK_REFERENCE_CALLBACK_IP")
+            .map_err(|_| Error::Invalid("reference callback address is required"))?
+            .parse::<Ipv4Addr>()
+            .map_err(|_| Error::Invalid("reference callback address"))?;
+        external_streams::compare(
+            &reference,
+            &mut reference_session,
+            app.as_str(),
+            callback_ip,
         )
         .await?;
         compare_subscriptions(&actual, &reference, app.as_str()).await?;

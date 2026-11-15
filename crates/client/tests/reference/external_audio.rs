@@ -14,7 +14,7 @@ fn invalid(error: impl std::fmt::Display) -> Error {
     Error::Invalid("external audio comparison")
 }
 
-async fn started(session: &mut Session, id: &ChannelId) -> Result<(), Error> {
+pub(super) async fn started(session: &mut Session, id: &ChannelId) -> Result<(), Error> {
     tokio::time::timeout(Duration::from_secs(3), async {
         for _ in 0..64 {
             if let EventKind::StasisStart { channel, .. } = session.next_event().await?.kind {
