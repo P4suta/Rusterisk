@@ -1,0 +1,34 @@
+{
+	"name": "rusterisk-browser-call-example",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"license": "(MIT OR Apache-2.0)",
+	"engines": {
+		"node": "26.13.1"
+	},
+	"scripts": {
+		"build": "esbuild src/main.ts --bundle --format=esm --target=es2022 --outfile=dist/app.js",
+		"check": "tsc --noEmit && eslint . --max-warnings=0 && biome check .",
+		"test": "node --test --test-timeout=15000 tests/*.test.ts",
+		"browser": "playwright test"
+	},
+	"dependencies": {
+		"sip.js": "0.21.2"
+	},
+	"overrides": {
+		"@typescript-eslint/typescript-estree": {
+			"minimatch": "11.0.1"
+		}
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.6.2",
+		"@eslint/js": "10.0.1",
+		"@playwright/test": "1.65.1",
+		"@types/node": "26.6.6",
+		"esbuild": "0.28.2",
+		"eslint": "10.15.0",
+		"typescript": "6.0.2",
+		"typescript-eslint": "8.72.2"
+	}
+}
