@@ -28,6 +28,30 @@ struct DnsFixture {
     job: JoinHandle<Result<Vec<Query>, ControlError>>,
 }
 
+#[tokio::test]
+async fn short_record_lifetimes_are_never_extended_by_resolver_options() -> Result<(), ControlError>
+{
+    let fixture = DnsFixture::start(|query| {
+        Ok(std::iter::once(Record::from_rdata(
+            query.name().clone(),
+            1,
+            RData::A(A(Ipv4Addr::LOCALHOST)),
+        ))
+        .collect())
+    })
+    .await?;
+    let mut options = ResolverOpts::default();
+    options.ip_strategy = LookupIpStrategy::Ipv4Only;
+    options.positive_min_ttl = Some(Duration::from_secs(3600));
+    let resolver = fixture.resolver(options)?;
+    let target =
+        StaticTarget::from_uri(Protocol::Tcp, "sip:phone@peer.test:5070").map_err(failure)?;
+    let result = resolver.resolve(&target).await?;
+    assert!(!result.cache_valid(Instant::now() + Duration::from_secs(2)));
+    assert_eq!(fixture.finish().await?.len(), 1);
+    Ok(())
+}
+
 impl DnsFixture {
     async fn start<F>(mut answer: F) -> Result<Self, ControlError>
     where

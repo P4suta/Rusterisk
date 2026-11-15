@@ -110,6 +110,7 @@ impl DestinationResolver {
         options.timeout = QUERY_TIMEOUT;
         options.attempts = 1;
         options.cache_size = 0;
+        options.positive_min_ttl = Some(Duration::ZERO);
         options.max_active_requests = 16;
         options.num_concurrent_reqs = 1;
         options.edns_payload_len = 1232;
