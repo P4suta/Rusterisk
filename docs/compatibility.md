@@ -29,7 +29,9 @@ Endpoint queries report configured resources, routing availability, and exact ch
 Registration expiry changes routing availability without ending active calls.
 
 Known operations without working adapters return `501`.
-Sound queries, server information, and channel redirection still use that response.
+Sound queries and channel redirection still use that response.
+Authenticated readers can select [server information](server-information.md) sections with case-insensitive names.
+The response preserves process identity, startup time, and the bounded channel limit.
 Registered JSON body parameters override query values while path identifiers remain authoritative.
 Body values follow the public operation's declared types and bounded conversion rules.
 Channel creation validates initial variables together and applies them before publishing creation events.
