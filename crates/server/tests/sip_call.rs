@@ -746,6 +746,91 @@ async fn dialplan_answer_wait_and_hangup_finish_a_real_invitation_without_stasis
     result
 }
 
+#[tokio::test]
+async fn dialplan_playback_sends_a_stored_sound_and_resumes_after_received_audio(
+) -> Result<(), ControlError> {
+    let directory = tempfile::tempdir().map_err(failure)?;
+    let mut recording =
+        rusterisk_storage::Recorder::create(directory.path(), "welcome", 8000).map_err(failure)?;
+    for _ in 0..20 {
+        recording
+            .write(Frame::new(&[5000; 160], 8000).map_err(failure)?)
+            .map_err(failure)?;
+    }
+    recording.finish().map_err(failure)?;
+    std::fs::create_dir(directory.path().join("sounds")).map_err(failure)?;
+    std::fs::rename(
+        directory.path().join("recordings/welcome.wav"),
+        directory.path().join("sounds/welcome.wav"),
+    )
+    .map_err(failure)?;
+    let (storage, worker) =
+        rusterisk_server::storage::StorageWorker::start(directory.path().to_owned())
+            .await
+            .map_err(failure)?;
+    let phone = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(failure)?;
+    let audio = SocketPair::bind(IpAddr::V4(Ipv4Addr::LOCALHOST), 0, 0).map_err(failure)?;
+    let sip = "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[contact]\ntype=aor\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=contact\ncontext=internal\nallow=ulaw\n";
+    let config = Config::parse(
+        "[general]\nbindaddr=127.0.0.1\n",
+        "[app]\ntype=user\npassword=test-password\n",
+        sip,
+        "",
+        "[internal]\nexten => 100,1,Playback(welcome)\nsame => n,Stasis(app,${PLAYBACKSTATUS})\n",
+    )
+    .map_err(failure)?;
+    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (media, hub, notices) = MediaHub::new(4);
+    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices)
+        .await?
+        .with_storage(storage);
+    let target = signaling.listeners()?[0].1;
+    let runner = tokio::spawn(runner.run());
+    let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
+    let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
+    let result = async {
+        let mut subscription = controller.subscribe(credentials()?, None, "app".into()).await?;
+        invite(&phone, target, &audio).await?;
+        let answered = response(&phone).await?;
+        assert_eq!(answered.status_code.code(), 200);
+        let ack = format!("ACK sip:100@{target} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-playback-ack;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", phone.local_addr().map_err(failure)?, answered.from_header().map_err(failure)?.value(), answered.to_header().map_err(failure)?.value(), answered.call_id_header().map_err(failure)?.value());
+        phone.send_to(ack.as_bytes(), target).await.map_err(failure)?;
+        let mut bytes = [0; 1501];
+        let mut consecutive = 0;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            for _ in 0..150 {
+                let (size, _) = audio.data().recv_from(&mut bytes).await.map_err(failure)?;
+                let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
+                if packet.payload().iter().all(|sample| (i32::from(mulaw_decode(*sample)) - 5000).abs() < 300) {
+                    consecutive += 1;
+                    if consecutive == 6 { return Ok(()); }
+                } else { consecutive = 0; }
+            }
+            Err(ControlError::Invalid("Expected playback audio"))
+        }).await.map_err(failure)??;
+        let channel = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Some(event) = subscription.events.recv().await {
+                if let EventKind::StasisStart { channel, args } = event.kind {
+                    assert_eq!(args, ["SUCCESS"]);
+                    return Ok(channel.id);
+                }
+            }
+            Err(ControlError::Capacity)
+        }).await.map_err(failure)??;
+        controller.execute(credentials()?, None, Action::Hangup(channel)).await?;
+        finish_bye(&phone).await?;
+        Ok(())
+    }.await;
+    controller.shutdown();
+    runner.await.map_err(failure)??;
+    signaling.await.map_err(failure)??;
+    hub.await.map_err(failure)?.map_err(failure)?;
+    worker.close().await.map_err(failure)?;
+    result
+}
+
 async fn finish_bye(socket: &UdpSocket) -> Result<(), ControlError> {
     let mut bytes = [0; 16385];
     for _ in 0..4 {

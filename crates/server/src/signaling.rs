@@ -1,10 +1,11 @@
 use crate::media::{MediaNotice, MediaPort};
 use crate::rtp::{RtpSession, SocketPair};
+use crate::storage::{PlaybackMedia, StoragePort};
 use crate::{CallKey, ControlError, Controller, Effect, IncomingCall, Milestone, Signal};
 use rusterisk_api::ChannelId;
 use rusterisk_config::{Codec, Config, Dtmf, Protocol};
-use rusterisk_core::{AudioGate, DtmfCommand};
-use rusterisk_media::{AudioFormat, Gate, TelephoneFormat};
+use rusterisk_core::{AudioGate, DtmfCommand, MediaTaskToken};
+use rusterisk_media::{AudioFormat, AudioTarget, Gate, TelephoneFormat};
 use rusterisk_sip::{Datagram, Engine, Outbound, Output, RejectReason, SipEvent, MAX_MESSAGE};
 use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
@@ -13,6 +14,7 @@ use std::time::{Duration, Instant};
 use tokio::io::ReadBuf;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
 
 struct Listener {
     name: String,
@@ -67,6 +69,8 @@ pub struct Signaling {
     calls: BTreeMap<CallKey, Active>,
     bridges: BTreeMap<BridgeIdentity, u64>,
     serial: u64,
+    storage: Option<StoragePort>,
+    playbacks: JoinSet<(CallKey, MediaTaskToken, Result<(), ControlError>)>,
 }
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -102,6 +106,11 @@ async fn receive(listeners: &[Listener]) -> Result<Received, ControlError> {
 }
 
 impl Signaling {
+    pub fn with_storage(mut self, storage: StoragePort) -> Self {
+        self.storage = Some(storage);
+        self
+    }
+
     pub async fn bind(
         mut config: Config,
         controller: Controller,
@@ -149,6 +158,8 @@ impl Signaling {
             calls: BTreeMap::new(),
             bridges: BTreeMap::new(),
             serial: 0,
+            storage: None,
+            playbacks: JoinSet::new(),
         })
     }
 
@@ -540,15 +551,37 @@ impl Signaling {
                     self.notify(Signal::Terminated { key, cause: 21 }).await?;
                 }
             }
-            Effect::Playback { key, token, media } => {
-                tracing::warn!(channel = %key.id, generation = key.generation, ?token, media, "playback storage is unavailable");
-                self.notify(Signal::PlaybackFinished {
-                    key,
-                    token,
-                    completion: crate::PlaybackCompletion::Failed,
-                })
-                .await?;
-            }
+            Effect::Playback { key, token, media } => match &self.storage {
+                Some(storage) if self.playbacks.len() < 64 && self.calls.contains_key(&key) => {
+                    let storage = storage.clone();
+                    let port = self.media.clone();
+                    self.playbacks.spawn(async move {
+                        let result = async {
+                            let name = ChannelId::try_from(media)?;
+                            let source = storage
+                                .play(PlaybackMedia::Sound(name))
+                                .await
+                                .map_err(failure)?;
+                            let completed = port
+                                .play(AudioTarget::Channel(key.clone()), token, source)
+                                .await
+                                .map_err(failure)?;
+                            completed.await.map_err(failure)?.map_err(failure)
+                        }
+                        .await;
+                        (key, token, result)
+                    });
+                }
+                Some(_) | None => {
+                    tracing::warn!(channel = %key.id, generation = key.generation, ?token, "playback admission failed");
+                    self.notify(Signal::PlaybackFinished {
+                        key,
+                        token,
+                        completion: crate::PlaybackCompletion::Failed,
+                    })
+                    .await?;
+                }
+            },
             Effect::Release { key } => {
                 if let Some(call) = self.calls.remove(&key) {
                     let output = self.terminate(call.listener, &key, now).map_err(failure)?;
@@ -730,6 +763,17 @@ impl Signaling {
                     }
                     None => { if !*stop.borrow() { return Err(ControlError::Adapter("Media task stopped".into())); } break; }
                 },
+                result = self.playbacks.join_next(), if !self.playbacks.is_empty() => {
+                    let (key, token, result) = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
+                    let completion = match result {
+                        Ok(()) => crate::PlaybackCompletion::Completed,
+                        Err(error) => {
+                            tracing::warn!(channel = %key.id, generation = key.generation, ?token, %error, "dialplan playback failed");
+                            crate::PlaybackCompletion::Failed
+                        }
+                    };
+                    self.notify(Signal::PlaybackFinished { key, token, completion }).await?;
+                },
                 _instant = tick.tick() => {
                     let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
                     for listener in 0..self.listeners.len() {
@@ -758,6 +802,22 @@ impl Signaling {
                 }
                 Err(error) => {
                     tracing::error!(%error, "dialog cleanup failed");
+                    cleanup = Err(failure(error));
+                }
+            }
+        }
+        self.playbacks.abort_all();
+        while let Some(result) = self.playbacks.join_next().await {
+            match result {
+                Ok((key, token, Err(error))) => {
+                    tracing::warn!(channel = %key.id, generation = key.generation, ?token, %error, "playback failed before shutdown")
+                }
+                Ok((_, _, Ok(()))) => {}
+                Err(error) if error.is_cancelled() => {
+                    tracing::debug!(%error, "playback cancelled during shutdown")
+                }
+                Err(error) => {
+                    tracing::error!(%error, "playback task failed during shutdown");
                     cleanup = Err(failure(error));
                 }
             }
