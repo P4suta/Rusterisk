@@ -1096,6 +1096,9 @@ pub struct AsteriskPing {
     pub asterisk_id: String,
 }
 
+mod info_section;
+pub use info_section::InfoSection;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AsteriskInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
