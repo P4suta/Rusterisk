@@ -5,6 +5,9 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
+const MAX_FOREGROUND_REQUESTS: usize = 8;
+const MAX_REQUESTS: usize = 16;
+
 #[derive(Clone, Debug)]
 pub struct Originate {
     pub endpoint: String,
@@ -190,6 +193,107 @@ impl OwnedCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::IntoFuture;
+
+    fn channel(id: &str) -> Result<api::Channel, Error> {
+        Ok(serde_json::from_value(serde_json::json!({
+            "id":id, "name":"PJSIP/phone", "state":"Up", "accountcode":"",
+            "caller":{"name":"", "number":"100"}, "connected":{"name":"", "number":"200"},
+            "dialplan":{"context":"default", "exten":"s", "priority":1}, "creationtime":"now", "language":"en"
+        }))?)
+    }
+
+    #[tokio::test]
+    async fn client_request_capacity_limits_foreground_work_and_drains_queued_cleanup(
+    ) -> Result<(), Error> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let app = axum::Router::new()
+            .route(
+                "/ari/channels",
+                axum::routing::post(
+                    |axum::extract::Query(query): axum::extract::Query<
+                        BTreeMap<String, String>,
+                    >| async move {
+                        query
+                            .get("channelId")
+                            .ok_or(axum::http::StatusCode::BAD_REQUEST)
+                            .and_then(|id| {
+                                channel(id)
+                                    .map(axum::Json)
+                                    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                            })
+                    },
+                ),
+            )
+            .route(
+                "/ari/channels/{id}",
+                axum::routing::delete(|| async { axum::http::StatusCode::NO_CONTENT }),
+            );
+        let server = tokio::spawn(axum::serve(listener, app).into_future());
+        let result = async {
+            let client = Client::new(&format!("http://{address}"), "app", "password")?;
+            let (_commands, mut calls) =
+                Calls::new(client, api::ChannelId::try_from("app".to_owned())?);
+            let mut leases = Vec::new();
+            for index in 0..9 {
+                let (progress, received) = watch::channel(CallSnapshot {
+                    progress: OwnedCallProgress::new(),
+                    channel: None,
+                    failure: None,
+                    cleanup: Cleanup::Pending,
+                });
+                let (lifetime, dropped) = oneshot::channel();
+                let (reply, mut response) = oneshot::channel();
+                calls.submit(Command {
+                    id: api::ChannelId::try_from(format!("setup-{index}"))?,
+                    options: Originate::new("PJSIP/phone".into())?,
+                    progress,
+                    lifetime: dropped,
+                    reply,
+                });
+                if index < 8 {
+                    assert!(matches!(response.try_recv(), Ok(Ok(()))));
+                } else {
+                    assert!(matches!(response.try_recv(), Ok(Err(Error::Capacity))));
+                }
+                leases.push((lifetime, received));
+            }
+            assert_eq!(calls.originates.len(), 8);
+            assert_eq!(calls.used.len(), 8);
+            for index in 0..32 {
+                let channel = channel(&format!("cleanup-{index}"))?;
+                let (progress, received) = watch::channel(CallSnapshot {
+                    progress: OwnedCallProgress::new().finish(CallCompletion::Cancelled),
+                    channel: Some(channel.clone()),
+                    failure: None,
+                    cleanup: Cleanup::Pending,
+                });
+                let (lifetime, dropped) = oneshot::channel();
+                calls.entries.insert(
+                    channel.id,
+                    Entry {
+                        progress,
+                        lifetime: dropped,
+                        work: Work::Idle,
+                    },
+                );
+                leases.push((lifetime, received));
+            }
+            calls.tick();
+            assert_eq!(calls.cleanups.len(), 8);
+            assert_eq!(calls.originates.len() + calls.cleanups.len(), 16);
+            calls.close().await?;
+            assert!(calls.cleanups.is_empty());
+            assert!(calls.entries.values().all(|entry| entry.work == Work::Done
+                && entry.progress.borrow().cleanup == Cleanup::Complete));
+            Ok(())
+        }
+        .await;
+        server.abort();
+        assert!(server.await.is_err());
+        result
+    }
 
     #[tokio::test]
     async fn duplicate_events_and_late_admission_cannot_restore_released_client_control(
@@ -379,7 +483,12 @@ impl Calls {
         if command.reply.is_closed() {
             return;
         }
-        if self.entries.len() >= 64 || self.used.len() >= 4096 || self.used.contains(&command.id) {
+        if self.entries.len() >= 64
+            || self.used.len() >= 4096
+            || self.used.contains(&command.id)
+            || self.originates.len() >= MAX_FOREGROUND_REQUESTS
+            || self.originates.len() + self.cleanups.len() >= MAX_REQUESTS
+        {
             let _delivered = command.reply.send(Err(Error::Capacity));
             return;
         }
@@ -520,7 +629,9 @@ impl Calls {
             }
             let cleanup = {
                 let snapshot = entry.progress.borrow();
-                if snapshot.progress.completion().is_none() {
+                if snapshot.progress.completion().is_none()
+                    || self.originates.len() + self.cleanups.len() >= MAX_REQUESTS
+                {
                     false
                 } else {
                     match entry.work {

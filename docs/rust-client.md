@@ -56,6 +56,9 @@ Await explicit cleanup before shutting down the runtime.
 ## Bound transport and event work
 
 A session holds at most 64 call handles and remembers at most 4096 issued identifiers.
+At most eight originate requests run together, with 16 request workers available for setup and cleanup.
+Foreground saturation rejects new originate commands with `Error::Capacity`.
+Pending cleanup stays in its call entry until a worker becomes available.
 The event queue retains 64 events.
 `next_event` reports `Error::EventLagged` when the caller falls behind.
 Call progress continues to update while the caller waits for a milestone.
