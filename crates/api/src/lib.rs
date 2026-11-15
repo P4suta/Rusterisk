@@ -1,10 +1,12 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+mod event_filter;
 mod media_uri;
 mod recording_options;
 mod recording_policy;
 mod swagger;
+pub use event_filter::EventFilterRequest;
 pub use media_uri::{InvalidMediaUri, MediaUri};
 pub use recording_options::{
     InvalidRecordingOption, RecordingOptions, RecordingSeconds, RecordingTermination,
@@ -357,6 +359,7 @@ pub enum EventKind {
 pub enum Method {
     Get,
     Post,
+    Put,
     Delete,
 }
 
@@ -365,6 +368,7 @@ impl Method {
         match self {
             Self::Get => "get",
             Self::Post => "post",
+            Self::Put => "put",
             Self::Delete => "delete",
         }
     }
@@ -372,6 +376,7 @@ impl Method {
         match self {
             Self::Get => "GET",
             Self::Post => "POST",
+            Self::Put => "PUT",
             Self::Delete => "DELETE",
         }
     }
@@ -785,6 +790,14 @@ pub const OPERATIONS: &[Operation] = &[
         ["eventSource!"]
     ),
     operation!(
+        "applications.filter",
+        "filter",
+        Put,
+        "/applications/{applicationName}/eventFilter",
+        "Application",
+        ["filter"]
+    ),
+    operation!(
         "applications.unsubscribe",
         "unsubscribe",
         Delete,
@@ -1008,6 +1021,7 @@ pub fn schemas() -> Value {
     let _channel = generator.subschema_for::<Channel>();
     let _bridge = generator.subschema_for::<Bridge>();
     let _application = generator.subschema_for::<Application>();
+    let _filter = generator.subschema_for::<EventFilterRequest>();
     let _endpoint = generator.subschema_for::<Endpoint>();
     let _playback = generator.subschema_for::<Playback>();
     let _live = generator.subschema_for::<LiveRecording>();
@@ -1043,13 +1057,14 @@ fn parameters(operation: &Operation, format: Option<DiscoveryFormat>) -> Vec<Val
         .parameters
         .iter()
         .map(|name| (name.trim_end_matches('!'), name.ends_with('!'), "query"));
-    paths.chain(queries).filter(|(name, _, _)| format.is_some() || *name != "variables").map(|(name, required, location)| {
-        let location = if name == "variables" { "body" } else { location };
+    paths.chain(queries).filter(|(name, _, _)| format.is_some() || !matches!(*name, "variables" | "filter")).map(|(name, required, location)| {
+        let location = if matches!(name, "variables" | "filter") { "body" } else { location };
         let schema = match name {
             "ifExists" => schemars::schema_for!(RecordingIfExists).to_value(),
             "maxDurationSeconds" | "maxSilenceSeconds" => schemars::schema_for!(RecordingSeconds).to_value(),
             "terminateOn" => schemars::schema_for!(RecordingTermination).to_value(),
             "beep" => schemars::schema_for!(bool).to_value(),
+            "filter" => json!({"type": "object"}),
             _ => json!({"type": "string"}),
         };
         if let Some(format) = format {
@@ -1087,6 +1102,9 @@ pub fn openapi() -> Value {
         entry[operation.method.as_str()] = json!({"operationId": operation.id, "parameters": parameters(operation, None), "responses": responses, "security": security});
         if operation.parameters.contains(&"variables") {
             entry[operation.method.as_str()]["requestBody"] = json!({"content": {"application/json": {"schema": {"type": "object", "properties": {"variables": {"type": "object", "additionalProperties": {"type": "string"}}}}}}});
+        }
+        if operation.parameters.contains(&"filter") {
+            entry[operation.method.as_str()]["requestBody"] = json!({"content": {"application/json": {"schema": {"$ref": "#/components/schemas/EventFilterRequest"}}}});
         }
     }
     let servers = json_array([json!({"url": "/ari"})]);
