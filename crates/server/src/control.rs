@@ -26,6 +26,7 @@ pub enum ControlError {
     Invalid(&'static str),
     NotFound(&'static str),
     EndpointTechnology(String),
+    BridgeExists(ChannelId),
     Conflict(&'static str),
     InvalidState(&'static str),
     Unprocessable(&'static str),
@@ -42,7 +43,7 @@ impl ControlError {
         match self {
             Self::Invalid(_) => 400,
             Self::NotFound(_) | Self::EndpointTechnology(_) => 404,
-            Self::Conflict(_) => 409,
+            Self::Conflict(_) | Self::BridgeExists(_) => 409,
             Self::InvalidState(_) => 412,
             Self::Unprocessable(_) => 422,
             Self::Capacity => 503,
@@ -65,6 +66,7 @@ impl std::fmt::Display for ControlError {
             Self::EndpointTechnology(technology) => {
                 write!(f, "No Endpoints found - invalid tech {technology}")
             }
+            Self::BridgeExists(id) => write!(f, "Bridge with id '{id}' already exists"),
             Self::Capacity => f.write_str("Resource capacity exceeded"),
             Self::Unauthorized => f.write_str("Authentication required"),
             Self::Forbidden => f.write_str("Operation forbidden"),
@@ -1139,7 +1141,7 @@ impl Control {
             Action::GetBridge(id) => Outcome::json(self.bridge(&id)?),
             Action::CreateBridge { id, name } => {
                 if self.bridges.contains_key(&id) {
-                    return Err(ControlError::Conflict("Bridge already exists"));
+                    return Err(ControlError::BridgeExists(id));
                 }
                 if self.bridges.len() >= self.capacity || name.len() > 128 {
                     return Err(ControlError::Capacity);

@@ -17,6 +17,38 @@ fn originate(name: &str, timeout: u32) -> Result<Action, ControlError> {
 }
 
 #[test]
+fn duplicate_bridge_reports_its_id_and_preserves_the_original() -> Result<(), ControlError> {
+    let mut control = Control::new(4);
+    control.apply(
+        Action::CreateBridge {
+            id: id("conversation")?,
+            name: "Original".into(),
+        },
+        "created",
+        0,
+    )?;
+    let original = control.bridge(&id("conversation")?)?.clone();
+    let result = control.apply(
+        Action::CreateBridge {
+            id: id("conversation")?,
+            name: "Replacement".into(),
+        },
+        "later",
+        1,
+    );
+    let Err(error) = result else {
+        return Err(ControlError::Unsupported);
+    };
+    assert_eq!(error.status(), 409);
+    assert_eq!(
+        error.to_string(),
+        "Bridge with id 'conversation' already exists"
+    );
+    assert_eq!(control.bridge(&id("conversation")?)?, &original);
+    Ok(())
+}
+
+#[test]
 fn bridge_membership_keeps_its_generation_until_explicit_deletion() -> Result<(), ControlError> {
     let mut control = Control::new(4);
     control.subscribe("app")?;

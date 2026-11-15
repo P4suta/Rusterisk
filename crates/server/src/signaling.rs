@@ -435,6 +435,7 @@ impl Signaling {
                             | ControlError::Unprocessable(_)
                             | ControlError::InvalidState(_)
                             | ControlError::Conflict(_)
+                            | ControlError::BridgeExists(_)
                             | ControlError::Unauthorized
                             | ControlError::Forbidden
                             | ControlError::Encoding(_)
