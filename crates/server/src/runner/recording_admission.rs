@@ -30,6 +30,9 @@ impl Runner {
         if let Signal::ExternalRtpAdmitted { key, result } = signal {
             return self.complete_external_admission(key, result, now);
         }
+        if let Signal::AudioSocketAdmitted { key, result } = signal {
+            return self.complete_stream_admission(key, result, now);
+        }
         if let Signal::RecordingAdmitted { token, .. } = &signal {
             if self
                 .recording_admissions
@@ -72,6 +75,7 @@ impl Runner {
             | Signal::Milestone { .. }
             | Signal::Terminated { .. } => None,
             Signal::ExternalRtpAdmitted { .. } => None,
+            Signal::AudioSocketAdmitted { .. } => None,
         };
         let mut outcome = self.control.signal_at(signal, &timestamp(), now)?;
         self.publish(&mut outcome)?;
@@ -329,7 +333,8 @@ mod tests {
                     | Effect::Start { .. }
                     | Effect::ReleaseBridge { .. }
                     | Effect::DialBridge { .. }
-                    | Effect::ConnectExternalRtp { .. } => return Err(ControlError::Unsupported),
+                    | Effect::ConnectExternalRtp { .. }
+                    | Effect::ConnectAudioSocket { .. } => return Err(ControlError::Unsupported),
                 }
             }
             Ok((releases, bridges, cancellations, recordings))

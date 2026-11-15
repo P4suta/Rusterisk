@@ -27,7 +27,7 @@ enum Admission {
         owner: crate::MediaOwner,
         token: rusterisk_core::MediaTaskToken,
     },
-    ExternalRtp(CallKey),
+    ExternalMedia(CallKey),
 }
 
 #[derive(Clone)]
@@ -495,7 +495,10 @@ impl Runner {
                     &action,
                     Action::RecordChannel { .. } | Action::RecordBridge { .. }
                 );
-                let external = matches!(&action, Action::ExternalRtp { .. });
+                let external = matches!(
+                    &action,
+                    Action::ExternalRtp { .. } | Action::ExternalAudioSocket { .. }
+                );
                 let result = self
                     .authorize(&credentials, origin.as_deref(), action.read_only())
                     .and_then(|()| {
@@ -536,8 +539,9 @@ impl Runner {
                             | Effect::Bridge { .. }
                             | Effect::ReleaseBridge { .. }
                             | Effect::DialBridge { .. } => None,
-                            Effect::ConnectExternalRtp { key, .. } => {
-                                Some(Admission::ExternalRtp(key.clone()))
+                            Effect::ConnectExternalRtp { key, .. }
+                            | Effect::ConnectAudioSocket { key, .. } => {
+                                Some(Admission::ExternalMedia(key.clone()))
                             }
                         });
                         if let Err(error) = self.publish(&mut outcome) {
@@ -558,7 +562,7 @@ impl Runner {
                                         ),
                                     );
                                 }
-                                Admission::ExternalRtp(key) => {
+                                Admission::ExternalMedia(key) => {
                                     self.external_admissions.insert(
                                         key,
                                         external_admission::Pending::new(reply, deadline),

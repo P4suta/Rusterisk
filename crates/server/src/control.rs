@@ -152,6 +152,11 @@ pub enum IncomingTarget {
 
 #[derive(Clone, Debug)]
 pub enum Action {
+    ExternalAudioSocket {
+        id: ChannelId,
+        app: String,
+        target: rusterisk_api::AudioSocketTarget,
+    },
     ExternalRtp {
         id: ChannelId,
         app: String,
@@ -301,6 +306,7 @@ impl Action {
             Self::Hangup(_) | Self::Continue { .. } | Self::DestroyBridge(_) => 2,
             Self::Originate { .. }
             | Self::ExternalRtp { .. }
+            | Self::ExternalAudioSocket { .. }
             | Self::RecordChannel { .. }
             | Self::RecordBridge { .. }
             | Self::ControlRecording { .. }
@@ -335,6 +341,7 @@ impl Action {
             | Self::GetBridge(_) => true,
             Self::Originate { .. }
             | Self::ExternalRtp { .. }
+            | Self::ExternalAudioSocket { .. }
             | Self::FilterApplication { .. }
             | Self::SubscribeResources { .. }
             | Self::UnsubscribeResources { .. }
@@ -366,6 +373,10 @@ impl Action {
 
 #[derive(Clone, Debug)]
 pub enum Effect {
+    ConnectAudioSocket {
+        key: CallKey,
+        target: rusterisk_api::AudioSocketTarget,
+    },
     ConnectExternalRtp {
         key: CallKey,
         target: rusterisk_api::ExternalRtpTarget,
@@ -451,6 +462,10 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
+    AudioSocketAdmitted {
+        key: CallKey,
+        result: Result<(), ControlError>,
+    },
     ExternalRtpAdmitted {
         key: CallKey,
         result: Result<std::net::SocketAddr, ControlError>,
@@ -593,6 +608,8 @@ enum ChannelKind {
     Sip,
     ExternalRtpPending,
     ExternalRtpAdmitted,
+    AudioSocketPending,
+    AudioSocketAdmitted,
 }
 
 struct ChannelEntry {
@@ -959,7 +976,24 @@ impl Control {
                 app,
                 target,
                 data,
-            } => self.external_rtp(id, app, target, data, timestamp, now_ms),
+            } => self.external_media(
+                id,
+                app,
+                external_media::Target::Rtp(target),
+                data,
+                timestamp,
+                now_ms,
+            ),
+            Action::ExternalAudioSocket { id, app, target } => self.external_media(
+                id,
+                app,
+                external_media::Target::AudioSocket(target),
+                uuid::Uuid::from_bytes(target.session())
+                    .hyphenated()
+                    .to_string(),
+                timestamp,
+                now_ms,
+            ),
             Action::RecordChannel {
                 channel,
                 name,
@@ -1725,6 +1759,9 @@ impl Control {
             Signal::ExternalRtpAdmitted { key, result } => {
                 self.external_rtp_admitted(key, result, timestamp)
             }
+            Signal::AudioSocketAdmitted { key, result } => {
+                self.audio_socket_admitted(key, result, timestamp)
+            }
             Signal::EndpointContact { key, presence } => {
                 let mut outcome = Outcome::empty();
                 if self.endpoints.observe(&key, presence) {
@@ -1875,8 +1912,12 @@ impl Control {
                     return self.end_at(&key.id, timestamp, 16, now);
                 }
                 match entry.kind {
-                    ChannelKind::ExternalRtpPending => return Ok(Outcome::empty()),
-                    ChannelKind::Sip | ChannelKind::ExternalRtpAdmitted => {}
+                    ChannelKind::ExternalRtpPending | ChannelKind::AudioSocketPending => {
+                        return Ok(Outcome::empty())
+                    }
+                    ChannelKind::Sip
+                    | ChannelKind::ExternalRtpAdmitted
+                    | ChannelKind::AudioSocketAdmitted => {}
                 }
                 let entry = self
                     .channels

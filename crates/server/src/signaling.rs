@@ -557,6 +557,13 @@ impl Signaling {
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
+            Effect::ConnectAudioSocket { key, .. } => {
+                self.notify(Signal::AudioSocketAdmitted {
+                    key,
+                    result: Err(ControlError::Unsupported),
+                })
+                .await?
+            }
             Effect::ConnectExternalRtp { key, target } => {
                 let result = self.connect_external_rtp(key.clone(), target).await;
                 if let Err(operation) = &result {

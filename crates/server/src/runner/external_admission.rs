@@ -24,19 +24,39 @@ impl Runner {
         result: Result<SocketAddr, ControlError>,
         now: u64,
     ) -> Result<(), ControlError> {
+        let signal = Signal::ExternalRtpAdmitted {
+            key: key.clone(),
+            result: result.clone(),
+        };
+        self.complete_media_admission(key, signal, result.map(|_| ()), now)
+    }
+
+    pub(super) fn complete_stream_admission(
+        &mut self,
+        key: CallKey,
+        result: Result<(), ControlError>,
+        now: u64,
+    ) -> Result<(), ControlError> {
+        let signal = Signal::AudioSocketAdmitted {
+            key: key.clone(),
+            result: result.clone(),
+        };
+        self.complete_media_admission(key, signal, result, now)
+    }
+
+    fn complete_media_admission(
+        &mut self,
+        key: CallKey,
+        signal: Signal,
+        result: Result<(), ControlError>,
+        now: u64,
+    ) -> Result<(), ControlError> {
         if self.external_admissions.get(&key).is_some_and(|pending| {
             pending.reply.is_closed() || now >= pending.deadline || !self.control.has_channel(&key)
         }) {
             self.expire_external_admission(&key, now)?;
         }
-        let mut outcome = self.control.signal_at(
-            Signal::ExternalRtpAdmitted {
-                key: key.clone(),
-                result: result.clone(),
-            },
-            &timestamp(),
-            now,
-        )?;
+        let mut outcome = self.control.signal_at(signal, &timestamp(), now)?;
         self.publish(&mut outcome)?;
         if let Some(pending) = self.external_admissions.remove(&key) {
             let response = match result {

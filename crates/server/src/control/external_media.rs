@@ -7,12 +7,17 @@ use rusterisk_api::{
 use rusterisk_core::{Call, MediaTasks};
 use std::{collections::BTreeMap, net::SocketAddr};
 
+pub(super) enum Target {
+    Rtp(ExternalRtpTarget),
+    AudioSocket(rusterisk_api::AudioSocketTarget),
+}
+
 impl Control {
-    pub(super) fn external_rtp(
+    pub(super) fn external_media(
         &mut self,
         id: ChannelId,
         app: String,
-        target: ExternalRtpTarget,
+        target: Target,
         data: String,
         timestamp: &str,
         now: u64,
@@ -41,9 +46,27 @@ impl Control {
             id: id.clone(),
             generation,
         };
+        let (kind, name, effect) = match target {
+            Target::Rtp(target) => (
+                ChannelKind::ExternalRtpPending,
+                format!("UnicastRTP/{}-{generation:08x}", target.remote()),
+                Effect::ConnectExternalRtp {
+                    key: key.clone(),
+                    target,
+                },
+            ),
+            Target::AudioSocket(target) => (
+                ChannelKind::AudioSocketPending,
+                format!("AudioSocket/{}-{generation:08x}", target.remote()),
+                Effect::ConnectAudioSocket {
+                    key: key.clone(),
+                    target,
+                },
+            ),
+        };
         let snapshot = Channel {
             id: id.clone(),
-            name: format!("UnicastRTP/{}-{generation:08x}", target.remote()),
+            name,
             state: ChannelState::Down,
             accountcode: String::new(),
             caller: Caller::default(),
@@ -71,13 +94,11 @@ impl Control {
                 channel: snapshot.clone(),
             },
         );
-        outcome
-            .effects
-            .push(Effect::ConnectExternalRtp { key, target });
+        outcome.effects.push(effect);
         self.channels.insert(
             id,
             ChannelEntry {
-                kind: ChannelKind::ExternalRtpPending,
+                kind,
                 call: Call::outgoing(generation).reserve_stasis(application)?,
                 endpoint: String::new(),
                 snapshot,
@@ -112,7 +133,10 @@ impl Control {
             return Ok(outcome);
         };
         match entry.kind {
-            ChannelKind::Sip | ChannelKind::ExternalRtpAdmitted => return Ok(Outcome::empty()),
+            ChannelKind::Sip
+            | ChannelKind::ExternalRtpAdmitted
+            | ChannelKind::AudioSocketPending
+            | ChannelKind::AudioSocketAdmitted => return Ok(Outcome::empty()),
             ChannelKind::ExternalRtpPending => {}
         }
         let local = match result {
@@ -130,5 +154,35 @@ impl Control {
         let mut snapshot = entry.snapshot.clone();
         snapshot.channelvars = Some(variables);
         Outcome::json(snapshot)
+    }
+
+    pub(super) fn audio_socket_admitted(
+        &mut self,
+        key: CallKey,
+        result: Result<(), ControlError>,
+        timestamp: &str,
+    ) -> Result<Outcome, ControlError> {
+        let Some(entry) = self
+            .channels
+            .get_mut(&key.id)
+            .filter(|entry| entry.call.generation() == key.generation)
+        else {
+            let mut outcome = Outcome::empty();
+            outcome.effects.push(Effect::Release { key });
+            return Ok(outcome);
+        };
+        match entry.kind {
+            ChannelKind::AudioSocketPending => {}
+            ChannelKind::Sip
+            | ChannelKind::ExternalRtpPending
+            | ChannelKind::ExternalRtpAdmitted
+            | ChannelKind::AudioSocketAdmitted => return Ok(Outcome::empty()),
+        }
+        match result {
+            Ok(()) => {}
+            Err(_) => return self.end(&key.id, timestamp, 21),
+        }
+        entry.kind = ChannelKind::AudioSocketAdmitted;
+        Outcome::json(&entry.snapshot)
     }
 }
