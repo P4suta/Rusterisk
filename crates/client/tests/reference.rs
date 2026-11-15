@@ -20,6 +20,8 @@ mod external_websockets;
 mod request_bodies;
 #[path = "reference/server_info.rs"]
 mod server_info;
+#[path = "reference/sound_playback.rs"]
+mod sound_playback;
 #[path = "reference/sounds.rs"]
 mod sounds;
 
@@ -508,6 +510,13 @@ async fn compare_resources(
             reference_media_ip,
         )
         .await?;
+        sound_playback::compare(
+            &actual,
+            &mut actual_session,
+            app.as_str(),
+            Ipv4Addr::LOCALHOST,
+        )
+        .await?;
         external_streams::compare(
             &actual,
             &mut actual_session,
@@ -519,6 +528,13 @@ async fn compare_resources(
             .map_err(|_| Error::Invalid("reference callback address is required"))?
             .parse::<Ipv4Addr>()
             .map_err(|_| Error::Invalid("reference callback address"))?;
+        sound_playback::compare(
+            &reference,
+            &mut reference_session,
+            app.as_str(),
+            callback_ip,
+        )
+        .await?;
         external_streams::compare(
             &reference,
             &mut reference_session,

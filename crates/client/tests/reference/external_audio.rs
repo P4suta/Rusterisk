@@ -49,7 +49,11 @@ fn local(channel: Channel) -> Result<SocketAddr, Error> {
     Ok(SocketAddr::new(ip, port))
 }
 
-async fn received(peer: &SocketPair, codec: StaticRtpCodec, expected: i32) -> Result<(), Error> {
+pub(super) async fn received(
+    peer: &SocketPair,
+    codec: StaticRtpCodec,
+    expected: i32,
+) -> Result<(), Error> {
     let mut packets = 0;
     let mut last = None;
     let result = tokio::time::timeout(Duration::from_secs(3), async {

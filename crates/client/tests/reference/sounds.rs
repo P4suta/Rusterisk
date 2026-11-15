@@ -22,9 +22,11 @@ pub async fn prepare(configuration: &Path) -> Result<(StoragePort, StorageWorker
         ] {
             let id = ChannelId::try_from(format!("fixture-{language}-{sample}"))?;
             let mut recording = storage.record(id.clone(), 8000).await.map_err(failure)?;
-            recording
-                .try_write(Frame::new(&[sample; 160], 8000).map_err(failure)?)
-                .map_err(failure)?;
+            for _ in 0..3 {
+                recording
+                    .try_write(Frame::new(&[sample; 160], 8000).map_err(failure)?)
+                    .map_err(failure)?;
+            }
             recording.finish().await.map_err(failure)?;
             let source = data.join("recordings").join(format!("{id}.wav"));
             for root in [data.as_path(), configuration] {
