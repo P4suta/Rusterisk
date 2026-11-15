@@ -5,9 +5,11 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 mod history;
 mod preparation;
+mod recording_copy;
 mod recording_file;
 pub use history::{CallHistoryChange, CallRecord};
 pub use preparation::RecordingPreparation;
+pub use recording_copy::RecordingCopy;
 pub use recording_file::{RecordingChunk, StoredRecordingReader};
 
 const MAX_RECORDING: u64 = 1024 * 1024 * 1024;
@@ -149,12 +151,19 @@ impl Store {
                 return Err(StorageError::InvalidName);
             }
             if entry.path().extension().is_some_and(|value| {
-                value == "partial" || value == "replacement" || value == "append"
+                value == "partial"
+                    || value == "replacement"
+                    || value == "append"
+                    || value == "copying"
             }) {
                 interrupted.push(entry.path());
             }
         }
         for path in interrupted {
+            if path.extension().is_some_and(|value| value == "copying") {
+                std::fs::remove_file(path)?;
+                continue;
+            }
             if !recover(&path)? {
                 continue;
             }
@@ -240,6 +249,14 @@ impl Store {
 
     pub fn open_recording(&self, name: &str) -> Result<StoredRecordingReader, StorageError> {
         StoredRecordingReader::open(&self.recording_path(name)?)
+    }
+
+    pub fn prepare_recording_copy(
+        &self,
+        source: &str,
+        destination: &str,
+    ) -> Result<RecordingCopy, StorageError> {
+        RecordingCopy::create(&self.recording_path(source)?, &self.recordings, destination)
     }
 
     pub fn delete_recording(&mut self, name: &str) -> Result<(), StorageError> {
@@ -400,7 +417,7 @@ impl Recorder {
             RecordingIfExists::Overwrite => ("replacement", 1),
             RecordingIfExists::Append => ("append", 1),
         };
-        for staging in ["partial", "replacement", "append"] {
+        for staging in ["partial", "replacement", "append", "copying"] {
             if directory.join(format!("{name}.{staging}")).try_exists()? {
                 return Err(StorageError::Exists);
             }
