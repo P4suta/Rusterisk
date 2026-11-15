@@ -5,6 +5,10 @@ use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
+mod recording;
+pub use recording::RecordingSink;
+use recording::{RecordingKey, RecordingSet};
+use rusterisk_media::Frame;
 
 #[derive(Debug)]
 pub enum WorkerError {
@@ -60,6 +64,21 @@ enum Command {
     Recordings {
         reply: oneshot::Sender<Result<Vec<StoredRecording>, StorageError>>,
     },
+    Record {
+        name: ChannelId,
+        rate: u32,
+        input: mpsc::Receiver<Frame>,
+        lifetime: oneshot::Receiver<()>,
+        reply: oneshot::Sender<Result<RecordingKey, StorageError>>,
+    },
+    FinishRecording {
+        key: RecordingKey,
+        reply: oneshot::Sender<Result<(), StorageError>>,
+    },
+    CancelRecording {
+        key: RecordingKey,
+        reply: oneshot::Sender<Result<(), StorageError>>,
+    },
 }
 
 #[derive(Clone)]
@@ -69,6 +88,13 @@ pub struct StoragePort {
 }
 
 impl StoragePort {
+    fn wake(&self) {
+        match self.commands.try_send(Command::Wake) {
+            Ok(())
+            | Err(mpsc::error::TrySendError::Full(_) | mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+
     fn send(&self, command: Command) -> Result<(), WorkerError> {
         if *self.stop.borrow() {
             return Err(WorkerError::Closed);
@@ -145,7 +171,7 @@ fn respond<T>(reply: oneshot::Sender<Result<T, StorageError>>, result: Result<T,
     }
 }
 
-fn command(store: &mut Store, command: Command) {
+fn command(store: &mut Store, recordings: &mut RecordingSet, command: Command) {
     match command {
         Command::Wake => {}
         Command::Start {
@@ -177,20 +203,65 @@ fn command(store: &mut Store, command: Command) {
                 respond(reply, store.recordings());
             }
         }
+        Command::Record {
+            name,
+            rate,
+            input,
+            lifetime,
+            reply,
+        } => {
+            if !reply.is_closed() {
+                let result = recordings.begin(name, rate, input, lifetime);
+                if let Err(result) = reply.send(result) {
+                    match result {
+                        Ok(key) => {
+                            if let Err(error) = recordings.cancel(&key) {
+                                tracing::warn!(%error, "cancelled recording startup cleanup failed");
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "recording startup failed after cancellation")
+                        }
+                    }
+                }
+            }
+        }
+        Command::FinishRecording { key, reply } => {
+            if !reply.is_closed() {
+                respond(reply, recordings.finish(&key, store));
+            }
+        }
+        Command::CancelRecording { key, reply } => {
+            if !reply.is_closed() {
+                respond(reply, recordings.cancel(&key));
+            }
+        }
     }
 }
 
-fn serve(mut store: Store, mut commands: mpsc::Receiver<Command>, stop: watch::Receiver<bool>) {
+fn serve(
+    mut store: Store,
+    root: PathBuf,
+    mut commands: mpsc::Receiver<Command>,
+    stop: watch::Receiver<bool>,
+) {
+    let mut recordings = RecordingSet::new(root);
     loop {
         if *stop.borrow() {
             commands.close();
             while let Ok(next) = commands.try_recv() {
-                command(&mut store, next);
+                recordings.pump();
+                command(&mut store, &mut recordings, next);
             }
+            recordings.pump();
             break;
         }
         match commands.blocking_recv() {
-            Some(next) => command(&mut store, next),
+            Some(next) => {
+                recordings.pump();
+                command(&mut store, &mut recordings, next);
+                recordings.pump();
+            }
             None => break,
         }
     }
@@ -222,7 +293,7 @@ impl StorageWorker {
                 match Store::open(&root) {
                     Ok(store) => {
                         if ready.send(Ok(())).is_ok() {
-                            serve(store, receiver, stopped);
+                            serve(store, root, receiver, stopped);
                         }
                     }
                     Err(error) => {
