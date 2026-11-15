@@ -18,11 +18,13 @@ mod incoming;
 mod info;
 mod outgoing;
 mod request_identity;
+mod stream_framing;
 mod telephone;
 mod transactions;
 pub use incoming::RejectReason;
 pub use outgoing::Outbound;
 use request_identity::RequestIdentity;
+pub use stream_framing::{SipStreamDecoder, StreamFramingError, StreamItem};
 pub use telephone::DtmfFormat;
 
 pub const MAX_MESSAGE: usize = 16384;
