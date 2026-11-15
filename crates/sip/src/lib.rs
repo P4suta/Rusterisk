@@ -14,6 +14,7 @@ mod info;
 mod media_direction;
 mod outgoing;
 mod peer_lifetime;
+mod registrar;
 mod request_identity;
 mod session_description;
 mod stream_framing;
@@ -711,20 +712,10 @@ impl Engine {
                     let endpoint = self.config.endpoints[index].clone();
                     if request.method == Method::Register {
                         let to = request.to_header()?.typed()?;
-                        let username = to
-                            .uri
-                            .auth
-                            .as_ref()
-                            .map(|auth| auth.user.as_str())
-                            .ok_or(SipError::InvalidPacket)?;
-                        let expected = self
-                            .config
-                            .auth
-                            .iter()
-                            .find(|auth| auth.name == endpoint.auth)
-                            .ok_or(SipError::InvalidPacket)?;
-                        if username != expected.username {
-                            self.render_response(&request, 403, "Forbidden", "", "")?
+                        if let Err(rejection) = registrar::address(&self.config, &endpoint, &to.uri)
+                        {
+                            let (status, reason) = rejection.response();
+                            self.render_response(&request, status, reason, "", "")?
                         } else {
                             let expires = request
                                 .expires_header()
