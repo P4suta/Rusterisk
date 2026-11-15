@@ -5,8 +5,8 @@ use std::net::SocketAddr;
 impl Engine {
     pub fn disconnected(&mut self, peer: SocketAddr) -> Output {
         let mut events = Vec::new();
-        self.contacts.retain(|endpoint, (current, _)| {
-            if *current != peer {
+        self.contacts.retain(|endpoint, contact| {
+            if contact.peer != peer {
                 return true;
             }
             events.push(SipEvent::EndpointContact {

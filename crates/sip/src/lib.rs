@@ -6,7 +6,7 @@ use rsipstack::sip::{
         untyped::ToTypedHeader,
     },
     services::DigestGenerator,
-    HeadersExt, Method, Request, SipMessage,
+    HeadersExt, Method, Request, SipMessage, Uri,
 };
 use rusterisk_config::{Codec, Config, Protocol};
 use rusterisk_core::ContactPresence;
@@ -426,6 +426,12 @@ pub struct PendingInvite {
     protocol: Protocol,
 }
 
+struct RegisteredContact {
+    uri: Uri,
+    peer: SocketAddr,
+    expires: u64,
+}
+
 pub struct Engine {
     config: Config,
     protocol: Protocol,
@@ -435,13 +441,20 @@ pub struct Engine {
     nonces: BTreeMap<String, Nonce>,
     cache: BTreeMap<RequestIdentity, Cached>,
     pending: BTreeMap<String, PendingInvite>,
-    contacts: BTreeMap<String, (SocketAddr, u64)>,
+    contacts: BTreeMap<String, RegisteredContact>,
     outgoing: BTreeMap<String, outgoing::Outgoing>,
     incoming: BTreeMap<String, incoming::Incoming>,
     transactions: transactions::Transactions,
 }
 
 impl Engine {
+    pub fn registered_peer(&self, endpoint: &str, now: u64) -> Option<SocketAddr> {
+        self.contacts
+            .get(endpoint)
+            .filter(|contact| contact.expires > now)
+            .map(|contact| contact.peer)
+    }
+
     pub fn new(config: Config, seed: [u8; 32]) -> Self {
         Self {
             config,
@@ -736,6 +749,7 @@ impl Engine {
                                 .map_err(|_| SipError::InvalidPacket)?
                                 .unwrap_or(300)
                                 .min(3600);
+                            let contact = request.contact_header()?.typed()?;
                             let extra = format!(
                                 "Contact: {}\r\nExpires: {expires}\r\n",
                                 request.contact_header()?.value()
@@ -747,9 +761,13 @@ impl Engine {
                                 self.contacts
                                     .insert(
                                         endpoint.name.clone(),
-                                        (peer, now.saturating_add(u64::from(expires) * 1000)),
+                                        RegisteredContact {
+                                            uri: contact.uri,
+                                            peer,
+                                            expires: now.saturating_add(u64::from(expires) * 1000),
+                                        },
                                     )
-                                    .is_none_or(|(_, expires)| expires <= now)
+                                    .is_none_or(|contact| contact.expires <= now)
                             };
                             if changed {
                                 events.push(SipEvent::EndpointContact {
@@ -863,8 +881,8 @@ impl Engine {
     }
 
     fn expire_contacts(&mut self, now: u64, events: &mut Vec<SipEvent>) {
-        self.contacts.retain(|endpoint, (_, expires)| {
-            if *expires > now {
+        self.contacts.retain(|endpoint, contact| {
+            if contact.expires > now {
                 return true;
             }
             events.push(SipEvent::EndpointContact {

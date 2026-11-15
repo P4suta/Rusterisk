@@ -470,8 +470,7 @@ impl Engine {
         let registered = self
             .contacts
             .get(&endpoint.name)
-            .filter(|(_, expires)| *expires > now)
-            .map(|(peer, _)| *peer);
+            .filter(|contact| contact.expires > now);
         let contact = self
             .config
             .aors
@@ -480,10 +479,10 @@ impl Engine {
             .find_map(|aor| aor.contact.as_deref());
         let uri = match (resolved_peer, registered, contact) {
             (Some(_), _, Some(contact)) | (None, None, Some(contact)) => Uri::try_from(contact)?,
-            (None, Some(peer), _) => Uri::try_from(format!("sip:{}@{peer}", endpoint.name))?,
+            (None, Some(contact), _) => contact.uri.clone(),
             (Some(_), _, None) | (None, None, None) => return Err(SipError::InvalidPacket),
         };
-        let peer = match resolved_peer.or(registered) {
+        let peer = match resolved_peer.or(registered.map(|contact| contact.peer)) {
             Some(peer) => peer,
             None => uri.host_with_port.to_string().parse::<SocketAddr>()?,
         };

@@ -8,7 +8,7 @@ use rsipstack::sip::{
 };
 use rusterisk_config::Config;
 use rusterisk_core::ContactPresence;
-use rusterisk_sip::{Engine, Output, SipError, SipEvent};
+use rusterisk_sip::{Engine, Outbound, Output, SipError, SipEvent};
 
 fn config() -> Result<Config, SipError> {
     Ok(Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:5060\n[auth]\ntype=auth\nusername=phone\npassword=password\n[dynamic]\ntype=aor\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=dynamic\nallow=ulaw\n", "", "")?)
@@ -20,10 +20,20 @@ fn register(
     now: u64,
     expires: u32,
 ) -> Result<(Output, String), SipError> {
+    register_contact(engine, serial, now, expires, "sip:phone@127.0.0.1:5061")
+}
+
+fn register_contact(
+    engine: &mut Engine,
+    serial: u32,
+    now: u64,
+    expires: u32,
+    contact: &str,
+) -> Result<(Output, String), SipError> {
     let uri = Uri::try_from("sip:localhost")?;
     let peer = "127.0.0.1:5061".parse()?;
     let packet = |sequence: u32, authorization: &str| {
-        format!("REGISTER {uri} SIP/2.0\r\nVia: SIP/2.0/UDP {peer};branch=z9hG4bK-register-{serial}-{sequence};rport\r\nFrom: <sip:phone@localhost>;tag=phone\r\nTo: <sip:phone@localhost>\r\nCall-ID: registration-{serial}\r\nCSeq: {sequence} REGISTER\r\nContact: <sip:phone@{peer}>\r\nExpires: {expires}\r\nMax-Forwards: 70\r\n{authorization}Content-Length: 0\r\n\r\n")
+        format!("REGISTER {uri} SIP/2.0\r\nVia: SIP/2.0/UDP {peer};branch=z9hG4bK-register-{serial}-{sequence};rport\r\nFrom: <sip:phone@localhost>;tag=phone\r\nTo: <sip:phone@localhost>\r\nCall-ID: registration-{serial}\r\nCSeq: {sequence} REGISTER\r\nContact: <{contact}>\r\nExpires: {expires}\r\nMax-Forwards: 70\r\n{authorization}Content-Length: 0\r\n\r\n")
     };
     let challenge = engine.receive(packet(1, "").as_bytes(), peer, now)?;
     assert!(challenge.events.is_empty());
@@ -95,5 +105,44 @@ fn unrelated_packets_cannot_discard_an_expiration_observation() -> Result<(), Si
     engine.receive(options.as_bytes(), "127.0.0.1:5061".parse()?, 1001)?;
     presence(&engine.tick(1001)?, ContactPresence::Absent);
     assert!(engine.tick(1002)?.events.is_empty());
+    Ok(())
+}
+
+#[test]
+fn registered_contact_targets_preserve_browser_identity_and_physical_routing(
+) -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    for (serial, contact) in [
+        (1, "sip:random-user@browser.invalid;transport=ws"),
+        (2, "sip:refreshed-user@replacement.invalid;transport=ws"),
+    ] {
+        register_contact(&mut engine, serial, u64::from(serial), 1, contact)?;
+        assert_eq!(
+            engine.registered_peer("phone", 3),
+            Some("127.0.0.1:5061".parse()?)
+        );
+        let output = engine.originate(
+            Outbound {
+                id: format!("browser-call-{serial}"),
+                generation: u64::from(serial),
+                endpoint: "phone".into(),
+                caller: "100".into(),
+                local_rtp: "127.0.0.1:10000".parse()?,
+                timeout_ms: None,
+            },
+            3,
+        )?;
+        let packet = &output.datagrams[0];
+        assert_eq!(packet.peer, "127.0.0.1:5061".parse()?);
+        let request = match SipMessage::try_from(packet.bytes.as_slice())? {
+            SipMessage::Request(request) => request,
+            SipMessage::Response(_) => return Err(SipError::InvalidPacket),
+        };
+        assert_eq!(request.uri, Uri::try_from(contact)?);
+    }
+    assert_eq!(engine.registered_peer("phone", 1003), None);
+    register_contact(&mut engine, 3, 2000, 1, "sip:last@browser.invalid")?;
+    engine.disconnected("127.0.0.1:5061".parse()?);
+    assert_eq!(engine.registered_peer("phone", 2002), None);
     Ok(())
 }
