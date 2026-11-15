@@ -1,4 +1,6 @@
 use std::time::Duration;
+mod interop;
+pub use interop::{published_address, Interop};
 
 pub struct Step {
     pub arguments: Vec<String>,
@@ -12,12 +14,16 @@ pub struct ReferenceBuild {
 #[derive(Debug)]
 pub enum ReferenceError {
     InvalidIdentity,
+    InvalidAddress,
+    InvalidConfigPath,
 }
 
 impl std::fmt::Display for ReferenceError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidIdentity => formatter.write_str("invalid reference build identity"),
+            Self::InvalidAddress => formatter.write_str("invalid local reference address"),
+            Self::InvalidConfigPath => formatter.write_str("invalid reference configuration path"),
         }
     }
 }
@@ -31,15 +37,18 @@ fn step(arguments: &[&str], seconds: u64) -> Step {
     }
 }
 
+fn valid_identity(identity: &str) -> bool {
+    !identity.is_empty()
+        && identity.len() <= 64
+        && identity
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && !identity.starts_with('-')
+}
+
 impl ReferenceBuild {
     pub fn new(identity: &str) -> Result<Self, ReferenceError> {
-        if identity.is_empty()
-            || identity.len() > 64
-            || !identity
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            || identity.starts_with('-')
-        {
+        if !valid_identity(identity) {
             return Err(ReferenceError::InvalidIdentity);
         }
         Ok(Self {
