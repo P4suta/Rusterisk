@@ -29,3 +29,9 @@ interop *arguments="":
 
 core-proofs *arguments="--dry-run":
     cargo run --locked --target-dir target/xtask --package xtask -- core-proofs {{ arguments }}
+
+core-miri *arguments="--dry-run":
+    cargo run --locked --target-dir target/xtask --package xtask -- core-miri {{ arguments }}
+
+core-mutation *arguments="--dry-run":
+    cargo run --locked --target-dir target/xtask --package xtask -- core-mutation {{ arguments }}
