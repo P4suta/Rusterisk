@@ -32,3 +32,10 @@ item = "PendingMedia"
 lint = "clippy::large_enum_variant"
 adr = "docs/adr/own-webrtc-media-by-call-generation.md"
 rationale = "Keep pending media inline and owned by the call generation."
+
+[[exceptions]]
+path = "crates/server/src/encryption/sip_domain.rs"
+item = "sip_client_configuration"
+lint = "clippy::disallowed_types"
+adr = "docs/adr/verify-sip-domains-with-an-immutable-library-callback.md"
+rationale = "Share only immutable SIP certificate trust through the fixed verifier API."

@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_rustls::server::TlsStream;
 mod client;
+mod sip_domain;
 pub(crate) use client::TlsClientContext;
 #[cfg(test)]
 mod client_tests;

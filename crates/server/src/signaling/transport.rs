@@ -253,7 +253,7 @@ impl Network {
                             .ok_or(ControlError::Invalid("Encryption configuration missing"))?,
                     )
                     .await?,
-                    client: TlsClientContext::load(transport.ca_list_file.as_deref())?,
+                    client: TlsClientContext::load_sip(transport.ca_list_file.as_deref())?,
                 },
                 Protocol::Ws => ListenerSocket::WebSocket {
                     address: config.http.bind,

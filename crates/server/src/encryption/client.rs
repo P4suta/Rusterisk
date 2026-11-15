@@ -66,7 +66,7 @@ impl TlsClientContext {
         self.0.clone()
     }
 
-    pub(crate) fn load(ca_list_file: Option<&str>) -> Result<Self, ControlError> {
+    fn roots(ca_list_file: Option<&str>) -> Result<RootCertStore, ControlError> {
         let mut roots = RootCertStore::empty();
         match ca_list_file {
             Some(path) => {
@@ -95,10 +95,22 @@ impl TlsClientContext {
                 "No certificate authorities configured",
             ));
         }
+        Ok(roots)
+    }
+
+    pub(crate) fn load(ca_list_file: Option<&str>) -> Result<Self, ControlError> {
+        let roots = Self::roots(ca_list_file)?;
         let config = ClientConfig::builder()
             .with_root_certificates(roots)
             .with_no_client_auth();
         Ok(Self(client_connector(config)))
+    }
+
+    pub(crate) fn load_sip(ca_list_file: Option<&str>) -> Result<Self, ControlError> {
+        let roots = Self::roots(ca_list_file)?;
+        Ok(Self(client_connector(
+            super::sip_domain::sip_client_configuration(roots),
+        )))
     }
 
     pub(crate) async fn connect(

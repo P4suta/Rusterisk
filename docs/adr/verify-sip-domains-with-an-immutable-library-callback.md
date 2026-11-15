@@ -19,6 +19,7 @@ Delegate certificate paths, validity, key usage, and handshake signatures to off
 Match the original URI host with complete, case-insensitive identities.
 Normalize internationalized names before comparison.
 Accept numeric endpoints through library address verification.
+Decline the optional CN fallback.
 Construct the callback only through the registered `::std::sync::Arc::<crate::encryption::sip_domain::SipDomainVerifier>::new(verifier)` in `sip_client_configuration`.
 Keep web clients on their standard verifier.
 
