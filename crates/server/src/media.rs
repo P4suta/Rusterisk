@@ -1,13 +1,15 @@
 use crate::rtp::{LinkStats, RtpChannels, RtpDigitCommand, RtpLink, RtpSession, SocketPair};
-use crate::storage::{RecordingSink, WorkerError};
+use crate::storage::{PlaybackSource, RecordingSink, WorkerError};
 use crate::CallKey;
 use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone, MediaTaskToken};
-use rusterisk_media::{Frame, Gate, MediaError, Mixer, TelephoneFormat};
+use rusterisk_media::{AudioTarget, Frame, Gate, MediaError, Mixer, TelephoneFormat};
 use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
+mod playback;
 mod recording;
+use playback::Playbacks;
 use recording::Recordings;
 pub use recording::{RecordingEnd, RecordingTarget};
 
@@ -30,6 +32,16 @@ pub enum MediaNotice {
 }
 
 enum Command {
+    Play {
+        token: MediaTaskToken,
+        target: AudioTarget<CallKey>,
+        source: PlaybackSource,
+        completed: oneshot::Sender<Result<(), MediaError>>,
+        reply: oneshot::Sender<Result<(), MediaError>>,
+    },
+    EndPlayback {
+        token: MediaTaskToken,
+    },
     Record {
         token: MediaTaskToken,
         target: RecordingTarget,
@@ -71,6 +83,36 @@ pub struct MediaPort {
 }
 
 impl MediaPort {
+    pub async fn play(
+        &self,
+        target: AudioTarget<CallKey>,
+        token: MediaTaskToken,
+        source: PlaybackSource,
+    ) -> Result<oneshot::Receiver<Result<(), MediaError>>, MediaError> {
+        let (completed, completion) = oneshot::channel();
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .try_send(Command::Play {
+                token,
+                target,
+                source,
+                completed,
+                reply,
+            })
+            .map_err(|_| MediaError::Capacity)?;
+        tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+            .map_err(|error| MediaError::Transport(error.to_string()))??;
+        Ok(completion)
+    }
+
+    pub fn stop_playback(&self, token: MediaTaskToken) -> Result<(), MediaError> {
+        self.commands
+            .try_send(Command::EndPlayback { token })
+            .map_err(|_| MediaError::Capacity)
+    }
+
     pub async fn record(
         &self,
         target: RecordingTarget,
@@ -199,6 +241,7 @@ pub struct MediaHub {
     workers: JoinSet<(CallKey, Result<LinkStats, MediaError>)>,
     dropped: u64,
     recordings: Recordings,
+    playbacks: Playbacks,
 }
 
 impl MediaHub {
@@ -216,6 +259,7 @@ impl MediaHub {
                 workers: JoinSet::new(),
                 dropped: 0,
                 recordings: Recordings::new(),
+                playbacks: Playbacks::new(),
             },
             events,
         )
@@ -229,6 +273,7 @@ impl MediaHub {
 
     fn remove(&mut self, key: &CallKey) -> Result<(), MediaError> {
         self.recordings.release(key);
+        self.playbacks.release(key);
         if let Some(port) = self.ports.remove(key) {
             port.stop.send_replace(true);
             if !self.mixer.remove(key) {
@@ -288,6 +333,30 @@ impl MediaHub {
 
     fn command(&mut self, command: Command) -> Result<(), MediaError> {
         match command {
+            Command::Play {
+                token,
+                target,
+                source,
+                completed,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let valid = match &target {
+                        AudioTarget::Channel(key) => self.ports.contains_key(key),
+                        AudioTarget::Bridge(_) => true,
+                    };
+                    let result = if valid {
+                        self.playbacks.begin(token, target, source, completed)
+                    } else {
+                        Err(MediaError::UnknownStream)
+                    };
+                    let admitted = result.is_ok();
+                    if reply.send(result).is_err() && admitted {
+                        self.playbacks.end(token, Ok(()));
+                    }
+                }
+            }
+            Command::EndPlayback { token } => self.playbacks.end(token, Ok(())),
             Command::Record {
                 token,
                 target,
@@ -433,7 +502,8 @@ impl MediaHub {
                 }
             }
         }
-        let audio = self.mixer.tick_with_recordings()?;
+        let playback = self.playbacks.tick()?;
+        let audio = self.mixer.tick_with_playback(&playback)?;
         self.recordings.bridges(&audio.bridges)?;
         for (key, frame) in audio.channels {
             let port = self.ports.get(&key).ok_or(MediaError::UnknownStream)?;
@@ -479,6 +549,7 @@ impl MediaHub {
     }
 
     async fn close(&mut self) -> Result<(), MediaError> {
+        self.playbacks.close();
         for (_, port) in std::mem::take(&mut self.ports) {
             port.stop.send_replace(true);
         }
