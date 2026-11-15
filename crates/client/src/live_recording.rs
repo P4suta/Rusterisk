@@ -9,6 +9,44 @@ struct Creation<'a> {
 }
 
 impl Client {
+    pub async fn live_recording(&self, name: &api::ChannelId) -> Result<api::LiveRecording, Error> {
+        self.request(
+            "recordings.getLive",
+            &[("recordingName", name.as_str())],
+            &[],
+        )
+        .await
+    }
+
+    pub async fn cancel_recording(&self, name: &api::ChannelId) -> Result<(), Error> {
+        self.recording_control("recordings.cancel", name).await
+    }
+
+    pub async fn stop_recording(&self, name: &api::ChannelId) -> Result<(), Error> {
+        self.recording_control("recordings.stop", name).await
+    }
+
+    pub async fn pause_recording(&self, name: &api::ChannelId) -> Result<(), Error> {
+        self.recording_control("recordings.pause", name).await
+    }
+
+    pub async fn resume_recording(&self, name: &api::ChannelId) -> Result<(), Error> {
+        self.recording_control("recordings.unpause", name).await
+    }
+
+    pub async fn mute_recording(&self, name: &api::ChannelId) -> Result<(), Error> {
+        self.recording_control("recordings.mute", name).await
+    }
+
+    pub async fn unmute_recording(&self, name: &api::ChannelId) -> Result<(), Error> {
+        self.recording_control("recordings.unmute", name).await
+    }
+
+    async fn recording_control(&self, operation: &str, name: &api::ChannelId) -> Result<(), Error> {
+        self.request(operation, &[("recordingName", name.as_str())], &[])
+            .await
+    }
+
     pub async fn record_channel(
         &self,
         channel: &api::ChannelId,
