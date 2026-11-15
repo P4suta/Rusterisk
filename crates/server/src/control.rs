@@ -15,6 +15,7 @@ mod dial;
 mod dialplan;
 mod endpoints;
 mod external_media;
+mod initial_variables;
 mod playback;
 mod recording;
 mod stasis;
@@ -1015,6 +1016,37 @@ impl Control {
         timestamp: &str,
         now_ms: u64,
     ) -> Result<Outcome, ControlError> {
+        self.apply_with_variables(action, BTreeMap::new(), timestamp, now_ms)
+    }
+
+    pub fn apply_with_variables(
+        &mut self,
+        action: Action,
+        variables: BTreeMap<String, String>,
+        timestamp: &str,
+        now_ms: u64,
+    ) -> Result<Outcome, ControlError> {
+        if !variables.is_empty()
+            && !matches!(
+                &action,
+                Action::Originate { .. }
+                    | Action::ExternalRtp { .. }
+                    | Action::ExternalAudioSocket { .. }
+                    | Action::ExternalWebSocket { .. }
+                    | Action::ExternalWebSocketClient { .. }
+            )
+        {
+            return Err(ControlError::Unsupported);
+        }
+        let caller = if let Action::Originate { caller, .. } = &action {
+            Caller {
+                name: String::new(),
+                number: caller.clone(),
+            }
+        } else {
+            Caller::default()
+        };
+        let initial = initial_variables::InitialVariables::new(variables, caller)?;
         match action {
             Action::ExternalWebSocketClient {
                 id,
@@ -1042,10 +1074,13 @@ impl Control {
                     auto_answer,
                 };
                 self.external_media(
-                    id,
-                    app,
-                    external_media::Target::WebSocketClient { client, options },
-                    data,
+                    external_media::Creation {
+                        id,
+                        app,
+                        target: external_media::Target::WebSocketClient { client, options },
+                        data,
+                        initial,
+                    },
                     timestamp,
                     now_ms,
                 )
@@ -1060,19 +1095,24 @@ impl Control {
                 auto_answer,
                 data,
             } => self.external_media(
-                id.clone(),
-                app,
-                external_media::Target::WebSocket(crate::media_websocket::MediaLinkOptions {
-                    connection_id,
-                    channel_id: id,
-                    channel: String::new(),
-                    format,
-                    control_format: self.media_control_format(control_format),
-                    direction,
-                    auto_answer,
-                    channel_variables: BTreeMap::new(),
-                }),
-                data,
+                external_media::Creation {
+                    id: id.clone(),
+                    app,
+                    target: external_media::Target::WebSocket(
+                        crate::media_websocket::MediaLinkOptions {
+                            connection_id,
+                            channel_id: id,
+                            channel: String::new(),
+                            format,
+                            control_format: self.media_control_format(control_format),
+                            direction,
+                            auto_answer,
+                            channel_variables: BTreeMap::new(),
+                        },
+                    ),
+                    data,
+                    initial,
+                },
                 timestamp,
                 now_ms,
             ),
@@ -1082,20 +1122,26 @@ impl Control {
                 target,
                 data,
             } => self.external_media(
-                id,
-                app,
-                external_media::Target::Rtp(target),
-                data,
+                external_media::Creation {
+                    id,
+                    app,
+                    target: external_media::Target::Rtp(target),
+                    data,
+                    initial,
+                },
                 timestamp,
                 now_ms,
             ),
             Action::ExternalAudioSocket { id, app, target } => self.external_media(
-                id,
-                app,
-                external_media::Target::AudioSocket(target),
-                uuid::Uuid::from_bytes(target.session())
-                    .hyphenated()
-                    .to_string(),
+                external_media::Creation {
+                    id,
+                    app,
+                    target: external_media::Target::AudioSocket(target),
+                    data: uuid::Uuid::from_bytes(target.session())
+                        .hyphenated()
+                        .to_string(),
+                    initial,
+                },
                 timestamp,
                 now_ms,
             ),
@@ -1254,10 +1300,7 @@ impl Control {
                     name: format!("{endpoint}-{generation:08x}"),
                     state: ChannelState::Down,
                     accountcode: String::new(),
-                    caller: Caller {
-                        name: String::new(),
-                        number: caller.clone(),
-                    },
+                    caller: initial.caller,
                     connected: Caller::default(),
                     dialplan: Dialplan {
                         context: "default".into(),
@@ -1291,7 +1334,7 @@ impl Control {
                         generation,
                     },
                     endpoint,
-                    caller,
+                    caller: snapshot.caller.number.clone(),
                     timeout: Some(timeout),
                 });
                 self.channels.insert(
@@ -1303,7 +1346,7 @@ impl Control {
                         snapshot,
                         arguments: args,
                         deadline: Some(deadline),
-                        variables: BTreeMap::new(),
+                        variables: initial.values,
                         dtmf: None,
                         dialplan: Some(DialplanFrame::dormant(self.dialplan_program.clone())),
                         media_tasks: MediaTasks::new(generation),
@@ -1615,34 +1658,8 @@ impl Control {
             .get_mut(id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
         access.check(entry.call.stasis())?;
-        let mut caller = entry.snapshot.caller.clone();
-        match field {
-            CallerField::Name => caller.name = value.into(),
-            CallerField::Number => caller.number = value.into(),
-            CallerField::All => {
-                caller = if let Some((name, number)) = value.split_once('<') {
-                    let number = number
-                        .trim()
-                        .strip_suffix('>')
-                        .ok_or(ControlError::Invalid("Invalid caller identification"))?;
-                    Caller {
-                        name: name.trim().trim_matches('"').into(),
-                        number: number.trim().into(),
-                    }
-                } else {
-                    Caller {
-                        name: String::new(),
-                        number: value.trim().into(),
-                    }
-                };
-            }
-        }
-        if caller.name.len() > 128 || caller.number.len() > 128 {
-            return Err(ControlError::Invalid(
-                "Caller identification exceeds 128 bytes",
-            ));
-        }
-        entry.snapshot.caller = caller;
+        entry.snapshot.caller =
+            initial_variables::caller_value(entry.snapshot.caller.clone(), field, value)?;
         let mut outcome = Outcome::empty();
         outcome.optional_event(
             application_name(&self.applications, entry.call.stasis())?,

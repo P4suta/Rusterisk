@@ -17,6 +17,14 @@ pub(super) enum Target {
     },
 }
 
+pub(super) struct Creation {
+    pub id: ChannelId,
+    pub app: String,
+    pub target: Target,
+    pub data: String,
+    pub initial: super::initial_variables::InitialVariables,
+}
+
 impl Control {
     pub(super) fn media_control_format(
         &self,
@@ -34,13 +42,17 @@ impl Control {
 
     pub(super) fn external_media(
         &mut self,
-        id: ChannelId,
-        app: String,
-        target: Target,
-        data: String,
+        creation: Creation,
         timestamp: &str,
         now: u64,
     ) -> Result<Outcome, ControlError> {
+        let Creation {
+            id,
+            app,
+            target,
+            data,
+            initial,
+        } = creation;
         if matches!(&target, Target::WebSocketClient { options, .. } if options.format == rusterisk_api::MediaFormat::Opus)
         {
             return Err(ControlError::Unsupported);
@@ -81,7 +93,7 @@ impl Control {
             id: id.clone(),
             generation,
         };
-        let mut variables = BTreeMap::new();
+        let mut variables = initial.values;
         let mut websocket = None;
         let (kind, name, effect) = match target {
             Target::WebSocketClient { client, options } => {
@@ -141,7 +153,7 @@ impl Control {
             name,
             state: ChannelState::Down,
             accountcode: String::new(),
-            caller: Caller::default(),
+            caller: initial.caller,
             connected: Caller::default(),
             dialplan: Dialplan {
                 context: "default".into(),
