@@ -235,6 +235,7 @@ pub struct Transport {
     pub bind: SocketAddr,
     pub external_media_address: Option<IpAddr>,
     pub tls: Option<TlsFiles>,
+    pub ca_list_file: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -568,6 +569,7 @@ impl Config {
                         "external_media_address",
                         "cert_file",
                         "priv_key_file",
+                        "ca_list_file",
                     ],
                 )?;
                 let protocol = match section.required(file, "protocol")? {
@@ -590,8 +592,17 @@ impl Config {
                         private_key: section.required(file, "priv_key_file")?.into(),
                     })
                 } else {
+                    for key in ["cert_file", "priv_key_file", "ca_list_file"] {
+                        if section.value(key).is_some() {
+                            return Err(ConfigError::at(file, section.position(key), format!("{key} requires an encrypted transport")));
+                        }
+                    }
                     None
                 };
+                let ca_list_file = section.value("ca_list_file").map(str::to_owned);
+                if ca_list_file.as_ref().is_some_and(String::is_empty) {
+                    return Err(ConfigError::at(file, section.position("ca_list_file"), "empty certificate authority list path"));
+                }
                 let bind = section
                     .required(file, "bind")?
                     .parse()
@@ -610,6 +621,7 @@ impl Config {
                     bind,
                     external_media_address,
                     tls,
+                    ca_list_file,
                 });
             }
             "auth" => {
