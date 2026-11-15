@@ -16,6 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::net::{TcpListener, UdpSocket};
+mod authentication;
 mod capacity;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {

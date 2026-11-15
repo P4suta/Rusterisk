@@ -1,12 +1,6 @@
 use crate::{Datagram, DialogReply, Engine, Output, Session, SessionSecurity, SipError, SipEvent};
 use rsipstack::sip::{
-    headers::{
-        auth::{Algorithm, AuthQop, Qop, Scheme},
-        typed::{Authorization, WwwAuthenticate},
-        untyped::ToTypedHeader,
-    },
-    services::DigestGenerator,
-    Header, HeadersExt, Method, Request, Response, SipMessage, Uri,
+    headers::untyped::ToTypedHeader, Header, HeadersExt, Method, Request, Response, SipMessage, Uri,
 };
 use rusterisk_config::{Auth, Codec};
 use std::net::SocketAddr;
@@ -164,97 +158,46 @@ fn authenticate(
     } else {
         "WWW-Authenticate"
     };
-    let Some(header) = response
-        .headers
-        .iter()
-        .find(|header| header.name().eq_ignore_ascii_case(name))
-    else {
-        return Ok(None);
-    };
-    let challenge = match WwwAuthenticate::parse(header.value()) {
-        Ok(challenge) => challenge,
-        Err(_) => return Ok(None),
-    };
-    if challenge.scheme != Scheme::Digest
-        || challenge.nonce.len() > 256
-        || challenge.realm.len() > 256
-        || challenge
-            .opaque
-            .as_ref()
-            .is_some_and(|opaque| opaque.len() > 256)
-    {
-        return Ok(None);
-    }
-    let algorithm = match challenge.algorithm.unwrap_or(Algorithm::Md5) {
-        Algorithm::Md5 => Algorithm::Md5,
-        Algorithm::Md5Sess => Algorithm::Md5Sess,
-        Algorithm::Sha256 | Algorithm::Sha256Sess | Algorithm::Sha512 | Algorithm::Sha512Sess => {
-            return Ok(None);
-        }
-    };
     let authorization_name = if proxy {
         "Proxy-Authorization"
     } else {
         "Authorization"
     };
-    if let Some(previous) = dialog
+    let previous = dialog
         .invite
         .headers
         .iter()
         .find(|header| header.name().eq_ignore_ascii_case(authorization_name))
-    {
-        let previous = Authorization::parse(previous.value())?;
-        if challenge.stale.as_deref() != Some("true") || previous.nonce == challenge.nonce {
-            return Ok(None);
+        .map(|header| header.value());
+    let selected = match crate::digest::Header::choose_challenge(
+        response
+            .headers
+            .iter()
+            .filter(|header| header.name().eq_ignore_ascii_case(name))
+            .map(|header| header.value()),
+        &dialog.credentials,
+        previous,
+    ) {
+        Ok(Some(selected)) => selected,
+        Ok(None)
+        | Err(crate::digest::DigestError::Invalid | crate::digest::DigestError::Unsupported) => {
+            return Ok(None)
         }
-    }
-    let Some(credentials) = dialog
-        .credentials
-        .iter()
-        .find(|auth| auth.realm == challenge.realm)
-        .or_else(|| {
-            dialog
-                .credentials
-                .iter()
-                .find(|auth| auth.matches_outbound_realm(&challenge.realm))
-        })
-    else {
-        return Ok(None);
     };
-    let qop = match challenge.qop {
-        Some(Qop::Auth) => {
-            let mut bytes = [0; 16];
-            getrandom::fill(&mut bytes).map_err(|_| SipError::Entropy)?;
-            Some(AuthQop::Auth {
-                cnonce: format!("{:032x}", u128::from_be_bytes(bytes)),
-                nc: 1,
-            })
+    let mut entropy = [0; 16];
+    getrandom::fill(&mut entropy).map_err(|_| SipError::Entropy)?;
+    let nonce = format!("{:032x}", u128::from_be_bytes(entropy));
+    let authorization = match selected.authorization(
+        "INVITE",
+        &dialog.invite.uri.to_string(),
+        &dialog.invite.body,
+        &nonce,
+        1,
+    ) {
+        Ok(authorization) => authorization,
+        Err(crate::digest::DigestError::Invalid | crate::digest::DigestError::Unsupported) => {
+            return Ok(None)
         }
-        Some(Qop::AuthInt) => return Ok(None),
-        None if algorithm == Algorithm::Md5Sess => return Ok(None),
-        None => None,
-    };
-    let digest = DigestGenerator {
-        username: &credentials.username,
-        password: credentials.password.expose(),
-        nonce: &challenge.nonce,
-        uri: &dialog.invite.uri,
-        realm: &challenge.realm,
-        method: &Method::Invite,
-        qop: qop.as_ref(),
-        algorithm,
-    }
-    .compute();
-    let authorization = Authorization {
-        scheme: Scheme::Digest,
-        username: credentials.username.clone(),
-        realm: challenge.realm,
-        nonce: challenge.nonce,
-        uri: dialog.invite.uri.clone(),
-        response: digest,
-        algorithm: Some(algorithm),
-        opaque: challenge.opaque,
-        qop,
     };
     let mut invite = dialog.invite.clone();
     let sequence = dialog
@@ -280,10 +223,12 @@ fn authenticate(
         .replace(format!("{sequence} INVITE"));
     let header = if proxy {
         Header::ProxyAuthorization(rsipstack::sip::headers::untyped::ProxyAuthorization::new(
-            authorization.to_string(),
+            authorization,
         ))
     } else {
-        authorization.into()
+        Header::Authorization(rsipstack::sip::headers::untyped::Authorization::new(
+            authorization,
+        ))
     };
     invite.headers.unique_push(header);
     let bytes = invite.to_string().into_bytes();

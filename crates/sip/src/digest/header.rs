@@ -262,5 +262,6 @@ fn value(source: &str) -> Result<(AttributeValue, &str), DigestError> {
     Err(DigestError::Invalid)
 }
 
+mod challenge;
 #[cfg(test)]
 mod tests;

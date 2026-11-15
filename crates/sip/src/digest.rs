@@ -5,6 +5,8 @@ use std::num::NonZeroU32;
 use subtle::ConstantTimeEq;
 mod header;
 pub(crate) use header::Header;
+#[cfg(test)]
+mod challenge_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DigestError {
