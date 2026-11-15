@@ -1531,6 +1531,7 @@ impl Control {
                 timestamp,
                 EventKind::ChannelHold {
                     channel: entry.snapshot.clone(),
+                    musicclass: Some("N/A".into()),
                 },
             ),
             MediaOperation::Unhold => outcome.optional_event(

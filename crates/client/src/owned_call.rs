@@ -666,7 +666,7 @@ impl Calls {
             | api::EventKind::ChannelEnteredBridge { channel, .. }
             | api::EventKind::ChannelLeftBridge { channel, .. }
             | api::EventKind::ChannelDtmfReceived { channel, .. }
-            | api::EventKind::ChannelHold { channel }
+            | api::EventKind::ChannelHold { channel, .. }
             | api::EventKind::ChannelUnhold { channel }
             | api::EventKind::ChannelUserevent { channel, .. } => (channel, None, None),
             api::EventKind::BridgeCreated { .. }

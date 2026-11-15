@@ -1,6 +1,18 @@
 use rusterisk_api::{openapi, swagger, ChannelId, Event, EventKind, OPERATIONS};
 
 #[test]
+fn hold_events_describe_the_optional_requested_music_class(
+) -> Result<(), rusterisk_api::SwaggerError> {
+    let models = swagger("events")?;
+    let hold = &models["models"]["ChannelHold"];
+    assert_eq!(hold["properties"]["musicclass"]["type"], "string");
+    assert!(!hold["required"]
+        .as_array()
+        .is_some_and(|required| required.iter().any(|name| name == "musicclass")));
+    Ok(())
+}
+
+#[test]
 fn stored_audio_descriptions_match_unencoded_wave_response_bytes(
 ) -> Result<(), rusterisk_api::SwaggerError> {
     let document = openapi();

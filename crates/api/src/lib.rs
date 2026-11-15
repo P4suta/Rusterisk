@@ -277,6 +277,8 @@ pub enum EventKind {
     },
     ChannelHold {
         channel: Channel,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        musicclass: Option<String>,
     },
     ChannelUnhold {
         channel: Channel,
