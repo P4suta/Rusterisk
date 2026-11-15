@@ -322,6 +322,8 @@ struct Ending {
     next: u64,
 }
 
+const MAX_REPEATED_REPORTS: usize = 5;
+
 pub struct TelephoneSender {
     payload_type: u8,
     rate: u32,
@@ -362,7 +364,7 @@ impl TelephoneSender {
             events: format.events,
             source,
             active: None,
-            endings: Vec::with_capacity(2),
+            endings: Vec::with_capacity(MAX_REPEATED_REPORTS),
         })
     }
 
@@ -422,8 +424,26 @@ impl TelephoneSender {
         .packet(self.payload_type, timestamp, marker, payload)
     }
 
+    fn repeat_report(
+        &mut self,
+        payload: [u8; 4],
+        timestamp: u32,
+        next: u64,
+    ) -> Result<(), MediaError> {
+        if self.endings.len() >= MAX_REPEATED_REPORTS {
+            return Err(MediaError::Capacity);
+        }
+        self.endings.push(Ending {
+            payload,
+            timestamp,
+            remaining: 2,
+            next,
+        });
+        Ok(())
+    }
+
     pub fn poll(&mut self, now: u64, audio: &mut RtpSender) -> Result<Vec<RtpPacket>, MediaError> {
-        let mut packets = Vec::with_capacity(4);
+        let mut packets = Vec::with_capacity(MAX_REPEATED_REPORTS);
         let mut index = 0;
         while index < self.endings.len() {
             if now < self.endings[index].next {
@@ -455,16 +475,13 @@ impl TelephoneSender {
             .min(u64::from(active.tone.duration_ms));
         let ticks = (elapsed * u64::from(self.rate) / 1000) as u32;
         let segment = ticks.saturating_sub(1) / u32::from(u16::MAX) * u32::from(u16::MAX);
-        if segment != active.segment {
+        while active.segment < segment {
             let payload = TelephoneEvent::new(active.tone.digit, false, 10, u16::MAX)?.encode();
-            packets.push(self.packet(
-                audio,
-                active.timestamp.wrapping_add(active.segment),
-                active.first,
-                &payload,
-            )?);
+            let timestamp = active.timestamp.wrapping_add(active.segment);
+            packets.push(self.packet(audio, timestamp, active.first, &payload)?);
+            self.repeat_report(payload, timestamp, next)?;
             active.first = false;
-            active.segment = segment;
+            active.segment += u32::from(u16::MAX);
         }
         let ended = elapsed == u64::from(active.tone.duration_ms);
         let payload =
@@ -472,15 +489,7 @@ impl TelephoneSender {
         let timestamp = active.timestamp.wrapping_add(segment);
         packets.push(self.packet(audio, timestamp, active.first, &payload)?);
         if ended {
-            if self.endings.len() >= 2 {
-                return Err(MediaError::Capacity);
-            }
-            self.endings.push(Ending {
-                payload,
-                timestamp,
-                remaining: 2,
-                next,
-            });
+            self.repeat_report(payload, timestamp, next)?;
         } else {
             active.next = next;
             active.first = false;
