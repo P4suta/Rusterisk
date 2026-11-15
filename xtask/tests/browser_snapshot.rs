@@ -4,6 +4,9 @@ use std::{
 };
 use xtask::browser::SourceSnapshot;
 
+#[path = "browser_snapshot/vendor.rs"]
+mod vendor;
+
 fn write(root: &Path, path: &str, bytes: &[u8]) -> Result<(), std::io::Error> {
     let path = root.join(path);
     std::fs::create_dir_all(
@@ -11,6 +14,42 @@ fn write(root: &Path, path: &str, bytes: &[u8]) -> Result<(), std::io::Error> {
             .ok_or_else(|| std::io::Error::other("missing fixture parent"))?,
     )?;
     std::fs::write(path, bytes)
+}
+
+fn project(root: &Path) -> Result<(), std::io::Error> {
+    write(root, "Cargo.toml", b"[workspace]\nmembers=['xtask']\n")?;
+    for path in [
+        "Cargo.lock",
+        "xtask/Cargo.toml",
+        "xtask/src/lib.rs",
+        "xtask/tests/contract.rs",
+        "xtask/fuzz/Cargo.toml",
+        "xtask/fuzz/Cargo.lock",
+        "xtask/fuzz/src/targets.rs",
+        "xtask/examples/example.rs",
+    ] {
+        write(root, path, b"fixture")?;
+    }
+    for path in [
+        "package.json",
+        "package-lock.json",
+        "tsconfig.json",
+        "eslint.config.mjs",
+        "biome.json",
+        "playwright.config.ts",
+        "index.html",
+        "style.css",
+        "src/main.ts",
+        "tests/call.spec.ts",
+        "config/http.conf",
+        "config/ari.conf",
+        "config/pjsip.conf",
+        "config/rtp.conf",
+        "config/extensions.conf",
+    ] {
+        write(root, &format!("examples/browser/{path}"), b"fixture")?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -27,38 +66,7 @@ fn browser_snapshot_copies_owned_inputs_and_refuses_changed_sources_and_test_add
     std::fs::create_dir(&directory)?;
     let result = (|| {
         let root = directory.join("root");
-        write(&root, "Cargo.toml", b"[workspace]\nmembers=['xtask']\n")?;
-        for path in [
-            "Cargo.lock",
-            "xtask/Cargo.toml",
-            "xtask/src/lib.rs",
-            "xtask/tests/contract.rs",
-            "xtask/fuzz/Cargo.toml",
-            "xtask/fuzz/Cargo.lock",
-            "xtask/fuzz/src/targets.rs",
-            "xtask/examples/example.rs",
-        ] {
-            write(&root, path, b"fixture")?;
-        }
-        for path in [
-            "package.json",
-            "package-lock.json",
-            "tsconfig.json",
-            "eslint.config.mjs",
-            "biome.json",
-            "playwright.config.ts",
-            "index.html",
-            "style.css",
-            "src/main.ts",
-            "tests/call.spec.ts",
-            "config/http.conf",
-            "config/ari.conf",
-            "config/pjsip.conf",
-            "config/rtp.conf",
-            "config/extensions.conf",
-        ] {
-            write(&root, &format!("examples/browser/{path}"), b"fixture")?;
-        }
+        project(&root)?;
         let source = directory.join("source");
         let state = directory.join("state");
         let snapshot = SourceSnapshot::read(&root).map_err(std::io::Error::other)?;

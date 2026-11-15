@@ -56,6 +56,12 @@ pub struct SourceSnapshot {
     files: Vec<File>,
 }
 
+#[derive(Clone, Copy)]
+enum FileBounds {
+    Project,
+    Vendor,
+}
+
 fn directory(path: &Path) -> Result<(), SourceError> {
     let kind = std::fs::symlink_metadata(path)?.file_type();
     if !kind.is_dir() || kind.is_symlink() {
@@ -64,16 +70,16 @@ fn directory(path: &Path) -> Result<(), SourceError> {
     Ok(())
 }
 
-fn read(path: &Path) -> Result<Vec<u8>, SourceError> {
+fn read(path: &Path, limit: usize) -> Result<Vec<u8>, SourceError> {
     let kind = std::fs::symlink_metadata(path)?.file_type();
     if !kind.is_file() || kind.is_symlink() {
         return Err(SourceError::Invalid);
     }
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
-        .take(1024 * 1024 + 1)
+        .take(limit as u64 + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > 1024 * 1024 {
+    if bytes.len() > limit {
         return Err(SourceError::Invalid);
     }
     Ok(bytes)
@@ -107,11 +113,32 @@ fn parents(root: &Path, relative: &Path) -> Result<(), SourceError> {
 }
 
 fn add(path: &Path, relative: &Path, files: &mut Vec<File>) -> Result<(), SourceError> {
+    add_file(path, relative, files, FileBounds::Project)
+}
+
+fn add_file(
+    path: &Path,
+    relative: &Path,
+    files: &mut Vec<File>,
+    bounds: FileBounds,
+) -> Result<(), SourceError> {
     if !normal(relative) || files.len() >= 1024 {
         return Err(SourceError::Invalid);
     }
-    let bytes = read(path)?;
-    if files.iter().map(|file| file.bytes.len()).sum::<usize>() + bytes.len() > 24 * 1024 * 1024 {
+    let limit = match bounds {
+        FileBounds::Project => 1024 * 1024,
+        FileBounds::Vendor => 8 * 1024 * 1024,
+    };
+    let bytes = read(path, limit)?;
+    let total: usize = files.iter().map(|file| file.bytes.len()).sum();
+    let vendor: usize = files
+        .iter()
+        .filter(|file| file.path.starts_with("vendor/str0m"))
+        .map(|file| file.bytes.len())
+        .sum();
+    if total + bytes.len() > 40 * 1024 * 1024
+        || (matches!(bounds, FileBounds::Vendor) && vendor + bytes.len() > 12 * 1024 * 1024)
+    {
         return Err(SourceError::Invalid);
     }
     files.push(File {
@@ -122,6 +149,16 @@ fn add(path: &Path, relative: &Path, files: &mut Vec<File>) -> Result<(), Source
 }
 
 fn walk(path: &Path, relative: &Path, files: &mut Vec<File>, depth: u8) -> Result<(), SourceError> {
+    walk_files(path, relative, files, depth, FileBounds::Project)
+}
+
+fn walk_files(
+    path: &Path,
+    relative: &Path,
+    files: &mut Vec<File>,
+    depth: u8,
+    bounds: FileBounds,
+) -> Result<(), SourceError> {
     directory(path)?;
     if depth > 8 {
         return Err(SourceError::Invalid);
@@ -134,10 +171,39 @@ fn walk(path: &Path, relative: &Path, files: &mut Vec<File>, depth: u8) -> Resul
             return Err(SourceError::Invalid);
         }
         if kind.is_dir() {
-            walk(&entry.path(), &relative, files, depth + 1)?;
+            walk_files(&entry.path(), &relative, files, depth + 1, bounds)?;
         } else {
-            add(&entry.path(), &relative, files)?;
+            add_file(&entry.path(), &relative, files, bounds)?;
         }
+    }
+    Ok(())
+}
+
+fn vendor(root: &Path, manifest: &toml::Value, files: &mut Vec<File>) -> Result<(), SourceError> {
+    let path = manifest
+        .get("patch")
+        .and_then(|value| value.get("crates-io"))
+        .and_then(|value| value.get("str0m"))
+        .and_then(|value| value.get("path"));
+    let Some(path) = path else { return Ok(()) };
+    if path.as_str() != Some("vendor/str0m") {
+        return Err(SourceError::Invalid);
+    }
+    for path in ["vendor/str0m-source.toml", "vendor/str0m.patch"] {
+        parents(root, Path::new(path))?;
+        add(&root.join(path), Path::new(path), files)?;
+    }
+    parents(root, Path::new("vendor/str0m"))?;
+    let before = files.len();
+    walk_files(
+        &root.join("vendor/str0m"),
+        Path::new("vendor/str0m"),
+        files,
+        0,
+        FileBounds::Vendor,
+    )?;
+    if files.len() == before {
+        return Err(SourceError::Invalid);
     }
     Ok(())
 }
@@ -242,6 +308,7 @@ impl SourceSnapshot {
         }
         parents(root, Path::new("examples/browser"))?;
         browser(&root.join("examples/browser"), &mut files)?;
+        vendor(root, &manifest, &mut files)?;
         files.sort_by(|left, right| left.path.cmp(&right.path));
         if files.windows(2).any(|pair| pair[0].path == pair[1].path) {
             return Err(SourceError::Invalid);
