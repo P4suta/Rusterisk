@@ -19,8 +19,8 @@ fn configuration(protocol: &str) -> Result<Config, SipError> {
 }
 
 #[test]
-fn reliable_invites_advertise_the_transport_and_timeout_without_retransmission()
--> Result<(), SipError> {
+fn reliable_invites_advertise_the_transport_and_timeout_without_retransmission(
+) -> Result<(), SipError> {
     for (protocol, token) in [(Protocol::Tcp, "TCP"), (Protocol::Tls, "TLS")] {
         let mut engine = Engine::new(configuration(&token.to_ascii_lowercase())?, [7; 32])
             .with_transport(protocol);

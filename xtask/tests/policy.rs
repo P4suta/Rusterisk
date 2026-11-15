@@ -54,27 +54,21 @@ fn permits_only_registered_item_exceptions_with_the_exact_reason() -> Result<(),
     };
     let source = r#"#[expect(clippy::large_enum_variant, reason = "docs/adr/serialize-call-decisions-in-a-pure-core.md: Keep bounded frames inline.")] enum AudioSocket { End, Audio([i16; 960]) }"#;
     assert!(xtask::inspect_with_exceptions(source, std::slice::from_ref(&exception))?.is_empty());
-    assert!(
-        !xtask::inspect_with_exceptions(
-            &source.replace("Keep bounded frames inline.", "Unregistered reason."),
-            std::slice::from_ref(&exception)
-        )?
-        .is_empty()
-    );
-    assert!(
-        !xtask::inspect_with_exceptions(
-            &source.replace("enum AudioSocket", "enum Other"),
-            std::slice::from_ref(&exception)
-        )?
-        .is_empty()
-    );
-    assert!(
-        !xtask::inspect_with_exceptions(
-            &source.replace("#[expect", "#![expect"),
-            std::slice::from_ref(&exception)
-        )?
-        .is_empty()
-    );
+    assert!(!xtask::inspect_with_exceptions(
+        &source.replace("Keep bounded frames inline.", "Unregistered reason."),
+        std::slice::from_ref(&exception)
+    )?
+    .is_empty());
+    assert!(!xtask::inspect_with_exceptions(
+        &source.replace("enum AudioSocket", "enum Other"),
+        std::slice::from_ref(&exception)
+    )?
+    .is_empty());
+    assert!(!xtask::inspect_with_exceptions(
+        &source.replace("#[expect", "#![expect"),
+        std::slice::from_ref(&exception)
+    )?
+    .is_empty());
     Ok(())
 }
 
@@ -144,12 +138,10 @@ fn rejects_client_config_exception_escape_routes() -> Result<(), syn::Error> {
     assert!(!attribute.is_empty());
     let bare = source.replacen(attribute, "", 1);
     assert!(!xtask::inspect_with_exceptions(&bare, &[client_config_exception()])?.is_empty());
-    assert!(
-        !xtask::inspect_with_exceptions(
-            &format!("{attribute}\n{bare}"),
-            &[client_config_exception()]
-        )?
-        .is_empty()
-    );
+    assert!(!xtask::inspect_with_exceptions(
+        &format!("{attribute}\n{bare}"),
+        &[client_config_exception()]
+    )?
+    .is_empty());
     Ok(())
 }
