@@ -1,8 +1,36 @@
 use super::{application_name, Control, ControlError, Outcome};
-use rusterisk_api::{ChannelId, EventKind};
+use rusterisk_api::{Application, ChannelId, EventKind};
 use rusterisk_core::StasisMembership;
 
 impl Control {
+    pub(super) fn application(&self, name: &str) -> Result<Application, ControlError> {
+        let application = self
+            .applications
+            .get(name)
+            .copied()
+            .ok_or(ControlError::NotFound("Application not found"))?;
+        let channel_ids: Vec<ChannelId> = self.channels.iter().filter(|(_, entry)| matches!(entry.call.stasis(), StasisMembership::Pending(current) | StasisMembership::Entered(current) if current == application)).map(|(id, _)| id.clone()).collect();
+        let bridge_ids = self
+            .bridges
+            .iter()
+            .filter(|(_, bridge)| {
+                bridge
+                    .snapshot
+                    .channels
+                    .iter()
+                    .any(|id| channel_ids.contains(id))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        Ok(Application {
+            name: name.into(),
+            channel_ids,
+            bridge_ids,
+            endpoint_ids: Vec::new(),
+            device_names: Vec::new(),
+        })
+    }
+
     pub(super) fn move_application(
         &mut self,
         id: &ChannelId,

@@ -182,6 +182,8 @@ pub enum Action {
     },
     ListChannels,
     GetChannel(ChannelId),
+    ListApplications,
+    GetApplication(String),
     GetVariable {
         channel: ChannelId,
         variable: String,
@@ -244,6 +246,8 @@ impl Action {
     pub(crate) const fn effect_budget(&self) -> usize {
         match self {
             Self::ListChannels
+            | Self::ListApplications
+            | Self::GetApplication(_)
             | Self::GetRecording(_)
             | Self::GetPlayback(_)
             | Self::GetChannel(_)
@@ -277,6 +281,8 @@ impl Action {
     pub const fn read_only(&self) -> bool {
         match self {
             Self::ListChannels
+            | Self::ListApplications
+            | Self::GetApplication(_)
             | Self::GetRecording(_)
             | Self::GetPlayback(_)
             | Self::GetChannel(_)
@@ -909,6 +915,13 @@ impl Control {
                     .collect::<Vec<_>>(),
             ),
             Action::GetChannel(id) => Outcome::json(self.channel(&id)?),
+            Action::ListApplications => Outcome::json(
+                self.applications
+                    .keys()
+                    .map(|name| self.application(name))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            Action::GetApplication(name) => Outcome::json(self.application(&name)?),
             Action::GetVariable { channel, variable } => {
                 let entry = self
                     .channels
