@@ -153,10 +153,15 @@ pub fn execute(task: Task, execution: Execution, image: &str) -> Result<(), Assu
                         &state.join("results/mutants.out/outcomes.json"),
                         4 * 1024 * 1024,
                     )?;
-                    validate_mutation_outcomes(
+                    let result = validate_mutation_outcomes(
                         &bytes,
                         mutations.as_ref().ok_or(AssuranceError::Inventory)?,
-                    )?;
+                    );
+                    if result.is_err() {
+                        let capture = read_bounded(&state.join("mutations.txt"), 4 * 1024 * 1024)?;
+                        eprintln!("{}", String::from_utf8_lossy(&capture));
+                    }
+                    result?;
                 }
             }
         }

@@ -222,6 +222,7 @@ pub fn validate_mutation_outcomes(
     inventory: &MutationInventory,
 ) -> Result<(), AssuranceError> {
     let lab: Lab = json(bytes)?;
+    println!("mutation summary: {} total; {} caught; {} unviable; {} missed; {} timed out; {} success; {} outcomes; end={}", lab.total_mutants, lab.caught, lab.unviable, lab.missed, lab.timeout, lab.success, lab.outcomes.len(), lab.end_time.as_deref().unwrap_or("missing"));
     if lab.cargo_mutants_version != "27.1.0"
         || !lab.end_time.is_some_and(|time| !time.is_empty())
         || lab.total_mutants != inventory.mutants.len()
@@ -289,11 +290,16 @@ pub fn validate_mutation_outcomes(
         || seen.len() != inventory.mutants.len()
         || caught != lab.caught
         || unviable != lab.unviable
-        || Invariant::ALL
-            .iter()
-            .any(|invariant| !covered.contains(invariant))
     {
         return Err(AssuranceError::Results);
+    }
+    let undetected: Vec<&'static str> = Invariant::ALL
+        .iter()
+        .filter(|invariant| !covered.contains(invariant))
+        .map(|invariant| invariant.label())
+        .collect();
+    if !undetected.is_empty() {
+        return Err(AssuranceError::UndetectedMutationScopes(undetected));
     }
     println!("core mutation: {caught} caught; {unviable} unviable; every declared invariant detected a viable mutation");
     Ok(())

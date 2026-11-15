@@ -22,6 +22,7 @@ pub enum AssuranceError {
     Inventory,
     EmptyMutationInventory,
     MissingMutationScopes(Vec<&'static str>),
+    UndetectedMutationScopes(Vec<&'static str>),
     UnknownMutationScope {
         file: String,
         function: Option<String>,
@@ -45,6 +46,7 @@ impl std::fmt::Display for AssuranceError {
             Self::Inventory => formatter.write_str("core assurance requires a nonempty complete native inventory"),
             Self::EmptyMutationInventory => formatter.write_str("native mutation inventory is empty"),
             Self::MissingMutationScopes(scopes) => write!(formatter, "native mutation inventory is missing required invariants: {}", scopes.join(", ")),
+            Self::UndetectedMutationScopes(scopes) => write!(formatter, "native mutation results have no caught viable mutation for required invariants: {}", scopes.join(", ")),
             Self::UnknownMutationScope { file, function } => match function {
                 Some(function) => write!(formatter, "native mutation inventory has an unrecognized scope: {file}: {function}"),
                 None => write!(formatter, "native mutation inventory has no enclosing function: {file}"),

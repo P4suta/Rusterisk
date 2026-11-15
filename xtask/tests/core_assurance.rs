@@ -263,3 +263,26 @@ fn mutation_inventory_names_the_missing_or_unrecognized_invariant() -> Result<()
     assert!(error.to_string().contains("empty"));
     Ok(())
 }
+
+#[test]
+fn mutation_results_name_invariants_without_a_caught_viable_mutation() -> Result<(), AssuranceError>
+{
+    let mutants = mutants();
+    let inventory =
+        validate_mutation_inventory(&serde_json::to_vec(&mutants).map_err(AssuranceError::Json)?)?;
+    let mut report = caught_report(&mutants);
+    report["caught"] = serde_json::json!(mutants.len() - 1);
+    report["unviable"] = serde_json::json!(1);
+    report["outcomes"][1]["summary"] = serde_json::json!("Unviable");
+    report["outcomes"][1]["phase_results"] = serde_json::Value::Array(
+        [serde_json::json!({"phase":"Build", "process_status":{"Failure":101}})].into(),
+    );
+    let error = validate_mutation_outcomes(
+        &serde_json::to_vec(&report).map_err(AssuranceError::Json)?,
+        &inventory,
+    )
+    .err()
+    .ok_or(AssuranceError::Results)?;
+    assert!(error.to_string().contains("terminal cleanup"));
+    Ok(())
+}
