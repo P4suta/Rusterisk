@@ -26,6 +26,8 @@ async fn outgoing_digits_share_or_separate_clocks_and_close_every_reported_sourc
         let (tones, tone_input) = mpsc::channel(16);
         let (completed, _completed) = mpsc::channel(8);
         let (stop, stopped) = watch::channel(false);
+        let (_direction, direction) =
+            watch::channel(rusterisk_core::PeerMediaDirection::SendReceive);
         let link = RtpLink::new(
             sockets,
             RtpSession {
@@ -41,6 +43,7 @@ async fn outgoing_digits_share_or_separate_clocks_and_close_every_reported_sourc
                 commands: tone_input,
                 completed,
                 stop: stopped,
+                direction,
             },
         )?;
         let task = tokio::spawn(link.run());

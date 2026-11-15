@@ -21,6 +21,7 @@ async fn real_datagrams_carry_known_audio_in_both_directions_and_release_ports(
     let (_commands, commands) = mpsc::channel(8);
     let (completed, _completed) = mpsc::channel(8);
     let (stop, stopped) = watch::channel(false);
+    let (_direction, direction) = watch::channel(rusterisk_core::PeerMediaDirection::SendReceive);
     let link = RtpLink::new(
         sockets,
         RtpSession {
@@ -36,6 +37,7 @@ async fn real_datagrams_carry_known_audio_in_both_directions_and_release_ports(
             commands,
             completed,
             stop: stopped,
+            direction,
         },
     )?;
     let task = tokio::spawn(link.run());

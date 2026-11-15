@@ -1,7 +1,7 @@
 use crate::rtp::{LinkStats, RtpChannels, RtpDigitCommand, RtpLink, RtpSession, SocketPair};
 use crate::storage::{PlaybackSource, RecordingSink, WorkerError};
 use crate::CallKey;
-use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone, MediaTaskToken};
+use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone, MediaTaskToken, PeerMediaDirection};
 use rusterisk_media::{AudioTarget, Frame, Gate, MediaError, Mixer, TelephoneFormat};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -98,6 +98,10 @@ enum Command {
     Gate {
         key: CallKey,
         gate: Gate,
+    },
+    PeerDirection {
+        key: CallKey,
+        direction: PeerMediaDirection,
     },
 }
 
@@ -354,6 +358,15 @@ impl MediaPort {
             .try_send(Command::Gate { key, gate })
             .map_err(|_| MediaError::Capacity)
     }
+    pub fn peer_direction(
+        &self,
+        key: CallKey,
+        direction: PeerMediaDirection,
+    ) -> Result<(), MediaError> {
+        self.commands
+            .try_send(Command::PeerDirection { key, direction })
+            .map_err(|_| MediaError::Capacity)
+    }
 }
 
 enum Connection {
@@ -368,6 +381,7 @@ struct Port {
     completed: mpsc::Receiver<DtmfToken>,
     telephone: Option<TelephoneFormat>,
     stop: watch::Sender<bool>,
+    direction: watch::Sender<PeerMediaDirection>,
     connection: Connection,
 }
 
@@ -440,6 +454,7 @@ impl MediaHub {
         let (commands, command_input) = mpsc::channel(8);
         let (completed, completions) = mpsc::channel(8);
         let (stop, stopped) = watch::channel(false);
+        let (direction, directed) = watch::channel(PeerMediaDirection::SendReceive);
         let link = RtpLink::new(
             sockets,
             session,
@@ -450,6 +465,7 @@ impl MediaHub {
                 commands: command_input,
                 completed,
                 stop: stopped,
+                direction: directed,
             },
         )?;
         self.mixer.insert(key.clone())?;
@@ -463,6 +479,7 @@ impl MediaHub {
                 completed: completions,
                 telephone: session.telephone,
                 stop,
+                direction,
                 connection: Connection::Waiting,
             },
         );
@@ -632,6 +649,11 @@ impl MediaHub {
             Command::Gate { key, gate } => {
                 if self.ports.contains_key(&key) {
                     self.mixer.gate(&key, gate)?;
+                }
+            }
+            Command::PeerDirection { key, direction } => {
+                if let Some(port) = self.ports.get(&key) {
+                    port.direction.send_replace(direction);
                 }
             }
         }

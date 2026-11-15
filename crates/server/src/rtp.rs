@@ -1,4 +1,4 @@
-use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone};
+use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone, PeerMediaDirection};
 use rusterisk_media::{
     AudioFormat, Frame, MediaError, RtpPacket, RtpReceiver, RtpSender, SourceReport,
     TelephoneFormat, TelephoneReceiver, TelephoneSender, MAX_PACKET,
@@ -98,6 +98,7 @@ pub struct RtpChannels {
     pub commands: mpsc::Receiver<RtpDigitCommand>,
     pub completed: mpsc::Sender<DtmfToken>,
     pub stop: watch::Receiver<bool>,
+    pub direction: watch::Receiver<PeerMediaDirection>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -256,9 +257,18 @@ impl RtpLink {
                 changed = self.channels.stop.changed() => {
                     if changed.is_err() || *self.channels.stop.borrow() { break; }
                 }
+                changed = self.channels.direction.changed() => {
+                    if changed.is_err() { break; }
+                    while self.receiver.pop()?.is_some() {}
+                    if !self.channels.direction.borrow().can_send() {
+                        if let Some(telephone) = &mut self.telephone {
+                            telephone.receiver = TelephoneReceiver::new(telephone.format.payload_type(), telephone.format.rate())?;
+                        }
+                    }
+                }
                 packet = self.sockets.data.recv_from(&mut data) => {
                     let (size, peer) = packet.map_err(failure)?;
-                    if peer != self.session.remote || size > MAX_PACKET { stats.dropped += 1; continue; }
+                    if peer != self.session.remote || size > MAX_PACKET || !self.channels.direction.borrow().can_send() { stats.dropped += 1; continue; }
                     let now = started.elapsed().as_millis() as u64;
                     match RtpPacket::parse(&data[..size]).and_then(|packet| self.receive(&packet, now)) {
                         Ok(true) => stats.packets_received += 1,
@@ -271,6 +281,7 @@ impl RtpLink {
                 }
                 frame = self.channels.outgoing.recv() => {
                     let Some(frame) = frame else { break; };
+                    if !self.channels.direction.borrow().can_receive() { continue; }
                     let sampled = tokio::time::Instant::now();
                     let now = sampled.duration_since(started).as_millis() as u64;
                     let packet = self.sender.packet_at(frame, now)?;
@@ -286,9 +297,12 @@ impl RtpLink {
                         let sampled = tokio::time::Instant::now();
                         let now = sampled.duration_since(started).as_millis() as u64;
                         if let Some(tone) = telephone.receiver.expire(now)? {
-                            self.channels.digits.try_send(tone).map_err(|_| MediaError::Capacity)?;
+                            if self.channels.direction.borrow().can_send() {
+                                self.channels.digits.try_send(tone).map_err(|_| MediaError::Capacity)?;
+                            }
                         }
                         for packet in telephone.sender.poll(now, &mut self.sender)? {
+                            if !self.channels.direction.borrow().can_receive() { continue; }
                             send(&self.sockets.data, &packet.encode()?, self.session.remote).await?;
                             let timestamp = telephone.sender.timestamp_at(now, &self.sender);
                             record(&mut sources, &packet, telephone.format.rate(), timestamp, sampled)?;
@@ -318,12 +332,12 @@ impl RtpLink {
                         }
                     }
                     match self.receiver.pop() {
-                        Ok(Some(frame)) => match self.channels.incoming.try_send(frame) {
+                        Ok(Some(frame)) if self.channels.direction.borrow().can_send() => match self.channels.incoming.try_send(frame) {
                             Ok(()) => {}
                             Err(mpsc::error::TrySendError::Full(_)) => stats.dropped += 1,
                             Err(mpsc::error::TrySendError::Closed(_)) => break,
                         },
-                        Ok(None) => {}
+                        Ok(Some(_)) | Ok(None) => {}
                         Err(_) => stats.dropped += 1,
                     }
                 }
