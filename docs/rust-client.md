@@ -57,7 +57,18 @@ The event queue retains 64 events.
 Call progress continues to update while the caller waits for a milestone.
 
 Requests have a ten-second deadline and a five-second connection deadline.
-The client rejects URLs larger than 4096 bytes and response bodies larger than one mebibyte.
+The client rejects URLs larger than 4096 bytes and JSON response bodies larger than one mebibyte.
 The event transport limits messages to 64 kibibytes.
 Session cleanup has a 22-second deadline.
 The driver then aborts and joins any remaining workers.
+
+## Download stored audio
+
+Use `stored_recordings` and `stored_recording` to inspect completed recordings.
+Use `download_stored_recording` with an asynchronous output writer to stream the stored bytes.
+The method returns the number of bytes written and accepts at most one gibibyte plus the 44-byte wave header.
+Response headers and error responses have ten-second deadlines.
+The transfer has a ten-minute deadline, with five seconds for each read or write.
+Dropping the download future releases its response transport.
+A failed or cancelled transfer can leave partial output, which the caller must discard or recover.
+Use `delete_stored_recording` to remove a completed recording.

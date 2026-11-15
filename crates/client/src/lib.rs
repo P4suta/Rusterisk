@@ -145,12 +145,12 @@ impl Client {
         session::connect(self, application).await
     }
 
-    async fn request<T: DeserializeOwned>(
+    fn prepare_request(
         &self,
         operation: &str,
         path: &[(&str, &str)],
         query: &[(&str, &str)],
-    ) -> Result<T, Error> {
+    ) -> Result<reqwest::RequestBuilder, Error> {
         if query.len() > 32
             || query
                 .iter()
@@ -178,7 +178,21 @@ impl Client {
         }
         let method = reqwest::Method::from_bytes(operation.method.upper().as_bytes())
             .map_err(|_| Error::Invalid("invalid operation method"))?;
-        let mut response = self.http.request(method, url).send().await?;
+        Ok(self.http.request(method, url))
+    }
+
+    async fn request<T: DeserializeOwned>(
+        &self,
+        operation: &str,
+        path: &[(&str, &str)],
+        query: &[(&str, &str)],
+    ) -> Result<T, Error> {
+        Self::decode_response(self.prepare_request(operation, path, query)?.send().await?).await
+    }
+
+    async fn decode_response<T: DeserializeOwned>(
+        mut response: reqwest::Response,
+    ) -> Result<T, Error> {
         let status = response.status();
         if response
             .content_length()
