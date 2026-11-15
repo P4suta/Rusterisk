@@ -149,7 +149,7 @@ mod tests {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecordingEnd {
     Finish,
     Cancel,

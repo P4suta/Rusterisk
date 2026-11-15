@@ -122,6 +122,9 @@ async fn check_dial_capacity(connected: bool) -> Result<(), ControlError> {
                     rusterisk_server::Effect::Start { .. }
                     | rusterisk_server::Effect::Playback { .. }
                     | rusterisk_server::Effect::PlayMedia { .. }
+                    | rusterisk_server::Effect::RecordMedia { .. }
+                    | rusterisk_server::Effect::ControlRecording { .. }
+                    | rusterisk_server::Effect::EndRecording { .. }
                     | rusterisk_server::Effect::ControlPlayback { .. }
                     | rusterisk_server::Effect::Answer { .. }
                     | rusterisk_server::Effect::Ring { .. }

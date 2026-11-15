@@ -1,17 +1,18 @@
-use crate::media::PlaybackControl;
+use crate::media::{PlaybackControl, RecordingEnd};
 use rusterisk_api::{
     Bridge, Caller, Channel, ChannelId, ChannelState, Dialplan, Event, EventKind, MediaUri,
 };
 use rusterisk_core::{
     AudioGate, Call, CallEvent, CallState, DtmfCommand, DtmfDigit, DtmfError, DtmfOutbox,
     DtmfTiming, DtmfToken, MediaConnection, MediaState, MediaTaskError, MediaTaskToken, MediaTasks,
-    MuteDirection, StasisApplication, StasisMembership, Transition,
+    MuteDirection, RecordingControl, StasisApplication, StasisMembership, Transition,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 mod dial;
 mod dialplan;
 mod playback;
+mod recording;
 mod stasis;
 use dialplan::DialplanFrame;
 
@@ -135,6 +136,23 @@ pub enum IncomingTarget {
 
 #[derive(Clone, Debug)]
 pub enum Action {
+    RecordChannel {
+        channel: ChannelId,
+        name: ChannelId,
+    },
+    RecordBridge {
+        bridge: ChannelId,
+        name: ChannelId,
+    },
+    GetRecording(ChannelId),
+    ControlRecording {
+        name: ChannelId,
+        operation: RecordingControl,
+    },
+    EndRecording {
+        name: ChannelId,
+        mode: RecordingEnd,
+    },
     PlayBridge {
         bridge: ChannelId,
         id: ChannelId,
@@ -219,6 +237,7 @@ impl Action {
     pub(crate) const fn effect_budget(&self) -> usize {
         match self {
             Self::ListChannels
+            | Self::GetRecording(_)
             | Self::GetPlayback(_)
             | Self::GetChannel(_)
             | Self::GetVariable { .. }
@@ -229,6 +248,10 @@ impl Action {
             | Self::Move { .. } => 0,
             Self::Hangup(_) | Self::Continue { .. } | Self::DestroyBridge(_) => 2,
             Self::Originate { .. }
+            | Self::RecordChannel { .. }
+            | Self::RecordBridge { .. }
+            | Self::ControlRecording { .. }
+            | Self::EndRecording { .. }
             | Self::PlayBridge { .. }
             | Self::PlayChannel { .. }
             | Self::ControlPlayback { .. }
@@ -247,12 +270,17 @@ impl Action {
     pub const fn read_only(&self) -> bool {
         match self {
             Self::ListChannels
+            | Self::GetRecording(_)
             | Self::GetPlayback(_)
             | Self::GetChannel(_)
             | Self::GetVariable { .. }
             | Self::ListBridges
             | Self::GetBridge(_) => true,
             Self::Originate { .. }
+            | Self::RecordChannel { .. }
+            | Self::RecordBridge { .. }
+            | Self::ControlRecording { .. }
+            | Self::EndRecording { .. }
             | Self::PlayBridge { .. }
             | Self::PlayChannel { .. }
             | Self::ControlPlayback { .. }
@@ -277,6 +305,19 @@ impl Action {
 
 #[derive(Clone, Debug)]
 pub enum Effect {
+    RecordMedia {
+        owner: MediaOwner,
+        token: MediaTaskToken,
+        name: ChannelId,
+    },
+    ControlRecording {
+        token: MediaTaskToken,
+        operation: RecordingControl,
+    },
+    EndRecording {
+        token: MediaTaskToken,
+        mode: RecordingEnd,
+    },
     PlayMedia {
         owner: MediaOwner,
         token: MediaTaskToken,
@@ -339,6 +380,16 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
+    RecordingAdmitted {
+        owner: MediaOwner,
+        token: MediaTaskToken,
+        result: Result<(), ControlError>,
+    },
+    RecordingFinished {
+        owner: MediaOwner,
+        token: MediaTaskToken,
+        result: Result<(), ControlError>,
+    },
     MediaPlaybackStarted {
         owner: MediaOwner,
         token: MediaTaskToken,
@@ -559,6 +610,7 @@ pub struct Control {
     bridges: BTreeMap<ChannelId, BridgeEntry>,
     applications: BTreeMap<String, StasisApplication>,
     playbacks: BTreeMap<ChannelId, playback::PlaybackEntry>,
+    recordings: BTreeMap<ChannelId, recording::RecordingEntry>,
     dialplan_program: rusterisk_config::Dialplan,
 }
 
@@ -702,6 +754,7 @@ impl Control {
             bridges: BTreeMap::new(),
             applications: BTreeMap::new(),
             playbacks: BTreeMap::new(),
+            recordings: BTreeMap::new(),
             dialplan_program: program,
         }
     }
@@ -772,6 +825,13 @@ impl Control {
         now_ms: u64,
     ) -> Result<Outcome, ControlError> {
         match action {
+            Action::RecordChannel { channel, name } => self.record_channel(channel, name),
+            Action::RecordBridge { bridge, name } => self.record_bridge(bridge, name),
+            Action::GetRecording(name) => self.get_recording(&name),
+            Action::ControlRecording { name, operation } => {
+                self.control_recording(&name, operation)
+            }
+            Action::EndRecording { name, mode } => self.end_recording(&name, mode),
             Action::PlayBridge { bridge, id, media } => self.play_bridge(bridge, id, media),
             Action::PlayChannel { channel, id, media } => self.play_channel(channel, id, media),
             Action::GetPlayback(id) => self.get_playback(&id),
@@ -1038,6 +1098,10 @@ impl Control {
                     .remove(&id)
                     .ok_or(ControlError::NotFound("Bridge not found"))?;
                 self.end_bridge_playbacks(&id, bridge.token, timestamp, &mut outcome);
+                self.finish_owner_recordings(&MediaOwner::Bridge {
+                    id: id.clone(),
+                    generation: bridge.token,
+                });
                 let released = bridge.media_tasks.cancel();
                 tracing::debug!(bridge = %id, generation = bridge.token, tasks = released.iter().flatten().count(), "bridge media tasks released");
                 outcome.effects.push(Effect::ReleaseBridge {
@@ -1302,6 +1366,10 @@ impl Control {
             timestamp,
             &mut outcome,
         );
+        self.finish_owner_recordings(&MediaOwner::Channel(CallKey {
+            id: id.clone(),
+            generation: entry.call.generation(),
+        }));
         if let Some(frame) = &mut entry.dialplan {
             if let Some(mut dial) = frame.dial.take() {
                 outcome.append(self.cancel_dial(&mut dial, timestamp)?);
@@ -1459,6 +1527,16 @@ impl Control {
         now: u64,
     ) -> Result<Outcome, ControlError> {
         match signal {
+            Signal::RecordingAdmitted {
+                owner,
+                token,
+                result,
+            } => self.recording_admitted(&owner, token, result, timestamp),
+            Signal::RecordingFinished {
+                owner,
+                token,
+                result,
+            } => self.finish_recording(&owner, token, result, timestamp),
             Signal::MediaPlaybackStarted { owner, token } => {
                 self.playback_started(&owner, token, timestamp)
             }

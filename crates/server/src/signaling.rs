@@ -459,6 +459,26 @@ impl Signaling {
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
+            Effect::RecordMedia {
+                owner,
+                token,
+                name: _,
+            } => {
+                self.notify(Signal::RecordingAdmitted {
+                    owner,
+                    token,
+                    result: Err(ControlError::Unsupported),
+                })
+                .await?;
+            }
+            Effect::ControlRecording { token, operation } => {
+                if let Err(error) = self.media.control_recording(token, operation).await {
+                    tracing::warn!(?token, %error, "recording control failed");
+                }
+            }
+            Effect::EndRecording { token, mode } => {
+                self.media.stop_recording(token, mode).map_err(failure)?
+            }
             Effect::Dtmf { key, command } => {
                 if self
                     .calls
