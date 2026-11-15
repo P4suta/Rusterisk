@@ -1103,13 +1103,14 @@ fn parameters(operation: &Operation, format: Option<DiscoveryFormat>) -> Vec<Val
             "terminateOn" => schemars::schema_for!(RecordingTermination).to_value(),
             "beep" => schemars::schema_for!(bool).to_value(),
             "filter" => json!({"type": "object"}),
+            "eventSource" => json!({"type": "array", "items": {"type": "string"}, "maxItems": 32}),
             _ => json!({"type": "string"}),
         };
         if let Some(format) = format {
-            let kind = schema["type"].as_str().unwrap_or("string");
+            let kind = if name == "eventSource" && format == DiscoveryFormat::Asterisk { "string" } else { schema["type"].as_str().unwrap_or("string") };
             let data_type = if name == "variables" { "containers" } else if kind == "integer" && format == DiscoveryFormat::Asterisk { "int" } else { kind };
-            let mut parameter = json!({"name": name, "paramType": location, "required": required, "allowMultiple": false, "dataType": data_type, "type": kind, "description": name});
-            for field in ["format", "minimum", "maximum"] {
+            let mut parameter = json!({"name": name, "paramType": location, "required": required, "allowMultiple": name == "eventSource", "dataType": data_type, "type": kind, "description": name});
+            for field in ["format", "minimum", "maximum", "items", "maxItems"] {
                 if let Some(value) = schema.get(field) { parameter[field] = value.clone(); }
             }
             if let Some(values) = schema.get("enum") {
@@ -1118,8 +1119,13 @@ fn parameters(operation: &Operation, format: Option<DiscoveryFormat>) -> Vec<Val
                     DiscoveryFormat::Standard => parameter["enum"] = values.clone(),
                 }
             }
+            if name == "eventSource" && format == DiscoveryFormat::Standard { parameter["collectionFormat"] = "csv".into(); }
             parameter
-        } else { json!({"name": name, "in": location, "required": required, "schema": schema}) }
+        } else {
+            let mut parameter = json!({"name": name, "in": location, "required": required, "schema": schema});
+            if name == "eventSource" { parameter["style"] = "form".into(); parameter["explode"] = false.into(); }
+            parameter
+        }
     }).collect()
 }
 
@@ -1194,6 +1200,7 @@ pub fn swagger_for(resource: &str, format: DiscoveryFormat) -> Result<Value, Swa
             (404, "Resource not found"),
             (409, "Invalid resource state"),
             (412, "Channel in invalid state"),
+            (422, "Event source does not exist"),
             (500, "Operation failed"),
             (501, "Operation not supported"),
             (503, "Resource capacity exceeded"),
