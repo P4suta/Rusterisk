@@ -295,6 +295,7 @@ pub struct Recorder {
     path: PathBuf,
     rate: u32,
     bytes: u32,
+    prefix_bytes: u32,
     publication: Publication,
 }
 
@@ -400,6 +401,7 @@ impl Recorder {
                 path,
                 rate,
                 bytes: 0,
+                prefix_bytes: source.as_ref().map(|source| source.remaining).unwrap_or(0),
                 publication,
             },
             source,
@@ -421,7 +423,19 @@ impl Recorder {
         Ok(())
     }
 
-    pub fn finish(mut self) -> Result<PathBuf, StorageError> {
+    pub fn finish(self) -> Result<PathBuf, StorageError> {
+        self.finish_with_tail_trim(0)
+    }
+
+    pub fn finish_with_tail_trim(mut self, milliseconds: u64) -> Result<PathBuf, StorageError> {
+        let maximum = self
+            .bytes
+            .checked_sub(self.prefix_bytes)
+            .ok_or(StorageError::InvalidState)?;
+        let samples = milliseconds.saturating_mul(u64::from(self.rate)) / 1000;
+        let trim = samples.saturating_mul(2).min(u64::from(maximum));
+        self.bytes -= trim as u32;
+        self.file.set_len(u64::from(self.bytes) + 44)?;
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&header(self.rate, self.bytes))?;
         self.file.sync_all()?;
