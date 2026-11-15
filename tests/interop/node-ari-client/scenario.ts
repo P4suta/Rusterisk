@@ -7,6 +7,8 @@ import { deadline } from "./deadline.ts";
 type Snapshot = {
 	readonly endpoints: readonly EndpointSnapshot[];
 	readonly application: ApplicationSnapshot;
+	readonly filtered: ApplicationSnapshot;
+	readonly cleared: ApplicationSnapshot;
 };
 
 async function snapshot(address: string): Promise<Snapshot> {
@@ -42,7 +44,30 @@ async function snapshot(address: string): Promise<Snapshot> {
 				5000,
 			),
 		);
-		return { endpoints, application: app };
+		const filtered = application(
+			await deadline(
+				"event filter",
+				client.applications.filter({
+					applicationName: "compat-node",
+					filter: {
+						allowed: [{ type: "StasisStart" }],
+						disallowed: [{ type: "ChannelVarset" }],
+					},
+				}),
+				5000,
+			),
+		);
+		const cleared = application(
+			await deadline(
+				"filter reset",
+				client.applications.filter({
+					applicationName: "compat-node",
+					filter: {},
+				}),
+				5000,
+			),
+		);
+		return { endpoints, application: app, filtered, cleared };
 	} finally {
 		client.stop();
 	}

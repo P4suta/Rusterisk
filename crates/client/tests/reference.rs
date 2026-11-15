@@ -1,5 +1,5 @@
 use rusterisk_client::{
-    api::{ApiError, Bridge, BridgeVideoMode, ChannelId},
+    api::{ApiError, Bridge, BridgeVideoMode, ChannelId, EventFilter, EventFilterRequest},
     Client, Error,
 };
 use std::{future::IntoFuture, time::Duration};
@@ -177,6 +177,60 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
         assert_eq!(
             actual.application(app.as_str()).await?,
             reference.application(app.as_str()).await?
+        );
+        for update in [
+            EventFilterRequest {
+                allowed: Some(
+                    [EventFilter {
+                        event_type: "StasisStart".into(),
+                    }]
+                    .into_iter()
+                    .collect(),
+                ),
+                disallowed: Some(
+                    [EventFilter {
+                        event_type: "ChannelVarset".into(),
+                    }]
+                    .into_iter()
+                    .collect(),
+                ),
+            },
+            EventFilterRequest {
+                allowed: Some(Vec::new()),
+                disallowed: None,
+            },
+            EventFilterRequest::default(),
+        ] {
+            assert_eq!(
+                actual.filter_application(app.as_str(), &update).await?,
+                reference.filter_application(app.as_str(), &update).await?
+            );
+        }
+        let invalid = EventFilterRequest {
+            allowed: Some(
+                [EventFilter {
+                    event_type: String::new(),
+                }]
+                .into_iter()
+                .collect(),
+            ),
+            disallowed: None,
+        };
+        assert_eq!(
+            rejection(actual.filter_application(app.as_str(), &invalid).await)?,
+            rejection(reference.filter_application(app.as_str(), &invalid).await)?
+        );
+        assert_eq!(
+            rejection(
+                actual
+                    .filter_application("missing", &Default::default())
+                    .await
+            )?,
+            rejection(
+                reference
+                    .filter_application("missing", &Default::default())
+                    .await
+            )?
         );
         assert_eq!(
             rejection(actual.application("missing").await)?,
