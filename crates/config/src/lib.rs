@@ -228,7 +228,12 @@ impl Section {
         }
     }
 
-    fn number(&self, file: &str, key: &str, default: u16) -> Result<u16, ConfigError> {
+    fn number<T: std::str::FromStr>(
+        &self,
+        file: &str,
+        key: &str,
+        default: T,
+    ) -> Result<T, ConfigError> {
         match self.value(key) {
             None => Ok(default),
             Some(value) => value
@@ -289,6 +294,9 @@ pub struct Aor {
     pub name: String,
     pub max_contacts: u16,
     pub contact: Option<String>,
+    pub minimum_expiration: u32,
+    pub default_expiration: u32,
+    pub maximum_expiration: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -732,7 +740,17 @@ impl Config {
                 });
             }
             "aor" => {
-                section.check(file, &["type", "max_contacts", "contact"])?;
+                section.check(
+                    file,
+                    &[
+                        "type",
+                        "max_contacts",
+                        "contact",
+                        "minimum_expiration",
+                        "default_expiration",
+                        "maximum_expiration",
+                    ],
+                )?;
                 let max_contacts = section.number(file, "max_contacts", 0)?;
                 if max_contacts > 16 {
                     return Err(ConfigError::at(
@@ -741,10 +759,22 @@ impl Config {
                         "max_contacts must be 0 through 16",
                     ));
                 }
+                let minimum_expiration = section.number(file, "minimum_expiration", 60)?;
+                let maximum_expiration = section.number(file, "maximum_expiration", 7200)?;
+                if minimum_expiration > maximum_expiration {
+                    return Err(ConfigError::at(
+                        file,
+                        section.position("minimum_expiration"),
+                        "minimum_expiration must not exceed maximum_expiration",
+                    ));
+                }
                 self.aors.push(Aor {
                     name: section.name.clone(),
                     max_contacts,
                     contact: section.value("contact").map(String::from),
+                    minimum_expiration,
+                    default_expiration: section.number(file, "default_expiration", 3600)?,
+                    maximum_expiration,
                 });
             }
             "endpoint" => {
