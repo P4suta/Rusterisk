@@ -1874,6 +1874,10 @@ impl Control {
                 if milestone == Milestone::Ended {
                     return self.end_at(&key.id, timestamp, 16, now);
                 }
+                match entry.kind {
+                    ChannelKind::ExternalRtpPending => return Ok(Outcome::empty()),
+                    ChannelKind::Sip | ChannelKind::ExternalRtpAdmitted => {}
+                }
                 let entry = self
                     .channels
                     .get_mut(&key.id)

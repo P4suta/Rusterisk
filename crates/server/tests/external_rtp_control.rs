@@ -23,6 +23,69 @@ fn create() -> Result<Action, ControlError> {
 }
 
 #[test]
+fn external_channels_require_admission_before_answer_or_media_milestones(
+) -> Result<(), ControlError> {
+    let mut control = Control::new(4);
+    control.subscribe("calls")?;
+    control.apply(create()?, "created", 0)?;
+    let key = control.key(&id()?)?;
+    for milestone in [
+        Milestone::Ringing,
+        Milestone::Answered,
+        Milestone::MediaConnected,
+    ] {
+        let outcome = control.signal(
+            Signal::Milestone {
+                key: key.clone(),
+                milestone,
+            },
+            "early",
+        )?;
+        assert!(outcome.events.is_empty());
+        assert!(outcome.effects.is_empty());
+        assert_eq!(control.channel(&id()?)?.state, ChannelState::Down);
+    }
+    control.signal(
+        Signal::ExternalRtpAdmitted {
+            key: key.clone(),
+            result: Ok("127.0.0.1:10000"
+                .parse()
+                .map_err(|_| ControlError::Unsupported)?),
+        },
+        "admitted",
+    )?;
+    control.signal(
+        Signal::Milestone {
+            key: key.clone(),
+            milestone: Milestone::Answered,
+        },
+        "answered",
+    )?;
+    let media = control.apply(
+        Action::GetVariable {
+            channel: id()?,
+            variable: "RUSTERISK_MEDIA_CONNECTED".into(),
+        },
+        "now",
+        0,
+    )?;
+    assert_eq!(media.body, Some(serde_json::json!({"value":"0"})));
+    let outcome = control.signal(
+        Signal::Milestone {
+            key,
+            milestone: Milestone::Ended,
+        },
+        "ended",
+    )?;
+    assert!(matches!(&outcome.effects[..], [Effect::Release { .. }]));
+    assert!(matches!(
+        control.channel(&id()?),
+        Err(ControlError::NotFound(_))
+    ));
+    Ok(())
+}
+
+#[test]
 fn external_admission_reports_local_variables_without_predicting_stasis_or_received_audio(
 ) -> Result<(), ControlError> {
     let mut control = Control::new(4);
