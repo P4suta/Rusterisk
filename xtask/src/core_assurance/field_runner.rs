@@ -18,7 +18,7 @@ pub(super) fn preview(
             &plan.identity,
             source.to_str().ok_or(AssuranceError::Plan)?,
             state.to_str().ok_or(AssuranceError::Plan)?,
-            &plan.image,
+            plan.image.as_str(),
         )?;
         for phase in [Phase::FieldBuild(mutation), Phase::FieldTests(mutation)] {
             let step = plan.step(phase);
@@ -69,7 +69,7 @@ pub(super) fn execute(
             &plan.identity,
             source.to_str().ok_or(AssuranceError::Plan)?,
             state.to_str().ok_or(AssuranceError::Plan)?,
-            &plan.image,
+            plan.image.as_str(),
         )?;
         for phase in [Phase::FieldBuild(mutation), Phase::FieldTests(mutation)] {
             let step = field_plan.step(phase);

@@ -86,7 +86,7 @@ pub struct CoreProofPlan {
     name: String,
     source: String,
     results: String,
-    image: String,
+    image: crate::reference::ImageIdentity,
 }
 
 impl CoreProofPlan {
@@ -96,22 +96,13 @@ impl CoreProofPlan {
         results: &str,
         image: &str,
     ) -> Result<Self, ProofError> {
-        let image_valid = image.rsplit_once("@sha256:").is_some_and(|(name, digest)| {
-            !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b".-_/:".contains(&byte))
-                && digest.len() == 64
-                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-        });
+        let image = crate::reference::ImageIdentity::parse(image).ok_or(ProofError::Plan)?;
         if identity.is_empty()
             || identity.len() > 64
             || identity.starts_with('-')
             || !identity
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            || image.len() > 512
-            || !image_valid
             || [source, results].iter().any(|path| {
                 path.is_empty() || path.len() > 4096 || path.contains([',', '\r', '\n', '\0'])
             })
@@ -122,7 +113,7 @@ impl CoreProofPlan {
             name: format!("rusterisk-core-proofs-{identity}"),
             source: source.into(),
             results: results.into(),
-            image: image.into(),
+            image,
         })
     }
 
@@ -154,7 +145,7 @@ impl CoreProofPlan {
             "--env=CARGO_BUILD_JOBS=1",
             "--env=CARGO_NET_OFFLINE=true",
             "--entrypoint=/usr/bin/timeout",
-            &self.image,
+            self.image.as_str(),
             "--signal=TERM",
             "--kill-after=10s",
             "880s",

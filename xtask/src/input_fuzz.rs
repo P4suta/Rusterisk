@@ -106,7 +106,7 @@ pub struct FuzzPlan {
     identity: String,
     source: String,
     state: String,
-    image: String,
+    image: crate::reference::ImageIdentity,
     target: LinuxTarget,
 }
 
@@ -118,22 +118,13 @@ impl FuzzPlan {
         image: &str,
         target: LinuxTarget,
     ) -> Result<Self, FuzzError> {
-        let image_valid = image.rsplit_once("@sha256:").is_some_and(|(name, digest)| {
-            !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b".-_/:".contains(&byte))
-                && digest.len() == 64
-                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-        });
+        let image = crate::reference::ImageIdentity::parse(image).ok_or(FuzzError::Plan)?;
         if identity.is_empty()
             || identity.len() > 64
             || identity.starts_with('-')
             || !identity
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            || image.len() > 512
-            || !image_valid
             || [source, state].iter().any(|path| {
                 path.is_empty() || path.len() > 4096 || path.contains([',', '\r', '\n', '\0'])
             })
@@ -144,7 +135,7 @@ impl FuzzPlan {
             identity: identity.into(),
             source: source.into(),
             state: state.into(),
-            image: image.into(),
+            image,
             target,
         })
     }
@@ -178,7 +169,7 @@ impl FuzzPlan {
             if fetch { "--env=CARGO_NET_OFFLINE=false" } else { "--env=CARGO_NET_OFFLINE=true" },
             "--env=TMPDIR=/state/tmp",
             "--env=ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:abort_on_error=1:detect_odr_violation=1",
-            "--entrypoint=/usr/bin/timeout", &self.image,
+            "--entrypoint=/usr/bin/timeout", self.image.as_str(),
             "--signal=TERM", "--kill-after=10s", &format!("{}s", budget - 20),
         ].into_iter().map(str::to_owned).collect();
         match phase {

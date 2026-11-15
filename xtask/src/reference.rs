@@ -17,6 +17,38 @@ pub struct VerificationBuild {
     name: String,
 }
 
+pub(crate) struct ImageIdentity(String);
+
+impl ImageIdentity {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        let digest = if let Some(digest) = value.strip_prefix("sha256:") {
+            digest
+        } else {
+            let (name, digest) = value.rsplit_once("@sha256:")?;
+            if name.is_empty()
+                || name.starts_with('-')
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b".-_/:".contains(&byte))
+            {
+                return None;
+            }
+            digest
+        };
+        if value.len() > 512
+            || digest.len() != 64
+            || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return None;
+        }
+        Some(Self(value.into()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Debug)]
 pub enum ReferenceError {
     InvalidIdentity,

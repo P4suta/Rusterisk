@@ -107,7 +107,7 @@ pub struct CoreAssurancePlan {
     identity: String,
     source: String,
     state: String,
-    image: String,
+    image: crate::reference::ImageIdentity,
 }
 
 impl CoreAssurancePlan {
@@ -117,22 +117,13 @@ impl CoreAssurancePlan {
         state: &str,
         image: &str,
     ) -> Result<Self, AssuranceError> {
-        let image_valid = image.rsplit_once("@sha256:").is_some_and(|(name, digest)| {
-            !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b".-_/:".contains(&byte))
-                && digest.len() == 64
-                && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
-        });
+        let image = crate::reference::ImageIdentity::parse(image).ok_or(AssuranceError::Plan)?;
         if identity.is_empty()
             || identity.len() > 64
             || identity.starts_with('-')
             || !identity
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            || image.len() > 512
-            || !image_valid
             || [source, state].iter().any(|path| {
                 path.is_empty() || path.len() > 4096 || path.contains([',', '\r', '\n', '\0'])
             })
@@ -143,7 +134,7 @@ impl CoreAssurancePlan {
             identity: identity.into(),
             source: source.into(),
             state: state.into(),
-            image: image.into(),
+            image,
         })
     }
 
@@ -206,7 +197,7 @@ impl CoreAssurancePlan {
             "--env=MIRI_SYSROOT=/state/miri",
             "--env=MIRIFLAGS=-Zmiri-seed=1",
             "--entrypoint=/usr/bin/timeout",
-            &self.image,
+            self.image.as_str(),
             "--signal=TERM",
             "--kill-after=10s",
             &format!("{}s", budget - 20),
