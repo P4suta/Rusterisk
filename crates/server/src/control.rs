@@ -108,6 +108,12 @@ pub struct CallKey {
     pub generation: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MediaOwner {
+    Channel(CallKey),
+    Bridge { id: ChannelId, generation: u64 },
+}
+
 #[derive(Clone, Debug)]
 pub struct IncomingCall {
     pub id: ChannelId,
@@ -129,6 +135,11 @@ pub enum IncomingTarget {
 
 #[derive(Clone, Debug)]
 pub enum Action {
+    PlayBridge {
+        bridge: ChannelId,
+        id: ChannelId,
+        media: MediaUri,
+    },
     PlayChannel {
         channel: ChannelId,
         id: ChannelId,
@@ -218,6 +229,7 @@ impl Action {
             | Self::Move { .. } => 0,
             Self::Hangup(_) | Self::Continue { .. } | Self::DestroyBridge(_) => 2,
             Self::Originate { .. }
+            | Self::PlayBridge { .. }
             | Self::PlayChannel { .. }
             | Self::ControlPlayback { .. }
             | Self::SendDtmf { .. }
@@ -241,6 +253,7 @@ impl Action {
             | Self::ListBridges
             | Self::GetBridge(_) => true,
             Self::Originate { .. }
+            | Self::PlayBridge { .. }
             | Self::PlayChannel { .. }
             | Self::ControlPlayback { .. }
             | Self::SendDtmf { .. }
@@ -264,8 +277,8 @@ impl Action {
 
 #[derive(Clone, Debug)]
 pub enum Effect {
-    PlayChannel {
-        key: CallKey,
+    PlayMedia {
+        owner: MediaOwner,
         token: MediaTaskToken,
         media: MediaUri,
     },
@@ -326,6 +339,15 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
+    MediaPlaybackStarted {
+        owner: MediaOwner,
+        token: MediaTaskToken,
+    },
+    MediaPlaybackFinished {
+        owner: MediaOwner,
+        token: MediaTaskToken,
+        completion: PlaybackCompletion,
+    },
     PlaybackStarted {
         key: CallKey,
         token: MediaTaskToken,
@@ -527,6 +549,7 @@ impl VariableAccess {
 struct BridgeEntry {
     token: u64,
     snapshot: Bridge,
+    media_tasks: MediaTasks,
 }
 
 pub struct Control {
@@ -749,6 +772,7 @@ impl Control {
         now_ms: u64,
     ) -> Result<Outcome, ControlError> {
         match action {
+            Action::PlayBridge { bridge, id, media } => self.play_bridge(bridge, id, media),
             Action::PlayChannel { channel, id, media } => self.play_channel(channel, id, media),
             Action::GetPlayback(id) => self.get_playback(&id),
             Action::ControlPlayback { id, operation } => {
@@ -996,16 +1020,26 @@ impl Control {
                         },
                     );
                 }
-                self.bridges.insert(id, BridgeEntry { token, snapshot });
+                self.bridges.insert(
+                    id,
+                    BridgeEntry {
+                        token,
+                        snapshot,
+                        media_tasks: MediaTasks::new(token),
+                    },
+                );
                 Ok(outcome)
             }
             Action::DestroyBridge(id) => {
                 let channels = self.bridge(&id)?.channels.clone();
                 let mut outcome = self.membership(id.clone(), channels, false, timestamp)?;
-                let bridge = self
+                let mut bridge = self
                     .bridges
                     .remove(&id)
                     .ok_or(ControlError::NotFound("Bridge not found"))?;
+                self.end_bridge_playbacks(&id, bridge.token, timestamp, &mut outcome);
+                let released = bridge.media_tasks.cancel();
+                tracing::debug!(bridge = %id, generation = bridge.token, tasks = released.iter().flatten().count(), "bridge media tasks released");
                 outcome.effects.push(Effect::ReleaseBridge {
                     generation: bridge.token,
                 });
@@ -1425,12 +1459,22 @@ impl Control {
         now: u64,
     ) -> Result<Outcome, ControlError> {
         match signal {
-            Signal::PlaybackStarted { key, token } => self.playback_started(&key, token, timestamp),
+            Signal::MediaPlaybackStarted { owner, token } => {
+                self.playback_started(&owner, token, timestamp)
+            }
+            Signal::MediaPlaybackFinished {
+                owner,
+                token,
+                completion,
+            } => self.finish_playback(&owner, token, completion, timestamp),
+            Signal::PlaybackStarted { key, token } => {
+                self.playback_started(&MediaOwner::Channel(key), token, timestamp)
+            }
             Signal::PlaybackFinished {
                 key,
                 token,
                 completion,
-            } => self.finish_playback(&key, token, completion, timestamp),
+            } => self.finish_playback(&MediaOwner::Channel(key), token, completion, timestamp),
             Signal::DtmfReady { key, events } => {
                 if let Some(entry) = self
                     .channels

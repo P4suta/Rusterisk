@@ -10,6 +10,96 @@ fn id(value: &str) -> Result<ChannelId, ControlError> {
 fn media(value: &str) -> Result<MediaUri, ControlError> {
     MediaUri::try_from(value).map_err(|error| ControlError::Adapter(error.to_string()))
 }
+
+#[test]
+fn empty_bridges_own_playback_and_deletion_cannot_affect_a_replacement_bridge(
+) -> Result<(), ControlError> {
+    use rusterisk_server::MediaOwner;
+    let mut control = Control::new(4);
+    control.subscribe("calls")?;
+    let mut previous = None;
+    for _ in 0..2 {
+        control.apply(
+            Action::CreateBridge {
+                id: id("mix")?,
+                name: String::new(),
+            },
+            "now",
+            0,
+        )?;
+        let started = control.apply(
+            Action::PlayBridge {
+                bridge: id("mix")?,
+                id: id("play")?,
+                media: media("sound:welcome")?,
+            },
+            "now",
+            0,
+        )?;
+        assert_eq!(
+            started.body.ok_or(ControlError::Capacity)?["target_uri"],
+            "bridge:mix"
+        );
+        let [Effect::PlayMedia { owner, token, .. }] = &started.effects[..] else {
+            return Err(ControlError::Unsupported);
+        };
+        assert!(matches!(owner, MediaOwner::Bridge { id: bridge, .. } if bridge == &id("mix")?));
+        let owner = owner.clone();
+        let token = *token;
+        if let Some((old_owner, old_token)) = previous {
+            assert_ne!(old_owner, owner);
+            assert!(control
+                .signal(
+                    Signal::MediaPlaybackFinished {
+                        owner: old_owner,
+                        token: old_token,
+                        completion: PlaybackCompletion::Completed
+                    },
+                    "late"
+                )?
+                .events
+                .is_empty());
+        }
+        assert_eq!(
+            control
+                .signal(
+                    Signal::MediaPlaybackStarted {
+                        owner: owner.clone(),
+                        token
+                    },
+                    "now"
+                )?
+                .events
+                .len(),
+            1
+        );
+        let queued = control.apply(
+            Action::PlayBridge {
+                bridge: id("mix")?,
+                id: id("queued")?,
+                media: media("recording:saved")?,
+            },
+            "now",
+            0,
+        )?;
+        assert!(queued.effects.is_empty());
+        let deleted = control.apply(Action::DestroyBridge(id("mix")?), "now", 0)?;
+        assert_eq!(
+            deleted
+                .events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::PlaybackFinished { .. }))
+                .count(),
+            2
+        );
+        assert!(matches!(
+            control.apply(Action::GetPlayback(id("play")?), "now", 0),
+            Err(ControlError::NotFound(_))
+        ));
+        previous = Some((owner, token));
+    }
+    Ok(())
+}
 fn admitted(control: &mut Control) -> Result<CallKey, ControlError> {
     control.subscribe("calls")?;
     control.apply(
@@ -54,15 +144,15 @@ fn playback_acceptance_start_and_completion_are_distinct_and_queued_audio_starts
         "queued"
     );
     assert!(first.events.is_empty());
-    let [Effect::PlayChannel {
-        key: target,
+    let [Effect::PlayMedia {
+        owner: target,
         token: first_token,
         ..
     }] = &first.effects[..]
     else {
         return Err(ControlError::Unsupported);
     };
-    assert_eq!(target, &key);
+    assert_eq!(target, &rusterisk_server::MediaOwner::Channel(key.clone()));
     let first_token = *first_token;
     let second = control.apply(
         Action::PlayChannel {
@@ -105,7 +195,7 @@ fn playback_acceptance_start_and_completion_are_distinct_and_queued_audio_starts
     assert!(
         matches!(&finished.events[0].kind, EventKind::PlaybackFinished { playback } if playback.id == id("first")? && playback.state == rusterisk_api::PlaybackState::Done)
     );
-    let [Effect::PlayChannel {
+    let [Effect::PlayMedia {
         token: second_token,
         media: source,
         ..

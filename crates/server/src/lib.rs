@@ -12,6 +12,6 @@ pub mod storage;
 mod websocket;
 pub use control::{
     Action, CallHistoryEvent, CallKey, Control, ControlError, Effect, IncomingCall, IncomingTarget,
-    Milestone, Outcome, PlaybackCompletion, Signal,
+    MediaOwner, Milestone, Outcome, PlaybackCompletion, Signal,
 };
 pub use runner::{Controller, Credentials, Runner, Subscription};

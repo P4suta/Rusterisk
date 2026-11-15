@@ -73,7 +73,7 @@ async fn http_playback_returns_created_location_and_routes_controls_to_the_owned
         let accepted = playback(response).await?;
         assert_eq!(accepted.state, PlaybackState::Queued);
         assert_eq!(accepted.target_uri, "channel:phone");
-        let Effect::PlayChannel { token, .. } = effects.recv().await.ok_or(ControlError::Capacity)? else { return Err(ControlError::Unsupported); };
+        let Effect::PlayMedia { token, .. } = effects.recv().await.ok_or(ControlError::Capacity)? else { return Err(ControlError::Unsupported); };
         let response = app.clone().oneshot(request("GET", "/ari/playbacks/fixed")?).await.map_err(failure)?;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(playback(response).await?.id, accepted.id);

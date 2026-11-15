@@ -142,7 +142,7 @@ fn all_failed_attempts_resume_once_and_late_failures_do_not_end_the_parent(
             Effect::Start { key, .. } => Ok(key),
             Effect::Dtmf { .. }
             | Effect::Playback { .. }
-            | Effect::PlayChannel { .. }
+            | Effect::PlayMedia { .. }
             | Effect::ControlPlayback { .. }
             | Effect::Gate { .. }
             | Effect::Answer { .. }

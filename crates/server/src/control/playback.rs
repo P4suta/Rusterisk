@@ -1,9 +1,10 @@
 use super::{
-    application_name, CallKey, Control, ControlError, Effect, Outcome, PlaybackCompletion,
+    application_name, CallKey, Control, ControlError, Effect, MediaOwner, Outcome,
+    PlaybackCompletion,
 };
 use crate::media::PlaybackControl;
 use rusterisk_api::{ChannelId, ChannelState, EventKind, MediaUri, Playback, PlaybackState};
-use rusterisk_core::{MediaTaskKind, MediaTaskToken, StasisMembership};
+use rusterisk_core::{MediaTaskKind, MediaTaskToken, MediaTasks, StasisMembership};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -15,7 +16,7 @@ enum Phase {
 }
 
 pub(super) struct PlaybackEntry {
-    key: CallKey,
+    owner: MediaOwner,
     token: MediaTaskToken,
     media: MediaUri,
     language: String,
@@ -28,7 +29,10 @@ impl PlaybackEntry {
             id: id.clone(),
             media_uri: self.media.to_string(),
             next_media_uri: None,
-            target_uri: format!("channel:{}", self.key.id),
+            target_uri: match &self.owner {
+                MediaOwner::Channel(key) => format!("channel:{}", key.id),
+                MediaOwner::Bridge { id, .. } => format!("bridge:{id}"),
+            },
             language: self.language.clone(),
             state: match self.phase {
                 Phase::Queued | Phase::Loading => PlaybackState::Queued,
@@ -41,21 +45,64 @@ impl PlaybackEntry {
 }
 
 impl Control {
+    pub(super) fn media_tasks(
+        &mut self,
+        owner: &MediaOwner,
+    ) -> Result<&mut MediaTasks, ControlError> {
+        match owner {
+            MediaOwner::Channel(key) => self
+                .channels
+                .get_mut(&key.id)
+                .filter(|entry| entry.call.generation() == key.generation)
+                .map(|entry| &mut entry.media_tasks)
+                .ok_or(ControlError::NotFound("Channel not found")),
+            MediaOwner::Bridge { id, generation } => self
+                .bridges
+                .get_mut(id)
+                .filter(|entry| entry.token == *generation)
+                .map(|entry| &mut entry.media_tasks)
+                .ok_or(ControlError::NotFound("Bridge not found")),
+        }
+    }
+
+    fn media_event(
+        &self,
+        owner: &MediaOwner,
+        timestamp: &str,
+        kind: EventKind,
+        outcome: &mut Outcome,
+    ) -> Result<(), ControlError> {
+        match owner {
+            MediaOwner::Channel(key) => {
+                let entry = self
+                    .channels
+                    .get(&key.id)
+                    .filter(|entry| entry.call.generation() == key.generation)
+                    .ok_or(ControlError::NotFound("Channel not found"))?;
+                outcome.optional_event(
+                    application_name(&self.applications, entry.call.stasis())?,
+                    timestamp,
+                    kind,
+                );
+            }
+            MediaOwner::Bridge { .. } => {
+                for application in self.applications.keys() {
+                    outcome.event(application, timestamp, kind.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn play_channel(
         &mut self,
         channel: ChannelId,
         id: ChannelId,
         media: MediaUri,
     ) -> Result<Outcome, ControlError> {
-        if self.playbacks.contains_key(&id) {
-            return Err(ControlError::Conflict("Playback already exists"));
-        }
-        if self.playbacks.len() >= 64 {
-            return Err(ControlError::Capacity);
-        }
         let entry = self
             .channels
-            .get_mut(&channel)
+            .get(&channel)
             .ok_or(ControlError::NotFound("Channel not found"))?;
         if !matches!(entry.call.stasis(), StasisMembership::Entered(_)) {
             return Err(ControlError::Conflict("Channel not in Stasis application"));
@@ -70,40 +117,78 @@ impl Control {
             id: channel,
             generation: entry.call.generation(),
         };
-        let token = entry.media_tasks.reserve(MediaTaskKind::Playback)?;
+        let language = entry.snapshot.language.clone();
+        self.enqueue_playback(MediaOwner::Channel(key), id, media, language)
+    }
+
+    pub(super) fn play_bridge(
+        &mut self,
+        bridge: ChannelId,
+        id: ChannelId,
+        media: MediaUri,
+    ) -> Result<Outcome, ControlError> {
+        let entry = self
+            .bridges
+            .get(&bridge)
+            .ok_or(ControlError::NotFound("Bridge not found"))?;
+        let owner = MediaOwner::Bridge {
+            id: bridge,
+            generation: entry.token,
+        };
+        self.enqueue_playback(owner, id, media, String::new())
+    }
+
+    fn enqueue_playback(
+        &mut self,
+        owner: MediaOwner,
+        id: ChannelId,
+        media: MediaUri,
+        language: String,
+    ) -> Result<Outcome, ControlError> {
+        if self.playbacks.contains_key(&id) {
+            return Err(ControlError::Conflict("Playback already exists"));
+        }
+        if self.playbacks.len() >= 64 {
+            return Err(ControlError::Capacity);
+        }
+        let token = self.media_tasks(&owner)?.reserve(MediaTaskKind::Playback)?;
         let playback = PlaybackEntry {
-            key: key.clone(),
+            owner: owner.clone(),
             token,
             media,
-            language: entry.snapshot.language.clone(),
+            language,
             phase: Phase::Queued,
         };
         let mut outcome = Outcome::json(playback.snapshot(&id))?;
         outcome.status = 201;
         outcome.location = Some(format!("/ari/playbacks/{id}"));
         self.playbacks.insert(id, playback);
-        self.next_playback(&key, &mut outcome)?;
+        self.next_playback(&owner, &mut outcome)?;
         Ok(outcome)
     }
 
-    fn next_playback(&mut self, key: &CallKey, outcome: &mut Outcome) -> Result<(), ControlError> {
-        let entry = self
-            .channels
-            .get_mut(&key.id)
-            .filter(|entry| entry.call.generation() == key.generation)
-            .ok_or(ControlError::NotFound("Channel not found"))?;
-        if let Some(token) = entry.media_tasks.next_playback() {
-            let playback = self
+    fn next_playback(
+        &mut self,
+        owner: &MediaOwner,
+        outcome: &mut Outcome,
+    ) -> Result<(), ControlError> {
+        if let Some(token) = self.media_tasks(owner)?.next_playback() {
+            let (id, playback) = self
                 .playbacks
-                .values_mut()
-                .find(|playback| playback.key == *key && playback.token == token)
+                .iter()
+                .find(|(_, playback)| playback.owner == *owner && playback.token == token)
                 .ok_or(ControlError::Conflict("Playback ownership is missing"))?;
-            entry.media_tasks.start(token)?;
-            playback.phase = Phase::Loading;
-            outcome.effects.push(Effect::PlayChannel {
-                key: key.clone(),
+            let id = id.clone();
+            let media = playback.media.clone();
+            self.media_tasks(owner)?.start(token)?;
+            self.playbacks
+                .get_mut(&id)
+                .ok_or(ControlError::NotFound("Playback not found"))?
+                .phase = Phase::Loading;
+            outcome.effects.push(Effect::PlayMedia {
+                owner: owner.clone(),
                 token,
-                media: playback.media.clone(),
+                media,
             });
         }
         Ok(())
@@ -119,7 +204,7 @@ impl Control {
 
     pub(super) fn playback_started(
         &mut self,
-        key: &CallKey,
+        owner: &MediaOwner,
         token: MediaTaskToken,
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
@@ -127,22 +212,17 @@ impl Control {
         if let Some((id, playback)) = self
             .playbacks
             .iter_mut()
-            .find(|(_, playback)| playback.key == *key && playback.token == token)
+            .find(|(_, playback)| playback.owner == *owner && playback.token == token)
         {
             if playback.phase == Phase::Loading {
-                let entry = self
-                    .channels
-                    .get(&key.id)
-                    .filter(|entry| entry.call.generation() == key.generation)
-                    .ok_or(ControlError::NotFound("Channel not found"))?;
                 playback.phase = Phase::Playing;
-                outcome.optional_event(
-                    application_name(&self.applications, entry.call.stasis())?,
+                let snapshot = playback.snapshot(id);
+                self.media_event(
+                    owner,
                     timestamp,
-                    EventKind::PlaybackStarted {
-                        playback: playback.snapshot(id),
-                    },
-                );
+                    EventKind::PlaybackStarted { playback: snapshot },
+                    &mut outcome,
+                )?;
             }
         }
         Ok(outcome)
@@ -150,27 +230,23 @@ impl Control {
 
     pub(super) fn finish_playback(
         &mut self,
-        key: &CallKey,
+        owner: &MediaOwner,
         token: MediaTaskToken,
         completion: PlaybackCompletion,
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
         let id = self.playbacks.iter().find_map(|(id, playback)| {
-            (playback.key == *key && playback.token == token).then_some(id.clone())
+            (playback.owner == *owner && playback.token == token).then_some(id.clone())
         });
         let Some(id) = id else {
-            return self.finish_dialplan_playback(key, token, completion);
+            return match owner {
+                MediaOwner::Channel(key) => self.finish_dialplan_playback(key, token, completion),
+                MediaOwner::Bridge { .. } => Ok(Outcome::empty()),
+            };
         };
-        let entry = self
-            .channels
-            .get_mut(&key.id)
-            .filter(|entry| entry.call.generation() == key.generation)
-            .ok_or(ControlError::NotFound("Channel not found"))?;
-        if !entry.media_tasks.finish(token) {
+        if !self.media_tasks(owner)?.finish(token) {
             return Err(ControlError::Conflict("Playback completion changed"));
         }
-        let application =
-            application_name(&self.applications, entry.call.stasis())?.map(str::to_owned);
         let playback = self
             .playbacks
             .remove(&id)
@@ -188,12 +264,13 @@ impl Control {
             ) => PlaybackState::Failed,
         };
         let mut outcome = Outcome::empty();
-        outcome.optional_event(
-            application.as_deref(),
+        self.media_event(
+            owner,
             timestamp,
             EventKind::PlaybackFinished { playback: snapshot },
-        );
-        self.next_playback(key, &mut outcome)?;
+            &mut outcome,
+        )?;
+        self.next_playback(owner, &mut outcome)?;
         Ok(outcome)
     }
 
@@ -205,68 +282,73 @@ impl Control {
     ) -> Result<Outcome, ControlError> {
         let playback = self
             .playbacks
+            .get(id)
+            .ok_or(ControlError::NotFound("Playback not found"))?;
+        let owner = playback.owner.clone();
+        let token = playback.token;
+        let phase = playback.phase;
+        let mut outcome = Outcome::empty();
+        let next = match (operation, phase) {
+            (PlaybackControl::Stop, Phase::Queued) => {
+                return self.finish_playback(
+                    &owner,
+                    token,
+                    PlaybackCompletion::Completed,
+                    timestamp,
+                )
+            }
+            (PlaybackControl::Stop, Phase::Stopping) => return Ok(outcome),
+            (PlaybackControl::Stop, Phase::Loading | Phase::Playing | Phase::Paused) => {
+                Phase::Stopping
+            }
+            (PlaybackControl::Pause, Phase::Playing | Phase::Paused) => {
+                self.media_tasks(&owner)?.pause(token)?;
+                Phase::Paused
+            }
+            (PlaybackControl::Resume, Phase::Playing | Phase::Paused) => {
+                self.media_tasks(&owner)?.resume(token)?;
+                Phase::Playing
+            }
+            (
+                PlaybackControl::Pause | PlaybackControl::Resume,
+                Phase::Queued | Phase::Loading | Phase::Stopping,
+            ) => return Err(ControlError::Conflict("Playback not playing")),
+        };
+        let playback = self
+            .playbacks
             .get_mut(id)
             .ok_or(ControlError::NotFound("Playback not found"))?;
-        let key = playback.key.clone();
-        let token = playback.token;
-        let mut outcome = Outcome::empty();
-        match operation {
-            PlaybackControl::Stop => match playback.phase {
-                Phase::Queued => {
-                    return self.finish_playback(
-                        &key,
-                        token,
-                        PlaybackCompletion::Completed,
-                        timestamp,
-                    )
-                }
-                Phase::Stopping => return Ok(outcome),
-                Phase::Loading | Phase::Playing | Phase::Paused => playback.phase = Phase::Stopping,
-            },
-            PlaybackControl::Pause | PlaybackControl::Resume => {
-                let entry = self
-                    .channels
-                    .get_mut(&key.id)
-                    .filter(|entry| entry.call.generation() == key.generation)
-                    .ok_or(ControlError::NotFound("Channel not found"))?;
-                match (operation, playback.phase) {
-                    (PlaybackControl::Pause, Phase::Playing | Phase::Paused) => {
-                        entry.media_tasks.pause(token)?;
-                        playback.phase = Phase::Paused;
-                    }
-                    (PlaybackControl::Resume, Phase::Playing | Phase::Paused) => {
-                        let was_paused = playback.phase == Phase::Paused;
-                        entry.media_tasks.resume(token)?;
-                        playback.phase = Phase::Playing;
-                        if was_paused {
-                            outcome.optional_event(
-                                application_name(&self.applications, entry.call.stasis())?,
-                                timestamp,
-                                EventKind::PlaybackStarted {
-                                    playback: playback.snapshot(id),
-                                },
-                            );
-                        }
-                    }
-                    (
-                        PlaybackControl::Pause | PlaybackControl::Resume,
-                        Phase::Queued | Phase::Loading | Phase::Stopping,
-                    ) => return Err(ControlError::Conflict("Playback not playing")),
-                    (
-                        PlaybackControl::Stop,
-                        Phase::Queued
-                        | Phase::Loading
-                        | Phase::Playing
-                        | Phase::Paused
-                        | Phase::Stopping,
-                    ) => return Err(ControlError::Conflict("Playback control changed")),
-                }
-            }
+        playback.phase = next;
+        if operation == PlaybackControl::Resume && phase == Phase::Paused {
+            let snapshot = playback.snapshot(id);
+            self.media_event(
+                &owner,
+                timestamp,
+                EventKind::PlaybackStarted { playback: snapshot },
+                &mut outcome,
+            )?;
         }
         outcome
             .effects
             .push(Effect::ControlPlayback { token, operation });
         Ok(outcome)
+    }
+
+    fn remove_playbacks(&mut self, owner: &MediaOwner) -> Vec<Playback> {
+        let ids = self
+            .playbacks
+            .iter()
+            .filter_map(|(id, playback)| (playback.owner == *owner).then_some(id.clone()))
+            .collect::<Vec<_>>();
+        let mut snapshots = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(playback) = self.playbacks.remove(&id) {
+                let mut snapshot = playback.snapshot(&id);
+                snapshot.state = PlaybackState::Done;
+                snapshots.push(snapshot);
+            }
+        }
+        snapshots
     }
 
     pub(super) fn end_channel_playbacks(
@@ -276,19 +358,34 @@ impl Control {
         timestamp: &str,
         outcome: &mut Outcome,
     ) {
-        let ids = self
-            .playbacks
-            .iter()
-            .filter_map(|(id, playback)| (playback.key == *key).then_some(id.clone()))
-            .collect::<Vec<_>>();
-        for id in ids {
-            if let Some(playback) = self.playbacks.remove(&id) {
-                let mut snapshot = playback.snapshot(&id);
-                snapshot.state = PlaybackState::Done;
-                outcome.optional_event(
+        for playback in self.remove_playbacks(&MediaOwner::Channel(key.clone())) {
+            outcome.optional_event(
+                application,
+                timestamp,
+                EventKind::PlaybackFinished { playback },
+            );
+        }
+    }
+
+    pub(super) fn end_bridge_playbacks(
+        &mut self,
+        id: &ChannelId,
+        generation: u64,
+        timestamp: &str,
+        outcome: &mut Outcome,
+    ) {
+        let owner = MediaOwner::Bridge {
+            id: id.clone(),
+            generation,
+        };
+        for playback in self.remove_playbacks(&owner) {
+            for application in self.applications.keys() {
+                outcome.event(
                     application,
                     timestamp,
-                    EventKind::PlaybackFinished { playback: snapshot },
+                    EventKind::PlaybackFinished {
+                        playback: playback.clone(),
+                    },
                 );
             }
         }
