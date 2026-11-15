@@ -21,7 +21,7 @@ fn create(connection: &str) -> Result<Action, ControlError> {
         app: "calls".into(),
         connection_id: id(connection)?,
         format: MediaFormat::Pcmu,
-        control_format: MediaControlFormat::Json,
+        control_format: Some(MediaControlFormat::Json),
         direction: MediaDirection::Both,
         auto_answer: false,
         data: String::new(),

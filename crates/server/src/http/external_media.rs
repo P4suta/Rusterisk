@@ -69,7 +69,7 @@ pub(super) fn action(parameters: &BTreeMap<String, String>) -> Result<Action, Co
             "slin48" => rusterisk_api::MediaFormat::Pcm48,
             _ => return Err(ControlError::Unsupported),
         };
-        let mut control_format = rusterisk_api::MediaControlFormat::PlainText;
+        let mut control_format = None;
         let mut auto_answer = true;
         let mut options = value(parameters, "transport_data", "");
         while !options.is_empty() {
@@ -80,11 +80,11 @@ pub(super) fn action(parameters: &BTreeMap<String, String>) -> Result<Action, Co
                 let (format, tail) = tail
                     .split_once(')')
                     .ok_or(ControlError::Invalid("Invalid media options"))?;
-                control_format = match format {
+                control_format = Some(match format {
                     "json" => rusterisk_api::MediaControlFormat::Json,
                     "plain-text" => rusterisk_api::MediaControlFormat::PlainText,
                     _ => return Err(ControlError::Invalid("Invalid media control format")),
-                };
+                });
                 options = tail;
             } else {
                 return Err(ControlError::Unsupported);

@@ -157,7 +157,7 @@ pub enum Action {
         app: String,
         connection_id: ChannelId,
         format: rusterisk_api::MediaFormat,
-        control_format: rusterisk_api::MediaControlFormat,
+        control_format: Option<rusterisk_api::MediaControlFormat>,
         direction: rusterisk_api::MediaDirection,
         auto_answer: bool,
         data: String,
@@ -753,6 +753,7 @@ pub struct Control {
     dialplan_program: rusterisk_config::Dialplan,
     endpoints: Endpoints,
     media_connections: BTreeMap<ChannelId, (CallKey, crate::media_websocket::MediaLinkOptions)>,
+    websocket: rusterisk_config::WebSocketConfig,
 }
 
 impl Control {
@@ -897,6 +898,7 @@ impl Control {
     pub fn with_configuration(capacity: usize, config: &rusterisk_config::Config) -> Self {
         let mut control = Self::with_dialplan(capacity, config.dialplan.clone());
         control.endpoints = Endpoints::configured(config);
+        control.websocket = config.websocket.clone();
         control
     }
 
@@ -914,6 +916,7 @@ impl Control {
             dialplan_program: program,
             endpoints: Endpoints::default(),
             media_connections: BTreeMap::new(),
+            websocket: rusterisk_config::WebSocketConfig::default(),
         }
     }
 
@@ -1007,7 +1010,14 @@ impl Control {
                     channel_id: id,
                     channel: String::new(),
                     format,
-                    control_format,
+                    control_format: control_format.unwrap_or(match self.websocket.control_format {
+                        rusterisk_config::WebSocketControlFormat::PlainText => {
+                            rusterisk_api::MediaControlFormat::PlainText
+                        }
+                        rusterisk_config::WebSocketControlFormat::Json => {
+                            rusterisk_api::MediaControlFormat::Json
+                        }
+                    }),
                     direction,
                     auto_answer,
                     channel_variables: BTreeMap::new(),

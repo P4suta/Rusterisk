@@ -18,7 +18,8 @@ fn failure(error: impl std::fmt::Display) -> ControlError {
 #[tokio::test]
 async fn incoming_media_upgrades_bind_one_channel_and_clean_up_after_disconnect(
 ) -> Result<(), ControlError> {
-    let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[general]\nallowed_origins=https://accepted.example\n[app]\ntype=user\npassword=test-password\n", "", "", "").map_err(failure)?;
+    let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[general]\nallowed_origins=https://accepted.example\n[app]\ntype=user\npassword=test-password\n", "", "", "").map_err(failure)?
+        .with_websocket_configuration("[global]\ncontrol_message_format=json\n", "").map_err(failure)?;
     let (controller, runner, effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
     let signaling =
@@ -37,7 +38,7 @@ async fn incoming_media_upgrades_bind_one_channel_and_clean_up_after_disconnect(
         let credentials = Credentials::new("app".into(), "test-password".into())?;
         let mut subscription = controller.subscribe(credentials.clone(), None, "calls".into()).await?;
         let client = reqwest::Client::new();
-        let response = client.post(format!("http://{address}/ari/channels/externalMedia?app=calls&transport=websocket&encapsulation=none&connection_type=server&format=ulaw&channelId=external&transport_data=f(json)"))
+        let response = client.post(format!("http://{address}/ari/channels/externalMedia?app=calls&transport=websocket&encapsulation=none&connection_type=server&format=ulaw&channelId=external"))
             .basic_auth("app", Some("test-password")).send().await.map_err(failure)?;
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         let channel: Channel = response.json().await.map_err(failure)?;
