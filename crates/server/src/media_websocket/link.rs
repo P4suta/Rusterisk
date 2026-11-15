@@ -1,7 +1,8 @@
 use super::{BufferItem, BufferNotice, FlowNotice, MediaBuffer, MediaSocket, SocketMessage};
 use crate::media_link::{Channels, DigitCommand, LinkStats};
 use rusterisk_api::{
-    ChannelId, MediaCommand, MediaControlFormat, MediaDirection, MediaEvent, MediaFormat,
+    ChannelId, MediaCommand, MediaCommandError, MediaControlFormat, MediaDirection, MediaEvent,
+    MediaFormat,
 };
 use rusterisk_media::{alaw_encode, mulaw_encode, Frame, MediaError};
 use std::{collections::BTreeMap, time::Duration};
@@ -195,7 +196,7 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
                 })
                 .await?;
             }
-            if audio {
+            if audio || self.audio.is_empty() {
                 break;
             }
         }
@@ -271,7 +272,8 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
                                 Err(MediaError::Capacity) => self.event(MediaEvent::Error { channel_id: self.options.channel_id.clone(), error_text: "media capacity exceeded".into() }).await?,
                                 Err(error @ (MediaError::InvalidFrame | MediaError::InvalidPacket | MediaError::InvalidRoute | MediaError::UnknownStream | MediaError::Unsupported | MediaError::Codec(_) | MediaError::Transport(_) | MediaError::Control(_))) => return Err(error),
                             },
-                            Err(_) => tracing::debug!(channel = %self.options.channel_id, "media command refused"),
+                            Err(MediaCommandError::UnsupportedFormat) => self.event(MediaEvent::Error { channel_id: self.options.channel_id.clone(), error_text: "SET_MEDIA_DIRECTION only supports JSON format.\n".into() }).await?,
+                            Err(MediaCommandError::Capacity | MediaCommandError::Invalid | MediaCommandError::Json(_)) => tracing::debug!(channel = %self.options.channel_id, "media command refused"),
                         }
                     }
                     Some(SocketMessage::Binary(bytes)) => {
@@ -291,7 +293,7 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
                 }
                 command = self.channels.commands.recv(), if active.is_none() && (!self.channels.commands.is_closed() || !self.channels.commands.is_empty()) => active = command,
                 _instant = tick.tick() => {
-                    self.tick(&mut stats).await?;
+                    if self.options.direction != MediaDirection::In { self.tick(&mut stats).await?; }
                     if let Some(command) = &mut active {
                         let (tone, finished, completion) = match command {
                             DigitCommand::Tone(tone) => (Some(*tone), true, None),
