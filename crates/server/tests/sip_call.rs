@@ -839,6 +839,17 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
             let finished = tokio::time::timeout(Duration::from_secs(2), subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
             assert!(matches!(finished.kind, EventKind::PlaybackFinished { playback } if playback.id.as_str() == name && playback.state == rusterisk_api::PlaybackState::Done));
         }
+        controller.execute(credentials()?, None, Action::CreateBridge { id: id("playback-mix")?, name: String::new() }).await?;
+        controller.execute(credentials()?, None, Action::AddChannels { bridge: id("playback-mix")?, channels: [channel.clone()].into_iter().collect() }).await?;
+        for _ in 0..2 { subscription.events.recv().await.ok_or(ControlError::Capacity)?; }
+        let request = Request::builder().method("POST").uri("/ari/bridges/playback-mix/play/bridge-play?media=recording:saved")
+            .header("Authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("app:test-password"))).body(Body::empty()).map_err(failure)?;
+        assert_eq!(app.oneshot(request).await.map_err(failure)?.status(), StatusCode::CREATED);
+        let started = tokio::time::timeout(Duration::from_secs(2), subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
+        assert!(matches!(started.kind, EventKind::PlaybackStarted { playback } if playback.target_uri == "bridge:playback-mix"));
+        receive_audio(&audio, -6000).await?;
+        let finished = tokio::time::timeout(Duration::from_secs(2), subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
+        assert!(matches!(finished.kind, EventKind::PlaybackFinished { playback } if playback.state == rusterisk_api::PlaybackState::Done));
         controller.execute(credentials()?, None, Action::Hangup(channel)).await?;
         finish_bye(&phone).await?;
         Ok(())

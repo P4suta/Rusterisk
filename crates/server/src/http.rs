@@ -185,28 +185,18 @@ fn response(outcome: Outcome) -> Result<Response, ControlError> {
     Ok(response)
 }
 
-fn play_channel(
-    channel: &str,
-    playback: ChannelId,
-    parameters: &BTreeMap<String, String>,
-) -> Result<Action, ControlError> {
+fn playback_media(parameters: &BTreeMap<String, String>) -> Result<MediaUri, ControlError> {
     if parameters
         .get("lang")
         .is_some_and(|language| !language.is_empty())
     {
         return Err(ControlError::Unsupported);
     }
-    let media =
-        MediaUri::try_from(required(parameters, "media")?).map_err(|error| match error {
-            InvalidMediaUri::Unsupported => ControlError::Unsupported,
-            InvalidMediaUri::Syntax | InvalidMediaUri::Name => {
-                ControlError::Invalid("Invalid media URI")
-            }
-        })?;
-    Ok(Action::PlayChannel {
-        channel: id(channel)?,
-        id: playback,
-        media,
+    MediaUri::try_from(required(parameters, "media")?).map_err(|error| match error {
+        InvalidMediaUri::Unsupported => ControlError::Unsupported,
+        InvalidMediaUri::Syntax | InvalidMediaUri::Name => {
+            ControlError::Invalid("Invalid media URI")
+        }
     })
 }
 
@@ -339,12 +329,26 @@ async fn dispatch(
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let action = match (method.as_str(), segments.as_slice()) {
-        ("POST", ["ari", "channels", channel, "play"]) => {
-            play_channel(channel, optional_id(parameters, "playbackId")?, parameters)?
-        }
-        ("POST", ["ari", "channels", channel, "play", playback]) => {
-            play_channel(channel, id(playback)?, parameters)?
-        }
+        ("POST", ["ari", "channels", channel, "play"]) => Action::PlayChannel {
+            channel: id(channel)?,
+            id: optional_id(parameters, "playbackId")?,
+            media: playback_media(parameters)?,
+        },
+        ("POST", ["ari", "channels", channel, "play", playback]) => Action::PlayChannel {
+            channel: id(channel)?,
+            id: id(playback)?,
+            media: playback_media(parameters)?,
+        },
+        ("POST", ["ari", "bridges", bridge, "play"]) => Action::PlayBridge {
+            bridge: id(bridge)?,
+            id: optional_id(parameters, "playbackId")?,
+            media: playback_media(parameters)?,
+        },
+        ("POST", ["ari", "bridges", bridge, "play", playback]) => Action::PlayBridge {
+            bridge: id(bridge)?,
+            id: id(playback)?,
+            media: playback_media(parameters)?,
+        },
         ("GET", ["ari", "playbacks", playback]) => Action::GetPlayback(id(playback)?),
         ("DELETE", ["ari", "playbacks", playback]) => Action::ControlPlayback {
             id: id(playback)?,

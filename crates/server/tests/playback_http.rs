@@ -90,11 +90,21 @@ async fn http_playback_returns_created_location_and_routes_controls_to_the_owned
         controller.signal(Signal::PlaybackFinished { key, token, completion: PlaybackCompletion::Completed }).await?;
         while !matches!(subscription.events.recv().await.ok_or(ControlError::Capacity)?.kind, EventKind::PlaybackFinished { .. }) {}
         assert_eq!(app.clone().oneshot(request("GET", "/ari/playbacks/fixed")?).await.map_err(failure)?.status(), StatusCode::NOT_FOUND);
-        let response = app.oneshot(request("POST", "/ari/channels/phone/play?media=recording:call-1")?).await.map_err(failure)?;
+        let response = app.clone().oneshot(request("POST", "/ari/channels/phone/play?media=recording:call-1")?).await.map_err(failure)?;
         assert_eq!(response.status(), StatusCode::CREATED);
         let location = response.headers().get("Location").ok_or(ControlError::Capacity)?.to_str().map_err(failure)?.to_owned();
         let accepted = playback(response).await?;
         assert_eq!(location, format!("/ari/playbacks/{}", accepted.id));
+        assert_eq!(app.clone().oneshot(request("POST", "/ari/bridges?bridgeId=mix")?).await.map_err(failure)?.status(), StatusCode::OK);
+        let response = app.clone().oneshot(request("POST", "/ari/bridges/mix/play/bridge-play?media=sound:welcome")?).await.map_err(failure)?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(playback(response).await?.target_uri, "bridge:mix");
+        assert!(matches!(effects.recv().await, Some(Effect::PlayMedia { .. })));
+        assert!(matches!(effects.recv().await, Some(Effect::PlayMedia { owner: rusterisk_server::MediaOwner::Bridge { .. }, .. })));
+        let response = app.clone().oneshot(request("POST", "/ari/bridges/mix/play?media=recording:call-1")?).await.map_err(failure)?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(playback(response).await?.target_uri, "bridge:mix");
+        assert!(effects.try_recv().is_err());
         Ok(())
     }).await.map_err(failure)?;
     controller.shutdown();

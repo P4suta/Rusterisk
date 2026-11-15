@@ -695,6 +695,14 @@ pub const OPERATIONS: &[Operation] = &[
         ["media!", "playbackId", "lang"]
     ),
     operation!(
+        "bridges.playWithId",
+        "playWithId",
+        Post,
+        "/bridges/{bridgeId}/play/{playbackId}",
+        "Playback",
+        ["media!", "lang"]
+    ),
+    operation!(
         "bridges.record",
         "record",
         Post,
