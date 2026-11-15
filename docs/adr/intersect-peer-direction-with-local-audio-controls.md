@@ -16,6 +16,7 @@ Represent negotiated peer direction and local audio controls as distinct core st
 Intersect their permissions when computing the effective audio gate.
 Carry direction changes through owned transport controls with the current call generation.
 Suppress transport sending or delivery when negotiation forbids it.
+Wait for transport confirmation before sending the negotiated answer.
 Accept direction updates that preserve the selected codec and transport.
 Reject unsupported offers without changing the active session.
 Keep request acceptance, media configuration, and received audio as separate observations.

@@ -17,6 +17,8 @@ use tokio::io::ReadBuf;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
+#[cfg(test)]
+mod negotiation_tests;
 mod recording;
 
 struct Listener {
@@ -28,6 +30,12 @@ struct Active {
     listener: usize,
     pending: Option<SocketPair>,
     digits: DigitDelivery,
+    direction_reply: Option<DirectionReply>,
+}
+
+struct DirectionReply {
+    direction: PeerMediaDirection,
+    datagram: Datagram,
 }
 
 enum DigitDelivery {
@@ -77,6 +85,15 @@ fn key(id: String, generation: u64) -> Result<CallKey, ControlError> {
         id: ChannelId::try_from(id)?,
         generation,
     })
+}
+
+fn peer_direction(direction: rusterisk_sip::Direction) -> PeerMediaDirection {
+    match direction {
+        rusterisk_sip::Direction::SendRecv => PeerMediaDirection::SendReceive,
+        rusterisk_sip::Direction::SendOnly => PeerMediaDirection::SendOnly,
+        rusterisk_sip::Direction::RecvOnly => PeerMediaDirection::ReceiveOnly,
+        rusterisk_sip::Direction::Inactive => PeerMediaDirection::Inactive,
+    }
 }
 
 async fn receive(listeners: &[Listener]) -> Result<Received, ControlError> {
@@ -210,7 +227,38 @@ impl Signaling {
         output: Output,
         now: u64,
     ) -> Result<(), ControlError> {
-        self.transmit(listener, output.datagrams).await?;
+        let mut datagrams = output.datagrams;
+        for event in &output.events {
+            if let SipEvent::PeerDirection {
+                id,
+                generation,
+                direction,
+            } = event
+            {
+                let key = key(id.clone(), *generation)?;
+                if datagrams.len() != 1 {
+                    return Err(ControlError::Invalid("Expected one direction answer"));
+                }
+                let datagram = datagrams.pop().ok_or(ControlError::Capacity)?;
+                if let Some(call) = self.calls.get_mut(&key) {
+                    if call.direction_reply.is_some() {
+                        return Err(ControlError::Conflict("Media negotiation already pending"));
+                    }
+                    call.direction_reply = Some(DirectionReply {
+                        direction: peer_direction(*direction),
+                        datagram,
+                    });
+                }
+            }
+        }
+        datagrams.retain(|packet| {
+            !self.calls.values().any(|call| {
+                call.direction_reply.as_ref().is_some_and(|reply| {
+                    reply.datagram.peer == packet.peer && reply.datagram.bytes == packet.bytes
+                })
+            })
+        });
+        self.transmit(listener, datagrams).await?;
         for event in output.events {
             match event {
                 SipEvent::PeerDirection {
@@ -218,12 +266,7 @@ impl Signaling {
                     generation,
                     direction,
                 } => {
-                    let direction = match direction {
-                        rusterisk_sip::Direction::SendRecv => PeerMediaDirection::SendReceive,
-                        rusterisk_sip::Direction::SendOnly => PeerMediaDirection::SendOnly,
-                        rusterisk_sip::Direction::RecvOnly => PeerMediaDirection::ReceiveOnly,
-                        rusterisk_sip::Direction::Inactive => PeerMediaDirection::Inactive,
-                    };
+                    let direction = peer_direction(direction);
                     self.notify(Signal::PeerDirection {
                         key: key(id, generation)?,
                         direction,
@@ -271,12 +314,7 @@ impl Signaling {
                             Codec::Pcma => AudioFormat::Pcma,
                             Codec::Opus => AudioFormat::Opus,
                         };
-                        let direction = match session.direction {
-                            rusterisk_sip::Direction::SendRecv => PeerMediaDirection::SendReceive,
-                            rusterisk_sip::Direction::SendOnly => PeerMediaDirection::SendOnly,
-                            rusterisk_sip::Direction::RecvOnly => PeerMediaDirection::ReceiveOnly,
-                            rusterisk_sip::Direction::Inactive => PeerMediaDirection::Inactive,
-                        };
+                        let direction = peer_direction(session.direction);
                         match self
                             .media
                             .attach(
@@ -422,6 +460,7 @@ impl Signaling {
                 listener,
                 pending: None,
                 digits: DigitDelivery::new(dtmf),
+                direction_reply: None,
             },
         );
         Ok(())
@@ -490,6 +529,7 @@ impl Signaling {
                 listener,
                 pending: Some(sockets),
                 digits: DigitDelivery::new(dtmf),
+                direction_reply: None,
             },
         );
         self.output(listener, output, now).await
@@ -573,11 +613,27 @@ impl Signaling {
                     AudioGate::OutgoingMuted => Gate::OutgoingMuted,
                     AudioGate::Closed => Gate::Closed,
                 };
-                let _applied = self
+                let applied = self
                     .media
-                    .peer_direction(key, direction, gate)
+                    .peer_direction(key.clone(), direction, gate)
                     .await
                     .map_err(failure)?;
+                if let Some(call) = self.calls.get_mut(&key) {
+                    if call
+                        .direction_reply
+                        .as_ref()
+                        .is_some_and(|reply| reply.direction == direction)
+                    {
+                        let reply = call.direction_reply.take().ok_or(ControlError::Capacity)?;
+                        let listener = call.listener;
+                        if applied {
+                            self.transmit(listener, [reply.datagram].into_iter().collect())
+                                .await?;
+                        } else {
+                            self.notify(Signal::Terminated { key, cause: 21 }).await?;
+                        }
+                    }
+                }
             }
             Effect::Answer { key } => {
                 if let Err(error) = self.answer(&key, now).await {
