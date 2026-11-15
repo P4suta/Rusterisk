@@ -4,3 +4,15 @@ useDefault = true
 [[allowlists]]
 description = "Exclude build outputs and Git object storage."
 paths = ['''(^|/)target/''', '''(^|/)\.git/''']
+
+[[allowlists]]
+description = "Published str0m key fixtures require complete byte equality in vendor-check."
+targetRules = ["private-key"]
+paths = ['''(^|/)vendor/str0m/(cert\.pem|examples/key\.pem)$''']
+
+[[allowlists]]
+description = "The verified published source record contains SHA-256 file hashes."
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)vendor/str0m-source\.toml$''']
+regexes = ['''^[a-f0-9]{64}$''']

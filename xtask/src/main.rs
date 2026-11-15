@@ -228,6 +228,7 @@ fn execute() -> Result<(), TaskError> {
             run("cargo", &["test", "--manifest-path", "xtask/fuzz/Cargo.toml", "--target-dir", "target", "--locked", "--features", "signaling,media", "--tests"])
         }
         [task] if task == "security" => {
+            xtask::vendor::check(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string()))?;
             security::check()?;
             run(
                 "gitleaks",
