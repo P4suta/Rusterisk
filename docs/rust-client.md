@@ -59,6 +59,31 @@ Cleanup failures reach the caller and the structured diagnostics.
 Dropping a call or session initiates cleanup while the Tokio runtime remains available.
 Await explicit cleanup before shutting down the runtime.
 
+## Exchange external audio
+
+Use `Session::external_websocket` with `WebSocketMediaOptions` to create an owned incoming media channel after event subscription.
+Wait for `Accepted`, read its channel snapshot, and pass the channel to `Client::connect_media` with the selected `MediaControlFormat`.
+The connection uses the channel's bearer identifier and negotiates the `media` subprotocol.
+The method checks the initial `MEDIA_START` channel and connection identifiers before returning.
+`start_event` exposes the negotiated format and frame size.
+
+Send encoded audio with `MediaSession::send_audio` and typed controls with `command`.
+`next_message` returns `MediaMessage::Audio` or a parsed `MediaMessage::Event`.
+Binary messages carry at most 65500 bytes and commands carry at most 128 bytes.
+Malformed events and events for another channel close the connection.
+Writes have a 100-millisecond deadline.
+Cancelling a write closes the socket and prevents reuse of a partial command.
+A pending read preserves its partial message when cancelled.
+
+`MediaSession::close` waits up to two seconds for the peer's close response.
+Dropping the media session releases its socket immediately.
+Closing the owned call also ends its media socket at the server.
+Native integration tests compare known audio received in both directions through two owned channels and verify channel and socket cleanup.
+
+Use `Client::external_websocket_client` to request an outgoing connection through a configured `websocket_client.conf` entry.
+Pass the configured connection name as `connection` and select media options explicitly.
+The server owns the outgoing socket and retries within its configured admission deadline.
+
 ## Bound transport and event work
 
 A session holds at most 64 call handles and remembers at most 4096 issued identifiers.
