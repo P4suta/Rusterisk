@@ -9,6 +9,7 @@ mod digit_sequence;
 mod digits;
 mod media_tasks;
 mod owned_progress;
+mod recording_gate;
 mod stasis;
 pub use dial_failure::DialFailure;
 pub use dial_fork::{DialFork, DialForkDecision, DialForkError, DialForkOutcome, DialForkState};
@@ -22,6 +23,7 @@ pub use digit_sequence::{DtmfError, DtmfSequence, DtmfTiming, DtmfTone};
 pub use digits::DtmfDigit;
 pub use media_tasks::{MediaTaskError, MediaTaskKind, MediaTaskState, MediaTaskToken, MediaTasks};
 pub use owned_progress::{CallCompletion, CallMilestone, OwnedCallProgress};
+pub use recording_gate::{RecordingControl, RecordingGate};
 pub use stasis::{StasisApplication, StasisMembership};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
