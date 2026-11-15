@@ -1,6 +1,26 @@
 use rusterisk_api::{openapi, swagger, ChannelId, Event, EventKind, OPERATIONS};
 
 #[test]
+fn stored_audio_descriptions_match_unencoded_wave_response_bytes(
+) -> Result<(), rusterisk_api::SwaggerError> {
+    let document = openapi();
+    let content = &document["paths"]["/recordings/stored/{recordingName}/file"]["get"]["responses"]
+        ["200"]["content"];
+    assert_eq!(content["audio/wav"], serde_json::json!({}));
+    assert!(content.get("application/json").is_none());
+    let standard = swagger("recordings")?;
+    let operation = standard["apis"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|api| api["operations"].as_array().into_iter().flatten())
+        .find(|operation| operation["nickname"] == "getStoredFile")
+        .ok_or_else(|| rusterisk_api::SwaggerError::Schema("getStoredFile".into()))?;
+    assert_eq!(operation["produces"][0], "audio/wav");
+    Ok(())
+}
+
+#[test]
 fn playback_and_recording_descriptions_use_created_responses() {
     let document = openapi();
     for operation in OPERATIONS.iter().filter(|operation| {

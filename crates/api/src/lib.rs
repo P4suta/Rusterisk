@@ -993,8 +993,6 @@ pub fn schemas() -> Value {
 fn response_schema(name: &str) -> Value {
     if let Some(item) = name.strip_suffix("[]") {
         json!({"type": "array", "items": {"$ref": format!("#/components/schemas/{item}")}})
-    } else if name == "binary" {
-        json!({"type": "string", "contentEncoding": "base64"})
     } else {
         json!({"$ref": format!("#/components/schemas/{name}")})
     }
@@ -1046,6 +1044,8 @@ pub fn openapi() -> Value {
     for operation in OPERATIONS {
         let response = if operation.response == "void" {
             json!({"description": "Completed"})
+        } else if operation.response == "binary" {
+            json!({"description": "Stored audio bytes", "content": {"audio/wav": {}}})
         } else {
             json!({"description": "Accepted operation", "content": {"application/json": {"schema": response_schema(operation.response)}}})
         };
@@ -1134,8 +1134,7 @@ pub fn swagger_for(resource: &str, format: DiscoveryFormat) -> Result<Value, Swa
                 } else if operation.response == "binary" {
                     definition["type"] = Value::String("string".into());
                     definition["format"] = Value::String("byte".into());
-                    definition["produces"] =
-                        json_array([Value::String("application/octet-stream".into())]);
+                    definition["produces"] = json_array([Value::String("audio/wav".into())]);
                 } else {
                     definition["type"] = Value::String(operation.response.into());
                 }
