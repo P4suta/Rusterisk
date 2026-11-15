@@ -6,6 +6,8 @@ use rusterisk_client::{
     Client, Error,
 };
 use std::{future::IntoFuture, net::Ipv4Addr, time::Duration};
+#[path = "reference/external_audio.rs"]
+mod external_audio;
 
 async fn compare_external_admission(
     client: &Client,
@@ -419,6 +421,24 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
         );
         compare_external_admission(&actual, &mut actual_session, app.as_str()).await?;
         compare_external_admission(&reference, &mut reference_session, app.as_str()).await?;
+        external_audio::compare(
+            &actual,
+            &mut actual_session,
+            app.as_str(),
+            Ipv4Addr::LOCALHOST,
+        )
+        .await?;
+        let reference_media_ip = std::env::var("RUSTERISK_REFERENCE_MEDIA_IP")
+            .map_err(|_| Error::Invalid("reference media address is required"))?
+            .parse::<Ipv4Addr>()
+            .map_err(|_| Error::Invalid("reference media address"))?;
+        external_audio::compare(
+            &reference,
+            &mut reference_session,
+            app.as_str(),
+            reference_media_ip,
+        )
+        .await?;
         compare_subscriptions(&actual, &reference, app.as_str()).await?;
         reference_session.shutdown().await?;
         actual_session.shutdown().await?;
