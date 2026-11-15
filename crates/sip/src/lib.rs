@@ -323,6 +323,15 @@ enum DialogReply {
     Rejected(Vec<u8>),
 }
 
+impl DialogReply {
+    fn response(bytes: Vec<u8>) -> Self {
+        Self::Accepted {
+            bytes,
+            events: Vec::new(),
+        }
+    }
+}
+
 impl Output {
     fn response(peer: SocketAddr, bytes: Vec<u8>) -> Self {
         Self {

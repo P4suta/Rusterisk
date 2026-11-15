@@ -389,7 +389,7 @@ impl Engine {
         };
         let sequence = request.cseq_header()?.typed()?.seq;
         if sequence <= dialog.remote_cseq {
-            return Ok(Some(DialogReply::Rejected(response(
+            return Ok(Some(DialogReply::response(response(
                 request,
                 500,
                 "Server Internal Error",
@@ -400,7 +400,7 @@ impl Engine {
         if request.method == Method::Invite {
             match dialog.state {
                 State::Terminated { .. } => {
-                    return Ok(Some(DialogReply::Rejected(response(
+                    return Ok(Some(DialogReply::response(response(
                         request,
                         481,
                         "Call/Transaction Does Not Exist",
@@ -409,7 +409,7 @@ impl Engine {
                     )?)))
                 }
                 State::AwaitingAck { .. } => {
-                    return Ok(Some(DialogReply::Rejected(response(
+                    return Ok(Some(DialogReply::response(response(
                         request,
                         500,
                         "Server Internal Error",
@@ -422,7 +422,7 @@ impl Engine {
             let updated =
                 match direction_update(&dialog.offer, &request.body, &dialog.invite.session) {
                     Ok(updated) => updated,
-                    Err(_) => return Ok(Some(DialogReply::Rejected(response(
+                    Err(_) => return Ok(Some(DialogReply::response(response(
                         request,
                         488,
                         "Not Acceptable Here",
@@ -484,7 +484,7 @@ impl Engine {
         }
         if request.method == Method::Info {
             if matches!(dialog.state, State::Terminated { .. }) {
-                return Ok(Some(DialogReply::Rejected(response(
+                return Ok(Some(DialogReply::response(response(
                     request,
                     481,
                     "Call/Transaction Does Not Exist",

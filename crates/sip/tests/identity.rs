@@ -302,6 +302,19 @@ fn unsupported_direction_offers_leave_the_active_session_unchanged() -> Result<(
         assert!(rejected.datagrams[0].bytes.starts_with(b"SIP/2.0 488"));
         assert!(rejected.events.is_empty());
         assert_eq!(engine.active_session(&id, 7), Some(&original));
+        let repeated = engine.tick(u64::from(sequence) * 1000 + 500)?;
+        assert_eq!(repeated.datagrams.len(), 1);
+        assert_eq!(repeated.datagrams[0].bytes, rejected.datagrams[0].bytes);
+        let ack = incoming_request(&rejected.datagrams[0].bytes, "ACK", sequence)?;
+        let ack = std::str::from_utf8(&ack)?.replace(
+            &format!("z9hG4bK-ACK-{sequence}"),
+            &format!("z9hG4bK-update-{sequence}"),
+        );
+        engine.receive(ack.as_bytes(), peer, u64::from(sequence) * 1000 + 501)?;
+        assert!(engine
+            .tick(u64::from(sequence) * 1000 + 999)?
+            .datagrams
+            .is_empty());
     }
     Ok(())
 }
