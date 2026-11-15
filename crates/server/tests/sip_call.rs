@@ -56,6 +56,15 @@ async fn matching_event(
 }
 
 async fn answer(signal: &UdpSocket, audio: &SocketPair) -> Result<SocketAddr, ControlError> {
+    answer_dialog(signal, audio)
+        .await
+        .map(|(address, _ack)| address)
+}
+
+async fn answer_dialog(
+    signal: &UdpSocket,
+    audio: &SocketPair,
+) -> Result<(SocketAddr, String), ControlError> {
     let mut bytes = [0; 16385];
     let (size, peer) = tokio::time::timeout(Duration::from_secs(2), signal.recv_from(&mut bytes))
         .await
@@ -76,7 +85,8 @@ async fn answer(signal: &UdpSocket, audio: &SocketPair) -> Result<SocketAddr, Co
         .send_to(reply.as_bytes(), peer)
         .await
         .map_err(failure)?;
-    Ok(offered.remote)
+    let ack = format!("ACK sip:rusterisk@{peer} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-ack;rport\r\nFrom: {};tag=phone\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", signal.local_addr().map_err(failure)?, request.to_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value());
+    Ok((offered.remote, ack))
 }
 
 async fn receive_audio(peer: &SocketPair, expected: i32) -> Result<(), ControlError> {
@@ -681,7 +691,7 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
         let ack = format!("ACK sip:100@{target} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-ack;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", alice.local_addr().map_err(failure)?, answered.from_header().map_err(failure)?.value(), answered.to_header().map_err(failure)?.value(), answered.call_id_header().map_err(failure)?.value());
         alice.send_to(ack.as_bytes(), target).await.map_err(failure)?;
         controller.execute(credentials()?, None, Action::Originate { id: id("bob")?, endpoint: "PJSIP/bob".into(), app: "app".into(), args: Vec::new(), caller: "100".into(), timeout: 30 }).await?;
-        let bob_target = answer(&bob, &bob_audio).await?;
+        let (bob_target, bob_ack) = answer_dialog(&bob, &bob_audio).await?;
         let mut up = BTreeSet::new();
         while up.len() < 2 {
             let event = tokio::time::timeout(Duration::from_secs(2), events.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
@@ -740,6 +750,23 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
         drain_received_audio(&bob_audio)?;
         send_voice(&alice_audio, alice_target, &mut alice_sender, 4000).await?;
         receive_audio(&bob_audio, 4000).await?;
+        for (sequence, version, direction) in [(1, 2, "sendonly"), (2, 3, "sendrecv")] {
+            update_direction(&bob, target, &bob_ack, &bob_audio, sequence, version, direction).await?;
+            matching_event(&mut events.events, |event| match direction {
+                "sendonly" => matches!(event, EventKind::ChannelHold { channel, .. } if channel.id.as_str() == "bob"),
+                _ => matches!(event, EventKind::ChannelUnhold { channel } if channel.id.as_str() == "bob"),
+            }).await?;
+            drain_received_audio(&alice_audio)?;
+            drain_received_audio(&bob_audio)?;
+            tokio::try_join!(send_voice(&alice_audio, alice_target, &mut alice_sender, 4000), send_voice(&bob_audio, bob_target, &mut bob_sender, -7000))?;
+            receive_audio(&alice_audio, -7000).await?;
+            if direction == "sendonly" {
+                let mut bytes = [0; 1501];
+                assert!(tokio::time::timeout(Duration::from_millis(150), bob_audio.data().recv_from(&mut bytes)).await.is_err());
+            } else {
+                receive_audio(&bob_audio, 4000).await?;
+            }
+        }
         for _ in 0..2 {
             send_digits(&controller, &incoming, "11111111111111111111111111111111", 0, 1).await?;
         }
