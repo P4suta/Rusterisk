@@ -48,14 +48,14 @@ async fn media_notifications_and_stasis_exit_cancel_owned_state_requests_before_
             let release = tokio::time::timeout(Duration::from_secs(1), requests.recv()).await.map_err(|_| Error::Timeout)?.ok_or(Error::Closed)?;
             let kind = if exiting { api::EventKind::StasisEnd { channel: channel.clone() } }
                 else { api::EventKind::ChannelVarset { channel: channel.clone(), variable: "RUSTERISK_MEDIA_CONNECTED".into(), value: "1".into() } };
-            calls.event(&api::Event { application: "app".into(), timestamp: "now".into(), kind });
+            calls.event(&api::Event { application: "app".into(), timestamp: "now".into(), kind })?;
             let (id, result) = tokio::time::timeout(Duration::from_secs(1), calls.probes.join_next()).await.map_err(|_| Error::Timeout)?.ok_or(Error::Closed)?.map_err(|_| Error::Closed)?;
             assert!(matches!(result, Err(Error::Closed)));
             calls.probed(id, result);
             assert!(received.borrow().media_probe_failure.is_none());
             assert_eq!(received.borrow().progress.has_reached(CallMilestone::MediaConnected), !exiting);
             if release.send(()).is_err() { tracing::debug!("canceled media request already released its server handler"); }
-            calls.event(&api::Event { application: "app".into(), timestamp: "later".into(), kind: api::EventKind::StasisEnd { channel } });
+            calls.event(&api::Event { application: "app".into(), timestamp: "later".into(), kind: api::EventKind::StasisEnd { channel } })?;
             calls.close().await?;
             Ok(())
         }.await;

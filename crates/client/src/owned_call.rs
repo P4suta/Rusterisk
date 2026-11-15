@@ -4,7 +4,9 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot, watch};
+mod incoming;
 mod media_probe;
+pub(crate) use incoming::adopt;
 #[cfg(test)]
 mod media_probe_tests;
 use media_probe::Probe;
@@ -275,8 +277,8 @@ mod tests {
                 let (lifetime, dropped) = oneshot::channel();
                 calls.entries.insert(channel.id.clone(), Entry { progress, lifetime: dropped, work: Work::Idle, probe: Probe::Waiting });
                 let event = api::Event { application: "app".into(), timestamp: "now".into(), kind: api::EventKind::StasisStart { channel: channel.clone(), args: Vec::new() } };
-                calls.event(&event);
-                calls.event(&event);
+                calls.event(&event)?;
+                calls.event(&event)?;
                 assert_eq!(calls.probes.len(), 1);
                 let (id, result) = tokio::time::timeout(Duration::from_secs(1), calls.probes.join_next()).await.map_err(|_| Error::Timeout)?.ok_or(Error::Closed)?.map_err(|_| Error::Closed)?;
                 calls.probed(id, result);
@@ -284,9 +286,9 @@ mod tests {
                 assert_eq!(received.borrow().media_probe_failure.as_ref().and_then(|failure| failure.status), if status == 503 { Some(503) } else { None });
                 let mut call = OwnedCall { id: channel.id.clone(), progress: received, lifetime: Lifetime::Owned(lifetime) };
                 if status == 503 { assert!(matches!(call.wait(CallMilestone::MediaConnected, Duration::from_secs(1)).await, Err(Error::MediaProbe(failure)) if failure.status == Some(503))); }
-                calls.event(&api::Event { application: "app".into(), timestamp: "connected".into(), kind: api::EventKind::ChannelVarset { channel: channel.clone(), variable: "RUSTERISK_MEDIA_CONNECTED".into(), value: "1".into() } });
+                calls.event(&api::Event { application: "app".into(), timestamp: "connected".into(), kind: api::EventKind::ChannelVarset { channel: channel.clone(), variable: "RUSTERISK_MEDIA_CONNECTED".into(), value: "1".into() } })?;
                 assert!(call.wait(CallMilestone::MediaConnected, Duration::from_secs(1)).await?.media_probe_failure.is_none());
-                calls.event(&api::Event { application: "app".into(), timestamp: "later".into(), kind: api::EventKind::StasisEnd { channel } });
+                calls.event(&api::Event { application: "app".into(), timestamp: "later".into(), kind: api::EventKind::StasisEnd { channel } })?;
                 drop(call);
                 calls.close().await?;
                 Ok(())
@@ -349,13 +351,13 @@ mod tests {
                 });
                 let (lifetime, dropped) = oneshot::channel();
                 let (reply, mut response) = oneshot::channel();
-                calls.submit(Command {
+                calls.submit(Command::Create(CreateRequest {
                     id: api::ChannelId::try_from(format!("setup-{index}"))?,
                     options: Start::Originate(Originate::new("PJSIP/phone".into())?),
                     progress,
                     lifetime: dropped,
                     reply,
-                });
+                }));
                 if index < 8 {
                     assert!(matches!(response.try_recv(), Ok(Ok(()))));
                 } else {
@@ -438,8 +440,8 @@ mod tests {
                     channel: channel.clone(),
                 },
             };
-            calls.event(&event);
-            calls.event(&event);
+            calls.event(&event)?;
+            calls.event(&event)?;
             calls.originated(channel.id.clone(), Ok(channel.clone()));
             calls.event(&api::Event {
                 application: "app".into(),
@@ -448,7 +450,7 @@ mod tests {
                     channel,
                     args: Vec::new(),
                 },
-            });
+            })?;
             drop(lifetime);
             calls.tick();
             assert_eq!(
@@ -513,9 +515,21 @@ enum Start {
     },
 }
 
-pub(crate) struct Command {
+pub(crate) enum Command {
+    Create(CreateRequest),
+    Adopt(AdoptRequest),
+}
+
+pub(crate) struct CreateRequest {
     id: api::ChannelId,
     options: Start,
+    progress: watch::Sender<CallSnapshot>,
+    lifetime: oneshot::Receiver<()>,
+    reply: oneshot::Sender<Result<(), Error>>,
+}
+
+pub(crate) struct AdoptRequest {
+    id: api::ChannelId,
     progress: watch::Sender<CallSnapshot>,
     lifetime: oneshot::Receiver<()>,
     reply: oneshot::Sender<Result<(), Error>>,
@@ -559,13 +573,13 @@ async fn start(commands: &mpsc::Sender<Command>, options: Start) -> Result<Owned
     let (lifetime, dropped) = oneshot::channel();
     let (reply, accepted) = oneshot::channel();
     commands
-        .try_send(Command {
+        .try_send(Command::Create(CreateRequest {
             id: id.clone(),
             options,
             progress,
             lifetime: dropped,
             reply,
-        })
+        }))
         .map_err(|_| Error::Capacity)?;
     accepted.await.map_err(|_| Error::Closed)??;
     Ok(OwnedCall {
@@ -595,6 +609,7 @@ pub(crate) struct Calls {
     client: Client,
     application: api::ChannelId,
     entries: BTreeMap<api::ChannelId, Entry>,
+    incoming: BTreeMap<api::ChannelId, CallSnapshot>,
     used: BTreeSet<api::ChannelId>,
     pub commands: mpsc::Receiver<Command>,
     pub originates: tokio::task::JoinSet<(api::ChannelId, Result<api::Channel, Error>)>,
@@ -612,6 +627,7 @@ impl Calls {
                 client,
                 application,
                 entries: BTreeMap::new(),
+                incoming: BTreeMap::new(),
                 used: BTreeSet::new(),
                 commands: received,
                 originates: tokio::task::JoinSet::new(),
@@ -623,6 +639,13 @@ impl Calls {
     }
 
     pub fn submit(&mut self, command: Command) {
+        match command {
+            Command::Create(request) => self.create(request),
+            Command::Adopt(request) => self.adopt(request),
+        }
+    }
+
+    fn create(&mut self, command: CreateRequest) {
         if command.reply.is_closed() {
             return;
         }
@@ -635,7 +658,7 @@ impl Calls {
             let _delivered = command.reply.send(Err(Error::Capacity));
             return;
         }
-        let Command {
+        let CreateRequest {
             id,
             options,
             progress,
@@ -699,9 +722,9 @@ impl Calls {
         let _delivered = reply.send(Ok(()));
     }
 
-    pub fn event(&mut self, event: &api::Event) {
+    pub fn event(&mut self, event: &api::Event) -> Result<(), Error> {
         if event.application != self.application.as_str() {
-            return;
+            return Ok(());
         }
         let (channel, milestone, completion) = match &event.kind {
             api::EventKind::StasisStart { channel, .. } => {
@@ -755,8 +778,36 @@ impl Calls {
             | api::EventKind::RecordingFinished { .. }
             | api::EventKind::RecordingFailed { .. }
             | api::EventKind::ApplicationReplaced { .. }
-            | api::EventKind::Dial { .. } => return,
+            | api::EventKind::Dial { .. } => return Ok(()),
         };
+        if completion.is_some() {
+            self.incoming.remove(&channel.id);
+        } else if milestone == Some(CallMilestone::Stasis)
+            && !self.entries.contains_key(&channel.id)
+            && !self.used.contains(&channel.id)
+        {
+            if self.incoming.len() >= 64 && !self.incoming.contains_key(&channel.id) {
+                return Err(Error::Capacity);
+            }
+            self.incoming
+                .entry(channel.id.clone())
+                .or_insert_with(|| CallSnapshot {
+                    progress: OwnedCallProgress::new(),
+                    channel: None,
+                    failure: None,
+                    cleanup: Cleanup::Pending,
+                    media_probe_failure: None,
+                });
+        }
+        if let Some(snapshot) = self.incoming.get_mut(&channel.id) {
+            snapshot.channel = Some(channel.clone());
+            if channel.state == api::ChannelState::Up {
+                snapshot.progress = snapshot.progress.observe(CallMilestone::Answered);
+            }
+            if let Some(milestone) = milestone {
+                snapshot.progress = snapshot.progress.observe(milestone);
+            }
+        }
         if let Some(entry) = self.entries.get_mut(&channel.id) {
             if completion.is_some() && entry.progress.borrow().progress.completion().is_none() {
                 entry.work = Work::Done;
@@ -785,6 +836,7 @@ impl Calls {
             });
         }
         self.tick();
+        Ok(())
     }
 
     pub fn tick(&mut self) {

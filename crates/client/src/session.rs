@@ -21,6 +21,12 @@ pub struct Session {
 }
 
 impl Session {
+    /// Adopts a channel observed in the session's Stasis application.
+    /// The handle preserves observed answer and media milestones.
+    /// Incoming adoption has no HTTP acceptance milestone.
+    pub async fn adopt(&self, id: &api::ChannelId) -> Result<OwnedCall, Error> {
+        owned_call::adopt(&self.commands, id.clone()).await
+    }
     pub async fn originate(&self, options: Originate) -> Result<OwnedCall, Error> {
         owned_call::originate(&self.commands, options).await
     }
@@ -153,7 +159,7 @@ async fn run(
                     match message {
                         Message::Text(text) => {
                             let event = serde_json::from_str(&text)?;
-                            calls.event(&event);
+                            calls.event(&event)?;
                             events.send(event).map_err(|_| Error::Closed)?;
                         }
                         Message::Ping(bytes) => send(&mut socket, Message::Pong(bytes)).await?,
