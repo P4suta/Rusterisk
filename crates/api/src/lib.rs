@@ -4,6 +4,8 @@ use serde_json::{json, Map, Value};
 mod event_filter;
 mod event_source;
 mod external_rtp;
+mod external_stream;
+pub use external_stream::{AudioSocketTarget, InvalidAudioSocketTarget};
 mod media_uri;
 mod recording_options;
 mod recording_policy;
