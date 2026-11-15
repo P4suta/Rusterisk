@@ -7,6 +7,7 @@ pub mod input_fuzz;
 pub mod legacy_audit;
 pub mod process;
 pub mod reference;
+mod sip_domain_policy;
 mod tls_client_policy;
 
 #[derive(Debug)]
@@ -82,6 +83,7 @@ pub fn inspect_with_exceptions(
         function: None,
         scope_depth: 0,
         block_depth: 0,
+        sip_domain_verifier: sip_domain_policy::verifier(&file),
     };
     policy.visit_file(&file);
     for (index, exception) in exceptions.iter().enumerate() {
@@ -102,6 +104,7 @@ struct Policy<'a> {
     function: Option<String>,
     scope_depth: usize,
     block_depth: usize,
+    sip_domain_verifier: bool,
 }
 
 impl Policy<'_> {
@@ -214,10 +217,15 @@ impl<'ast> Visit<'ast> for Policy<'_> {
     }
 
     fn visit_local(&mut self, node: &'ast syn::Local) {
-        if self.block_depth == 1 && tls_client_policy::constructor(node) {
+        if self.block_depth == 1 {
             if let (Some(function), [attribute]) = (self.function.clone(), node.attrs.as_slice()) {
                 let registered = self.exceptions.iter().any(|exception| {
-                    exception.item == function && exception.lint == "clippy::disallowed_types"
+                    exception.item == function
+                        && (tls_client_policy::constructor(node)
+                            && tls_client_policy::registration(exception)
+                            || self.sip_domain_verifier
+                                && sip_domain_policy::constructor(node)
+                                && sip_domain_policy::registration(exception))
                 });
                 if registered && self.approved(attribute, &function) {
                     visit::visit_attribute(self, attribute);

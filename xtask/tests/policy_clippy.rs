@@ -50,6 +50,66 @@ fn resolved_aliases_and_wrappers_cannot_bypass_shared_ownership_policy() -> Resu
                 "#[expect(clippy::disallowed_types, reason = \"unused fixture expectation\")] pub fn value() -> u8 { 1 }",
                 false,
             ),
+            (
+                "local_expectation",
+                r#"pub struct Trust;
+                pub fn configuration() {
+                    let verifier = Trust;
+                    #[expect(clippy::disallowed_types, reason = "scoped immutable callback fixture")]
+                    let verifier = ::std::sync::Arc::<Trust>::new(verifier);
+                    drop(verifier);
+                }"#,
+                true,
+            ),
+            (
+                "callback_extra_constructor",
+                r#"pub struct Trust;
+                pub fn configuration() {
+                    let verifier = Trust;
+                    #[expect(clippy::disallowed_types, reason = "scoped immutable callback fixture")]
+                    let verifier = ::std::sync::Arc::<Trust>::new(verifier);
+                    let _call_state = ::std::sync::Arc::new(1_u8);
+                    drop(verifier);
+                }"#,
+                false,
+            ),
+            (
+                "callback_alias",
+                r#"use std::sync::Arc as Shared;
+                pub struct Trust;
+                pub fn configuration() {
+                    let verifier = Trust;
+                    #[expect(clippy::disallowed_types, reason = "scoped immutable callback fixture")]
+                    let verifier = ::std::sync::Arc::<Trust>::new(verifier);
+                    let _call_state = Shared::new(1_u8);
+                    drop(verifier);
+                }"#,
+                false,
+            ),
+            (
+                "callback_wrapper",
+                r#"pub struct Trust;
+                pub struct CallState(pub std::sync::Arc<u8>);
+                pub fn configuration() {
+                    let verifier = Trust;
+                    #[expect(clippy::disallowed_types, reason = "scoped immutable callback fixture")]
+                    let verifier = ::std::sync::Arc::<Trust>::new(verifier);
+                    drop(verifier);
+                }"#,
+                false,
+            ),
+            (
+                "callback_other_function",
+                r#"pub struct Trust;
+                pub fn configuration() {
+                    let verifier = Trust;
+                    #[expect(clippy::disallowed_types, reason = "scoped immutable callback fixture")]
+                    let verifier = ::std::sync::Arc::<Trust>::new(verifier);
+                    drop(verifier);
+                }
+                pub fn other() { let _call_state = ::std::sync::Arc::new(1_u8); }"#,
+                false,
+            ),
         ];
         for (name, source, allowed) in fixtures {
             let path = directory.join(format!("{name}.rs"));

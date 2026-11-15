@@ -1,5 +1,13 @@
 use syn::{Expr, GenericArgument, Local, Path, PathArguments, Type};
 
+pub(super) fn registration(exception: &crate::Exception) -> bool {
+    exception.path == "crates/server/src/encryption/client.rs"
+        && exception.item == "client_connector"
+        && exception.lint == "clippy::disallowed_types"
+        && exception.adr == "docs/adr/confine-client-tls-sharing-to-immutable-library-config.md"
+        && exception.rationale == "Construct only immutable external TLS client configuration."
+}
+
 fn plain_path(path: &Path, names: &[&str]) -> bool {
     path.leading_colon.is_some()
         && path.segments.len() == names.len()
