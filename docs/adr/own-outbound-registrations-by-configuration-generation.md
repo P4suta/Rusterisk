@@ -13,23 +13,25 @@ Accepted registration settings have no running adapter.
 
 ## Decision
 
-Keep registration transitions pure and serialize their decisions in signaling.
+Keep registration transitions pure and serialize signaling decisions.
 Key each registration by its name and checked configuration generation.
 Own at most sixteen registration clients.
 Share sixteen setup slots and sixty-four connection slots with calls.
-Reuse the bounded resolver, verified TLS, and connection generations.
-Distinguish call and configuration lifetimes explicitly.
+Reuse bounded resolution, verified TLS, and connection generations.
+Distinguish call and configuration lifetimes.
 Reject stale completions before caching, connecting, or sending.
-Keep one boot Call-ID and increasing request sequence numbers across replacements.
-Refresh the matching Contact before its granted expiry.
-Apply finite transaction deadlines, response retry instructions, and configured retry limits.
+Keep one boot Call-ID and consecutive request sequences across replacements.
+Serialize new REGISTER transactions per registrar until a final response or timeout.
+Keep bounded retiring transaction metadata until settlement.
+Refresh matching Contacts before expiry.
+Apply finite deadlines, response retry instructions, and configured retry limits.
 Dispatch pending requests in round-robin order.
 Cancel the previous generation before publishing replacement settings.
 Preserve active calls and require restart for listener changes.
 
 ## Alternatives
 
-Detached per-registration loops duplicate resource limits and complicate replacement ordering.
+Detached loops duplicate limits and complicate replacement ordering.
 
 ## Consequences
 

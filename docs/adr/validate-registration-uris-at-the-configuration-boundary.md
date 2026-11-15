@@ -7,14 +7,14 @@ status: proposed
 
 ## Context
 
-[RFC 3261](https://www.rfc-editor.org/rfc/rfc3261.html#section-19.1.5) constrains forming requests from URIs.
+[RFC 3261](https://www.rfc-editor.org/rfc/rfc3261.html#section-10.2) distinguishes registrar targets from addresses of record.
 Registration targets influence name resolution, certificate identity, and signaling headers.
 Raw strings don't establish those constraints.
 
 ## Decision
 
 Use the locked [rsipstack parser](https://github.com/restsend/rsipstack/blob/ca99be1e736f8f6fed3e2f1e48de12384dac9733/src/sip/uri.rs) in the configuration crate.
-Construct bounded private URI values while source positions remain available.
+Construct bounded private URI values with distinct registrar and address roles while source positions remain available.
 Keep original URI octets for request serialization and digest authentication.
 Reject passwords, unsupported headers, routing parameters, and transport conflicts before network setup.
 Validate references using the completed configuration.
