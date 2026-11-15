@@ -110,6 +110,7 @@ impl Control {
                         key: key.clone(),
                         client,
                         options,
+                        channel_variables: variables.clone(),
                     },
                 )
             }
@@ -124,6 +125,7 @@ impl Control {
                     "MEDIA_WEBSOCKET_OPTIMAL_FRAME_SIZE".into(),
                     options.format.optimal_frame_size().to_string(),
                 );
+                options.channel_variables = variables.clone();
                 websocket = Some(options);
                 (
                     ChannelKind::WebSocketPending,

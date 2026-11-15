@@ -27,7 +27,12 @@ fn incoming_media_connections_publish_variables_and_claim_one_channel_generation
 ) -> Result<(), ControlError> {
     let mut control = Control::new(4);
     control.subscribe("calls")?;
-    let accepted = control.apply(create("connection")?, "created", 0)?;
+    let accepted = control.apply_with_variables(
+        create("connection")?,
+        std::collections::BTreeMap::from([("INITIAL_TAG".into(), "incoming value".into())]),
+        "created",
+        0,
+    )?;
     let channel: Channel = serde_json::from_value(accepted.body.ok_or(ControlError::Capacity)?)?;
     assert_eq!(channel.state, ChannelState::Down);
     let variables = channel.channelvars.ok_or(ControlError::Capacity)?;
@@ -55,6 +60,20 @@ fn incoming_media_connections_publish_variables_and_claim_one_channel_generation
     let (claimed, options) = control.claim_media_connection(&id("connection")?)?;
     assert_eq!(claimed, original);
     assert_eq!(options.format, MediaFormat::Pcmu);
+    assert_eq!(
+        options
+            .channel_variables
+            .get("INITIAL_TAG")
+            .map(String::as_str),
+        Some("incoming value")
+    );
+    assert_eq!(
+        options
+            .channel_variables
+            .get("MEDIA_WEBSOCKET_CONNECTION_ID")
+            .map(String::as_str),
+        Some("connection")
+    );
     assert!(matches!(
         control.claim_media_connection(&id("connection")?),
         Err(ControlError::Conflict(

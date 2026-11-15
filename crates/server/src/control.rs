@@ -402,6 +402,7 @@ pub enum Effect {
         key: CallKey,
         client: rusterisk_config::WebSocketClient,
         options: rusterisk_api::WebSocketMediaOptions,
+        channel_variables: BTreeMap<String, String>,
     },
     ReserveWebSocket {
         key: CallKey,

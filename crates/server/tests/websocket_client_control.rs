@@ -33,7 +33,12 @@ fn client_admission_captures_configuration_and_keeps_call_milestones_independent
             "external_host must be a valid websocket_client connection id."
         ))
     ));
-    let accepted = control.apply(create("agent")?, "created", 0)?;
+    let accepted = control.apply_with_variables(
+        create("agent")?,
+        std::collections::BTreeMap::from([("INITIAL_TAG".into(), "outgoing value".into())]),
+        "created",
+        0,
+    )?;
     let channel: Channel = serde_json::from_value(accepted.body.ok_or(ControlError::Capacity)?)?;
     assert!(channel.name.starts_with("WebSocket/agent/"));
     assert_eq!(channel.state, ChannelState::Down);
@@ -47,7 +52,7 @@ fn client_admission_captures_configuration_and_keeps_call_milestones_independent
     );
     let key = control.key(&channel.id)?;
     assert!(
-        matches!(&accepted.effects[..], [Effect::ConnectWebSocket { key: current, client, options }] if current == &key && client.uri.expose() == "ws://127.0.0.1:18080/media" && options.control_format == MediaControlFormat::Json)
+        matches!(&accepted.effects[..], [Effect::ConnectWebSocket { key: current, client, options, channel_variables }] if current == &key && client.uri.expose() == "ws://127.0.0.1:18080/media" && options.control_format == MediaControlFormat::Json && channel_variables.get("INITIAL_TAG").map(String::as_str) == Some("outgoing value"))
     );
     control.signal(
         Signal::Milestone {

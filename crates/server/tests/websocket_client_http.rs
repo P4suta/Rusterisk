@@ -37,7 +37,7 @@ async fn client_http_creation_waits_for_attachment_and_resolves_the_global_forma
         let error: serde_json::Value = serde_json::from_slice(&refused.into_body().collect().await.map_err(failure)?.to_bytes())?;
         assert_eq!(error["message"], "external_host must be a valid websocket_client connection id.");
         let pending = tokio::spawn(app.oneshot(request(&format!("{query}&external_host=agent"))?));
-        let Some(Effect::ConnectWebSocket { key, client, options }) = effects.recv().await else { return Err(ControlError::Capacity); };
+        let Some(Effect::ConnectWebSocket { key, client, options, .. }) = effects.recv().await else { return Err(ControlError::Capacity); };
         assert_eq!(client.name, "agent");
         assert_eq!(options.control_format, MediaControlFormat::Json);
         assert_eq!(options.direction, MediaDirection::Out);

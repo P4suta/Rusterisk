@@ -537,8 +537,11 @@ impl Signaling {
                 key,
                 client,
                 options,
+                channel_variables,
             } => {
-                if let Err(error) = self.start_websocket(key.clone(), client, options) {
+                if let Err(error) =
+                    self.start_websocket(key.clone(), client, options, channel_variables)
+                {
                     self.notify(Signal::WebSocketAdmitted {
                         key,
                         result: Err(error),

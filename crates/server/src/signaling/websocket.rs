@@ -125,6 +125,7 @@ impl Signaling {
         key: CallKey,
         client: WebSocketClient,
         options: WebSocketMediaOptions,
+        channel_variables: BTreeMap<String, String>,
     ) -> Result<(), ControlError> {
         if self.calls.len()
             + self.external_media.len()
@@ -144,7 +145,7 @@ impl Signaling {
             control_format: options.control_format,
             direction: options.direction,
             auto_answer: options.auto_answer,
-            channel_variables: BTreeMap::new(),
+            channel_variables,
         };
         let (cancel, mut stopped) = watch::channel(false);
         self.websocket_admissions.insert(
