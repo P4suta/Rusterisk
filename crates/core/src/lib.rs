@@ -68,6 +68,13 @@ pub enum MediaConnection {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionClaim {
+    Available,
+    Claimed,
+    Released,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MuteDirection {
     Incoming,
     Outgoing,
@@ -129,6 +136,7 @@ pub enum Transition {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoreError {
+    ConnectionClaimed,
     Ended,
     NotAnswered,
     NotHeld,
@@ -145,6 +153,7 @@ pub struct Call {
     state: CallState,
     media: MediaState,
     connection: MediaConnection,
+    connection_claim: ConnectionClaim,
     mute: AudioGate,
     peer_direction: PeerMediaDirection,
     bridge: Option<u64>,
@@ -178,6 +187,7 @@ impl Call {
             state: CallState::Down,
             media: MediaState::Waiting,
             connection: MediaConnection::Pending,
+            connection_claim: ConnectionClaim::Available,
             mute: AudioGate::Open,
             peer_direction: PeerMediaDirection::SendReceive,
             bridge: None,
@@ -236,6 +246,21 @@ impl Call {
         self.connection
     }
 
+    pub const fn connection_claim(self) -> ConnectionClaim {
+        self.connection_claim
+    }
+
+    pub fn claim_connection(mut self) -> Result<Self, CoreError> {
+        match self.connection_claim {
+            ConnectionClaim::Available => {
+                self.connection_claim = ConnectionClaim::Claimed;
+                Ok(self)
+            }
+            ConnectionClaim::Claimed => Err(CoreError::ConnectionClaimed),
+            ConnectionClaim::Released => Err(CoreError::Ended),
+        }
+    }
+
     pub fn connect_media(mut self) -> Decision {
         let transition = match self.connection {
             MediaConnection::Pending => {
@@ -275,6 +300,7 @@ impl Call {
                 self.state = CallState::Ended;
                 self.media = MediaState::Released;
                 self.connection = MediaConnection::Released;
+                self.connection_claim = ConnectionClaim::Released;
                 self.mute = AudioGate::Closed;
                 self.bridge = None;
                 self.stasis = StasisMembership::Released;
