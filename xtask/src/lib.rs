@@ -1,6 +1,7 @@
 use syn::parse::Parser;
 use syn::visit::{self, Visit};
 pub mod process;
+pub mod reference;
 
 #[derive(Debug)]
 pub enum SecurityConfigError {
