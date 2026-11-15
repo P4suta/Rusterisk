@@ -142,8 +142,12 @@ fn connection_claims_are_exclusive() {
 fn stasis_tracks_the_current_app() {
     let generation: u64 = kani::any();
     let app_id: u64 = kani::any();
+    let other_app_id: u64 = kani::any();
+    if app_id == other_app_id {
+        return;
+    }
     let app = StasisApplication::new(app_id);
-    let other = StasisApplication::new(app_id ^ 1);
+    let other = StasisApplication::new(other_app_id);
     let outgoing: bool = kani::any();
     let call = if outgoing {
         let Ok(pending) = Call::outgoing(generation).reserve_stasis(app) else {
@@ -192,7 +196,10 @@ fn stasis_tracks_the_current_app() {
 fn bridge_membership_is_exclusive() {
     let generation: u64 = kani::any();
     let bridge: u64 = kani::any();
-    let other = bridge ^ 1;
+    let other: u64 = kani::any();
+    if bridge == other {
+        return;
+    }
     let call = Call::outgoing(generation);
     assert_eq!(call.join(bridge), Err(CoreError::NotAnswered));
     let Ok(joined) = call.apply(CallEvent::Answer).call().join(bridge) else {
