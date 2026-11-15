@@ -13,6 +13,10 @@ pub struct ReferenceBuild {
     name: String,
 }
 
+pub struct VerificationBuild {
+    name: String,
+}
+
 #[derive(Debug)]
 pub enum ReferenceError {
     InvalidIdentity,
@@ -59,12 +63,45 @@ impl ReferenceBuild {
     }
 
     pub fn steps(&self) -> Vec<Step> {
-        [
-            step(&["buildx", "create", "--name", &self.name, "--driver", "docker-container", "--driver-opt", "memory=2g,memory-swap=2g,cpu-quota=200000,cpu-period=100000,restart-policy=no,image=moby/buildkit@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe"], 30),
-            step(&["buildx", "inspect", "--bootstrap", &self.name], 180),
-            step(&["update", "--pids-limit=256", &format!("buildx_buildkit_{}0", self.name)], 30),
-            step(&["buildx", "build", "--builder", &self.name, "--load", "--progress=plain", "--tag", "rusterisk-asterisk-reference:22.9.0", "containers/asterisk-reference"], 1800),
-        ].into_iter().collect()
+        build_steps(
+            &self.name,
+            "rusterisk-asterisk-reference:22.9.0",
+            "containers/asterisk-reference",
+            1800,
+        )
+    }
+
+    pub fn cleanup(&self) -> Step {
+        step(&["buildx", "rm", "--force", &self.name], 60)
+    }
+}
+
+fn build_steps(name: &str, tag: &str, context: &str, seconds: u64) -> Vec<Step> {
+    [
+        step(&["buildx", "create", "--name", name, "--driver", "docker-container", "--driver-opt", "memory=2g,memory-swap=2g,cpu-quota=200000,cpu-period=100000,restart-policy=no,image=moby/buildkit@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe"], 30),
+        step(&["buildx", "inspect", "--bootstrap", name], 180),
+        step(&["update", "--pids-limit=256", &format!("buildx_buildkit_{name}0")], 30),
+        step(&["buildx", "build", "--builder", name, "--load", "--progress=plain", "--tag", tag, context], seconds),
+    ].into_iter().collect()
+}
+
+impl VerificationBuild {
+    pub fn new(identity: &str) -> Result<Self, ReferenceError> {
+        if !valid_identity(identity) {
+            return Err(ReferenceError::InvalidIdentity);
+        }
+        Ok(Self {
+            name: format!("rusterisk-verification-{identity}"),
+        })
+    }
+
+    pub fn steps(&self) -> Vec<Step> {
+        build_steps(
+            &self.name,
+            "rusterisk-input-verification:rust-1.99.0",
+            "containers/input-verification",
+            900,
+        )
     }
 
     pub fn cleanup(&self) -> Step {

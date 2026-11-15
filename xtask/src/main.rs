@@ -25,7 +25,7 @@ impl std::fmt::Display for TaskError {
             Self::ReferenceCleanup { operation, cleanup } => {
                 write!(
                     f,
-                    "reference build failed: {operation}, builder cleanup failed: {cleanup}"
+                    "image build failed: {operation}, builder cleanup failed: {cleanup}"
                 )
             }
         }
@@ -166,6 +166,8 @@ fn execute() -> Result<(), TaskError> {
         [task, mode] if task == "interop" && mode == "--dry-run" => interop::execute(false),
         [task, mode] if task == "reference-build" && mode == "--dry-run" => reference_build(false),
         [task, mode] if task == "reference-build" && mode == "--run" => reference_build(true),
+        [task, mode] if task == "verification-build" && mode == "--dry-run" => verification_build(false),
+        [task, mode] if task == "verification-build" && mode == "--run" => verification_build(true),
         [task] if task == "policy" => policy(),
         [task] if task == "core-msrv" => core_msrv(),
         [task] if task == "node-check" => node_check(),
@@ -249,8 +251,21 @@ fn reference_build(execute: bool) -> Result<(), TaskError> {
     let identity = execution_identity(execute)?;
     let plan = xtask::reference::ReferenceBuild::new(&identity)
         .map_err(|error| TaskError::Contract(error.to_string()))?;
-    let steps = plan.steps();
-    let cleanup = plan.cleanup();
+    image_build(execute, plan.steps(), plan.cleanup())
+}
+
+fn verification_build(execute: bool) -> Result<(), TaskError> {
+    let identity = execution_identity(execute)?;
+    let plan = xtask::reference::VerificationBuild::new(&identity)
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
+    image_build(execute, plan.steps(), plan.cleanup())
+}
+
+fn image_build(
+    execute: bool,
+    steps: Vec<xtask::reference::Step>,
+    cleanup: xtask::reference::Step,
+) -> Result<(), TaskError> {
     for step in steps.iter().chain(std::iter::once(&cleanup)) {
         println!(
             "budget={}s docker {}",
@@ -264,13 +279,10 @@ fn reference_build(execute: bool) -> Result<(), TaskError> {
     let perform = |step: &xtask::reference::Step| {
         xtask::process::run(Command::new("docker").args(&step.arguments), step.budget)
     };
-    perform(
-        steps
-            .first()
-            .ok_or_else(|| TaskError::Contract("reference build has no creation step".into()))?,
-    )
-    .map_err(TaskError::Process)?;
-    let operation = steps.iter().skip(1).try_for_each(perform);
+    if steps.is_empty() {
+        return Err(TaskError::Contract("image build has no steps".into()));
+    }
+    let operation = steps.iter().try_for_each(perform);
     let cleanup = perform(&cleanup);
     match (operation, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
