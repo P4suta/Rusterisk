@@ -2,9 +2,7 @@ use rusterisk_client::{
     api::{ChannelId, ChannelState, EventKind},
     CallCompletion, CallMilestone, Cleanup, Client, Error,
 };
-use rusterisk_server::{
-    Action, Controller, Credentials, IncomingCall, IncomingTarget, Milestone, Signal,
-};
+use rusterisk_server::{Controller, IncomingCall, IncomingTarget, Milestone, Signal};
 use std::{future::IntoFuture, time::Duration};
 
 fn failure(error: impl std::fmt::Display) -> Error {
@@ -89,14 +87,24 @@ async fn incoming(end: End) -> Result<(), Error> {
                 assert!(matches!(client.channel(&id).await, Err(Error::Api { status:404, .. })));
             }
             End::Handoff => {
-                controller.execute(Credentials::new("api".into(), "password".into()).map_err(failure)?, None,
-                    Action::Move { channel:id.clone(), app:"destination".into(), args:Vec::new() }).await.map_err(failure)?;
+                let app = ChannelId::try_from("destination".to_owned())?;
+                let comma = ["ambiguous,argument".into()];
+                let empty = [String::new()];
+                let long = ["x".repeat(257)];
+                let overflow: [String;33] = std::array::from_fn(|_| "x".into());
+                let control = ["x\r\n".into()];
+                for invalid in [comma.as_slice(), empty.as_slice(), long.as_slice(), overflow.as_slice(), control.as_slice()] {
+                    assert!(matches!(client.move_channel(&id, &app, invalid).await, Err(Error::Invalid(_))));
+                }
+                assert!(matches!(client.move_channel(&id, &app, &vec!["x".repeat(256);32]).await, Err(Error::Capacity)));
+                let arguments = vec!["x".repeat(127);32];
+                client.move_channel(&id, &app, &arguments).await?;
                 let snapshot = call.wait_completion(Duration::from_secs(1)).await?;
                 assert_eq!(snapshot.progress.completion(), Some(CallCompletion::StasisExited));
                 assert_eq!(snapshot.cleanup, Cleanup::Complete);
                 assert!(matches!(session.adopt(&id).await, Err(Error::Invalid(_))));
                 let event = destination.next_event().await?;
-                assert!(matches!(event.kind, EventKind::StasisStart { channel, .. } if channel.id == id));
+                assert!(matches!(event.kind, EventKind::StasisStart { channel, args } if channel.id == id && args == arguments));
                 call.close().await?;
                 session.shutdown().await?;
                 assert_eq!(client.channel(&id).await?.state, ChannelState::Up);
