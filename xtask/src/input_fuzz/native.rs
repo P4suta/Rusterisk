@@ -43,8 +43,10 @@ pub fn validate_run(bytes: &[u8], seeds: usize) -> Result<u64, FuzzError> {
             if units.replace(count).is_some() {
                 return Err(FuzzError::Results);
             }
-        } else if line.starts_with('#') && line.contains(" DONE ") {
-            let (count, statistics) = line[1..].split_once(' ').ok_or(FuzzError::Results)?;
+        } else if line.starts_with('#') && line.split_ascii_whitespace().nth(1) == Some("DONE") {
+            let (count, statistics) = line[1..]
+                .split_once(|character: char| character.is_ascii_whitespace())
+                .ok_or(FuzzError::Results)?;
             let count = count.parse::<u64>().map_err(|_| FuzzError::Results)?;
             let (_, rest) = statistics.split_once("cov: ").ok_or(FuzzError::Results)?;
             let value = rest

@@ -143,6 +143,8 @@ fn native_fuzz_discovery_and_completion_refuse_empty_or_incomplete_runs() -> Res
     }
     let complete = "#100 DONE cov: 45 ft: 70 corp: 10/1Kb\nDone 100 runs in 1 second(s)\nstat::number_of_executed_units: 100\nstat::peak_rss_mb: 40\n";
     assert_eq!(validate_run(complete.as_bytes(), 7)?, 100);
+    let native = complete.replace("#100 DONE ", "#100\tDONE   ");
+    assert_eq!(validate_run(native.as_bytes(), 7)?, 100);
     for invalid in [
         String::new(),
         complete.replace("100", "0"),
