@@ -5,6 +5,11 @@ use rusterisk_storage::{RecordingChunk, StorageError, Store};
 use tokio::sync::{mpsc, oneshot};
 
 pub(super) enum StoredCommand {
+    Copy {
+        source: ChannelId,
+        destination: ChannelId,
+        reply: oneshot::Sender<Result<StoredRecording, StorageError>>,
+    },
     OpenFile {
         name: ChannelId,
         output: mpsc::Sender<RecordingChunk>,
@@ -41,6 +46,11 @@ impl StoragePort {
 
 pub(super) fn execute(store: &mut Store, files: &mut FileSet, command: StoredCommand) {
     match command {
+        StoredCommand::Copy {
+            source,
+            destination,
+            reply,
+        } => files.copy(store, source, destination, reply),
         StoredCommand::OpenFile {
             name,
             output,

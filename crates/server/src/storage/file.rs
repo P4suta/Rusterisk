@@ -1,5 +1,6 @@
+use super::copy::CopySet;
 use super::{receive, StoragePort, StoredCommand, WorkerError};
-use rusterisk_api::ChannelId;
+use rusterisk_api::{ChannelId, StoredRecording};
 use rusterisk_storage::{RecordingChunk, StorageError, Store, StoredRecordingReader};
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -121,6 +122,7 @@ struct Entry {
 pub(super) struct FileSet {
     generation: u64,
     entries: BTreeMap<u64, Entry>,
+    copies: CopySet,
 }
 
 impl FileSet {
@@ -128,6 +130,7 @@ impl FileSet {
         Self {
             generation: 0,
             entries: BTreeMap::new(),
+            copies: CopySet::new(),
         }
     }
 
@@ -162,6 +165,7 @@ impl FileSet {
     }
 
     pub fn pump(&mut self) {
+        self.copies.pump();
         let mut finished = Vec::new();
         for (generation, entry) in &mut self.entries {
             let canceled = match entry.lifetime.try_recv() {
@@ -201,5 +205,23 @@ impl FileSet {
                 }
             }
         }
+    }
+
+    pub fn copy(
+        &mut self,
+        store: &Store,
+        source: ChannelId,
+        destination: ChannelId,
+        reply: oneshot::Sender<Result<StoredRecording, StorageError>>,
+    ) {
+        self.copies.begin(store, source, destination, reply);
+    }
+
+    pub fn is_copying(&self) -> bool {
+        !self.copies.is_empty()
+    }
+
+    pub fn close(&mut self) {
+        self.copies.close();
     }
 }

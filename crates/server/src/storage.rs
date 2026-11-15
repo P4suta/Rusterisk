@@ -8,6 +8,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 mod history;
 mod playback;
 pub use history::HistoryReceipt;
+mod copy;
 mod file;
 mod recording;
 mod stored;
@@ -350,9 +351,11 @@ fn serve(
             recordings.pump();
             playbacks.pump();
             files.pump();
+            files.close();
             break;
         }
-        if !recordings.is_preparing() && wakes.blocking_recv().is_none() {
+        if !recordings.is_preparing() && !files.is_copying() && wakes.blocking_recv().is_none() {
+            files.close();
             break;
         }
         drain_commands(
