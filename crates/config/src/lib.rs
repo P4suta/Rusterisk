@@ -733,12 +733,12 @@ impl Config {
             }
             "aor" => {
                 section.check(file, &["type", "max_contacts", "contact"])?;
-                let max_contacts = section.number(file, "max_contacts", 1)?;
-                if max_contacts == 0 || max_contacts > 16 {
+                let max_contacts = section.number(file, "max_contacts", 0)?;
+                if max_contacts > 16 {
                     return Err(ConfigError::at(
                         file,
-                        section.line,
-                        "max_contacts must be 1 through 16",
+                        section.position("max_contacts"),
+                        "max_contacts must be 0 through 16",
                     ));
                 }
                 self.aors.push(Aor {
