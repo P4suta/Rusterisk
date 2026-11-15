@@ -492,59 +492,14 @@ impl MediaHub {
         session: RtpSession,
         initial_direction: PeerMediaDirection,
     ) -> Result<(), MediaError> {
-        if self.ports.len() >= self.capacity || self.workers.len() >= self.capacity {
-            return Err(MediaError::Capacity);
-        }
-        if self.ports.contains_key(&key) {
-            return Err(MediaError::InvalidRoute);
-        }
-        let (incoming, input) = mpsc::channel(3);
-        let (digits, digit_input) = mpsc::channel(16);
-        let (outgoing, output) = mpsc::channel(3);
-        let (commands, command_input) = mpsc::channel(8);
-        let (completed, completions) = mpsc::channel(8);
-        let (stop, stopped) = watch::channel(false);
-        let (direction, directed) = watch::channel(initial_direction);
-        let link = RtpLink::new(
-            sockets,
-            session,
-            RtpChannels {
-                incoming,
-                digits,
-                outgoing: output,
-                commands: command_input,
-                completed,
-                stop: stopped,
-                direction: directed,
-            },
-        )?;
-        self.mixer.insert(key.clone())?;
-        self.mixer.gate(
-            &key,
-            match initial_direction {
-                PeerMediaDirection::SendReceive => Gate::Open,
-                PeerMediaDirection::SendOnly => Gate::OutgoingMuted,
-                PeerMediaDirection::ReceiveOnly => Gate::IncomingMuted,
-                PeerMediaDirection::Inactive => Gate::Closed,
-            },
-        )?;
-        self.ports.insert(
-            key.clone(),
-            Port {
-                incoming: input,
-                digits: digit_input,
-                outgoing,
-                commands,
-                completed: completions,
-                digit_support: session
-                    .telephone
-                    .map(DigitSupport::Rfc4733)
-                    .unwrap_or(DigitSupport::Unsupported),
-                stop,
-                direction,
-                connection: Connection::Waiting,
-            },
-        );
+        self.check_link(&key)?;
+        let support = session
+            .telephone
+            .map(DigitSupport::Rfc4733)
+            .unwrap_or(DigitSupport::Unsupported);
+        let (port, channels) = Port::new(initial_direction, support);
+        let link = RtpLink::new(sockets, session, channels)?;
+        self.install_link(key.clone(), port, initial_direction)?;
         self.workers.spawn(async move { (key, link.run().await) });
         Ok(())
     }
