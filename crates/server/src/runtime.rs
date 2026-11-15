@@ -1,4 +1,4 @@
-use crate::encryption::TlsContext;
+use crate::encryption::{TlsClientContext, TlsContext};
 use crate::listener::HttpServer;
 use crate::media::MediaHub;
 use crate::signaling::Signaling;
@@ -39,6 +39,9 @@ impl Server {
         for transport in &config.transports {
             if let Some(files) = &transport.tls {
                 TlsContext::load(files).await?;
+            }
+            if transport.protocol == rusterisk_config::Protocol::Tls {
+                TlsClientContext::load(transport.ca_list_file.as_deref())?;
             }
         }
         Ok(())
