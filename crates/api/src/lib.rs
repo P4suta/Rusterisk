@@ -264,6 +264,10 @@ pub struct Event {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "docs/adr/keep-related-channel-snapshots-in-owned-events.md: Keep related channel snapshots inline."
+)]
 pub enum EventKind {
     EndpointStateChange {
         endpoint: Endpoint,
@@ -353,8 +357,15 @@ pub enum EventKind {
         args: Vec<String>,
     },
     Dial {
-        caller: Channel,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        caller: Option<Channel>,
         peer: Channel,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        forward: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        forwarded: Option<Channel>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dialstring: Option<String>,
         dialstatus: String,
     },
     ChannelUserevent {

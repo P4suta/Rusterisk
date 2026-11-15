@@ -4,3 +4,10 @@ item = "AudioSocket"
 lint = "clippy::large_enum_variant"
 adr = "docs/adr/serialize-call-decisions-in-a-pure-core.md"
 rationale = "Keep bounded frames inline."
+
+[[exceptions]]
+path = "crates/api/src/lib.rs"
+item = "EventKind"
+lint = "clippy::large_enum_variant"
+adr = "docs/adr/keep-related-channel-snapshots-in-owned-events.md"
+rationale = "Keep related channel snapshots inline."

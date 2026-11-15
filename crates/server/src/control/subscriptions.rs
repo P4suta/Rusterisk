@@ -258,7 +258,10 @@ impl Control {
             } => [channel(&value.id), bridge(&mix.id)],
             EventKind::BridgeCreated { bridge: value }
             | EventKind::BridgeDestroyed { bridge: value } => [bridge(&value.id), None],
-            EventKind::Dial { caller, peer, .. } => [channel(&caller.id), channel(&peer.id)],
+            EventKind::Dial { caller, peer, .. } => [
+                caller.as_ref().and_then(|caller| channel(&caller.id)),
+                channel(&peer.id),
+            ],
             EventKind::EndpointStateChange { endpoint } => [
                 self.endpoints.source(&endpoint.resource),
                 Some(specific(ResourceKind::Endpoint, 0)),
