@@ -1141,9 +1141,7 @@ impl Control {
                     id,
                     app,
                     target: external_media::Target::AudioSocket(target),
-                    data: uuid::Uuid::from_bytes(target.session())
-                        .hyphenated()
-                        .to_string(),
+                    data: target.session_text(),
                     initial,
                 },
                 timestamp,

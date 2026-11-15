@@ -165,7 +165,13 @@ pub(super) fn action(parameters: &BTreeMap<String, String>) -> Result<Action, Co
             return Err(ControlError::Unsupported);
         }
         let target = AudioSocketTarget::new(remote, *session.as_bytes())
-            .map_err(|_| ControlError::Invalid("Invalid external media address"))?;
+            .map_err(|_| ControlError::Invalid("Invalid external media address"))?
+            .with_session_text(data)
+            .map_err(|_| {
+                ControlError::Adapter(
+                    "An internal error prevented this request from being handled".into(),
+                )
+            })?;
         return Ok(Action::ExternalAudioSocket {
             id: optional_id(parameters, "channelId")?,
             app: app.into(),
