@@ -181,6 +181,11 @@ pub struct RtpReceiver {
 }
 
 impl RtpReceiver {
+    pub fn discard_pending(&mut self) {
+        self.packets.clear();
+        self.next = None;
+    }
+
     pub fn new(format: AudioFormat, payload_type: u8) -> Result<Self, MediaError> {
         if payload_type > 127 {
             return Err(MediaError::InvalidPacket);

@@ -259,7 +259,7 @@ impl RtpLink {
                 }
                 changed = self.channels.direction.changed() => {
                     if changed.is_err() { break; }
-                    while self.receiver.pop()?.is_some() {}
+                    self.receiver.discard_pending();
                     if !self.channels.direction.borrow().can_send() {
                         if let Some(telephone) = &mut self.telephone {
                             telephone.receiver = TelephoneReceiver::new(telephone.format.payload_type(), telephone.format.rate())?;

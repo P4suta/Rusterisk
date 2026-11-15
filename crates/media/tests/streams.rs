@@ -1,6 +1,26 @@
 use rusterisk_media::{AudioFormat, Frame, MediaError, RtpPacket, RtpReceiver, RtpSender};
 
 #[test]
+fn discarding_pending_audio_crosses_packet_gaps_and_preserves_the_source() -> Result<(), MediaError>
+{
+    let mut receiver = RtpReceiver::new(AudioFormat::Pcmu, 0)?;
+    for sequence in [1, 3, 5] {
+        receiver.push(&RtpPacket::new(0, sequence, 0, 7, &[0x80; 160])?)?;
+    }
+    receiver.discard_pending();
+    for _ in 0..16 {
+        assert!(receiver.pop()?.is_none());
+    }
+    assert!(receiver
+        .push(&RtpPacket::new(0, 6, 800, 8, &[0xff; 160])?)
+        .is_err());
+    receiver.push(&RtpPacket::new(0, 6, 800, 7, &[0xff; 160])?)?;
+    let frame = receiver.pop()?.ok_or(MediaError::InvalidFrame)?;
+    assert!(frame.samples().iter().all(|sample| *sample == 0));
+    Ok(())
+}
+
+#[test]
 fn packet_clocks_advance_by_audio_samples_and_receivers_restore_wrapping_packet_order(
 ) -> Result<(), MediaError> {
     let mut sender = RtpSender::new(AudioFormat::Pcmu, 0, [0, 0, 0, 7, 255, 254, 0, 0, 0, 9])?;
