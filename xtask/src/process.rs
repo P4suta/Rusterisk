@@ -7,6 +7,7 @@ pub enum ProcessError {
     Status(ExitStatus),
     Timeout,
     InvalidBudget,
+    InvalidOutput,
 }
 
 impl From<std::io::Error> for ProcessError {
@@ -22,6 +23,7 @@ impl std::fmt::Display for ProcessError {
             Self::Status(status) => write!(formatter, "process failed: {status}"),
             Self::Timeout => formatter.write_str("process deadline exceeded"),
             Self::InvalidBudget => formatter.write_str("process budget must be positive"),
+            Self::InvalidOutput => formatter.write_str("invalid bounded process output"),
         }
     }
 }

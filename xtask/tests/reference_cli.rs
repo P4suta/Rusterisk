@@ -21,3 +21,23 @@ fn reference_dry_run_needs_no_daemon_and_reports_the_complete_resource_scope(
     assert!(!invalid.status.success());
     Ok(())
 }
+
+#[test]
+fn interop_dry_run_reports_local_ports_deadlines_and_cleanup() -> Result<(), std::io::Error> {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or_else(|| std::io::Error::other("workspace missing"))?;
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["interop", "--dry-run"])
+        .current_dir(workspace)
+        .env("PATH", "")
+        .output()?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("127.0.0.1::8088"));
+    assert!(stdout.contains(
+        "budget=300s cargo test --locked --package rusterisk-client --test reference -- --ignored"
+    ));
+    assert!(stdout.contains("docker rm --force rusterisk-interop-preview"));
+    Ok(())
+}

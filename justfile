@@ -20,3 +20,6 @@ fmt:
 
 reference-build *arguments="--dry-run":
     cargo run --locked --target-dir target/xtask --package xtask -- reference-build {{ arguments }}
+
+interop *arguments="":
+    cargo run --locked --target-dir target/xtask --package xtask -- interop {{ arguments }}

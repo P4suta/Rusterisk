@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+mod interop;
 mod security;
 
 #[derive(Debug)]
@@ -134,6 +135,8 @@ fn run(program: &str, arguments: &[&str]) -> Result<(), TaskError> {
 fn execute() -> Result<(), TaskError> {
     let arguments: Vec<String> = std::env::args().skip(1).take(4).collect();
     match arguments.as_slice() {
+        [task] if task == "interop" => interop::execute(true),
+        [task, mode] if task == "interop" && mode == "--dry-run" => interop::execute(false),
         [task, mode] if task == "reference-build" && mode == "--dry-run" => reference_build(false),
         [task, mode] if task == "reference-build" && mode == "--run" => reference_build(true),
         [task] if task == "policy" => policy(),
@@ -174,20 +177,24 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|security|reference-build --dry-run|reference-build --run>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|security|reference-build --dry-run|reference-build --run|interop [--dry-run]>".into(),
         )),
     }
 }
 
-fn reference_build(execute: bool) -> Result<(), TaskError> {
-    let identity = if execute {
+fn execution_identity(execute: bool) -> Result<String, TaskError> {
+    Ok(if execute {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|error| TaskError::Contract(error.to_string()))?;
         format!("{}-{}", std::process::id(), timestamp.as_millis())
     } else {
         "preview".into()
-    };
+    })
+}
+
+fn reference_build(execute: bool) -> Result<(), TaskError> {
+    let identity = execution_identity(execute)?;
     let plan = xtask::reference::ReferenceBuild::new(&identity)
         .map_err(|error| TaskError::Contract(error.to_string()))?;
     let steps = plan.steps();
