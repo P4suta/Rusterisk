@@ -140,3 +140,60 @@ async fn bridge_playback_reaches_every_peer_and_is_included_in_its_recording(
     worker.close().await.map_err(failure)?;
     result
 }
+
+#[tokio::test]
+async fn a_cancelled_reservation_rejects_a_late_source_after_the_target_is_reused(
+) -> Result<(), MediaError> {
+    let directory = tempfile::tempdir().map_err(failure)?;
+    let mut fixture = Recorder::create(directory.path(), "source", 8000).map_err(failure)?;
+    fixture
+        .write(Frame::new(&[4000; 160], 8000)?)
+        .map_err(failure)?;
+    fixture.finish().map_err(failure)?;
+    let (storage, worker) = StorageWorker::start(directory.path().to_owned())
+        .await
+        .map_err(failure)?;
+    let (media, hub, _notices) = MediaHub::new(1);
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(hub.run(stopped));
+    let result = async {
+        let mut old_tasks = MediaTasks::new(1);
+        let old = old_tasks
+            .reserve(MediaTaskKind::Playback)
+            .map_err(|_| MediaError::Capacity)?;
+        let old_done = media.reserve_playback(AudioTarget::Bridge(10), old).await?;
+        media.stop_playback(old)?;
+        let mut current_tasks = MediaTasks::new(2);
+        let current = current_tasks
+            .reserve(MediaTaskKind::Playback)
+            .map_err(|_| MediaError::Capacity)?;
+        let current_done = media
+            .reserve_playback(AudioTarget::Bridge(10), current)
+            .await?;
+        let late = storage
+            .play(PlaybackMedia::Recording(id("source")?))
+            .await
+            .map_err(failure)?;
+        assert!(matches!(
+            media.attach_playback(old, late).await,
+            Err(MediaError::UnknownStream)
+        ));
+        let source = storage
+            .play(PlaybackMedia::Recording(id("source")?))
+            .await
+            .map_err(failure)?;
+        media.attach_playback(current, source).await?;
+        for done in [old_done, current_done] {
+            tokio::time::timeout(Duration::from_secs(2), done)
+                .await
+                .map_err(failure)?
+                .map_err(failure)??;
+        }
+        Ok(())
+    }
+    .await;
+    stop.send_replace(true);
+    task.await.map_err(failure)??;
+    worker.close().await.map_err(failure)?;
+    result
+}

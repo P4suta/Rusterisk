@@ -33,11 +33,15 @@ pub enum MediaNotice {
 }
 
 enum Command {
-    Play {
+    ReservePlayback {
         token: MediaTaskToken,
         target: AudioTarget<CallKey>,
-        source: PlaybackSource,
         completed: oneshot::Sender<Result<(), MediaError>>,
+        reply: oneshot::Sender<Result<(), MediaError>>,
+    },
+    AttachPlayback {
+        token: MediaTaskToken,
+        source: PlaybackSource,
         reply: oneshot::Sender<Result<(), MediaError>>,
     },
     ControlPlayback {
@@ -91,13 +95,22 @@ impl MediaPort {
         token: MediaTaskToken,
         source: PlaybackSource,
     ) -> Result<oneshot::Receiver<Result<(), MediaError>>, MediaError> {
+        let completion = self.reserve_playback(target, token).await?;
+        self.attach_playback(token, source).await?;
+        Ok(completion)
+    }
+
+    pub async fn reserve_playback(
+        &self,
+        target: AudioTarget<CallKey>,
+        token: MediaTaskToken,
+    ) -> Result<oneshot::Receiver<Result<(), MediaError>>, MediaError> {
         let (completed, completion) = oneshot::channel();
         let (reply, response) = oneshot::channel();
         self.commands
-            .try_send(Command::Play {
+            .try_send(Command::ReservePlayback {
                 token,
                 target,
-                source,
                 completed,
                 reply,
             })
@@ -107,6 +120,25 @@ impl MediaPort {
             .map_err(|error| MediaError::Transport(error.to_string()))?
             .map_err(|error| MediaError::Transport(error.to_string()))??;
         Ok(completion)
+    }
+
+    pub async fn attach_playback(
+        &self,
+        token: MediaTaskToken,
+        source: PlaybackSource,
+    ) -> Result<(), MediaError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .try_send(Command::AttachPlayback {
+                token,
+                source,
+                reply,
+            })
+            .map_err(|_| MediaError::Capacity)?;
+        tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+            .map_err(|error| MediaError::Transport(error.to_string()))?
     }
 
     pub fn stop_playback(&self, token: MediaTaskToken) -> Result<(), MediaError> {
@@ -343,10 +375,9 @@ impl MediaHub {
 
     fn command(&mut self, command: Command) -> Result<(), MediaError> {
         match command {
-            Command::Play {
+            Command::ReservePlayback {
                 token,
                 target,
-                source,
                 completed,
                 reply,
             } => {
@@ -356,10 +387,23 @@ impl MediaHub {
                         AudioTarget::Bridge(_) => true,
                     };
                     let result = if valid {
-                        self.playbacks.begin(token, target, source, completed)
+                        self.playbacks.reserve(token, target, completed)
                     } else {
                         Err(MediaError::UnknownStream)
                     };
+                    let admitted = result.is_ok();
+                    if reply.send(result).is_err() && admitted {
+                        self.playbacks.end(token, Ok(()));
+                    }
+                }
+            }
+            Command::AttachPlayback {
+                token,
+                source,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let result = self.playbacks.attach(token, source);
                     let admitted = result.is_ok();
                     if reply.send(result).is_err() && admitted {
                         self.playbacks.end(token, Ok(()));
