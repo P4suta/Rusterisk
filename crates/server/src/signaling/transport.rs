@@ -47,15 +47,19 @@ pub(super) enum DeferredTransmission {
         key: ConnectionKey,
         packet: Datagram,
     },
-    Closed,
+    Closed {
+        listener: usize,
+        packet: Datagram,
+    },
 }
 
 impl DeferredTransmission {
     pub(super) fn matches(&self, listener: usize, packet: &Datagram) -> bool {
         let (expected_listener, expected) = match self {
-            Self::Datagram { listener, packet } => (*listener, packet),
+            Self::Datagram { listener, packet } | Self::Closed { listener, packet } => {
+                (*listener, packet)
+            }
             Self::Stream { key, packet } => (key.listener, packet),
-            Self::Closed => return false,
         };
         expected_listener == listener
             && expected.peer == packet.peer
@@ -190,7 +194,7 @@ impl Network {
                         packet,
                     })
                 }
-                Some(_) | None => Ok(DeferredTransmission::Closed),
+                Some(_) | None => Ok(DeferredTransmission::Closed { listener, packet }),
             },
         }
     }
@@ -213,7 +217,7 @@ impl Network {
                 }
                 (key.listener, packet)
             }
-            DeferredTransmission::Closed => return Ok(false),
+            DeferredTransmission::Closed { .. } => return Ok(false),
         };
         self.send(listener, packet).await?;
         Ok(true)

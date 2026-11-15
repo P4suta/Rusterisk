@@ -17,7 +17,7 @@ Move the complete response and its transport route together.
 Release a response only while the captured generation remains open.
 Discard stale responses and end the affected call through the existing control path.
 Keep datagram routing explicit in the same closed transport enum.
-Suppress cached retries while the matching response remains pending.
+Keep response identity after closure to suppress cached retries until media acknowledgement.
 
 ## Alternatives
 

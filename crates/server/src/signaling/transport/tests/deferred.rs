@@ -127,3 +127,62 @@ async fn media_acknowledgements_never_send_old_answers_on_replacement_connection
     hub.await.map_err(failure)?.map_err(failure)?;
     result
 }
+
+#[tokio::test]
+async fn closed_deferred_answers_suppress_cached_retries_on_replacement_connections(
+) -> Result<(), ControlError> {
+    for closing in [false, true] {
+        let config = Config::parse(
+            "[general]\nbindaddr=127.0.0.1\n",
+            "[app]\ntype=user\npassword=test\n",
+            "[stream]\ntype=transport\nprotocol=tcp\nbind=127.0.0.1:0\n",
+            "",
+            "",
+        )
+        .map_err(failure)?;
+        let (controller, _runner, effects) = Controller::new(config.clone(), 8);
+        let (media, _hub, notices) = MediaHub::new(8);
+        let mut signaling = Signaling::bind(config, controller, effects, media, notices).await?;
+        let key = CallKey {
+            id: ChannelId::try_from("closed-deferred-call".to_owned())?,
+            generation: 1,
+        };
+        signaling.calls.insert(
+            key.clone(),
+            Active {
+                listener: 0,
+                pending: None,
+                digits: DigitDelivery::Media,
+                direction_reply: None,
+            },
+        );
+        let peer = "127.0.0.1:5061".parse().map_err(failure)?;
+        let previous = if closing {
+            let reserved = signaling.network.reserve(0, peer)?;
+            signaling
+                .network
+                .ports
+                .get_mut(&(0, peer))
+                .ok_or(ControlError::Capacity)?
+                .state = super::super::ConnectionState::Closing(ControlError::Capacity);
+            Some(reserved)
+        } else {
+            None
+        };
+        signaling
+            .output(0, answer(&key, peer, b"closed answer"), 0)
+            .await?;
+        signaling.network.ports.remove(&(0, peer));
+        drop(previous);
+        let mut replacement = signaling.network.reserve(0, peer)?;
+        let mut retry = answer(&key, peer, b"closed answer");
+        retry.events.clear();
+        signaling.output(0, retry, 1).await?;
+        assert!(matches!(
+            replacement.packets.try_recv(),
+            Err(TryRecvError::Empty)
+        ));
+        signaling.network.close().await?;
+    }
+    Ok(())
+}
