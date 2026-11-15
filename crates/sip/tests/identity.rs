@@ -150,6 +150,32 @@ fn cached_transactions_still_require_complete_request_headers() -> Result<(), Si
 }
 
 #[test]
+fn cancellation_and_error_acknowledgement_use_the_original_transaction_identity(
+) -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (incoming, wire, _) = authenticated_invite(&mut engine)?;
+    let id = incoming_id(&incoming)?;
+    let cancel = wire
+        .replace("INVITE", "CANCEL")
+        .replace(";branch=z9hG4bK-2;rport", ";rport;branch=z9hG4bK-2");
+    let cancelled = engine.receive(cancel.as_bytes(), peer, 2)?;
+    assert!(cancelled.datagrams[0].bytes.starts_with(b"SIP/2.0 200"));
+    assert!(cancelled.datagrams[1].bytes.starts_with(b"SIP/2.0 487"));
+    assert!(
+        matches!(&cancelled.events[..], [SipEvent::IncomingEnded { id: actual, .. }] if actual == &id)
+    );
+    assert!(engine.pending(&id).is_none());
+    let ack = incoming_request(&cancelled.datagrams[1].bytes, "ACK", 2)?;
+    let ack = std::str::from_utf8(&ack)?
+        .replace("z9hG4bK-ACK-2", "z9hG4bK-2")
+        .replace(";branch=z9hG4bK-2;rport", ";rport;branch=z9hG4bK-2");
+    engine.receive(ack.as_bytes(), peer, 3)?;
+    assert!(engine.tick(502)?.datagrams.is_empty());
+    Ok(())
+}
+
+#[test]
 fn independent_dialogs_with_the_same_call_identifier_preserve_their_invitations_and_cleanup(
 ) -> Result<(), SipError> {
     let mut engine = Engine::new(config()?, [7; 32]);

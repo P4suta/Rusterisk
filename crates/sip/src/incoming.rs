@@ -100,7 +100,8 @@ fn same_invite(
         && invite.request.call_id_header()?.value() == request.call_id_header()?.value()
         && invite.request.uri == request.uri
         && invite.request.cseq_header()?.typed()?.seq == request.cseq_header()?.typed()?.seq
-        && invite.request.top_via_header()?.typed()? == request.top_via_header()?.typed()?
+        && RequestIdentity::for_invite(&invite.request, peer)?
+            == RequestIdentity::for_invite(request, peer)?
         && invite.request.from_header()?.typed()? == request.from_header()?.typed()?
         && invite.request.to_header()?.typed()? == request.to_header()?.typed()?)
 }
@@ -348,8 +349,8 @@ impl Engine {
                     && cached.request.call_id_header()?.value() == request.call_id_header()?.value()
                     && cached.request.cseq_header()?.typed()?.seq
                         == request.cseq_header()?.typed()?.seq
-                    && cached.request.top_via_header()?.typed()?
-                        == request.top_via_header()?.typed()?
+                    && RequestIdentity::for_invite(&cached.request, peer)?
+                        == RequestIdentity::for_invite(request, peer)?
                     && cached.request.from_header()?.typed()? == request.from_header()?.typed()?
                     && request.to_header()?.typed()?.tag().map(|tag| tag.value())
                         == Some(retry.tag.as_str())

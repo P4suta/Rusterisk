@@ -70,6 +70,17 @@ pub(super) fn prepare_request(request: &mut Request, wire: &[u8]) -> Result<(), 
 }
 
 impl RequestIdentity {
+    pub(super) fn for_invite(request: &Request, peer: SocketAddr) -> Result<Self, SipError> {
+        let mut identity = Self::new(request, peer)?;
+        match &mut identity.transaction {
+            Transaction::Cookie { method, .. } => *method = "INVITE".into(),
+            Transaction::Legacy { cseq, .. } => {
+                *cseq = format!("{} INVITE", request.cseq_header()?.typed()?.seq)
+            }
+        }
+        Ok(identity)
+    }
+
     pub(super) fn new(request: &Request, peer: SocketAddr) -> Result<Self, SipError> {
         let via = request.top_via_header()?.typed()?;
         let transaction = if let Some(branch) = via
