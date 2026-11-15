@@ -13,7 +13,6 @@ fn browser_execution_bounds_every_phase_and_restricts_network_to_dependency_fetc
             "--cpus=2",
             "--memory=2g",
             "--memory-swap=2g",
-            "--pids-limit=256",
             "--read-only",
             "--init",
             "--shm-size=512m",
@@ -25,6 +24,18 @@ fn browser_execution_bounds_every_phase_and_restricts_network_to_dependency_fetc
                 "{required}"
             );
         }
+        let process_limit = if phase == Phase::Run {
+            "--pids-limit=512"
+        } else {
+            "--pids-limit=256"
+        };
+        let limits: Vec<_> = step
+            .arguments
+            .iter()
+            .filter(|value| value.starts_with("--pids-limit="))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(limits, [process_limit], "{}", phase.label());
         let network = if phase.downloads() {
             "--network=bridge"
         } else {

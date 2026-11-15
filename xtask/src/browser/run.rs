@@ -121,7 +121,11 @@ impl RunPlan {
             "--cpus=2",
             "--memory=2g",
             "--memory-swap=2g",
-            "--pids-limit=256",
+            if phase == Phase::Run {
+                "--pids-limit=512"
+            } else {
+                "--pids-limit=256"
+            },
             if phase.downloads() {
                 "--network=bridge"
             } else {
