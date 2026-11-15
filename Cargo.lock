@@ -2101,6 +2101,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "opus",
  "rcgen",
  "reqwest",
  "rsipstack",

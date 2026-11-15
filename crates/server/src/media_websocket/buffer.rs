@@ -1,5 +1,7 @@
 use rusterisk_api::MediaFormat;
-use rusterisk_media::{alaw_decode, mulaw_decode, Frame, MediaError, MAX_SAMPLES};
+use rusterisk_media::{
+    alaw_decode, mulaw_decode, AudioDecoder, AudioFormat, Frame, MediaError, MAX_SAMPLES,
+};
 use std::collections::VecDeque;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -58,6 +60,7 @@ pub struct MediaBuffer {
     frames: usize,
     markers: usize,
     partial: [u8; 1920],
+    packets: Option<AudioDecoder>,
     used: usize,
     mode: BufferMode,
     playout: Playout,
@@ -67,15 +70,16 @@ pub struct MediaBuffer {
 
 impl MediaBuffer {
     pub fn new(format: MediaFormat) -> Result<Self, MediaError> {
-        if format.optimal_frame_size() == 0 {
-            return Err(MediaError::Unsupported);
-        }
+        let packets = (format == MediaFormat::Opus)
+            .then(|| AudioDecoder::new(AudioFormat::Opus))
+            .transpose()?;
         Ok(Self {
             format,
             queue: VecDeque::with_capacity(16),
             frames: 0,
             markers: 0,
             partial: [0; 1920],
+            packets,
             used: 0,
             mode: BufferMode::Discrete,
             playout: Playout::Running,
@@ -134,6 +138,14 @@ impl MediaBuffer {
     pub fn push(&mut self, bytes: &[u8]) -> Result<Option<FlowNotice>, MediaError> {
         if bytes.len() > 65500 || self.flow == Flow::Backpressured {
             return Err(MediaError::Capacity);
+        }
+        if let Some(decoder) = &mut self.packets {
+            decoder.push(bytes)?;
+            let mut flow = None;
+            while let Some(frame) = self.packets.as_mut().and_then(AudioDecoder::pop) {
+                flow = self.append_frame(frame).or(flow);
+            }
+            return Ok(flow);
         }
         let size = usize::from(self.format.optimal_frame_size());
         let count = (self.used + bytes.len()) / size;
@@ -274,6 +286,9 @@ impl MediaBuffer {
         self.frames = 0;
         self.markers = 0;
         self.used = 0;
+        if let Some(decoder) = &mut self.packets {
+            decoder.clear();
+        }
         self.mode = BufferMode::Discrete;
         None
     }

@@ -37,10 +37,6 @@ fn supported_wire_formats_decode_exact_sample_rates_and_values() -> Result<(), M
         assert_eq!(frame.samples().len(), format.rate() as usize / 50);
         assert!(frame.samples().iter().all(|value| *value == sample));
     }
-    assert!(matches!(
-        MediaBuffer::new(MediaFormat::Opus),
-        Err(MediaError::Unsupported)
-    ));
     Ok(())
 }
 
