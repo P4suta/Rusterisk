@@ -74,6 +74,8 @@ pub struct Signaling {
     listeners: Vec<Listener>,
     calls: BTreeMap<CallKey, Active>,
     external_media: BTreeSet<CallKey>,
+    stream_admissions: BTreeMap<CallKey, external_media::PendingStream>,
+    stream_jobs: JoinSet<external_media::StreamCompletion>,
     storage: Option<StoragePort>,
     playbacks: JoinSet<(MediaOwner, MediaTaskToken, Result<(), ControlError>)>,
     recordings: JoinSet<recording::Completion>,
@@ -172,6 +174,8 @@ impl Signaling {
             listeners,
             calls: BTreeMap::new(),
             external_media: BTreeSet::new(),
+            stream_admissions: BTreeMap::new(),
+            stream_jobs: JoinSet::new(),
             storage: None,
             playbacks: JoinSet::new(),
             recordings: JoinSet::new(),
@@ -463,7 +467,7 @@ impl Signaling {
     }
 
     async fn admit(&mut self, listener: usize, incoming: IncomingCall) -> Result<(), ControlError> {
-        if self.calls.len() + self.external_media.len() >= 64 {
+        if self.calls.len() + self.external_media.len() + self.stream_admissions.len() >= 64 {
             return Err(ControlError::Capacity);
         }
         let dtmf = self
@@ -494,7 +498,7 @@ impl Signaling {
         timeout: Option<u32>,
         now: u64,
     ) -> Result<(), ControlError> {
-        if self.calls.len() + self.external_media.len() >= 64 {
+        if self.calls.len() + self.external_media.len() + self.stream_admissions.len() >= 64 {
             return Err(ControlError::Capacity);
         }
         let name = endpoint
@@ -557,12 +561,14 @@ impl Signaling {
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
-            Effect::ConnectAudioSocket { key, .. } => {
-                self.notify(Signal::AudioSocketAdmitted {
-                    key,
-                    result: Err(ControlError::Unsupported),
-                })
-                .await?
+            Effect::ConnectAudioSocket { key, target } => {
+                if let Err(error) = self.start_audio_socket(key.clone(), target) {
+                    self.notify(Signal::AudioSocketAdmitted {
+                        key,
+                        result: Err(error),
+                    })
+                    .await?;
+                }
             }
             Effect::ConnectExternalRtp { key, target } => {
                 let result = self.connect_external_rtp(key.clone(), target).await;
@@ -743,6 +749,9 @@ impl Signaling {
                 .control_playback(token, operation)
                 .map_err(failure)?,
             Effect::Release { key } => {
+                if let Some(pending) = self.stream_admissions.remove(&key) {
+                    pending.cancel.send_replace(true);
+                }
                 self.external_media.remove(&key);
                 if let Some(call) = self.calls.remove(&key) {
                     let output = self.terminate(call.listener, &key, now).map_err(failure)?;
@@ -984,8 +993,15 @@ impl Signaling {
                 notice = self.notices.recv() => match notice {
                     Some(MediaNotice::DtmfFinished { key, token }) => self.notify(Signal::DtmfFinished { key, token }).await?,
                     Some(MediaNotice::Dtmf { key, tone }) => self.notify(Signal::DtmfReceived { key, digit: tone.digit, duration_ms: tone.duration_ms }).await?,
-                    Some(MediaNotice::Connected { key }) => self.notify(Signal::Milestone { key, milestone: Milestone::MediaConnected }).await?,
+                    Some(MediaNotice::Connected { key }) => {
+                        if let Some(pending) = self.stream_admissions.get_mut(&key) { pending.received = true; }
+                        else { self.notify(Signal::Milestone { key, milestone: Milestone::MediaConnected }).await?; }
+                    },
                     Some(MediaNotice::Stopped { key, result }) => {
+                        if let Some(pending) = self.stream_admissions.remove(&key) {
+                            pending.cancel.send_replace(true);
+                            self.notify(Signal::AudioSocketAdmitted { key: key.clone(), result: Err(ControlError::Adapter("AudioSocket ended during admission".into())) }).await?;
+                        }
                         self.external_media.remove(&key);
                         if let Err(error) = result { tracing::warn!(channel = %key.id.as_str(), generation = key.generation, %error, "media stopped"); }
                         self.notify(Signal::Terminated { key, cause: 16 }).await?;
@@ -1007,6 +1023,10 @@ impl Signaling {
                     let completed = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
                     self.recording_completed(completed).await?;
                 },
+                result = self.stream_jobs.join_next(), if !self.stream_jobs.is_empty() => {
+                    let completed = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
+                    self.audio_socket_completed(completed).await?;
+                },
                 _instant = tick.tick() => {
                     let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
                     for listener in 0..self.listeners.len() {
@@ -1025,6 +1045,9 @@ impl Signaling {
         let result = self.serve(&mut stop, started).await;
         let mut cleanup = Ok(());
         let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
+        if let Err(error) = self.finish_streams().await {
+            cleanup = Err(error);
+        }
         for (key, call) in std::mem::take(&mut self.calls) {
             match self.terminate(call.listener, &key, now) {
                 Ok(output) => {
