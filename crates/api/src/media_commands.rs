@@ -9,6 +9,16 @@ pub enum MediaDirection {
     Out,
 }
 
+impl MediaDirection {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Both => "both",
+            Self::In => "in",
+            Self::Out => "out",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum MediaControlFormat {
     #[serde(rename = "plain-text")]
@@ -158,14 +168,9 @@ impl MediaCommand {
                     Self::MarkMedia { correlation_id } => ("MARK_MEDIA", correlation_id.as_deref()),
                     Self::GetStatus => ("GET_STATUS", None),
                     Self::ReportQueueDrained => ("REPORT_QUEUE_DRAINED", None),
-                    Self::SetMediaDirection { direction } => (
-                        "SET_MEDIA_DIRECTION",
-                        Some(match direction {
-                            MediaDirection::Both => "both",
-                            MediaDirection::In => "in",
-                            MediaDirection::Out => "out",
-                        }),
-                    ),
+                    Self::SetMediaDirection { direction } => {
+                        ("SET_MEDIA_DIRECTION", Some(direction.as_str()))
+                    }
                 };
                 let text = match data {
                     Some(data) if !data.is_empty() => format!("{name} {data}"),
