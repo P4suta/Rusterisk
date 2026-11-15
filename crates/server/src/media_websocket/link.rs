@@ -4,7 +4,7 @@ use rusterisk_api::{
     ChannelId, MediaCommand, MediaCommandError, MediaControlFormat, MediaDirection, MediaEvent,
     MediaFormat,
 };
-use rusterisk_media::{alaw_encode, mulaw_encode, Frame, MediaError};
+use rusterisk_media::{alaw_encode, mulaw_encode, Frame, MediaError, OpusCodec};
 use std::{collections::BTreeMap, time::Duration};
 use tokio::sync::mpsc;
 
@@ -25,6 +25,7 @@ pub struct WebSocketMediaLink<S> {
     channels: Channels,
     options: MediaLinkOptions,
     audio: MediaBuffer,
+    encoder: Option<OpusCodec>,
     answer: mpsc::Sender<()>,
 }
 
@@ -54,11 +55,15 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
             return Err(MediaError::Capacity);
         }
         let audio = MediaBuffer::new(options.format)?;
+        let encoder = (options.format == MediaFormat::Opus)
+            .then(OpusCodec::new)
+            .transpose()?;
         Ok(Self {
             socket,
             channels,
             options,
             audio,
+            encoder,
             answer,
         })
     }
@@ -222,7 +227,7 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
         Ok(())
     }
 
-    fn encoded(&self, frame: Frame) -> Result<axum::body::Bytes, MediaError> {
+    fn encoded(&mut self, frame: Frame) -> Result<axum::body::Bytes, MediaError> {
         let frame = frame.resample(self.options.format.rate())?;
         let bytes: Vec<u8> = match self.options.format {
             MediaFormat::Pcmu => frame
@@ -246,7 +251,11 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
                 .iter()
                 .flat_map(|sample| sample.to_le_bytes())
                 .collect(),
-            MediaFormat::Opus => return Err(MediaError::Unsupported),
+            MediaFormat::Opus => self
+                .encoder
+                .as_mut()
+                .ok_or(MediaError::InvalidRoute)?
+                .encode(frame)?,
         };
         Ok(bytes.into())
     }
