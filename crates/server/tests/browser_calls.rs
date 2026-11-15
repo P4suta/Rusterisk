@@ -1,5 +1,7 @@
 #[path = "../examples/browser/assets.rs"]
 mod assets;
+#[path = "browser_calls/resources.rs"]
+mod resources;
 use rusterisk_config::Config;
 use rusterisk_media::Frame;
 use rusterisk_server::{runtime::Server, ControlError, Credentials};
@@ -189,6 +191,7 @@ async fn actual_browser_calls_exchange_known_audio_and_store_both_senders(
             }
         }).await.map_err(failure).and_then(|result| result);
         if let Err(primary) = operation {
+            eprintln!("browser resource counters: {}", resources::snapshot(Path::new("/sys/fs/cgroup")));
             if child.id().is_some() {
                 if let Err(cleanup) = child.kill().await {
                     return Err(failure(format!("{primary}; child cleanup failed: {cleanup}")));
