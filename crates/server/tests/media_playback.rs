@@ -161,14 +161,20 @@ async fn a_cancelled_reservation_rejects_a_late_source_after_the_target_is_reuse
         let old = old_tasks
             .reserve(MediaTaskKind::Playback)
             .map_err(|_| MediaError::Capacity)?;
-        let old_done = media.reserve_playback(AudioTarget::Bridge(10), old).await?;
-        media.stop_playback(old)?;
+        let mut old_done = media.reserve_playback(AudioTarget::Bridge(10), old).await?;
+        media.bridge(10, Vec::new())?;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(40), &mut old_done)
+                .await
+                .is_err()
+        );
+        media.release_bridge(10)?;
         let mut current_tasks = MediaTasks::new(2);
         let current = current_tasks
             .reserve(MediaTaskKind::Playback)
             .map_err(|_| MediaError::Capacity)?;
         let current_done = media
-            .reserve_playback(AudioTarget::Bridge(10), current)
+            .reserve_playback(AudioTarget::Bridge(20), current)
             .await?;
         let late = storage
             .play(PlaybackMedia::Recording(id("source")?))
@@ -183,6 +189,7 @@ async fn a_cancelled_reservation_rejects_a_late_source_after_the_target_is_reuse
             .await
             .map_err(failure)?;
         media.attach_playback(current, source).await?;
+        media.release_bridge(10)?;
         for done in [old_done, current_done] {
             tokio::time::timeout(Duration::from_secs(2), done)
                 .await

@@ -369,6 +369,7 @@ impl Control {
         peer_entry.snapshot.connected = parent_caller;
         outcome.effects.push(Effect::DialBridge {
             parent: parent.clone(),
+            generation: token,
             peer: Some(peer),
         });
         Ok(outcome)
@@ -510,9 +511,10 @@ impl Control {
     ) -> Result<Outcome, ControlError> {
         let release = dial.fork.cancel().release;
         let mut outcome = Outcome::empty();
-        if dial.bridge.take().is_some() {
+        if let Some(generation) = dial.bridge.take() {
             outcome.effects.push(Effect::DialBridge {
                 parent: dial.parent.clone(),
+                generation,
                 peer: None,
             });
         }

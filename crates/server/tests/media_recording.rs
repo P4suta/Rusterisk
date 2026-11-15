@@ -100,7 +100,7 @@ async fn channel_and_bridge_recordings_contain_their_actual_received_audio(
             }
         }
         media.stop_recording(channel, RecordingEnd::Finish)?;
-        media.stop_recording(bridge, RecordingEnd::Finish)?;
+        media.release_bridge(10)?;
         for completed in [channel_done, bridge_done] {
             tokio::time::timeout(Duration::from_secs(2), completed)
                 .await

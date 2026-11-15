@@ -17,6 +17,61 @@ fn originate(name: &str, timeout: u32) -> Result<Action, ControlError> {
 }
 
 #[test]
+fn bridge_membership_keeps_its_generation_until_explicit_deletion() -> Result<(), ControlError> {
+    let mut control = Control::new(4);
+    control.subscribe("app")?;
+    control.apply(originate("phone", 30)?, "now", 0)?;
+    control.signal(
+        Signal::Milestone {
+            key: control.key(&id("phone")?)?,
+            milestone: Milestone::Answered,
+        },
+        "now",
+    )?;
+    let mut generations = Vec::new();
+    for _ in 0..2 {
+        control.apply(
+            Action::CreateBridge {
+                id: id("mix")?,
+                name: String::new(),
+            },
+            "now",
+            0,
+        )?;
+        let added = control.apply(
+            Action::AddChannels {
+                bridge: id("mix")?,
+                channels: [id("phone")?].into_iter().collect(),
+            },
+            "now",
+            0,
+        )?;
+        let [Effect::Bridge { generation, .. }] = &added.effects[..] else {
+            return Err(ControlError::Unsupported);
+        };
+        let generation = *generation;
+        generations.push(generation);
+        let removed = control.apply(
+            Action::RemoveChannels {
+                bridge: id("mix")?,
+                channels: [id("phone")?].into_iter().collect(),
+            },
+            "now",
+            0,
+        )?;
+        assert!(
+            matches!(&removed.effects[..], [Effect::Bridge { generation: current, channels, .. }] if *current == generation && channels.is_empty())
+        );
+        let deleted = control.apply(Action::DestroyBridge(id("mix")?), "now", 0)?;
+        assert!(
+            matches!(deleted.effects.last(), Some(Effect::ReleaseBridge { generation: current }) if *current == generation)
+        );
+    }
+    assert_ne!(generations[0], generations[1]);
+    Ok(())
+}
+
+#[test]
 fn originate_acceptance_is_separate_from_answer_and_stasis() -> Result<(), ControlError> {
     let mut control = Control::new(4);
     control.subscribe("app")?;

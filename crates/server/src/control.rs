@@ -216,7 +216,7 @@ impl Action {
             | Self::GetBridge(_)
             | Self::CreateBridge { .. }
             | Self::Move { .. } => 0,
-            Self::Hangup(_) | Self::Continue { .. } => 2,
+            Self::Hangup(_) | Self::Continue { .. } | Self::DestroyBridge(_) => 2,
             Self::Originate { .. }
             | Self::PlayChannel { .. }
             | Self::ControlPlayback { .. }
@@ -227,7 +227,6 @@ impl Action {
             | Self::Unhold(_)
             | Self::Mute { .. }
             | Self::Unmute { .. }
-            | Self::DestroyBridge(_)
             | Self::AddChannels { .. }
             | Self::RemoveChannels { .. } => 1,
         }
@@ -304,10 +303,15 @@ pub enum Effect {
     },
     Bridge {
         id: ChannelId,
+        generation: u64,
         channels: Vec<CallKey>,
+    },
+    ReleaseBridge {
+        generation: u64,
     },
     DialBridge {
         parent: CallKey,
+        generation: u64,
         peer: Option<CallKey>,
     },
 }
@@ -1002,6 +1006,9 @@ impl Control {
                     .bridges
                     .remove(&id)
                     .ok_or(ControlError::NotFound("Bridge not found"))?;
+                outcome.effects.push(Effect::ReleaseBridge {
+                    generation: bridge.token,
+                });
                 for app in self.applications.keys() {
                     outcome.event(
                         app,
@@ -1096,7 +1103,11 @@ impl Control {
             .iter()
             .map(|id| self.key(id))
             .collect::<Result<Vec<_>, _>>()?;
-        outcome.effects.push(Effect::Bridge { id, channels: keys });
+        outcome.effects.push(Effect::Bridge {
+            id,
+            generation: token,
+            channels: keys,
+        });
         Ok(outcome)
     }
 
@@ -1290,6 +1301,7 @@ impl Control {
                     .collect();
                 outcome.effects.push(Effect::Bridge {
                     id: bridge.snapshot.id.clone(),
+                    generation: bridge.token,
                     channels: keys,
                 });
             }

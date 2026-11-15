@@ -126,6 +126,7 @@ async fn check_dial_capacity(connected: bool) -> Result<(), ControlError> {
                     | rusterisk_server::Effect::Answer { .. }
                     | rusterisk_server::Effect::Ring { .. }
                     | rusterisk_server::Effect::Bridge { .. }
+                    | rusterisk_server::Effect::ReleaseBridge { .. }
                     | rusterisk_server::Effect::DialBridge { peer: Some(_), .. }
                     | rusterisk_server::Effect::Gate { .. }
                     | rusterisk_server::Effect::Dtmf { .. },

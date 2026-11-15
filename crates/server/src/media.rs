@@ -77,6 +77,9 @@ enum Command {
         id: u64,
         members: Vec<CallKey>,
     },
+    ReleaseBridge {
+        id: u64,
+    },
     Gate {
         key: CallKey,
         gate: Gate,
@@ -250,6 +253,11 @@ impl MediaPort {
         }
         self.commands
             .try_send(Command::Bridge { id, members })
+            .map_err(|_| MediaError::Capacity)
+    }
+    pub fn release_bridge(&self, id: u64) -> Result<(), MediaError> {
+        self.commands
+            .try_send(Command::ReleaseBridge { id })
             .map_err(|_| MediaError::Capacity)
     }
     pub fn gate(&self, key: CallKey, gate: Gate) -> Result<(), MediaError> {
@@ -481,6 +489,11 @@ impl MediaHub {
                 }
             }
             Command::Release { key } => self.remove(&key)?,
+            Command::ReleaseBridge { id } => {
+                self.playbacks.release_bridge(id);
+                self.recordings.release_bridge(id);
+                self.mixer.bridge(id, &[])?;
+            }
             Command::Bridge { id, members } => {
                 let mut active = Vec::with_capacity(members.len());
                 for key in members {

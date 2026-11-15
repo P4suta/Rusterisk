@@ -157,6 +157,19 @@ impl Playbacks {
         }
     }
 
+    pub fn release_bridge(&mut self, id: u64) {
+        let tokens = self
+            .entries
+            .iter()
+            .filter_map(|(token, entry)| {
+                (entry.target == AudioTarget::Bridge(id)).then_some(*token)
+            })
+            .collect::<Vec<_>>();
+        for token in tokens {
+            self.end(token, Ok(()));
+        }
+    }
+
     pub fn tick(&mut self) -> Result<Vec<(AudioTarget<CallKey>, Frame)>, MediaError> {
         self.tick_at(Instant::now())
     }

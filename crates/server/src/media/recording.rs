@@ -95,6 +95,19 @@ impl Recordings {
         }
     }
 
+    pub fn release_bridge(&mut self, id: u64) {
+        let tokens = self
+            .captures
+            .iter()
+            .filter_map(|(token, capture)| {
+                (capture.target == RecordingTarget::Bridge(id)).then_some(*token)
+            })
+            .collect::<Vec<_>>();
+        for token in tokens {
+            self.end(token, RecordingEnd::Finish);
+        }
+    }
+
     pub fn channel(&mut self, key: &CallKey, frame: Frame) {
         let mut failed = Vec::new();
         for (token, capture) in &mut self.captures {

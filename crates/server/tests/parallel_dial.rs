@@ -149,6 +149,7 @@ fn all_failed_attempts_resume_once_and_late_failures_do_not_end_the_parent(
             | Effect::Ring { .. }
             | Effect::Release { .. }
             | Effect::Bridge { .. }
+            | Effect::ReleaseBridge { .. }
             | Effect::DialBridge { .. } => Err(ControlError::Unsupported),
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -244,7 +245,7 @@ fn the_first_answer_cancels_its_peers_and_bridges_after_the_parent_answers(
             110,
         )?;
         assert!(
-            matches!(&connected.effects[..], [Effect::DialBridge { parent: root, peer: Some(peer) }] if root == &parent && peer == &winner)
+            matches!(&connected.effects[..], [Effect::DialBridge { parent: root, peer: Some(peer), .. }] if root == &parent && peer == &winner)
         );
         assert!(control
             .signal_at(
@@ -280,7 +281,7 @@ fn the_first_answer_cancels_its_peers_and_bridges_after_the_parent_answers(
             )?
         };
         assert_eq!(ended.effects.len(), 3);
-        assert!(ended.effects.iter().any(|effect| matches!(effect, Effect::DialBridge { parent: root, peer: None } if root == &parent)));
+        assert!(ended.effects.iter().any(|effect| matches!(effect, Effect::DialBridge { parent: root, peer: None, .. } if root == &parent)));
         assert!(control.channel(&parent.id).is_err());
         assert!(control.channel(&winner.id).is_err());
         assert!(control.tick_dialplans(3000, "later")?.events.is_empty());

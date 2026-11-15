@@ -27,12 +27,6 @@ struct Active {
     digits: DigitDelivery,
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum BridgeIdentity {
-    Application(ChannelId),
-    Dialplan(CallKey),
-}
-
 enum DigitDelivery {
     Media,
     Signaling(VecDeque<DtmfCommand>),
@@ -67,8 +61,6 @@ pub struct Signaling {
     notices: mpsc::Receiver<MediaNotice>,
     listeners: Vec<Listener>,
     calls: BTreeMap<CallKey, Active>,
-    bridges: BTreeMap<BridgeIdentity, u64>,
-    serial: u64,
     storage: Option<StoragePort>,
     playbacks: JoinSet<(CallKey, MediaTaskToken, Result<(), ControlError>)>,
 }
@@ -156,8 +148,6 @@ impl Signaling {
             notices,
             listeners,
             calls: BTreeMap::new(),
-            bridges: BTreeMap::new(),
-            serial: 0,
             storage: None,
             playbacks: JoinSet::new(),
         })
@@ -575,17 +565,28 @@ impl Signaling {
                 }
                 self.media.release(key).map_err(failure)?;
             }
-            Effect::Bridge { id, channels } => {
-                self.apply_bridge(BridgeIdentity::Application(id), channels)?;
+            Effect::Bridge {
+                id,
+                generation,
+                channels,
+            } => {
+                tracing::debug!(bridge = %id, generation, "bridge membership changed");
+                self.media.bridge(generation, channels).map_err(failure)?;
             }
-            Effect::DialBridge { parent, peer } => {
-                let identity = BridgeIdentity::Dialplan(parent.clone());
-                let channels = match peer {
-                    Some(peer) => [parent, peer].into_iter().collect(),
-                    None => Vec::new(),
-                };
-                self.apply_bridge(identity, channels)?;
+            Effect::ReleaseBridge { generation } => {
+                self.media.release_bridge(generation).map_err(failure)?
             }
+            Effect::DialBridge {
+                parent,
+                generation,
+                peer,
+            } => match peer {
+                Some(peer) => self
+                    .media
+                    .bridge(generation, [parent, peer].into_iter().collect())
+                    .map_err(failure)?,
+                None => self.media.release_bridge(generation).map_err(failure)?,
+            },
         }
         Ok(())
     }
@@ -650,29 +651,6 @@ impl Signaling {
             }
         }
         Ok(())
-    }
-
-    fn apply_bridge(
-        &mut self,
-        id: BridgeIdentity,
-        channels: Vec<CallKey>,
-    ) -> Result<(), ControlError> {
-        let token = match self.bridges.get(&id) {
-            Some(token) => *token,
-            None if channels.is_empty() => return Ok(()),
-            None => {
-                if self.bridges.len() >= 64 {
-                    return Err(ControlError::Capacity);
-                }
-                self.serial = self.serial.checked_add(1).ok_or(ControlError::Capacity)?;
-                self.bridges.insert(id.clone(), self.serial);
-                self.serial
-            }
-        };
-        if channels.is_empty() {
-            self.bridges.remove(&id);
-        }
-        self.media.bridge(token, channels).map_err(failure)
     }
 
     async fn answer(&mut self, key: &CallKey, now: u64) -> Result<(), ControlError> {
