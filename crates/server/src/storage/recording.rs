@@ -1,7 +1,7 @@
-use super::{receive, Command, StoragePort, WorkerError};
+use super::{receive, respond, Command, StoragePort, WorkerError};
 use rusterisk_api::{ChannelId, RecordingIfExists};
 use rusterisk_media::Frame;
-use rusterisk_storage::{Recorder, StorageError, Store};
+use rusterisk_storage::{RecordingPreparation, StorageError, Store};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
@@ -129,7 +129,8 @@ impl StoragePort {
 }
 
 struct Entry {
-    recorder: Recorder,
+    recorder: RecordingPreparation,
+    admission: Option<oneshot::Sender<Result<RecordingKey, StorageError>>>,
     input: mpsc::Receiver<Frame>,
     lifetime: oneshot::Receiver<()>,
     failure: Option<StorageError>,
@@ -168,13 +169,14 @@ impl RecordingSet {
             .generation
             .checked_add(1)
             .ok_or(StorageError::Capacity)?;
-        let recorder = Recorder::create_with_policy(&self.root, name.as_str(), rate, policy)?;
+        let recorder = RecordingPreparation::create(&self.root, name.as_str(), rate, policy)?;
         self.generation = generation;
         let key = RecordingKey { name, generation };
         self.entries.insert(
             key.clone(),
             Entry {
                 recorder,
+                admission: None,
                 input,
                 lifetime,
                 failure: None,
@@ -183,9 +185,45 @@ impl RecordingSet {
         Ok(key)
     }
 
+    pub fn admit(
+        &mut self,
+        key: RecordingKey,
+        reply: oneshot::Sender<Result<RecordingKey, StorageError>>,
+    ) {
+        let Some(entry) = self.entries.get_mut(&key) else {
+            respond(reply, Err(StorageError::InvalidState));
+            return;
+        };
+        if entry.admission.is_some() {
+            respond(reply, Err(StorageError::InvalidState));
+        } else if entry.recorder.is_ready() {
+            if reply.send(Ok(key.clone())).is_err() {
+                if let Err(error) = self.cancel(&key) {
+                    tracing::warn!(%error, "cancelled recording startup cleanup failed");
+                }
+            }
+        } else {
+            entry.admission = Some(reply);
+        }
+    }
+
+    pub fn is_preparing(&self) -> bool {
+        self.entries
+            .values()
+            .any(|entry| !entry.recorder.is_ready())
+    }
+
     pub fn pump(&mut self) {
         let mut cancelled = Vec::with_capacity(self.entries.len());
         for (key, entry) in &mut self.entries {
+            if entry
+                .admission
+                .as_ref()
+                .is_some_and(oneshot::Sender::is_closed)
+            {
+                cancelled.push(key.clone());
+                continue;
+            }
             match entry.lifetime.try_recv() {
                 Ok(()) | Err(oneshot::error::TryRecvError::Closed) => {
                     cancelled.push(key.clone());
@@ -195,6 +233,26 @@ impl RecordingSet {
             }
             if entry.failure.is_some() {
                 continue;
+            }
+            if !entry.recorder.is_ready() {
+                if let Err(error) = entry.recorder.advance() {
+                    if let Some(reply) = entry.admission.take() {
+                        respond(reply, Err(error));
+                    } else {
+                        tracing::warn!(%error, "recording copy failed before admission");
+                    }
+                    cancelled.push(key.clone());
+                    continue;
+                }
+                if !entry.recorder.is_ready() {
+                    continue;
+                }
+            }
+            if let Some(reply) = entry.admission.take() {
+                if reply.send(Ok(key.clone())).is_err() {
+                    cancelled.push(key.clone());
+                    continue;
+                }
             }
             for _ in 0..3 {
                 match entry.input.try_recv() {
@@ -248,6 +306,102 @@ mod tests {
 
     fn name() -> Result<ChannelId, WorkerError> {
         ChannelId::try_from("bounded".to_owned()).map_err(|_| WorkerError::Invalid)
+    }
+
+    #[test]
+    fn append_copying_yields_between_bounded_steps_and_other_recordings_keep_progressing(
+    ) -> Result<(), WorkerError> {
+        let directory = tempfile::tempdir()?;
+        let mut store = Store::open(directory.path())?;
+        let mut original = rusterisk_storage::Recorder::create(directory.path(), "bounded", 8000)?;
+        for _ in 0..100 {
+            original.write(Frame::new(&[1234; 160], 8000).map_err(StorageError::from)?)?;
+        }
+        original.finish()?;
+        let mut recordings = RecordingSet::new(directory.path().to_owned());
+        let (_frames, input) = mpsc::channel(3);
+        let (_lifetime, receiver) = oneshot::channel();
+        let append = recordings.begin(
+            name()?,
+            8000,
+            rusterisk_api::RecordingIfExists::Append,
+            input,
+            receiver,
+        )?;
+        let path = directory.path().join("recordings/bounded.append");
+        assert_eq!(std::fs::metadata(&path)?.len(), 44);
+        let (reply, mut response) = oneshot::channel();
+        recordings.admit(append.clone(), reply);
+        recordings.pump();
+        assert_eq!(std::fs::metadata(&path)?.len(), 44 + 8192);
+        assert!(matches!(
+            response.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        let (frames, input) = mpsc::channel(3);
+        let (_lifetime, receiver) = oneshot::channel();
+        let other = recordings.begin(
+            ChannelId::try_from("other".to_owned()).map_err(|_| WorkerError::Invalid)?,
+            8000,
+            rusterisk_api::RecordingIfExists::Fail,
+            input,
+            receiver,
+        )?;
+        frames
+            .try_send(Frame::new(&[5678; 160], 8000).map_err(StorageError::from)?)
+            .map_err(|_| WorkerError::Capacity)?;
+        recordings.pump();
+        recordings.finish(&other, &mut store)?;
+        assert_eq!(
+            rusterisk_storage::WaveReader::open(&directory.path().join("recordings/other.wav"))?
+                .read_frame()?
+                .ok_or(WorkerError::Invalid)?
+                .samples(),
+            [5678; 160]
+        );
+        assert_eq!(std::fs::metadata(&path)?.len(), 44 + 16384);
+        recordings.pump();
+        recordings.pump();
+        assert!(response.try_recv().map_err(|_| WorkerError::Invalid)?? == append);
+        recordings.finish(&append, &mut store)?;
+        assert_eq!(
+            std::fs::metadata(directory.path().join("recordings/bounded.wav"))?.len(),
+            32044
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn abandoned_append_admission_cancels_copying_before_the_next_storage_turn(
+    ) -> Result<(), WorkerError> {
+        let directory = tempfile::tempdir()?;
+        let mut original = rusterisk_storage::Recorder::create(directory.path(), "bounded", 8000)?;
+        for _ in 0..100 {
+            original.write(Frame::new(&[1234; 160], 8000).map_err(StorageError::from)?)?;
+        }
+        original.finish()?;
+        let previous = std::fs::read(directory.path().join("recordings/bounded.wav"))?;
+        let mut recordings = RecordingSet::new(directory.path().to_owned());
+        let (_frames, input) = mpsc::channel(3);
+        let (_lifetime, receiver) = oneshot::channel();
+        let append = recordings.begin(
+            name()?,
+            8000,
+            rusterisk_api::RecordingIfExists::Append,
+            input,
+            receiver,
+        )?;
+        let (reply, response) = oneshot::channel();
+        recordings.admit(append, reply);
+        drop(response);
+        recordings.pump();
+        assert!(!directory.path().join("recordings/bounded.append").exists());
+        assert!(!recordings.is_preparing());
+        assert_eq!(
+            std::fs::read(directory.path().join("recordings/bounded.wav"))?,
+            previous
+        );
+        Ok(())
     }
 
     #[tokio::test]

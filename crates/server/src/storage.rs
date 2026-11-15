@@ -260,18 +260,9 @@ fn command(
             reply,
         } => {
             if !reply.is_closed() {
-                let result = recordings.begin(name, rate, policy, input, lifetime);
-                if let Err(result) = reply.send(result) {
-                    match result {
-                        Ok(key) => {
-                            if let Err(error) = recordings.cancel(&key) {
-                                tracing::warn!(%error, "cancelled recording startup cleanup failed");
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, "recording startup failed after cancellation")
-                        }
-                    }
+                match recordings.begin(name, rate, policy, input, lifetime) {
+                    Ok(key) => recordings.admit(key, reply),
+                    Err(error) => respond(reply, Err(error)),
                 }
             }
         }
@@ -309,7 +300,7 @@ fn serve(
             playbacks.pump();
             break;
         }
-        if wakes.blocking_recv().is_none() {
+        if !recordings.is_preparing() && wakes.blocking_recv().is_none() {
             break;
         }
         for _ in 0..64 {
