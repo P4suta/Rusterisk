@@ -1,0 +1,93 @@
+[package]
+name = "rusterisk-core-assurance"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+publish = false
+autotests = false
+
+[lib]
+name = "rusterisk_core"
+path = "../src/lib.rs"
+test = false
+doctest = false
+
+[[test]]
+name = "connection_claim"
+path = "../tests/connection_claim.rs"
+
+[[test]]
+name = "dial_failures"
+path = "../tests/dial_failures.rs"
+
+[[test]]
+name = "dialplan_answer"
+path = "../tests/dialplan_answer.rs"
+
+[[test]]
+name = "dialplan_execution"
+path = "../tests/dialplan_execution.rs"
+
+[[test]]
+name = "digit_admission"
+path = "../tests/digit_admission.rs"
+
+[[test]]
+name = "digit_sequence"
+path = "../tests/digit_sequence.rs"
+
+[[test]]
+name = "digits"
+path = "../tests/digits.rs"
+
+[[test]]
+name = "media_tasks"
+path = "../tests/media_tasks.rs"
+
+[[test]]
+name = "owned_progress"
+path = "../tests/owned_progress.rs"
+
+[[test]]
+name = "parallel_dial"
+path = "../tests/parallel_dial.rs"
+
+[[test]]
+name = "peer_media"
+path = "../tests/peer_media.rs"
+
+[[test]]
+name = "recording_clock"
+path = "../tests/recording_clock.rs"
+
+[[test]]
+name = "recording_gate"
+path = "../tests/recording_gate.rs"
+
+[[test]]
+name = "recording_silence"
+path = "../tests/recording_silence.rs"
+
+[[test]]
+name = "recording_stop_keys"
+path = "../tests/recording_stop_keys.rs"
+
+[[test]]
+name = "resource_subscriptions"
+path = "../tests/resource_subscriptions.rs"
+
+[[test]]
+name = "stasis_ownership"
+path = "../tests/stasis_ownership.rs"
+
+[[test]]
+name = "transitions"
+path = "../tests/transitions.rs"
+
+[workspace]
+
+[lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
