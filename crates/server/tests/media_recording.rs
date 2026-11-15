@@ -136,3 +136,122 @@ async fn channel_and_bridge_recordings_contain_their_actual_received_audio(
     worker.close().await.map_err(failure)?;
     result
 }
+
+#[tokio::test]
+async fn cancellation_removes_audio_and_shutdown_finishes_owned_recordings(
+) -> Result<(), MediaError> {
+    let directory = tempfile::tempdir().map_err(failure)?;
+    let (storage, worker) = StorageWorker::start(directory.path().to_owned())
+        .await
+        .map_err(failure)?;
+    let (media, hub, _notices) = MediaHub::new(1);
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(hub.run(stopped));
+    let result = async {
+        let mut tasks = MediaTasks::new(10);
+        let cancelled = tasks
+            .reserve(MediaTaskKind::Recording)
+            .map_err(|_| MediaError::Capacity)?;
+        let completion = media
+            .record(
+                RecordingTarget::Bridge(10),
+                cancelled,
+                storage
+                    .record(id("cancelled")?, 8000)
+                    .await
+                    .map_err(failure)?,
+            )
+            .await?;
+        media.stop_recording(cancelled, RecordingEnd::Cancel)?;
+        tokio::time::timeout(Duration::from_secs(2), completion)
+            .await
+            .map_err(failure)?
+            .map_err(failure)?
+            .map_err(failure)?;
+        assert!(!directory
+            .path()
+            .join("recordings/cancelled.partial")
+            .exists());
+        assert!(!directory.path().join("recordings/cancelled.wav").exists());
+        assert!(tasks.finish(cancelled));
+        let final_token = tasks
+            .reserve(MediaTaskKind::Recording)
+            .map_err(|_| MediaError::Capacity)?;
+        let final_completion = media
+            .record(
+                RecordingTarget::Bridge(10),
+                final_token,
+                storage
+                    .record(id("shutdown")?, 8000)
+                    .await
+                    .map_err(failure)?,
+            )
+            .await?;
+        Ok(final_completion)
+    }
+    .await;
+    stop.send_replace(true);
+    task.await.map_err(failure)??;
+    let completion = result?;
+    completion.await.map_err(failure)?.map_err(failure)?;
+    assert!(directory.path().join("recordings/shutdown.wav").exists());
+    worker.close().await.map_err(failure)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_publication_is_reported_and_its_partial_audio_recovers_after_restart(
+) -> Result<(), MediaError> {
+    let directory = tempfile::tempdir().map_err(failure)?;
+    let (storage, worker) = StorageWorker::start(directory.path().to_owned())
+        .await
+        .map_err(failure)?;
+    let (media, hub, _notices) = MediaHub::new(1);
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(hub.run(stopped));
+    let result = async {
+        let mut tasks = MediaTasks::new(10);
+        let token = tasks
+            .reserve(MediaTaskKind::Recording)
+            .map_err(|_| MediaError::Capacity)?;
+        let completion = media
+            .record(
+                RecordingTarget::Bridge(10),
+                token,
+                storage
+                    .record(id("recover")?, 8000)
+                    .await
+                    .map_err(failure)?,
+            )
+            .await?;
+        std::fs::create_dir(directory.path().join("recordings/recover.wav")).map_err(failure)?;
+        media.stop_recording(token, RecordingEnd::Finish)?;
+        let outcome = tokio::time::timeout(Duration::from_secs(2), completion)
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
+        assert!(matches!(
+            outcome,
+            Err(rusterisk_server::storage::WorkerError::Storage(
+                rusterisk_storage::StorageError::Io(_)
+            ))
+        ));
+        Ok(())
+    }
+    .await;
+    stop.send_replace(true);
+    task.await.map_err(failure)??;
+    worker.close().await.map_err(failure)?;
+    result?;
+    std::fs::remove_dir(directory.path().join("recordings/recover.wav")).map_err(failure)?;
+    let (storage, worker) = StorageWorker::start(directory.path().to_owned())
+        .await
+        .map_err(failure)?;
+    assert_eq!(
+        storage.recordings().await.map_err(failure)?[0].name,
+        "recover"
+    );
+    assert!(!directory.path().join("recordings/recover.partial").exists());
+    worker.close().await.map_err(failure)?;
+    Ok(())
+}
