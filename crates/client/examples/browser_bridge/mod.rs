@@ -13,7 +13,7 @@ struct Bridge {
 }
 
 struct Conversation {
-    incoming: Option<ChannelId>,
+    incoming: Option<OwnedCall>,
     peer: Option<OwnedCall>,
     bridge: Option<Bridge>,
 }
@@ -38,25 +38,8 @@ fn combine(results: impl IntoIterator<Item = Result<(), Error>>) -> Result<(), E
     }
 }
 
-async fn incoming_active(client: &Client, id: &ChannelId) -> Result<bool, Error> {
-    match client.channel(id).await {
-        Ok(channel) => Ok(channel.dialplan.app_name == "Stasis"),
-        Err(Error::Api { status: 404, .. }) => Ok(false),
-        Err(error) => Err(error),
-    }
-}
-
-async fn incoming_ended(client: &Client, id: &ChannelId) -> Result<(), Error> {
-    loop {
-        if !incoming_active(client, id).await? {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
 impl Conversation {
-    fn new(incoming: ChannelId) -> Self {
+    fn new(incoming: OwnedCall) -> Self {
         Self {
             incoming: Some(incoming),
             peer: None,
@@ -65,7 +48,8 @@ impl Conversation {
     }
 
     fn owns(&self, id: &ChannelId) -> bool {
-        self.incoming.as_ref() == Some(id) || self.peer.as_ref().is_some_and(|peer| peer.id() == id)
+        self.incoming.as_ref().is_some_and(|call| call.id() == id)
+            || self.peer.as_ref().is_some_and(|peer| peer.id() == id)
     }
 
     async fn begin(
@@ -74,26 +58,18 @@ impl Conversation {
         session: &Session,
         endpoint: &str,
     ) -> Result<bool, Error> {
-        let incoming = self.incoming.as_ref().ok_or(Error::Closed)?.clone();
+        let incoming = self.incoming.as_ref().ok_or(Error::Closed)?.id().clone();
         client.answer(&incoming).await?;
-        let answered = tokio::time::timeout(Duration::from_secs(30), async {
-            loop {
-                let channel = match client.channel(&incoming).await {
-                    Ok(channel) if channel.dialplan.app_name == "Stasis" => channel,
-                    Ok(_) | Err(Error::Api { status: 404, .. }) => return Ok(false),
-                    Err(error) => return Err(error),
-                };
-                if channel.state == rusterisk_client::api::ChannelState::Up {
-                    return Ok::<bool, Error>(true);
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .map_err(|_| Error::Timeout)??;
-        if !answered {
-            self.incoming = None;
-            return Ok(false);
+        match self
+            .incoming
+            .as_mut()
+            .ok_or(Error::Closed)?
+            .wait(CallMilestone::Answered, Duration::from_secs(30))
+            .await
+        {
+            Ok(_) => {}
+            Err(Error::StasisExited | Error::CallEnded(_)) => return Ok(false),
+            Err(error) => return Err(error),
         }
         let identity = uuid::Uuid::new_v4().to_string();
         self.bridge = Some(Bridge {
@@ -116,13 +92,13 @@ impl Conversation {
                 .await?,
         );
         let peer = self.peer.as_mut().ok_or(Error::Closed)?;
-        tokio::select! {
-            result = peer.wait(CallMilestone::Stasis, Duration::from_secs(30)) => { result?; }
-            result = incoming_ended(client, &incoming) => {
-                result?;
-                self.incoming = None;
-                return Ok(false);
-            }
+        let entered = self.incoming.as_mut().ok_or(Error::Closed)?;
+        let answered = tokio::select! {
+            result = peer.wait(CallMilestone::Stasis, Duration::from_secs(30)) => { result?; true }
+            result = entered.wait_completion(Duration::from_secs(30)) => { result?; false }
+        };
+        if !answered {
+            return Ok(false);
         }
         client
             .add_channels(&bridge.id, std::slice::from_ref(peer.id()))
@@ -136,7 +112,7 @@ impl Conversation {
             results.push(peer.close().await);
         }
         if let Some(incoming) = self.incoming.take() {
-            results.push(absent(client.hangup(&incoming).await));
+            results.push(incoming.close().await);
         }
         if let Some(bridge) = self.bridge.take() {
             let result = match client.bridge(&bridge.id).await {
@@ -165,11 +141,16 @@ async fn events(
             if active.as_ref().is_some_and(|call| call.owns(&channel.id)) {
                 continue;
             }
+            let incoming = match session.adopt(&channel.id).await {
+                Ok(incoming) => incoming,
+                Err(Error::Invalid(_)) => continue,
+                Err(error) => return Err(error),
+            };
             if active.is_some() {
-                absent(client.hangup(&channel.id).await)?;
+                incoming.close().await?;
                 continue;
             }
-            *active = Some(Conversation::new(channel.id));
+            *active = Some(Conversation::new(incoming));
             let started = active
                 .as_mut()
                 .ok_or(Error::Closed)?
@@ -190,7 +171,11 @@ async fn events(
         if let Some(ended) = ended {
             if active.as_ref().is_some_and(|call| call.owns(ended)) {
                 let mut call = active.take().ok_or(Error::Closed)?;
-                if call.incoming.as_ref() == Some(ended) {
+                if call
+                    .incoming
+                    .as_ref()
+                    .is_some_and(|call| call.id() == ended)
+                {
                     call.incoming = None;
                 }
                 call.close(client).await?;

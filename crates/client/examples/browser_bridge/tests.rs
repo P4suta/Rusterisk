@@ -1,20 +1,34 @@
 use rusterisk_client::{api::ChannelId, Client, Error};
 use rusterisk_config::Config;
-use rusterisk_server::{Controller, Effect, IncomingCall, IncomingTarget, Milestone, Signal};
+use rusterisk_server::{
+    Action, Controller, Credentials, Effect, IncomingCall, IncomingTarget, Milestone, Signal,
+};
 use std::{future::IntoFuture, time::Duration};
 
 #[tokio::test]
 async fn stopping_during_peer_setup_releases_both_channels_and_the_bridge() -> Result<(), Error> {
-    setup_cleanup(false).await
+    setup_cleanup(End::Stop).await
 }
 
 #[tokio::test]
 async fn an_incoming_hangup_during_peer_setup_releases_the_peer_without_stopping_the_application(
 ) -> Result<(), Error> {
-    setup_cleanup(true).await
+    setup_cleanup(End::Hangup).await
 }
 
-async fn setup_cleanup(incoming_ends: bool) -> Result<(), Error> {
+#[tokio::test]
+async fn incoming_handoff_during_peer_setup_releases_the_peer_and_preserves_the_destination(
+) -> Result<(), Error> {
+    setup_cleanup(End::Handoff).await
+}
+
+enum End {
+    Stop,
+    Hangup,
+    Handoff,
+}
+
+async fn setup_cleanup(end: End) -> Result<(), Error> {
     let config = Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
         "[app]\ntype=user\npassword=test-password\n",
@@ -31,6 +45,9 @@ async fn setup_cleanup(incoming_ends: bool) -> Result<(), Error> {
         axum::serve(listener, rusterisk_server::http::router(controller.clone())).into_future(),
     );
     let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
+    let mut destination = client
+        .subscribe(&ChannelId::try_from("destination".to_owned())?)
+        .await?;
     let (stop, stopped) = tokio::sync::oneshot::channel();
     let mut demo = tokio::spawn(super::run(
         client.clone(),
@@ -79,16 +96,27 @@ async fn setup_cleanup(incoming_ends: bool) -> Result<(), Error> {
         }
         assert_eq!(client.channels().await?.len(), 2);
         assert_eq!(client.bridges().await?.len(), 1);
-        if incoming_ends {
-            controller
-                .signal(Signal::Milestone {
-                    key: incoming,
-                    milestone: Milestone::Ended,
-                })
-                .await
-                .map_err(|_| Error::Closed)?;
+        if !matches!(end, End::Stop) {
+            match end {
+                End::Hangup => controller.signal(Signal::Milestone { key:incoming.clone(), milestone:Milestone::Ended }).await.map_err(|_| Error::Closed)?,
+                End::Handoff => {
+                    controller.execute(Credentials::new("app".into(), "test-password".into()).map_err(|_| Error::Closed)?, None,
+                        Action::Move { channel:incoming.id.clone(), app:"destination".into(), args:Vec::new() }).await.map_err(|_| Error::Closed)?;
+                    loop {
+                        let event = destination.next_event().await?;
+                        if matches!(event.kind, rusterisk_client::api::EventKind::StasisStart { channel, .. } if channel.id == incoming.id) { break; }
+                    }
+                }
+                End::Stop => return Err(Error::Invalid("expected an incoming transition")),
+            }
             loop {
-                if client.channels().await?.is_empty() && client.bridges().await?.is_empty() {
+                let remaining = client.channels().await?;
+                let preserved = match end {
+                    End::Hangup => remaining.is_empty(),
+                    End::Handoff => remaining.len() == 1 && remaining[0].id == incoming.id,
+                    End::Stop => false,
+                };
+                if preserved && client.bridges().await?.is_empty() {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -110,11 +138,31 @@ async fn setup_cleanup(incoming_ends: bool) -> Result<(), Error> {
         }
     };
     let resources = async {
+        if matches!(end, End::Handoff) {
+            if client.channels().await?.len() != 1 {
+                return Err(Error::Invalid(
+                    "handoff must preserve the destination channel",
+                ));
+            }
+            assert_eq!(
+                client
+                    .channel(&ChannelId::try_from("incoming".to_owned())?)
+                    .await?
+                    .state,
+                rusterisk_client::api::ChannelState::Up
+            );
+            destination
+                .adopt(&ChannelId::try_from("incoming".to_owned())?)
+                .await?
+                .close()
+                .await?;
+        }
         assert!(client.channels().await?.is_empty());
         assert!(client.bridges().await?.is_empty());
         Ok::<(), Error>(())
     }
     .await;
+    let destination = destination.shutdown().await;
     controller.shutdown();
     let runner = runner
         .await
@@ -122,8 +170,15 @@ async fn setup_cleanup(incoming_ends: bool) -> Result<(), Error> {
         .map_err(|_| Error::Closed);
     server.abort();
     assert!(server.await.is_err());
-    let mut failures = Vec::with_capacity(5);
-    for outcome in [operation, stop_result, joined, resources, runner] {
+    let mut failures = Vec::with_capacity(6);
+    for outcome in [
+        operation,
+        stop_result,
+        joined,
+        resources,
+        runner,
+        destination,
+    ] {
         if let Err(error) = outcome {
             failures.push(error.to_string());
         }
