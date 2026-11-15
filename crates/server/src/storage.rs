@@ -291,3 +291,54 @@ impl Drop for StorageWorker {
         self.begin_close();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, StoragePort, StorageWorker, WorkerError};
+    use rusterisk_api::ChannelId;
+    use rusterisk_storage::Store;
+    use std::time::Duration;
+    use tokio::sync::{mpsc, watch};
+
+    #[tokio::test]
+    async fn queued_storage_work_is_bounded_before_the_worker_accepts_more(
+    ) -> Result<(), WorkerError> {
+        let (commands, receiver) = mpsc::channel(64);
+        let (stop, stopped) = watch::channel(false);
+        let port = StoragePort {
+            commands: commands.clone(),
+            stop: stopped,
+        };
+        for _ in 0..64 {
+            commands
+                .try_send(Command::Wake)
+                .map_err(|_| WorkerError::Capacity)?;
+        }
+        let id = ChannelId::try_from("refused".to_owned()).map_err(|_| WorkerError::Invalid)?;
+        assert!(matches!(
+            port.start_call(id, "start").await,
+            Err(WorkerError::Capacity)
+        ));
+        assert_eq!(receiver.len(), 64);
+        stop.send_replace(true);
+        assert!(matches!(port.recordings().await, Err(WorkerError::Closed)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropping_the_worker_releases_the_store_while_clients_remain_alive(
+    ) -> Result<(), WorkerError> {
+        let directory = tempfile::tempdir()?;
+        let (port, mut worker) = StorageWorker::start(directory.path().to_owned()).await?;
+        let completed = worker.completed.take().ok_or(WorkerError::Thread)?;
+        drop(worker);
+        assert!(matches!(port.recordings().await, Err(WorkerError::Closed)));
+        tokio::time::timeout(Duration::from_secs(2), completed)
+            .await
+            .map_err(|_| WorkerError::Timeout)?
+            .map_err(|_| WorkerError::Thread)?;
+        let reopened = Store::open(directory.path())?;
+        assert!(reopened.recordings()?.is_empty());
+        Ok(())
+    }
+}
