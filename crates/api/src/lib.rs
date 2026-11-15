@@ -1162,7 +1162,7 @@ fn parameter_schema(name: &str, kind: ParameterKind) -> Value {
                 json!({"type": "array", "items": {"type": "string"}, "maxItems": 32})
             }
             ParameterKind::Variables => {
-                json!({"type": "object", "additionalProperties": {"type": "string"}, "maxProperties": 128})
+                json!({"type": "object", "additionalProperties": {"type": "string"}, "maxProperties": 64})
             }
             ParameterKind::Filter => json!({"type": "object"}),
         },

@@ -80,6 +80,7 @@ enum Request {
         credentials: Credentials,
         origin: Option<String>,
         action: Action,
+        variables: BTreeMap<String, String>,
         reply: oneshot::Sender<Result<Outcome, ControlError>>,
     },
     Subscribe {
@@ -255,12 +256,24 @@ impl Controller {
         origin: Option<String>,
         action: Action,
     ) -> Result<Outcome, ControlError> {
+        self.execute_with_variables(credentials, origin, action, BTreeMap::new())
+            .await
+    }
+
+    pub(crate) async fn execute_with_variables(
+        &self,
+        credentials: Credentials,
+        origin: Option<String>,
+        action: Action,
+        variables: BTreeMap<String, String>,
+    ) -> Result<Outcome, ControlError> {
         let (reply, receiver) = oneshot::channel();
         self.requests
             .try_send(Request::Apply {
                 credentials,
                 origin,
                 action,
+                variables,
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
@@ -504,6 +517,7 @@ impl Runner {
                 credentials,
                 origin,
                 action,
+                variables,
                 reply,
             } => {
                 if reply.is_closed() {
@@ -533,7 +547,8 @@ impl Runner {
                         {
                             return Err(ControlError::Capacity);
                         }
-                        self.control.apply(action, &timestamp(), now_ms)
+                        self.control
+                            .apply_with_variables(action, variables, &timestamp(), now_ms)
                     });
                 let result = match result {
                     Ok(mut outcome) => {

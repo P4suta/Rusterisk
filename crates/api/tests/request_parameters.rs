@@ -79,4 +79,9 @@ fn json_request_schemas_include_typed_query_fields_and_keep_path_identifiers_out
             ["schema"]["properties"]["variables"]["additionalProperties"]["type"],
         "string"
     );
+    assert_eq!(
+        document["paths"]["/channels"]["post"]["requestBody"]["content"]["application/json"]
+            ["schema"]["properties"]["variables"]["maxProperties"],
+        64
+    );
 }

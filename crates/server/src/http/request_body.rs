@@ -88,7 +88,7 @@ pub(super) fn decode<'a>(
                 let variables = value.as_object().ok_or(ControlError::Invalid(
                     "Only string values in the 'variables' object allowed",
                 ))?;
-                if variables.len() > 128 {
+                if variables.len() > 64 {
                     return Err(ControlError::Invalid("Too many channel variables"));
                 }
                 for (name, value) in variables {

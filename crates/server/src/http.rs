@@ -379,9 +379,6 @@ async fn dispatch(
             .find(|operation| operation.matches(method.as_str(), path))
     });
     let fields = request_body::decode(parameters, operation, body)?;
-    if !fields.variables.is_empty() {
-        return Err(ControlError::Unsupported);
-    }
     let parameters = fields.parameters.as_ref();
     let stored = match (method.as_str(), segments.as_slice()) {
         ("GET", ["ari", "recordings", "stored"]) => Some(crate::StoredRecordingOperation::List),
@@ -633,7 +630,11 @@ async fn dispatch(
         }
         _ => return Err(ControlError::NotFound("Resource not found")),
     };
-    response(controller.execute(credentials, origin, action).await?)
+    response(
+        controller
+            .execute_with_variables(credentials, origin, action, fields.variables)
+            .await?,
+    )
 }
 
 async fn api(
