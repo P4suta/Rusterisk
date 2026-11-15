@@ -8,8 +8,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 mod history;
 mod playback;
 pub use history::HistoryReceipt;
+mod file;
 mod recording;
 mod stored;
+use file::FileSet;
+pub use file::RecordingFile;
 use playback::PlaybackSet;
 pub use playback::{PlaybackMedia, PlaybackSource};
 pub use recording::RecordingSink;
@@ -295,6 +298,7 @@ fn drain_commands(
     store: &mut Store,
     recordings: &mut RecordingSet,
     playbacks: &mut PlaybackSet,
+    files: &mut FileSet,
     commands: &mut mpsc::Receiver<Command>,
 ) {
     for _ in 0..64 {
@@ -302,9 +306,11 @@ fn drain_commands(
             Ok(next) => {
                 recordings.pump();
                 playbacks.pump();
+                files.pump();
                 command(store, recordings, playbacks, next);
                 recordings.pump();
                 playbacks.pump();
+                files.pump();
             }
             Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
                 break
@@ -323,33 +329,56 @@ fn serve(
 ) {
     let mut recordings = RecordingSet::new(root.clone());
     let mut playbacks = PlaybackSet::new(root);
+    let mut files = FileSet::new();
     loop {
         if *stop.borrow() {
             commands.close();
             stored.close();
-            drain_commands(&mut store, &mut recordings, &mut playbacks, &mut commands);
+            drain_commands(
+                &mut store,
+                &mut recordings,
+                &mut playbacks,
+                &mut files,
+                &mut commands,
+            );
             while let Ok(next) = stored.try_recv() {
                 recordings.pump();
                 playbacks.pump();
-                stored::execute(&mut store, next);
+                files.pump();
+                stored::execute(&mut store, &mut files, next);
             }
             recordings.pump();
             playbacks.pump();
+            files.pump();
             break;
         }
         if !recordings.is_preparing() && wakes.blocking_recv().is_none() {
             break;
         }
-        drain_commands(&mut store, &mut recordings, &mut playbacks, &mut commands);
+        drain_commands(
+            &mut store,
+            &mut recordings,
+            &mut playbacks,
+            &mut files,
+            &mut commands,
+        );
         for _ in 0..16 {
-            drain_commands(&mut store, &mut recordings, &mut playbacks, &mut commands);
+            drain_commands(
+                &mut store,
+                &mut recordings,
+                &mut playbacks,
+                &mut files,
+                &mut commands,
+            );
             match stored.try_recv() {
                 Ok(next) => {
                     recordings.pump();
                     playbacks.pump();
-                    stored::execute(&mut store, next);
+                    files.pump();
+                    stored::execute(&mut store, &mut files, next);
                     recordings.pump();
                     playbacks.pump();
+                    files.pump();
                 }
                 Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
                     break
@@ -358,6 +387,7 @@ fn serve(
         }
         recordings.pump();
         playbacks.pump();
+        files.pump();
     }
 }
 

@@ -1,9 +1,17 @@
+use super::file::FileSet;
 use super::{respond, StoragePort, WorkerError};
 use rusterisk_api::{ChannelId, StoredRecording};
-use rusterisk_storage::{StorageError, Store};
+use rusterisk_storage::{RecordingChunk, StorageError, Store};
 use tokio::sync::{mpsc, oneshot};
 
 pub(super) enum StoredCommand {
+    OpenFile {
+        name: ChannelId,
+        output: mpsc::Sender<RecordingChunk>,
+        lifetime: oneshot::Receiver<()>,
+        completed: oneshot::Sender<Result<(), StorageError>>,
+        reply: oneshot::Sender<Result<u64, StorageError>>,
+    },
     List {
         reply: oneshot::Sender<Result<Vec<StoredRecording>, StorageError>>,
     },
@@ -31,8 +39,19 @@ impl StoragePort {
     }
 }
 
-pub(super) fn execute(store: &mut Store, command: StoredCommand) {
+pub(super) fn execute(store: &mut Store, files: &mut FileSet, command: StoredCommand) {
     match command {
+        StoredCommand::OpenFile {
+            name,
+            output,
+            lifetime,
+            completed,
+            reply,
+        } => {
+            if !reply.is_closed() {
+                respond(reply, files.begin(store, name, output, lifetime, completed));
+            }
+        }
         StoredCommand::List { reply } => {
             if !reply.is_closed() {
                 respond(reply, store.recordings());
