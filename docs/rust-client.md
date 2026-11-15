@@ -39,6 +39,13 @@ An `OwnedCall` reserves an identifier before sending the request.
 An answer or Stasis event can arrive before the HTTP acceptance response.
 The four milestones keep their independent meanings.
 
+Use `Session::adopt` after receiving an incoming channel's `StasisStart` event.
+The session retains at most 64 live incoming observations and preserves answer and media events received before adoption.
+Adoption requires an observation in the session's app and rejects unknown, departed, and claimed identifiers.
+An adopted call has no HTTP acceptance milestone.
+Wait for each of `Stasis`, `Answered`, and `MediaConnected`, and close the handle or shut down the session to end a call that remains under client control.
+A destination session can adopt the channel after observing its own `StasisStart` event following an app move.
+
 `MediaConnected` observes Rusterisk's `RUSTERISK_MEDIA_CONNECTED` channel variable event.
 The milestone means the server received an audio frame.
 Checking received audio remains necessary to verify the intended signal.
