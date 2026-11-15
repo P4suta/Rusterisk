@@ -37,7 +37,8 @@ Live recording duration statistics remain absent.
 
 ## Signaling and audio
 
-The signaling adapter handles `SIP` over `UDP`, digest authentication, one registered contact per endpoint, incoming calls, outgoing calls, cancellation, and hangup.
+The signaling adapter handles `SIP` over `UDP`, native `TCP`, and verified `TLS`, digest authentication, one registered contact per endpoint, incoming calls, outgoing calls, cancellation, and hangup.
+Native stream tests cover authenticated registration, partial messages, shared flows, initial outbound connections, call control, half-close responses, saturation, and shutdown.
 Authenticated endpoint identity determines the context independently of displayed caller identification.
 Telephone digits use `RFC 4733` packets or `SIP INFO` according to the endpoint's configuration.
 The audio adapter decodes `PCMU`, `PCMA`, and Opus into complete 20 ms mixer frames.
@@ -49,7 +50,7 @@ Rejected offers preserve the active media session.
 Peer hold and resume preserve local hold and directional audio controls.
 The adapter confirms direction changes before sending the negotiated answer.
 Unsupported media changes return `488`.
-Blind transfer, attended transfer, stream transports, browser media, and legacy hold through an unspecified connection address remain pending.
+Blind transfer, attended transfer, WebSocket signaling, browser media, and legacy hold through an unspecified connection address remain pending.
 External media supports bidirectional unicast datagrams with numeric destinations and `ulaw` or `alaw` formats.
 Creation returns bound transport variables after socket admission.
 Stasis participation and received audio remain independent milestones.
@@ -63,11 +64,16 @@ Origin validation and exclusive connection claims protect channel generations.
 The service supports JSON and plain text controls, G.711 and signed linear audio, buffering, queue markers, pause, resume, and direction changes.
 Direction changes require JSON controls.
 Disconnecting releases the channel and its owned media.
-Outgoing WebSocket clients and Opus passthrough remain pending.
+Configured outgoing WebSocket clients preserve destination queries, negotiate the media subprotocol, and support basic authentication.
+Encrypted connections verify the certificate and peer name through native trust roots or a configured certificate list.
+Owned connection jobs enforce configured retry limits and a four-second admission deadline.
+Cancellation releases pending connections and prevents later retry attempts.
+WebSocket media with Opus remains pending.
 
 ## Configuration and persistence
 
 The server reads `http.conf`, `ari.conf`, `pjsip.conf`, `rtp.conf`, and `extensions.conf` with file and line diagnostics.
+Optional `chan_websocket.conf` and `websocket_client.conf` files configure media controls and outgoing media clients.
 Unsupported configuration options fail validation.
 Dialplan execution covers `NoOp`, `Set`, `Answer`, `Dial`, `Stasis`, `Playback`, `Wait`, `Goto`, and `Hangup`.
 Parallel `PJSIP` destinations use a bounded set of branches and select the first answered peer.
@@ -89,7 +95,8 @@ Datagram tests compare received audio through actual sockets and bridges, includ
 The local `just interop` gate compares bridge lifecycle, endpoint resources, routing availability, app subscriptions, external channel admission, and resource errors with Asterisk 22.9.0.
 Both servers bridge known external audio samples in both directions with `PCMU` and `PCMA`.
 AudioSocket comparisons also check session identifiers and exact received samples through both servers.
-Incoming WebSocket comparisons check start and status messages and known received samples in both directions with `PCMU`.
+Incoming and configured outgoing WebSocket comparisons check start and status messages and known received samples in both directions with `PCMU`.
+Both control formats also compare buffering, flow control, queue markers, pause, resume, manual answer, and telephone digit notifications.
 The reference distinguishes case-sensitive technology lists from case-insensitive endpoint detail queries.
 See [reference comparisons](reference-comparisons.md) for scope and resource limits.
 Reference signaling calls, browser audio, supported-platform distributions, and physical `HT813` observations remain unverified.

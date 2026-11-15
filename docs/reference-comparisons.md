@@ -37,6 +37,9 @@ The scenario uses synthetic credentials.
 The container stops after ten minutes even if the client runner disappears.
 The test command has a five-minute deadline.
 The runner collects reference logs after a test failure and removes its container after every result.
+Each run copies the reference configuration into an owned, bounded temporary directory.
+The outgoing media comparison writes its ephemeral callback address into the copy and reloads the reference module.
+The runner removes the configuration copy after every result.
 
 The same Rust client queries both servers.
 An owned Node.js process also uses `ari-client` 2.2.0 to discover operations, subscribe over WebSocket, and compare endpoint and app resources.
@@ -63,6 +66,9 @@ External channel comparisons check bound transport variables and Stasis particip
 Audio comparisons connect two external channels to a bridge on each server.
 Both directions send distinct known samples and check received sample values for `PCMU` and `PCMA`.
 AudioSocket comparisons check binary session identifiers, Stasis participation, bridge membership, and exact received samples in both directions.
+Incoming and configured outgoing WebSocket comparisons check the media subprotocol, start metadata, known samples in both directions, and JSON and plain text controls.
+Outgoing comparisons also check basic authentication, destination queries, and manual answer.
+Control comparisons check buffering, flow thresholds, pause, resume, flushing, queue markers, drained notifications, direction changes, and telephone digits.
 The runner inspects its reference container's private address and requires direct container routing.
 Stream callbacks use the reference's resolution of `host.docker.internal` and ephemeral host listener ports.
 The local rehearsal used OrbStack on macOS ARM64.
