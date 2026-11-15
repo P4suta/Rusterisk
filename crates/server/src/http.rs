@@ -338,6 +338,12 @@ async fn dispatch(
         ("GET", ["ari", "recordings", "stored", name, "file"]) => {
             Some(crate::StoredRecordingOperation::File(id(name)?))
         }
+        ("POST", ["ari", "recordings", "stored", name, "copy"]) => {
+            Some(crate::StoredRecordingOperation::Copy {
+                source: id(name)?,
+                destination: id(required(parameters, "destinationRecordingName")?)?,
+            })
+        }
         ("DELETE", ["ari", "recordings", "stored", name]) => {
             Some(crate::StoredRecordingOperation::Delete(id(name)?))
         }

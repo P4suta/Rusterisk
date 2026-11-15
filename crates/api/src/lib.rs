@@ -850,6 +850,14 @@ pub const OPERATIONS: &[Operation] = &[
         []
     ),
     operation!(
+        "recordings.copyStored",
+        "copyStored",
+        Post,
+        "/recordings/stored/{recordingName}/copy",
+        "StoredRecording",
+        ["destinationRecordingName!"]
+    ),
+    operation!(
         "recordings.getLive",
         "getLive",
         Get,

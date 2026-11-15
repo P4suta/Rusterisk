@@ -157,6 +157,70 @@ async fn stored_recording_routes_require_authentication_and_protect_writes_from_
         assert_eq!(replacement.status(), StatusCode::OK);
         drop(replacement);
         drop(held);
+        let copied = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/ari/recordings/stored/saved/copy?destinationRecordingName=copied",
+                "app",
+            )?)
+            .await
+            .map_err(failure)?;
+        assert_eq!(copied.status(), StatusCode::OK);
+        assert!(!copied.headers().contains_key("location"));
+        assert_eq!(
+            json::<StoredRecording>(copied).await?,
+            StoredRecording {
+                name: "copied".into(),
+                format: "wav".into()
+            }
+        );
+        assert_eq!(
+            std::fs::read(directory.path().join("recordings/copied.wav")).map_err(failure)?,
+            expected
+        );
+        for (path, user, status) in [
+            (
+                "/ari/recordings/stored/saved/copy?destinationRecordingName=copied",
+                "app",
+                StatusCode::CONFLICT,
+            ),
+            (
+                "/ari/recordings/stored/saved/copy?destinationRecordingName=forbidden",
+                "reader",
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "/ari/recordings/stored/missing/copy?destinationRecordingName=copied",
+                "app",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/ari/recordings/stored/saved/copy",
+                "app",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/ari/recordings/stored/saved/copy?destinationRecordingName=..",
+                "app",
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "/ari/recordings/stored/saved/copy?destinationRecordingName=pending",
+                "app",
+                StatusCode::CONFLICT,
+            ),
+        ] {
+            assert_eq!(
+                app.clone()
+                    .oneshot(request("POST", path, user)?)
+                    .await
+                    .map_err(failure)?
+                    .status(),
+                status,
+                "{path}"
+            );
+        }
         for name in ["missing", "pending"] {
             assert_eq!(
                 app.clone()

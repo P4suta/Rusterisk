@@ -9,6 +9,10 @@ pub(crate) enum Operation {
     List,
     Get(ChannelId),
     File(ChannelId),
+    Copy {
+        source: ChannelId,
+        destination: ChannelId,
+    },
     Delete(ChannelId),
 }
 
@@ -21,7 +25,7 @@ impl Operation {
     fn read_only(&self) -> bool {
         match self {
             Self::List | Self::Get(_) | Self::File(_) => true,
-            Self::Delete(_) => false,
+            Self::Delete(_) | Self::Copy { .. } => false,
         }
     }
 }
@@ -29,6 +33,8 @@ impl Operation {
 fn failure(error: WorkerError) -> ControlError {
     if matches!(&error, WorkerError::Storage(StorageError::NotFound)) {
         ControlError::NotFound("Recording not found")
+    } else if matches!(&error, WorkerError::Storage(StorageError::Exists)) {
+        ControlError::Conflict("A recording with the same name already exists on the system")
     } else if matches!(
         &error,
         WorkerError::Capacity | WorkerError::Timeout | WorkerError::Storage(StorageError::Capacity)
@@ -46,6 +52,7 @@ fn failure(error: WorkerError) -> ControlError {
 
 async fn execute(storage: StoragePort, operation: Operation) -> Result<Response, ControlError> {
     match operation {
+        Operation::Copy { source, destination } => Outcome::json(storage.copy_recording(source, destination).await.map_err(failure)?).map(Response::Json),
         Operation::List => Outcome::json(storage.recordings().await.map_err(failure)?)
             .map(Response::Json),
         Operation::Get(name) => Outcome::json(storage.recording(name).await.map_err(failure)?)
