@@ -1,3 +1,4 @@
+use crate::storage::{StoragePort, WorkerError};
 use crate::{Action, CallKey, Control, ControlError, Effect, IncomingCall, Outcome, Signal};
 use rusterisk_api::{Event, EventKind};
 use rusterisk_config::Config;
@@ -5,6 +6,9 @@ use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinSet;
+mod history;
+use history::HistoryRecorder;
 
 const MAX_PENDING_EFFECTS: usize = 64 * 2 + 1;
 
@@ -92,6 +96,8 @@ pub struct Runner {
     subscribers: BTreeMap<String, Subscriber>,
     sessions: BTreeMap<u64, Session>,
     subscription_generation: u64,
+    history: Option<HistoryRecorder>,
+    history_jobs: JoinSet<Result<(), WorkerError>>,
 }
 
 pub struct Subscription {
@@ -158,6 +164,8 @@ impl Controller {
                 subscribers: BTreeMap::new(),
                 sessions: BTreeMap::new(),
                 subscription_generation: 0,
+                history: None,
+                history_jobs: JoinSet::new(),
             },
             effect_receiver,
         )
@@ -274,6 +282,28 @@ fn timestamp() -> String {
 }
 
 impl Runner {
+    pub fn with_storage(mut self, storage: StoragePort) -> Result<Self, ControlError> {
+        self.history = Some(HistoryRecorder::new(storage)?);
+        Ok(self)
+    }
+
+    fn publish_history(&mut self, outcome: &mut Outcome) -> Result<(), ControlError> {
+        if outcome.history.is_empty() {
+            return Ok(());
+        }
+        match &self.history {
+            Some(history) => {
+                if self.history_jobs.len() >= 64 {
+                    return Err(ControlError::Capacity);
+                }
+                let receipt = history.queue(&mut outcome.history)?;
+                self.history_jobs.spawn(receipt.wait());
+            }
+            None => outcome.history.clear(),
+        }
+        Ok(())
+    }
+
     fn authorize(
         &self,
         credentials: &Credentials,
@@ -329,6 +359,7 @@ impl Runner {
     }
 
     fn publish(&mut self, outcome: &mut Outcome) -> Result<(), ControlError> {
+        self.publish_history(outcome)?;
         for effect in outcome.effects.drain(..) {
             self.emit_effect(effect)?;
         }
@@ -346,6 +377,7 @@ impl Runner {
         for application in disconnected {
             self.subscribers.remove(&application);
             let mut cleanup = self.control.unsubscribe(&application, &timestamp())?;
+            self.publish_history(&mut cleanup)?;
             for effect in cleanup.effects.drain(..) {
                 self.emit_effect(effect)?;
             }
@@ -549,6 +581,11 @@ impl Runner {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                result = self.history_jobs.join_next(), if !self.history_jobs.is_empty() => {
+                    result.ok_or(ControlError::Capacity)?
+                        .map_err(|error| ControlError::Adapter(error.to_string()))?
+                        .map_err(|error| ControlError::Adapter(error.to_string()))?;
+                }
                 permit = effect_sender.reserve(), if !self.pending_effects.is_empty() => {
                     match permit {
                         Ok(permit) => if let Some(effect) = self.pending_effects.pop_front() { permit.send(effect); },
@@ -621,6 +658,36 @@ impl Runner {
                     if cleanup.is_ok() {
                         cleanup = Err(error);
                     }
+                }
+            }
+        }
+        while !self.history_jobs.is_empty() {
+            let failure = match tokio::time::timeout_at(deadline, self.history_jobs.join_next())
+                .await
+            {
+                Ok(Some(Ok(Ok(())))) | Ok(None) => None,
+                Ok(Some(Ok(Err(error)))) => Some(ControlError::Adapter(error.to_string())),
+                Ok(Some(Err(error))) => Some(ControlError::Adapter(error.to_string())),
+                Err(error) => {
+                    self.history_jobs.abort_all();
+                    while let Some(result) = self.history_jobs.join_next().await {
+                        match result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                tracing::error!(%error, "history failed before cancellation")
+                            }
+                            Err(error) => {
+                                tracing::debug!(%error, "history task cancelled during shutdown")
+                            }
+                        }
+                    }
+                    Some(ControlError::Adapter(error.to_string()))
+                }
+            };
+            if let Some(error) = failure {
+                tracing::error!(%error, "history shutdown failed");
+                if cleanup.is_ok() {
+                    cleanup = Err(error);
                 }
             }
         }
