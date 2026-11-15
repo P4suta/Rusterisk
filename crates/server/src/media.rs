@@ -11,6 +11,7 @@ use tokio::task::JoinSet;
 mod playback;
 mod recording;
 mod streams;
+mod webrtc;
 pub use playback::PlaybackControl;
 use playback::Playbacks;
 use recording::Recordings;
@@ -124,6 +125,7 @@ pub struct MediaPort {
     commands: mpsc::Sender<Command>,
     websocket: mpsc::Sender<streams::WebSocketAttachment<axum::extract::ws::WebSocket>>,
     client_websocket: mpsc::Sender<streams::WebSocketAttachment<streams::ClientSocket>>,
+    webrtc: mpsc::Sender<webrtc::Attachment>,
 }
 
 impl MediaPort {
@@ -446,6 +448,7 @@ pub struct MediaHub {
     commands: mpsc::Receiver<Command>,
     websocket: mpsc::Receiver<streams::WebSocketAttachment<axum::extract::ws::WebSocket>>,
     client_websocket: mpsc::Receiver<streams::WebSocketAttachment<streams::ClientSocket>>,
+    webrtc: mpsc::Receiver<webrtc::Attachment>,
     notices: mpsc::Sender<MediaNotice>,
     mixer: Mixer<CallKey>,
     ports: BTreeMap<CallKey, Port>,
@@ -460,18 +463,21 @@ impl MediaHub {
         let (commands, receiver) = mpsc::channel(128);
         let (websocket, websocket_receiver) = mpsc::channel(8);
         let (client_websocket, client_websocket_receiver) = mpsc::channel(8);
+        let (webrtc, webrtc_receiver) = mpsc::channel(8);
         let (notices, events) = mpsc::channel(128);
         (
             MediaPort {
                 commands,
                 websocket,
                 client_websocket,
+                webrtc,
             },
             Self {
                 capacity: capacity.min(64),
                 commands: receiver,
                 websocket: websocket_receiver,
                 client_websocket: client_websocket_receiver,
+                webrtc: webrtc_receiver,
                 notices,
                 mixer: Mixer::new(capacity),
                 ports: BTreeMap::new(),
@@ -844,6 +850,10 @@ impl MediaHub {
                 },
                 attachment = self.client_websocket.recv() => match attachment {
                     Some(attachment) => self.websocket_attachment(attachment)?,
+                    None => break,
+                },
+                attachment = self.webrtc.recv() => match attachment {
+                    Some(attachment) => self.webrtc_attachment(attachment)?,
                     None => break,
                 },
                 result = self.workers.join_next(), if !self.workers.is_empty() => {

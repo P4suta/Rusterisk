@@ -11,6 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{mpsc, watch};
+#[path = "webrtc_audio/media.rs"]
+mod media;
 
 fn failure(error: impl std::fmt::Display) -> MediaError {
     MediaError::Transport(error.to_string())
