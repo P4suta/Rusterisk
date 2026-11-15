@@ -205,6 +205,16 @@ fn write_tree(root: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), Vend
     Ok(())
 }
 
+fn copy_published(source: &Path, target: &Path) -> Result<(), VendorError> {
+    let files = tree(source)?;
+    write_tree(target, &files)?;
+    for relative in files.keys() {
+        let permissions = std::fs::symlink_metadata(source.join(relative))?.permissions();
+        std::fs::set_permissions(target.join(relative), permissions)?;
+    }
+    Ok(())
+}
+
 fn temporary(
     operation: impl FnOnce(&Path) -> Result<usize, VendorError>,
 ) -> Result<usize, VendorError> {
@@ -336,7 +346,7 @@ pub fn import(root: &Path, archive: &Path) -> Result<usize, VendorError> {
         };
         record.validate()?;
         let record = toml::to_string(&record)?;
-        write_tree(&vendor.join("str0m"), &files)?;
+        copy_published(&source, &vendor.join("str0m"))?;
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)

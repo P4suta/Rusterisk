@@ -31,6 +31,33 @@ fn record() -> Record {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn importing_original_files_preserves_the_publishers_executable_mode(
+) -> Result<(), super::VendorError> {
+    use std::os::unix::fs::PermissionsExt;
+    fixture(|root| {
+        let original = root.join("original");
+        std::fs::create_dir(&original)?;
+        std::fs::write(original.join("tool.sh"), b"#!/bin/sh\n")?;
+        std::fs::set_permissions(
+            original.join("tool.sh"),
+            std::fs::Permissions::from_mode(0o755),
+        )?;
+        let target = root.join("target");
+        super::copy_published(&original, &target)?;
+        assert_eq!(
+            std::fs::metadata(target.join("tool.sh"))?
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+        assert_eq!(std::fs::read(target.join("tool.sh"))?, b"#!/bin/sh\n");
+        Ok(())
+    })
+}
+
 #[test]
 fn reverse_patch_verifies_the_complete_upstream_tree_and_rejects_unrecorded_changes(
 ) -> Result<(), super::VendorError> {
