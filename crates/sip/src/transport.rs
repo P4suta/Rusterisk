@@ -17,7 +17,12 @@ pub(super) fn contact(protocol: Protocol, local: SocketAddr) -> String {
         Protocol::Tcp => ";transport=tcp",
         Protocol::Tls => ";transport=tls",
         Protocol::Ws => ";transport=ws",
-        Protocol::Wss => ";transport=wss",
+        Protocol::Wss => ";transport=ws",
     };
-    format!("<sip:rusterisk@{local}{parameter}>")
+    let scheme = if protocol == Protocol::Wss {
+        "sips"
+    } else {
+        "sip"
+    };
+    format!("<{scheme}:rusterisk@{local}{parameter}>")
 }
