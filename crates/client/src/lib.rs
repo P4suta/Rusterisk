@@ -172,8 +172,16 @@ impl Client {
             .ok_or(Error::Invalid("unknown operation"))?;
         let mut resource = operation.path.to_owned();
         for (key, value) in path {
-            api::ChannelId::try_from((*value).to_owned())?;
-            resource = resource.replace(&format!("{{{key}}}"), value);
+            if operation.id == "sounds.get" && *key == "soundId" {
+                api::SoundId::try_from((*value).to_owned())
+                    .map_err(|_| Error::Invalid("invalid sound name"))?;
+                let encoded: String =
+                    url::form_urlencoded::byte_serialize(value.as_bytes()).collect();
+                resource = resource.replace(&format!("{{{key}}}"), &encoded);
+            } else {
+                api::ChannelId::try_from((*value).to_owned())?;
+                resource = resource.replace(&format!("{{{key}}}"), value);
+            }
         }
         if resource.contains(['{', '}']) {
             return Err(Error::Invalid("missing resource identifier"));
@@ -268,6 +276,26 @@ impl Client {
     }
     pub async fn channels(&self) -> Result<Vec<api::Channel>, Error> {
         self.request("channels.list", &[], &[]).await
+    }
+    pub async fn sounds(
+        &self,
+        language: Option<&str>,
+        format: Option<&str>,
+    ) -> Result<Vec<api::Sound>, Error> {
+        let mut query = Vec::with_capacity(2);
+        for (key, value) in [("lang", language), ("format", format)] {
+            if let Some(value) = value {
+                if value.len() > 64 || value.chars().any(char::is_control) {
+                    return Err(Error::Capacity);
+                }
+                query.push((key, value));
+            }
+        }
+        self.request("sounds.list", &[], &query).await
+    }
+    pub async fn sound(&self, name: &api::SoundId) -> Result<api::Sound, Error> {
+        self.request("sounds.get", &[("soundId", name.as_str())], &[])
+            .await
     }
     pub async fn applications(&self) -> Result<Vec<api::Application>, Error> {
         self.request("applications.list", &[], &[]).await
