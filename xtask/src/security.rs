@@ -1,6 +1,63 @@
 use super::{run, TaskError};
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
+
+fn bounded_text(path: &Path) -> Result<String, TaskError> {
+    let mut text = String::new();
+    std::fs::File::open(path)?
+        .take(1024 * 1024 + 1)
+        .read_to_string(&mut text)?;
+    if text.len() > 1024 * 1024 {
+        return Err(TaskError::Contract(
+            "dependency audit input exceeds 1 MiB".into(),
+        ));
+    }
+    Ok(text)
+}
+
+fn legacy(root: &Path) -> Result<(), TaskError> {
+    let fixture = Path::new("tests/interop/node-ari-client");
+    let path = root.join("node-audit.json");
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    println!("check: npm --prefix tests/interop/node-ari-client audit --json");
+    let findings = match xtask::process::run(
+        Command::new(npm)
+            .args([
+                "--prefix",
+                "tests/interop/node-ari-client",
+                "audit",
+                "--json",
+            ])
+            .stdout(output),
+        Duration::from_secs(120),
+    ) {
+        Ok(()) => false,
+        Err(xtask::process::ProcessError::Status(status)) if status.code() == Some(1) => true,
+        Err(error) => return Err(TaskError::Process(error)),
+    };
+    let assessment = xtask::legacy_audit::assess(
+        &bounded_text(&fixture.join("package.json"))?,
+        &bounded_text(&fixture.join("package-lock.json"))?,
+        &bounded_text(&path)?,
+    )
+    .map_err(|error| TaskError::Contract(error.to_string()))?;
+    if findings != (assessment.packages > 0) {
+        return Err(TaskError::Contract(
+            "dependency audit status doesn't match its findings".into(),
+        ));
+    }
+    println!(
+        "legacy audit: {} scoped advisories in {} private fixture dependencies",
+        assessment.advisories, assessment.packages
+    );
+    Ok(())
+}
 
 fn snapshot(root: &Path) -> Result<(), TaskError> {
     let database = root.join("advisories");
@@ -76,7 +133,8 @@ fn snapshot(root: &Path) -> Result<(), TaskError> {
             "check",
             "--hide-inclusion-graph",
         ],
-    )
+    )?;
+    legacy(root)
 }
 
 pub(super) fn check() -> Result<(), TaskError> {
