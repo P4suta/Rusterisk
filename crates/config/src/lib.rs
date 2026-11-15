@@ -56,6 +56,12 @@ pub struct Ini {
     pub sections: Vec<Section>,
 }
 
+#[derive(Clone, Copy)]
+enum SectionIdentity {
+    Name,
+    NameAndType,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct Section {
     pub name: String,
@@ -74,6 +80,18 @@ impl std::fmt::Debug for Section {
 
 impl Ini {
     pub fn parse(file: &str, source: &str) -> Result<Self, ConfigError> {
+        Self::parse_sections(file, source, SectionIdentity::Name)
+    }
+
+    fn parse_signaling(file: &str, source: &str) -> Result<Self, ConfigError> {
+        Self::parse_sections(file, source, SectionIdentity::NameAndType)
+    }
+
+    fn parse_sections(
+        file: &str,
+        source: &str,
+        identity: SectionIdentity,
+    ) -> Result<Self, ConfigError> {
         if source.len() > MAX_FILE {
             return Err(ConfigError::at(file, 1, "file exceeds 1 MiB"));
         }
@@ -106,7 +124,9 @@ impl Ini {
                         "invalid section name or section capacity exceeded",
                     ));
                 }
-                if sections.iter().any(|section| section.name == name) {
+                if matches!(identity, SectionIdentity::Name)
+                    && sections.iter().any(|section| section.name == name)
+                {
                     return Err(ConfigError::at(file, number, "duplicate section"));
                 }
                 sections.push(Section {
@@ -135,6 +155,23 @@ impl Ini {
                     .is_some()
                 {
                     return Err(ConfigError::at(file, number, "duplicate option"));
+                }
+            }
+        }
+        match identity {
+            SectionIdentity::Name => {}
+            SectionIdentity::NameAndType => {
+                for (index, section) in sections.iter().enumerate() {
+                    let kind = section.required(file, "type")?;
+                    if sections[..index].iter().any(|previous| {
+                        previous.name == section.name && previous.value("type") == Some(kind)
+                    }) {
+                        return Err(ConfigError::at(
+                            file,
+                            section.line,
+                            "duplicate signaling object",
+                        ));
+                    }
                 }
             }
         }
@@ -510,7 +547,7 @@ impl Config {
                 "at least one user is required",
             ));
         }
-        for section in Ini::parse("pjsip.conf", sip)?.sections {
+        for section in Ini::parse_signaling("pjsip.conf", sip)?.sections {
             config.sip_section(section)?;
         }
         config.validate_references()?;
