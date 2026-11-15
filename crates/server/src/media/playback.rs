@@ -79,6 +79,23 @@ impl Playbacks {
         token: MediaTaskToken,
         source: PlaybackSource,
     ) -> Result<(), MediaError> {
+        self.attach_at(token, source, Instant::now())
+    }
+
+    fn attach_at(
+        &mut self,
+        token: MediaTaskToken,
+        source: PlaybackSource,
+        now: Instant,
+    ) -> Result<(), MediaError> {
+        let entry = self.entries.get(&token).ok_or(MediaError::UnknownStream)?;
+        if matches!(entry.source, Source::Waiting)
+            && now.saturating_duration_since(entry.progress) >= Duration::from_secs(5)
+        {
+            let error = MediaError::Transport("Playback source timed out".into());
+            self.end(token, Err(error.clone()));
+            return Err(error);
+        }
         let entry = self
             .entries
             .get_mut(&token)
@@ -89,7 +106,7 @@ impl Playbacks {
                     source,
                     state: State::Active,
                 };
-                entry.progress = Instant::now();
+                entry.progress = now;
                 Ok(())
             }
             Source::Attached { .. } => Err(MediaError::InvalidRoute),
@@ -291,6 +308,48 @@ mod tests {
         ));
         playbacks.release(&current);
         completion.try_recv().map_err(failure)??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attachment_checks_expiry_before_the_next_audio_tick() -> Result<(), MediaError> {
+        let directory = tempfile::tempdir().map_err(failure)?;
+        Recorder::create(directory.path(), "expired", 8000)
+            .map_err(failure)?
+            .finish()
+            .map_err(failure)?;
+        let (storage, worker) = StorageWorker::start(directory.path().to_owned())
+            .await
+            .map_err(failure)?;
+        let source = storage
+            .play(PlaybackMedia::Recording(
+                ChannelId::try_from("expired".to_owned()).map_err(failure)?,
+            ))
+            .await
+            .map_err(failure)?;
+        let mut tasks = MediaTasks::new(1);
+        let token = tasks
+            .reserve(MediaTaskKind::Playback)
+            .map_err(|_| MediaError::Capacity)?;
+        let mut playbacks = Playbacks::new();
+        let (completed, mut completion) = oneshot::channel();
+        playbacks.reserve(token, AudioTarget::Bridge(1), completed)?;
+        let deadline = playbacks
+            .entries
+            .get(&token)
+            .ok_or(MediaError::UnknownStream)?
+            .progress
+            + Duration::from_secs(5);
+        assert!(matches!(
+            playbacks.attach_at(token, source, deadline),
+            Err(MediaError::Transport(_))
+        ));
+        assert!(matches!(
+            completion.try_recv().map_err(failure)?,
+            Err(MediaError::Transport(_))
+        ));
+        assert!(playbacks.entries.is_empty());
+        worker.close().await.map_err(failure)?;
         Ok(())
     }
 
