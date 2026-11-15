@@ -745,3 +745,98 @@ async fn dialplan_answer_wait_and_hangup_finish_a_real_invitation_without_stasis
     hub.await.map_err(failure)?.map_err(failure)?;
     result
 }
+
+async fn finish_bye(socket: &UdpSocket) -> Result<(), ControlError> {
+    let mut bytes = [0; 16385];
+    for _ in 0..4 {
+        let (size, peer) =
+            tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))
+                .await
+                .map_err(failure)?
+                .map_err(failure)?;
+        let SipMessage::Request(request) = SipMessage::try_from(&bytes[..size]).map_err(failure)?
+        else {
+            return Err(ControlError::Invalid("Expected dialog request"));
+        };
+        if request.method == Method::Ack {
+            continue;
+        }
+        assert_eq!(request.method, Method::Bye);
+        let reply = format!("SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n", request.top_via_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.to_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value(), request.cseq_header().map_err(failure)?.value());
+        socket
+            .send_to(reply.as_bytes(), peer)
+            .await
+            .map_err(failure)?;
+        return Ok(());
+    }
+    Err(ControlError::Invalid("Expected dialog hangup"))
+}
+
+#[tokio::test]
+async fn parallel_dial_bridges_received_audio_to_the_first_peer_and_cancels_the_other_invitation(
+) -> Result<(), ControlError> {
+    let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let alice = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(failure)?;
+    let bob = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(failure)?;
+    let charlie = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(failure)?;
+    let alice_audio = SocketPair::bind(ip, 0, 0).map_err(failure)?;
+    let bob_audio = SocketPair::bind(ip, 0, 0).map_err(failure)?;
+    let sip = format!("[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[alice-contact]\ntype=aor\n[bob-contact]\ntype=aor\ncontact=sip:bob@{}\n[charlie-contact]\ntype=aor\ncontact=sip:charlie@{}\n[alice]\ntype=endpoint\ntransport=udp\nauth=auth\naors=alice-contact\ncontext=internal\nallow=ulaw\n[bob]\ntype=endpoint\ntransport=udp\nauth=auth\naors=bob-contact\nallow=ulaw\n[charlie]\ntype=endpoint\ntransport=udp\nauth=auth\naors=charlie-contact\nallow=ulaw\n", bob.local_addr().map_err(failure)?, charlie.local_addr().map_err(failure)?);
+    let config = Config::parse(
+        "[general]\nbindaddr=127.0.0.1\n",
+        "[app]\ntype=user\npassword=test-password\n",
+        &sip,
+        "",
+        "[internal]\nexten => 100,1,Dial(PJSIP/bob&PJSIP/charlie,5)\nsame => n,Hangup()\n",
+    )
+    .map_err(failure)?;
+    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (media, hub, notices) = MediaHub::new(4);
+    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let target = signaling.listeners()?[0].1;
+    let runner = tokio::spawn(runner.run());
+    let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
+    let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
+    let result = async {
+        invite(&alice, target, &alice_audio).await?;
+        let mut bytes = [0; 16385];
+        let (size, charlie_target) = tokio::time::timeout(Duration::from_secs(2), charlie.recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
+        let SipMessage::Request(invitation) = SipMessage::try_from(&bytes[..size]).map_err(failure)? else { return Err(ControlError::Invalid("Expected parallel invitation")); };
+        assert_eq!(invitation.method, Method::Invite);
+        let declined = |code: &str, cseq: &str| -> Result<String, ControlError> {
+            Ok(format!("SIP/2.0 {code}\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=charlie\r\nCall-ID: {}\r\nCSeq: {cseq}\r\nContent-Length: 0\r\n\r\n", invitation.top_via_header().map_err(failure)?.value(), invitation.from_header().map_err(failure)?.value(), invitation.to_header().map_err(failure)?.value(), invitation.call_id_header().map_err(failure)?.value()))
+        };
+        charlie.send_to(declined("180 Ringing", invitation.cseq_header().map_err(failure)?.value())?.as_bytes(), charlie_target).await.map_err(failure)?;
+        let bob_target = answer(&bob, &bob_audio).await?;
+        let answered = response(&alice).await?;
+        assert_eq!(answered.status_code.code(), 200);
+        let alice_target = Session::parse(std::str::from_utf8(&answered.body).map_err(failure)?, &[Codec::Pcmu]).map_err(failure)?.remote;
+        let ack = format!("ACK sip:100@{target} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-parallel-ack;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", alice.local_addr().map_err(failure)?, answered.from_header().map_err(failure)?.value(), answered.to_header().map_err(failure)?.value(), answered.call_id_header().map_err(failure)?.value());
+        alice.send_to(ack.as_bytes(), target).await.map_err(failure)?;
+        let (size, peer) = tokio::time::timeout(Duration::from_secs(2), charlie.recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
+        let SipMessage::Request(cancel) = SipMessage::try_from(&bytes[..size]).map_err(failure)? else { return Err(ControlError::Invalid("Expected cancelled parallel invitation")); };
+        assert_eq!(cancel.method, Method::Cancel);
+        charlie.send_to(declined("200 OK", cancel.cseq_header().map_err(failure)?.value())?.as_bytes(), peer).await.map_err(failure)?;
+        charlie.send_to(declined("487 Request Terminated", invitation.cseq_header().map_err(failure)?.value())?.as_bytes(), peer).await.map_err(failure)?;
+        let mut left = AudioPeer { socket: &alice_audio, target: alice_target, sender: RtpSender::new(AudioFormat::Pcmu, 0, [7; 10]).map_err(failure)?, sample: 4000 };
+        let mut right = AudioPeer { socket: &bob_audio, target: bob_target, sender: RtpSender::new(AudioFormat::Pcmu, 0, [8; 10]).map_err(failure)?, sample: -7000 };
+        exchange(&mut left, &mut right, (-7000, 4000)).await?;
+        let channels = controller.execute(credentials()?, None, Action::ListChannels).await?.body.ok_or(ControlError::Capacity)?;
+        let parent = channels.as_array().ok_or(ControlError::Invalid("Expected channel list"))?.iter().find(|channel| channel["name"].as_str().is_some_and(|name| name.starts_with("PJSIP/alice-"))).and_then(|channel| channel["id"].as_str()).ok_or(ControlError::NotFound("Expected caller channel"))?;
+        controller.execute(credentials()?, None, Action::Hangup(id(parent)?)).await?;
+        tokio::try_join!(finish_bye(&alice), finish_bye(&bob))?;
+        assert_eq!(controller.execute(credentials()?, None, Action::ListChannels).await?.body, Some(serde_json::json!([])));
+        Ok(())
+    }.await;
+    controller.shutdown();
+    runner.await.map_err(failure)??;
+    signaling.await.map_err(failure)??;
+    hub.await.map_err(failure)?.map_err(failure)?;
+    result
+}
