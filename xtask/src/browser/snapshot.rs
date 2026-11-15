@@ -4,7 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-const BROWSER_FILES: [&str; 8] = [
+const BROWSER_FILES: [&str; 13] = [
     "package.json",
     "package-lock.json",
     "tsconfig.json",
@@ -13,6 +13,11 @@ const BROWSER_FILES: [&str; 8] = [
     "playwright.config.ts",
     "index.html",
     "style.css",
+    "config/http.conf",
+    "config/ari.conf",
+    "config/pjsip.conf",
+    "config/rtp.conf",
+    "config/extensions.conf",
 ];
 
 #[derive(Debug)]
@@ -156,6 +161,7 @@ fn optional_walk(root: &Path, relative: &Path, files: &mut Vec<File>) -> Result<
 fn browser(path: &Path, files: &mut Vec<File>) -> Result<(), SourceError> {
     directory(path)?;
     for file in BROWSER_FILES {
+        parents(path, Path::new(file))?;
         add(
             &path.join(file),
             &Path::new("examples/browser").join(file),

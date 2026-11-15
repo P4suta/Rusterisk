@@ -51,6 +51,11 @@ fn browser_snapshot_copies_owned_inputs_and_refuses_changed_sources_and_test_add
             "style.css",
             "src/main.ts",
             "tests/call.spec.ts",
+            "config/http.conf",
+            "config/ari.conf",
+            "config/pjsip.conf",
+            "config/rtp.conf",
+            "config/extensions.conf",
         ] {
             write(&root, &format!("examples/browser/{path}"), b"fixture")?;
         }
@@ -69,6 +74,14 @@ fn browser_snapshot_copies_owned_inputs_and_refuses_changed_sources_and_test_add
             .map_err(std::io::Error::other)?;
         assert_eq!(
             std::fs::read(source.join("xtask/examples/example.rs"))?,
+            b"fixture"
+        );
+        assert_eq!(
+            std::fs::read(source.join("examples/browser/config/pjsip.conf"))?,
+            b"fixture"
+        );
+        assert_eq!(
+            std::fs::read(state.join("browser/config/pjsip.conf"))?,
             b"fixture"
         );
         write(&root, "xtask/src/lib.rs", b"changed")?;

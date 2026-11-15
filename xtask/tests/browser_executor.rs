@@ -53,6 +53,11 @@ fn browser_executor_stops_after_a_deadline_cleans_only_the_owned_container_and_r
             "style.css",
             "src/main.ts",
             "tests/call.spec.ts",
+            "config/http.conf",
+            "config/ari.conf",
+            "config/pjsip.conf",
+            "config/rtp.conf",
+            "config/extensions.conf",
         ] {
             write(&root, &format!("examples/browser/{path}"), b"fixture")?;
         }
