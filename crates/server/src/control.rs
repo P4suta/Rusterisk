@@ -327,12 +327,19 @@ pub enum PlaybackCompletion {
     Failed,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallHistoryEvent {
+    Started { key: CallKey, timestamp: String },
+    Finished { key: CallKey, timestamp: String },
+}
+
 #[derive(Debug)]
 pub struct Outcome {
     pub status: u16,
     pub body: Option<Value>,
     pub effects: Vec<Effect>,
     pub events: Vec<Event>,
+    pub history: Vec<CallHistoryEvent>,
 }
 
 impl Outcome {
@@ -342,6 +349,7 @@ impl Outcome {
             body: None,
             effects: Vec::new(),
             events: Vec::new(),
+            history: Vec::new(),
         }
     }
     fn json(value: impl serde::Serialize) -> Result<Self, ControlError> {
@@ -350,6 +358,7 @@ impl Outcome {
             body: Some(serde_json::to_value(value)?),
             effects: Vec::new(),
             events: Vec::new(),
+            history: Vec::new(),
         })
     }
     fn event(&mut self, application: &str, timestamp: &str, kind: EventKind) {
@@ -368,6 +377,7 @@ impl Outcome {
     pub(crate) fn append(&mut self, mut other: Self) {
         self.effects.append(&mut other.effects);
         self.events.append(&mut other.events);
+        self.history.append(&mut other.history);
     }
 }
 
@@ -566,6 +576,13 @@ impl Control {
             language: "en".into(),
         };
         let mut outcome = Outcome::json(&snapshot)?;
+        outcome.history.push(CallHistoryEvent::Started {
+            key: CallKey {
+                id: incoming.id.clone(),
+                generation,
+            },
+            timestamp: timestamp.into(),
+        });
         outcome.optional_event(
             application_name(&self.applications, call.stasis())?,
             timestamp,
@@ -808,6 +825,13 @@ impl Control {
                     language: "en".into(),
                 };
                 let mut outcome = Outcome::json(&snapshot)?;
+                outcome.history.push(CallHistoryEvent::Started {
+                    key: CallKey {
+                        id: id.clone(),
+                        generation,
+                    },
+                    timestamp: timestamp.into(),
+                });
                 outcome.event(
                     &app,
                     timestamp,
@@ -1219,6 +1243,13 @@ impl Control {
             }
         }
         entry.call = entry.call.apply(CallEvent::Hangup).call();
+        outcome.history.push(CallHistoryEvent::Finished {
+            key: CallKey {
+                id: id.clone(),
+                generation: entry.call.generation(),
+            },
+            timestamp: timestamp.into(),
+        });
         let released = entry.media_tasks.cancel();
         tracing::debug!(channel = %id, generation = entry.call.generation(), tasks = released.iter().flatten().count(), "channel media tasks released");
         if let Some(outbox) = &mut entry.dtmf {

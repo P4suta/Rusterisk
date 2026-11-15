@@ -468,6 +468,10 @@ impl Control {
                 caller: snapshot.caller.number.clone(),
                 timeout: timeout.map(u32::from),
             });
+            outcome.history.push(super::CallHistoryEvent::Started {
+                key: key.clone(),
+                timestamp: timestamp.into(),
+            });
             children.push(key);
         }
         Ok((
