@@ -1,8 +1,10 @@
 use rusterisk_client::{
     api::{ChannelId, ChannelState, EventKind},
-    CallMilestone, Client, Error,
+    CallCompletion, CallMilestone, Cleanup, Client, Error,
 };
-use rusterisk_server::{Controller, IncomingCall, IncomingTarget, Milestone, Signal};
+use rusterisk_server::{
+    Action, Controller, Credentials, IncomingCall, IncomingTarget, Milestone, Signal,
+};
 use std::{future::IntoFuture, time::Duration};
 
 fn failure(error: impl std::fmt::Display) -> Error {
@@ -11,6 +13,27 @@ fn failure(error: impl std::fmt::Display) -> Error {
 
 #[tokio::test]
 async fn incoming_adoption_preserves_early_events_and_owns_terminal_cleanup() -> Result<(), Error> {
+    incoming(End::Handle).await
+}
+
+#[tokio::test]
+async fn session_shutdown_cleans_adopted_incoming_calls_with_live_handles() -> Result<(), Error> {
+    incoming(End::Session).await
+}
+
+#[tokio::test]
+async fn incoming_handoff_releases_the_handle_without_ending_the_destination_call(
+) -> Result<(), Error> {
+    incoming(End::Handoff).await
+}
+
+enum End {
+    Handle,
+    Session,
+    Handoff,
+}
+
+async fn incoming(end: End) -> Result<(), Error> {
     let config = rusterisk_config::Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
         "[api]\ntype=user\npassword=password\n",
@@ -29,9 +52,13 @@ async fn incoming_adoption_preserves_early_events_and_owns_terminal_cleanup() ->
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         let client = Client::new(&format!("http://{address}"),"api","password")?;
         let mut session = client.subscribe(&ChannelId::try_from("calls".to_owned())?).await?;
+        let mut destination = client.subscribe(&ChannelId::try_from("destination".to_owned())?).await?;
         let id = ChannelId::try_from("incoming".to_owned())?;
         assert!(matches!(session.adopt(&id).await, Err(Error::Invalid(_))));
         let key = controller.incoming(IncomingCall { id:id.clone(), endpoint:"phone".into(), caller:"100".into(), context:"internal".into(), extension:"200".into(), target:IncomingTarget::Stasis { application:"calls".into(), arguments:Vec::new() } }).await.map_err(failure)?;
+        if !matches!(end, End::Handle) {
+            controller.signal(Signal::Milestone { key:key.clone(), milestone:Milestone::MediaConnected }).await.map_err(failure)?;
+        }
         controller.signal(Signal::Milestone { key:key.clone(), milestone:Milestone::Answered }).await.map_err(failure)?;
         loop {
             if matches!(session.next_event().await?.kind, EventKind::ChannelStateChange { channel } if channel.id == id && channel.state == ChannelState::Up) { break; }
@@ -41,13 +68,44 @@ async fn incoming_adoption_preserves_early_events_and_owns_terminal_cleanup() ->
         assert!(snapshot.progress.has_reached(CallMilestone::Stasis));
         assert!(snapshot.progress.has_reached(CallMilestone::Answered));
         assert!(!snapshot.progress.has_reached(CallMilestone::Accepted));
-        assert!(!snapshot.progress.has_reached(CallMilestone::MediaConnected));
+        assert_eq!(snapshot.progress.has_reached(CallMilestone::MediaConnected), !matches!(end, End::Handle));
         assert!(matches!(session.adopt(&id).await, Err(Error::Invalid(_))));
-        controller.signal(Signal::Milestone { key, milestone:Milestone::MediaConnected }).await.map_err(failure)?;
+        if matches!(end, End::Handle) {
+            controller.signal(Signal::Milestone { key, milestone:Milestone::MediaConnected }).await.map_err(failure)?;
+        }
         call.wait(CallMilestone::MediaConnected, Duration::from_secs(1)).await?;
-        call.close().await?;
-        assert!(matches!(client.channel(&id).await, Err(Error::Api { status:404, .. })));
-        session.shutdown().await?;
+        match end {
+            End::Handle => {
+                call.close().await?;
+                session.shutdown().await?;
+                assert!(matches!(client.channel(&id).await, Err(Error::Api { status:404, .. })));
+            }
+            End::Session => {
+                session.shutdown().await?;
+                let snapshot = call.wait_completion(Duration::from_secs(1)).await?;
+                assert_eq!(snapshot.progress.completion(), Some(CallCompletion::Cancelled));
+                assert_eq!(snapshot.cleanup, Cleanup::Complete);
+                call.close().await?;
+                assert!(matches!(client.channel(&id).await, Err(Error::Api { status:404, .. })));
+            }
+            End::Handoff => {
+                controller.execute(Credentials::new("api".into(), "password".into()).map_err(failure)?, None,
+                    Action::Move { channel:id.clone(), app:"destination".into(), args:Vec::new() }).await.map_err(failure)?;
+                let snapshot = call.wait_completion(Duration::from_secs(1)).await?;
+                assert_eq!(snapshot.progress.completion(), Some(CallCompletion::StasisExited));
+                assert_eq!(snapshot.cleanup, Cleanup::Complete);
+                assert!(matches!(session.adopt(&id).await, Err(Error::Invalid(_))));
+                let event = destination.next_event().await?;
+                assert!(matches!(event.kind, EventKind::StasisStart { channel, .. } if channel.id == id));
+                call.close().await?;
+                session.shutdown().await?;
+                assert_eq!(client.channel(&id).await?.state, ChannelState::Up);
+                let adopted = destination.adopt(&id).await?;
+                adopted.close().await?;
+                assert!(matches!(client.channel(&id).await, Err(Error::Api { status:404, .. })));
+            }
+        }
+        destination.shutdown().await?;
         Ok::<(), Error>(())
     }).await.map_err(|_| Error::Timeout).and_then(|result| result);
     controller.shutdown();
