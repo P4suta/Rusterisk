@@ -7,6 +7,8 @@ mod external_rtp;
 mod external_stream;
 pub use external_stream::{AudioSocketTarget, InvalidAudioSocketTarget};
 mod media_commands;
+mod media_events;
+pub use media_events::{MediaEvent, MediaFormat};
 mod media_uri;
 pub use media_commands::{MediaCommand, MediaCommandError, MediaControlFormat, MediaDirection};
 mod recording_options;
