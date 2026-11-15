@@ -16,6 +16,7 @@ async fn compare_existing_client(actual: &str, reference: &str) -> Result<(), Er
     let scenario = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/interop/node-ari-client/scenario.ts");
     let mut child = tokio::process::Command::new("node")
+        .arg("--max-old-space-size=128")
         .arg(scenario)
         .env("RUSTERISK_ACTUAL_URL", actual)
         .env("RUSTERISK_REFERENCE_URL", reference)
