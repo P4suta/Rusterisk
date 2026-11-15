@@ -54,6 +54,7 @@ pub(super) fn execute(
     files: &mut FileSet,
     root: &std::path::Path,
     command: StoredCommand,
+    mut service: impl FnMut(&mut Store, &mut FileSet) -> Result<(), StorageError>,
 ) {
     match command {
         StoredCommand::Sounds {
@@ -62,10 +63,19 @@ pub(super) fn execute(
             reply,
         } => {
             if !reply.is_closed() {
-                respond(
-                    reply,
-                    super::sounds::catalogue(root, language.as_deref(), format.as_deref()),
-                );
+                let result =
+                    super::sounds::catalogue(root, language.as_deref(), format.as_deref(), || {
+                        if reply.is_closed() {
+                            return Err(StorageError::Io(std::io::Error::new(
+                                std::io::ErrorKind::Interrupted,
+                                "sound requester disconnected",
+                            )));
+                        }
+                        service(store, files)
+                    });
+                if !reply.is_closed() {
+                    respond(reply, result);
+                }
             }
         }
         StoredCommand::Copy {

@@ -120,6 +120,7 @@ impl Scan {
         language: &str,
         relative: &str,
         depth: u8,
+        service: &mut impl FnMut() -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
         if depth >= 8 {
             return Err(StorageError::Capacity);
@@ -127,6 +128,7 @@ impl Scan {
         let current = root.join("sounds").join(language).join(relative);
         directory(&current)?;
         for entry in std::fs::read_dir(current)? {
+            service()?;
             let entry = entry?;
             self.visit()?;
             let kind = entry.file_type()?;
@@ -144,7 +146,7 @@ impl Scan {
             };
             if kind.is_dir() {
                 if SoundId::try_from(relative.clone()).is_ok() {
-                    self.walk(root, language, &relative, depth + 1)?;
+                    self.walk(root, language, &relative, depth + 1, service)?;
                 }
             } else if kind.is_file() {
                 let Some(name) = relative.strip_suffix(".wav") else {
@@ -194,6 +196,7 @@ pub(super) fn catalogue(
     root: &Path,
     language: Option<&str>,
     format: Option<&str>,
+    mut service: impl FnMut() -> Result<(), StorageError>,
 ) -> Result<Vec<Sound>, StorageError> {
     let directory_path = root.join("sounds");
     match directory(&directory_path) {
@@ -207,6 +210,7 @@ pub(super) fn catalogue(
     };
     let mut languages = 0;
     for entry in std::fs::read_dir(directory_path)? {
+        service()?;
         let entry = entry?;
         scan.visit()?;
         let kind = entry.file_type()?;
@@ -227,7 +231,7 @@ pub(super) fn catalogue(
         if languages > 16 {
             return Err(StorageError::Capacity);
         }
-        scan.walk(root, name, "", 0)?;
+        scan.walk(root, name, "", 0, &mut service)?;
     }
     let mut sounds = Vec::with_capacity(scan.sounds.len());
     for mut sound in scan.sounds.into_values() {
@@ -246,3 +250,6 @@ pub(super) fn catalogue(
     }
     Ok(sounds)
 }
+
+#[cfg(test)]
+mod tests;

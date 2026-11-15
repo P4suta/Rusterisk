@@ -15,7 +15,7 @@ A management burst must leave those lifecycle command slots available.
 Keep a separate bounded lane for 16 stored recording commands.
 Preserve the 64-command lane for call history and active audio work.
 Use the existing coalesced wake slot for both lanes.
-Drain lifecycle commands before each management operation and pump audio between operations.
+Drain lifecycle commands and pump audio between management operations and sound entries.
 Stop admission and drain both lanes before joining the thread.
 
 ## Alternatives

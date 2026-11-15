@@ -347,7 +347,12 @@ fn serve(
                 recordings.pump();
                 playbacks.pump();
                 files.pump();
-                stored::execute(&mut store, &mut files, &root, next);
+                stored::execute(&mut store, &mut files, &root, next, |_store, _files| {
+                    Err(StorageError::Io(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "storage is stopping",
+                    )))
+                });
             }
             recordings.pump();
             playbacks.pump();
@@ -379,7 +384,22 @@ fn serve(
                     recordings.pump();
                     playbacks.pump();
                     files.pump();
-                    stored::execute(&mut store, &mut files, &root, next);
+                    stored::execute(&mut store, &mut files, &root, next, |store, files| {
+                        if *stop.borrow() {
+                            return Err(StorageError::Io(std::io::Error::new(
+                                std::io::ErrorKind::Interrupted,
+                                "storage is stopping",
+                            )));
+                        }
+                        drain_commands(
+                            store,
+                            &mut recordings,
+                            &mut playbacks,
+                            files,
+                            &mut commands,
+                        );
+                        Ok(())
+                    });
                     recordings.pump();
                     playbacks.pump();
                     files.pump();
