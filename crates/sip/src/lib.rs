@@ -128,8 +128,6 @@ impl Session {
         let mut mappings = BTreeMap::new();
         mappings.insert(0, Codec::Pcmu);
         mappings.insert(8, Codec::Pcma);
-        let mut dtmf = BTreeMap::new();
-        let mut parameters = BTreeMap::new();
         let mut direction = Direction::SendRecv;
         let mut security = SessionSecurity::Rtp;
         for line in source.lines().map(str::trim) {
@@ -181,19 +179,7 @@ impl Session {
                     "opus/48000/2" | "opus/48000/1" => {
                         mappings.insert(payload, Codec::Opus);
                     }
-                    "telephone-event/8000" => {
-                        dtmf.insert(payload, 8000);
-                    }
-                    "telephone-event/48000" => {
-                        dtmf.insert(payload, 48000);
-                    }
                     _ => {}
-                }
-            } else if let Some(parameter) = line.strip_prefix("a=fmtp:") {
-                let (payload, value) = parameter.split_once(' ').ok_or(SipError::InvalidPacket)?;
-                let payload: u8 = payload.parse().map_err(|_| SipError::InvalidPacket)?;
-                if payload > 127 || parameters.insert(payload, value).is_some() {
-                    return Err(SipError::InvalidPacket);
                 }
             } else {
                 match line {
@@ -210,6 +196,7 @@ impl Session {
             port.filter(|port| *port != 0)
                 .ok_or(SipError::InvalidPacket)?,
         );
+        let formats = DtmfFormat::parse_all(source)?;
         for codec in allowed {
             if let Some(payload_type) = payloads
                 .iter()
@@ -219,23 +206,20 @@ impl Session {
                     Codec::Pcmu | Codec::Pcma => 8000,
                     Codec::Opus => 48000,
                 };
-                let mut formats = Vec::with_capacity(dtmf.len());
-                for (payload, clock) in &dtmf {
-                    if payloads.contains(payload) && payload != payload_type {
-                        let mut format = DtmfFormat::new(*payload, *clock)?;
-                        if let Some(value) = parameters.get(payload) {
-                            format = format.with_parameters(value)?;
-                        }
-                        if format.events() != 0 {
-                            formats.push(format);
-                        }
-                    }
-                }
                 let telephone = formats
                     .iter()
+                    .filter(|format| format.payload_type() != *payload_type)
                     .find(|format| format.rate() == rate)
-                    .or_else(|| formats.iter().find(|format| format.rate() == 8000))
-                    .or_else(|| formats.first())
+                    .or_else(|| {
+                        formats.iter().find(|format| {
+                            format.payload_type() != *payload_type && format.rate() == 8000
+                        })
+                    })
+                    .or_else(|| {
+                        formats
+                            .iter()
+                            .find(|format| format.payload_type() != *payload_type)
+                    })
                     .copied();
                 return Ok(Self {
                     remote,

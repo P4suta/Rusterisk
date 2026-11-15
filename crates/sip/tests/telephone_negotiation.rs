@@ -55,3 +55,19 @@ fn absent_event_parameters_use_only_dtmf_and_malformed_ranges_are_refused() -> R
     assert!(DtmfFormat::new(101, 16000).is_err());
     Ok(())
 }
+
+#[test]
+fn all_negotiated_clocks_retain_their_masks_and_canonical_parameters() -> Result<(), SipError> {
+    let formats = DtmfFormat::parse_all(&offer("a=fmtp:101 0-16\r\na=fmtp:102 0-3,10-11,15\r\n"))?;
+    assert_eq!(formats.len(), 2);
+    assert_eq!(formats[0].payload_type(), 101);
+    assert_eq!(formats[0].rate(), 8000);
+    assert_eq!(formats[0].parameters(), "0-15");
+    assert_eq!(formats[1].payload_type(), 102);
+    assert_eq!(formats[1].rate(), 48000);
+    assert_eq!(formats[1].parameters(), "0-3,10-11,15");
+    assert!(DtmfFormat::parse_all(&" ".repeat(16385)).is_err());
+    let unoffered = offer("a=fmtp:101 0-3\r\n").replace("111 101 102", "111");
+    assert!(DtmfFormat::parse_all(&unoffered)?.is_empty());
+    Ok(())
+}
