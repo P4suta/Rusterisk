@@ -1,6 +1,8 @@
 use sha2::{Digest, Sha256};
 mod build;
 pub use build::Build;
+mod run;
+pub use run::{Phase, RunPlan};
 use std::{
     io::{Read, Write},
     path::Path,
@@ -12,6 +14,7 @@ pub enum BrowserError {
     Process(crate::process::ProcessError),
     Package,
     Declaration,
+    Plan,
     Cleanup {
         operation: String,
         cleanup: std::io::Error,
@@ -29,6 +32,7 @@ impl std::fmt::Display for BrowserError {
             Self::Declaration => formatter.write_str(
                 "browser signaling declarations differ from the bound source or exact correction",
             ),
+            Self::Plan => formatter.write_str("invalid bounded browser verification plan"),
             Self::Cleanup { operation, cleanup } => write!(
                 formatter,
                 "{operation}; declaration cleanup failed: {cleanup}"
