@@ -1,6 +1,6 @@
 use md5::Md5;
 use rsipstack::sip::{uri::Scheme, Method, Uri};
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha512_256};
 use std::num::NonZeroU32;
 use subtle::ConstantTimeEq;
 mod header;
@@ -18,6 +18,8 @@ pub(crate) enum Algorithm {
     Md5Session,
     Sha256,
     Sha256Session,
+    Sha512256,
+    Sha512256Session,
 }
 
 impl Algorithm {
@@ -28,6 +30,8 @@ impl Algorithm {
             Self::Md5Session,
             Self::Sha256,
             Self::Sha256Session,
+            Self::Sha512256,
+            Self::Sha512256Session,
         ]
         .into_iter()
         .find(|algorithm| algorithm.name().eq_ignore_ascii_case(value))
@@ -40,6 +44,8 @@ impl Algorithm {
             Self::Md5Session => "MD5-sess",
             Self::Sha256 => "SHA-256",
             Self::Sha256Session => "SHA-256-sess",
+            Self::Sha512256 => "SHA-512-256",
+            Self::Sha512256Session => "SHA-512-256-sess",
         }
     }
 
@@ -59,6 +65,13 @@ impl Algorithm {
                 }
                 Response::Sha256(digest.finalize().into())
             }
+            Self::Sha512256 | Self::Sha512256Session => {
+                let mut digest = Sha512_256::new();
+                for part in parts {
+                    digest.update(part);
+                }
+                Response::Sha512256(digest.finalize().into())
+            }
         }
     }
 
@@ -77,7 +90,10 @@ impl Algorithm {
                 credentials.password.as_bytes(),
             ])
             .hex();
-        if matches!(self, Self::Md5Session | Self::Sha256Session) {
+        if matches!(
+            self,
+            Self::Md5Session | Self::Sha256Session | Self::Sha512256Session
+        ) {
             let client = match protection {
                 Protection::Legacy => return Err(DigestError::Invalid),
                 Protection::Auth(client) | Protection::Integrity(client) => client,
@@ -279,13 +295,14 @@ impl<'a> Protection<'a> {
 pub(crate) enum Response {
     Md5([u8; 16]),
     Sha256([u8; 32]),
+    Sha512256([u8; 32]),
 }
 
 impl Response {
     pub(crate) fn hex(&self) -> String {
         let bytes = match self {
             Self::Md5(bytes) => bytes.as_slice(),
-            Self::Sha256(bytes) => bytes.as_slice(),
+            Self::Sha256(bytes) | Self::Sha512256(bytes) => bytes.as_slice(),
         };
         let mut encoded = String::with_capacity(bytes.len() * 2);
         const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -299,7 +316,7 @@ impl Response {
     pub(crate) fn matches(&self, encoded: &str) -> bool {
         let expected = match self {
             Self::Md5(bytes) => bytes.as_slice(),
-            Self::Sha256(bytes) => bytes.as_slice(),
+            Self::Sha256(bytes) | Self::Sha512256(bytes) => bytes.as_slice(),
         };
         if encoded.len() != expected.len() * 2 {
             return false;

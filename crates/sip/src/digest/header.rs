@@ -130,7 +130,10 @@ impl Header {
         let response = self.required_quoted("response")?;
         let expected = match algorithm {
             Algorithm::Md5 | Algorithm::Md5Session => 32,
-            Algorithm::Sha256 | Algorithm::Sha256Session => 64,
+            Algorithm::Sha256
+            | Algorithm::Sha256Session
+            | Algorithm::Sha512256
+            | Algorithm::Sha512256Session => 64,
         };
         if response.len() != expected || !response.bytes().all(lower_hexadecimal) {
             return Err(DigestError::Invalid);

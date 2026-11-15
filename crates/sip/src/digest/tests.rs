@@ -83,7 +83,7 @@ fn openssl_integrity_and_session_vectors_use_the_selected_body_hash() -> Result<
 #[test]
 fn unsupported_algorithms_never_become_the_legacy_default() -> Result<(), DigestError> {
     assert_eq!(Algorithm::parse(None)?.name(), "MD5");
-    for source in ["SHA-512-256", "SHA-512", "", "MD5, SHA-256", "unknown"] {
+    for source in ["SHA-384", "SHA-512", "", "MD5, SHA-256", "unknown"] {
         assert_eq!(
             Algorithm::parse(Some(source)),
             Err(DigestError::Unsupported)
@@ -143,7 +143,7 @@ fn invalid_or_excessive_inputs_do_not_reach_digest_calculation() {
 fn session_algorithms_require_a_client_nonce() -> Result<(), DigestError> {
     let credentials = Credentials::new("alice", "sample-password", "example.net")?;
     let request = DigestRequest::new("REGISTER", "sip:registrar.example.net", "server-nonce", b"")?;
-    for name in ["MD5-sess", "SHA-256-sess"] {
+    for name in ["MD5-sess", "SHA-256-sess", "SHA-512-256-sess"] {
         assert!(matches!(
             Algorithm::parse(Some(name))?.calculate(
                 &credentials,
@@ -152,6 +152,67 @@ fn session_algorithms_require_a_client_nonce() -> Result<(), DigestError> {
             ),
             Err(DigestError::Invalid)
         ));
+    }
+    Ok(())
+}
+
+#[test]
+fn openssl_sha512_256_vectors_require_the_standard_initial_value_and_session_derivation(
+) -> Result<(), DigestError> {
+    let credentials = Credentials::new("Jäsøn Doe", "Secret, or not?", "api@example.org")?;
+    let request = DigestRequest {
+        method: "GET",
+        uri: RequestUri("/doe.json"),
+        nonce: super::Nonce::new("5TsQWLVdgBdmrQ0XsxbDODV+57QdFR34I9HAbC/RVvkK")?,
+        body: b"",
+    };
+    let quality = Protection::parse(
+        Some("auth"),
+        Some("NTg6RKcb9boFIAS3KrFK9BGeh+iDa/sm6jUMp2wds69v"),
+        Some("00000001"),
+    )?;
+    let response =
+        Algorithm::parse(Some("SHA-512-256"))?.calculate(&credentials, &request, &quality)?;
+    assert_eq!(
+        response.hex(),
+        "3798d4131c277846293534c3edc11bd8a5e4cdcbff78b05db9d95eeb1cec68a5"
+    );
+    assert!(!response.matches("ae66e67d6b427bd3f120414a82e4acff38e8ecd9101d6c861229025f607a79dd"));
+    let credentials = Credentials::new("alice", "sample-password", "example.net")?;
+    for (algorithm, entity, expected) in [
+        (
+            "SHA-512-256",
+            b"".as_slice(),
+            "4cc0e017d37db99606dbfac1abc1c4da126adee45416adeb7e747a604abb0480",
+        ),
+        (
+            "SHA-512-256",
+            b"v=0\r\ns=call\r\n",
+            "4f14eae7c8b01445d23ae8aa180efc7defaea2759b667fe68d486d34e036038e",
+        ),
+        (
+            "SHA-512-256-sess",
+            b"".as_slice(),
+            "ff4fafa5018fa9edf6472cae3933e68ca21ae9d04da8203e28d4c6c5fb951152",
+        ),
+        (
+            "SHA-512-256-sess",
+            b"v=0\r\ns=call\r\n",
+            "3ed8634a2329ce28d942cfd49f453597879e8b410f90666f8314b7fbe11c7100",
+        ),
+    ] {
+        let request = DigestRequest::new(
+            "REGISTER",
+            "sip:registrar.example.net",
+            "server-nonce",
+            entity,
+        )?;
+        assert_eq!(
+            Algorithm::parse(Some(algorithm))?
+                .calculate(&credentials, &request, &protection()?)?
+                .hex(),
+            expected
+        );
     }
     Ok(())
 }

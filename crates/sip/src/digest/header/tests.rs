@@ -72,7 +72,7 @@ fn nonce_counts_and_unsupported_algorithms_are_not_silently_normalized() -> Resu
         assert!(Header::parse(&input)?.authorization().is_err());
     }
     for input in [
-        authorization("").replace("algorithm=SHA-256", "algorithm=SHA-512-256"),
+        authorization("").replace("algorithm=SHA-256", "algorithm=SHA-384"),
         authorization("").replace("qop=auth-int", "qop=unknown"),
         authorization(", userhash=true"),
         authorization(", username*=UTF-8''alice"),

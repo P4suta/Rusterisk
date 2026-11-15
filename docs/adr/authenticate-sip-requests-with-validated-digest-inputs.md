@@ -14,7 +14,7 @@ The locked [digest helper](https://github.com/restsend/rsipstack/blob/ca99be1e73
 
 Validate URI, realm, nonce, algorithm, protection mode, and counters before computing authentication.
 Bound text and use concrete hash primitives.
-Support MD5 for compatibility and SHA-256 for stronger authentication.
+Support MD5, SHA-256, and SHA-512-256.
 Compute integrity body hashes with the selected algorithm, including empty bodies.
 Treat session derivation explicitly.
 Keep unsupported algorithms distinct from absent algorithms.
