@@ -48,7 +48,7 @@ async fn typed_client_authenticates_and_roundtrips_server_resources() -> Result<
     let config = rusterisk_config::Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
         "[app]\ntype=user\npassword=test-password\n",
-        "",
+        "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:5060\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[dynamic]\ntype=aor\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=dynamic\nallow=ulaw\n",
         "",
         "",
     )
@@ -64,6 +64,25 @@ async fn typed_client_authenticates_and_roundtrips_server_resources() -> Result<
         let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
         assert_eq!(client.ping().await?.ping, "pong");
         assert!(client.channels().await?.is_empty());
+        let endpoint = client.endpoint("PJSIP", "phone").await?;
+        assert_eq!(
+            endpoint.state,
+            Some(rusterisk_client::api::EndpointState::Offline)
+        );
+        assert_eq!(client.endpoints().await?, std::slice::from_ref(&endpoint));
+        assert_eq!(client.endpoints_by_technology("PJSIP").await?, [endpoint]);
+        assert!(matches!(
+            client.endpoints_by_technology("unknown").await,
+            Err(Error::Api { status: 404, .. })
+        ));
+        assert!(matches!(
+            client.endpoint("PJSIP", "missing").await,
+            Err(Error::Api { status: 404, .. })
+        ));
+        assert!(matches!(
+            client.endpoint("PJSIP", "../phone").await,
+            Err(Error::Id(_))
+        ));
         assert!(client.applications().await?.is_empty());
         let session = client
             .subscribe(&ChannelId::try_from("calls".to_owned())?)

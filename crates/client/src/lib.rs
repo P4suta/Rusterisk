@@ -237,6 +237,24 @@ impl Client {
         self.request("applications.get", &[("applicationName", name)], &[])
             .await
     }
+    pub async fn endpoints(&self) -> Result<Vec<api::Endpoint>, Error> {
+        self.request("endpoints.list", &[], &[]).await
+    }
+    pub async fn endpoints_by_technology(
+        &self,
+        technology: &str,
+    ) -> Result<Vec<api::Endpoint>, Error> {
+        self.request("endpoints.listByTech", &[("tech", technology)], &[])
+            .await
+    }
+    pub async fn endpoint(&self, technology: &str, resource: &str) -> Result<api::Endpoint, Error> {
+        self.request(
+            "endpoints.get",
+            &[("tech", technology), ("resource", resource)],
+            &[],
+        )
+        .await
+    }
     pub async fn channel(&self, id: &api::ChannelId) -> Result<api::Channel, Error> {
         self.request("channels.get", &[("channelId", id.as_str())], &[])
             .await
