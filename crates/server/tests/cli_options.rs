@@ -12,7 +12,8 @@ fn informational_modes_do_not_require_configuration_and_validation_is_distinct_f
     assert_eq!(
         parse(&[])?,
         Command::Run {
-            directory: PathBuf::from("config")
+            directory: PathBuf::from("config"),
+            data_directory: PathBuf::from("data"),
         }
     );
     assert_eq!(parse(&["--unknown", "--help"])?, Command::Help);
@@ -22,6 +23,29 @@ fn informational_modes_do_not_require_configuration_and_validation_is_distinct_f
         Command::Check {
             directory: PathBuf::from("settings")
         }
+    );
+    Ok(())
+}
+
+#[test]
+fn persistence_paths_are_explicit_bounded_and_independent_of_configuration() -> Result<(), CliError>
+{
+    assert_eq!(
+        parse(&["--config-dir", "settings", "--data-dir", "private calls"])?,
+        Command::Run {
+            directory: PathBuf::from("settings"),
+            data_directory: PathBuf::from("private calls"),
+        }
+    );
+    assert_eq!(parse(&["--data-dir"]), Err(CliError::MissingDirectory));
+    assert_eq!(parse(&["--data-dir", ""]), Err(CliError::MissingDirectory));
+    assert_eq!(
+        parse(&["--data-dir", "a", "--data-dir", "b"]),
+        Err(CliError::DuplicateOption)
+    );
+    assert_eq!(
+        parse(&["--data-dir", &"a".repeat(4097)]),
+        Err(CliError::Capacity)
     );
     Ok(())
 }

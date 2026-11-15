@@ -21,7 +21,12 @@ async fn server_shutdown_waits_for_event_sockets_and_releases_every_listener(
     )
     .map_err(failure)?;
     config.http.bind.set_port(0);
-    let server = Server::bind(config, 4).await?;
+    let data = tempfile::tempdir().map_err(failure)?;
+    let server = Server::bind(config, 4, data.path().to_owned()).await?;
+    assert!(matches!(
+        rusterisk_storage::Store::open(data.path()),
+        Err(rusterisk_storage::StorageError::InUse)
+    ));
     let address = server.local_addr()?;
     let sip = server.sip_listeners()?;
     let controller = server.controller();
@@ -78,5 +83,28 @@ async fn server_shutdown_waits_for_event_sockets_and_releases_every_listener(
             .map_err(failure)?;
         assert_eq!(socket.local_addr().map_err(failure)?, address);
     }
+    assert!(rusterisk_storage::Store::open(data.path()).is_ok());
+    Ok(())
+}
+
+#[tokio::test]
+async fn listener_startup_failure_joins_storage_before_returning() -> Result<(), ControlError> {
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(failure)?;
+    let mut config = Config::parse(
+        "[general]\nbindaddr=127.0.0.1\n",
+        "[app]\ntype=user\npassword=test-password\n",
+        "",
+        "",
+        "",
+    )
+    .map_err(failure)?;
+    config.http.bind = occupied.local_addr().map_err(failure)?;
+    let data = tempfile::tempdir().map_err(failure)?;
+    assert!(Server::bind(config, 4, data.path().to_owned())
+        .await
+        .is_err());
+    assert!(rusterisk_storage::Store::open(data.path()).is_ok());
     Ok(())
 }

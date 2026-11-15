@@ -2,9 +2,11 @@ use crate::encryption::TlsContext;
 use crate::listener::HttpServer;
 use crate::media::MediaHub;
 use crate::signaling::Signaling;
+use crate::storage::StorageWorker;
 use crate::{ControlError, Controller, Runner};
 use rusterisk_config::Config;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::task::JoinSet;
 
@@ -22,6 +24,7 @@ pub struct Server {
     signaling: Signaling,
     media: MediaHub,
     http: HttpServer,
+    storage: StorageWorker,
 }
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -41,24 +44,46 @@ impl Server {
         Ok(())
     }
 
-    pub async fn bind(config: Config, capacity: usize) -> Result<Self, ControlError> {
+    pub async fn bind(
+        config: Config,
+        capacity: usize,
+        data_directory: PathBuf,
+    ) -> Result<Self, ControlError> {
+        let (storage_port, storage) = StorageWorker::start(data_directory)
+            .await
+            .map_err(failure)?;
         let (controller, control, effects) = Controller::new(config.clone(), capacity);
         let (media_port, media, notices) = MediaHub::new(capacity);
-        let signaling = Signaling::bind(
-            config.clone(),
-            controller.clone(),
-            effects,
-            media_port,
-            notices,
-        )
-        .await?;
-        let http = HttpServer::bind(&config.http, controller.clone()).await?;
+        let listeners: Result<(Signaling, HttpServer), ControlError> = async {
+            let signaling = Signaling::bind(
+                config.clone(),
+                controller.clone(),
+                effects,
+                media_port,
+                notices,
+            )
+            .await?
+            .with_storage(storage_port);
+            let http = HttpServer::bind(&config.http, controller.clone()).await?;
+            Ok((signaling, http))
+        }
+        .await;
+        let (signaling, http) = match listeners {
+            Ok(listeners) => listeners,
+            Err(primary) => {
+                if let Err(error) = storage.close().await {
+                    tracing::error!(%error, "storage startup cleanup failed");
+                }
+                return Err(primary);
+            }
+        };
         Ok(Self {
             controller,
             control,
             signaling,
             media,
             http,
+            storage,
         })
     }
 
@@ -79,6 +104,7 @@ impl Server {
             signaling,
             media,
             http,
+            storage,
         } = self;
         let mut tasks = JoinSet::new();
         tasks.spawn(async move { (Component::Control, control.run().await) });
@@ -138,6 +164,12 @@ impl Server {
                         primary = Some(failure(error));
                     }
                 }
+            }
+        }
+        if let Err(error) = storage.close().await {
+            tracing::error!(%error, "storage shutdown failed");
+            if primary.is_none() {
+                primary = Some(failure(error));
             }
         }
         match primary {

@@ -3,6 +3,7 @@ use rusterisk_server::cli::{CliError, Command};
 use rusterisk_server::runtime::Server;
 use rusterisk_server::ControlError;
 use std::io;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 enum AppError {
@@ -69,8 +70,10 @@ async fn shutdown_signal() -> Result<(), io::Error> {
     tokio::signal::ctrl_c().await
 }
 
-async fn start(config: Config) -> Result<(), AppError> {
-    let server = Server::bind(config, 64).await.map_err(AppError::Control)?;
+async fn start(config: Config, data_directory: PathBuf) -> Result<(), AppError> {
+    let server = Server::bind(config, 64, data_directory)
+        .await
+        .map_err(AppError::Control)?;
     let controller = server.controller();
     tracing::info!(http = %server.local_addr().map_err(AppError::Control)?, sip = ?server.sip_listeners().map_err(AppError::Control)?, "server ready");
     let serving = server.run();
@@ -108,14 +111,17 @@ fn execute(command: Command) -> Result<(), AppError> {
             println!("Configuration valid.");
             Ok(())
         }
-        Command::Run { directory } => {
+        Command::Run {
+            directory,
+            data_directory,
+        } => {
             let config = Config::load(&directory).map_err(AppError::Config)?;
             let subscriber = tracing_subscriber::fmt()
                 .json()
                 .with_max_level(tracing::Level::INFO)
                 .finish();
             tracing::subscriber::set_global_default(subscriber).map_err(AppError::Logging)?;
-            runtime()?.block_on(start(config))
+            runtime()?.block_on(start(config, data_directory))
         }
     }
 }
