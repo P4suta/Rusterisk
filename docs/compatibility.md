@@ -39,8 +39,10 @@ Live recording duration statistics remain absent.
 
 ## Signaling and audio
 
-The signaling adapter handles `SIP` over `UDP`, native `TCP`, and verified `TLS`, digest authentication, one registered contact per endpoint, incoming calls, outgoing calls, cancellation, and hangup.
+The signaling adapter handles `SIP` over `UDP`, native `TCP`, verified `TLS`, and signaling WebSockets, with digest authentication, incoming calls, outgoing calls, cancellation, and hangup.
 Native stream tests cover authenticated registration, partial messages, shared flows, initial outbound connections, call control, half-close responses, saturation, and shutdown.
+HTTP `/ws` upgrades require the `sip` subprotocol and enforce the configured Origin policy.
+Each endpoint preserves one registered Contact URI and routes browser placeholder hosts through the registered connection.
 Authenticated endpoint identity determines the context independently of displayed caller identification.
 Telephone digits use `RFC 4733` packets or `SIP INFO` according to the endpoint's configuration.
 The audio adapter decodes `PCMU`, `PCMA`, and Opus into complete 20 ms mixer frames.
@@ -52,7 +54,9 @@ Rejected offers preserve the active media session.
 Peer hold and resume preserve local hold and directional audio controls.
 The adapter confirms direction changes before sending the negotiated answer.
 Unsupported media changes return `488`.
-Blind transfer, attended transfer, WebSocket signaling, browser media, and legacy hold through an unspecified connection address remain pending.
+Native `DTLS-SRTP` session tests exchange known audio with `PCMU`, `PCMA`, and Opus.
+A `PCMU` integration test checks both directions through the audio bridge and port release.
+Blind transfer, attended transfer, browser call integration, and legacy hold through an unspecified connection address remain pending.
 External media supports bidirectional unicast datagrams with numeric destinations and `ulaw` or `alaw` formats.
 Creation returns bound transport variables after socket admission.
 Stasis participation and received audio remain independent milestones.
