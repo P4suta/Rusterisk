@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 pub enum PlaybackMedia {
     Recording(ChannelId),
     Sound(SoundId),
+    LocalizedSound { name: SoundId, language: ChannelId },
 }
 
 enum State {
@@ -152,33 +153,23 @@ impl PlaybackSet {
             .generation
             .checked_add(1)
             .ok_or(StorageError::Capacity)?;
-        let (directory, name) = match &media {
-            PlaybackMedia::Recording(name) => ("recordings", name.as_str()),
-            PlaybackMedia::Sound(name) => ("sounds", name.as_str()),
-        };
-        let mut directory = self.root.join(directory);
-        if !std::fs::symlink_metadata(&directory)?.is_dir() {
-            return Err(StorageError::InvalidName);
-        }
-        let relative = std::path::Path::new(name);
-        if let Some(parent) = relative.parent() {
-            for component in parent.components() {
-                directory.push(component);
+        let reader = match &media {
+            PlaybackMedia::Sound(name) => super::sounds::open(&self.root, name, "en")?,
+            PlaybackMedia::LocalizedSound { name, language } => {
+                super::sounds::open(&self.root, name, language.as_str())?
+            }
+            PlaybackMedia::Recording(name) => {
+                let directory = self.root.join("recordings");
                 if !std::fs::symlink_metadata(&directory)?.is_dir() {
                     return Err(StorageError::InvalidName);
                 }
+                let path = directory.join(format!("{name}.wav"));
+                if !std::fs::symlink_metadata(&path)?.is_file() {
+                    return Err(StorageError::InvalidName);
+                }
+                WaveReader::open(&path)?
             }
-        }
-        let mut leaf = relative
-            .file_name()
-            .ok_or(StorageError::InvalidName)?
-            .to_os_string();
-        leaf.push(".wav");
-        let path = directory.join(leaf);
-        if !std::fs::symlink_metadata(&path)?.is_file() {
-            return Err(StorageError::InvalidName);
-        }
-        let reader = WaveReader::open(&path)?;
+        };
         self.entries.insert(
             generation,
             Entry {

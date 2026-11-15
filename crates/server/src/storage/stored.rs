@@ -1,10 +1,15 @@
 use super::file::FileSet;
 use super::{respond, StoragePort, WorkerError};
-use rusterisk_api::{ChannelId, StoredRecording};
+use rusterisk_api::{ChannelId, Sound, StoredRecording};
 use rusterisk_storage::{RecordingChunk, StorageError, Store};
 use tokio::sync::{mpsc, oneshot};
 
 pub(super) enum StoredCommand {
+    Sounds {
+        language: Option<String>,
+        format: Option<String>,
+        reply: oneshot::Sender<Result<Vec<Sound>, StorageError>>,
+    },
     Copy {
         source: ChannelId,
         destination: ChannelId,
@@ -44,8 +49,25 @@ impl StoragePort {
     }
 }
 
-pub(super) fn execute(store: &mut Store, files: &mut FileSet, command: StoredCommand) {
+pub(super) fn execute(
+    store: &mut Store,
+    files: &mut FileSet,
+    root: &std::path::Path,
+    command: StoredCommand,
+) {
     match command {
+        StoredCommand::Sounds {
+            language,
+            format,
+            reply,
+        } => {
+            if !reply.is_closed() {
+                respond(
+                    reply,
+                    super::sounds::catalogue(root, language.as_deref(), format.as_deref()),
+                );
+            }
+        }
         StoredCommand::Copy {
             source,
             destination,

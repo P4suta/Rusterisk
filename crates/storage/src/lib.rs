@@ -592,6 +592,10 @@ pub struct WaveReader {
 }
 
 impl WaveReader {
+    pub fn rate(&self) -> u32 {
+        self.rate
+    }
+
     pub fn open(path: &Path) -> Result<Self, StorageError> {
         let mut file = File::open(path)?;
         let (rate, remaining) = read_header(&mut file)?;

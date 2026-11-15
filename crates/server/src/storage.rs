@@ -11,6 +11,7 @@ pub use history::HistoryReceipt;
 mod copy;
 mod file;
 mod recording;
+mod sounds;
 mod stored;
 use file::FileSet;
 pub use file::RecordingFile;
@@ -329,7 +330,7 @@ fn serve(
     stop: watch::Receiver<bool>,
 ) {
     let mut recordings = RecordingSet::new(root.clone());
-    let mut playbacks = PlaybackSet::new(root);
+    let mut playbacks = PlaybackSet::new(root.clone());
     let mut files = FileSet::new();
     loop {
         if *stop.borrow() {
@@ -346,7 +347,7 @@ fn serve(
                 recordings.pump();
                 playbacks.pump();
                 files.pump();
-                stored::execute(&mut store, &mut files, next);
+                stored::execute(&mut store, &mut files, &root, next);
             }
             recordings.pump();
             playbacks.pump();
@@ -378,7 +379,7 @@ fn serve(
                     recordings.pump();
                     playbacks.pump();
                     files.pump();
-                    stored::execute(&mut store, &mut files, next);
+                    stored::execute(&mut store, &mut files, &root, next);
                     recordings.pump();
                     playbacks.pump();
                     files.pump();
