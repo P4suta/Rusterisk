@@ -1,6 +1,6 @@
 ---
 date: 2026-11-16
-status: accepted
+status: proposed
 ---
 
 # Resolve sound names within the configured library
