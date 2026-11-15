@@ -1,8 +1,8 @@
 use crate::{
-    response, Datagram, DialogReply, Engine, Output, PendingInvite, RequestIdentity, Session,
-    SipError, SipEvent,
+    Datagram, DialogReply, Engine, Output, PendingInvite, RequestIdentity, Session, SipError,
+    SipEvent, response,
 };
-use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, Request, SipMessage};
+use rsipstack::sip::{HeadersExt, Method, Request, SipMessage, headers::untyped::ToTypedHeader};
 use std::net::SocketAddr;
 
 enum State {
@@ -49,7 +49,17 @@ impl Incoming {
             .ok_or(SipError::Capacity)?;
         let invite = tagged(&self.invite.request, &self.invite.local_tag)?;
         let target = &self.remote_target;
-        let packet = format!("{method} {target} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-{}-{method}-{};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {} {method}\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", self.invite.local, self.invite.local_tag, self.local_cseq, invite.to_header()?.value(), invite.from_header()?.value(), invite.call_id_header()?.value(), self.local_cseq);
+        let transport = crate::transport::token(self.invite.protocol);
+        let packet = format!(
+            "{method} {target} SIP/2.0\r\nVia: SIP/2.0/{transport} {};branch=z9hG4bK-{}-{method}-{};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {} {method}\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
+            self.invite.local,
+            self.invite.local_tag,
+            self.local_cseq,
+            invite.to_header()?.value(),
+            invite.from_header()?.value(),
+            invite.call_id_header()?.value(),
+            self.local_cseq
+        );
         match SipMessage::try_from(packet.as_str())? {
             SipMessage::Request(request) => Ok(request),
             SipMessage::Response(_) => Err(SipError::InvalidPacket),
@@ -62,6 +72,25 @@ impl Incoming {
             expires: now.saturating_add(32_000),
         };
         Ok(packet)
+    }
+}
+
+impl Engine {
+    pub(super) fn incoming_disconnected(&mut self, peer: SocketAddr, events: &mut Vec<SipEvent>) {
+        self.incoming.retain(|_, dialog| {
+            if dialog.invite.peer != peer {
+                return true;
+            }
+            match dialog.state {
+                State::AwaitingAck { .. } | State::Established => events.push(SipEvent::Ended {
+                    id: dialog.invite.id.clone(),
+                    generation: dialog.generation,
+                    cause: 41,
+                }),
+                State::Terminated { .. } => {}
+            }
+            false
+        });
     }
 }
 
@@ -296,7 +325,10 @@ impl Engine {
             .find(|(_, invite)| invite.id == id)
             .ok_or(SipError::InvalidPacket)?;
         let key = key.clone();
-        let extra = format!("Contact: <sip:rusterisk@{}>\r\nAllow: INVITE, ACK, CANCEL, BYE, OPTIONS\r\nSupported: \r\n", invite.local);
+        let extra = format!(
+            "Contact: {}\r\nAllow: INVITE, ACK, CANCEL, BYE, OPTIONS\r\nSupported: \r\n",
+            crate::transport::contact(invite.protocol, invite.local)
+        );
         let bytes = response(
             &tagged(&invite.request, &invite.local_tag)?,
             200,
@@ -408,7 +440,7 @@ impl Engine {
                         "Call/Transaction Does Not Exist",
                         "",
                         "",
-                    )?)))
+                    )?)));
                 }
                 State::AwaitingAck { .. } => {
                     return Ok(Some(DialogReply::response(response(
@@ -417,21 +449,26 @@ impl Engine {
                         "Server Internal Error",
                         &format!("Retry-After: {retry_after}\r\n"),
                         "",
-                    )?)))
+                    )?)));
                 }
                 State::Established => {}
             }
-            let updated =
-                match direction_update(&dialog.offer, &request.body, &dialog.invite.session) {
-                    Ok(updated) => updated,
-                    Err(_) => return Ok(Some(DialogReply::response(response(
+            let updated = match direction_update(
+                &dialog.offer,
+                &request.body,
+                &dialog.invite.session,
+            ) {
+                Ok(updated) => updated,
+                Err(_) => {
+                    return Ok(Some(DialogReply::response(response(
                         request,
                         488,
                         "Not Acceptable Here",
                         "Warning: 399 rusterisk \"Only media direction changes are supported\"\r\n",
                         "",
-                    )?))),
-                };
+                    )?)));
+                }
+            };
             let target = request
                 .headers
                 .iter()
@@ -449,7 +486,10 @@ impl Engine {
             } else {
                 dialog.answer_version
             };
-            let extra = format!("Contact: <sip:rusterisk@{}>\r\n", dialog.invite.local);
+            let extra = format!(
+                "Contact: {}\r\n",
+                crate::transport::contact(dialog.invite.protocol, dialog.invite.local)
+            );
             let bytes = response(
                 request,
                 200,
@@ -566,7 +606,7 @@ impl Engine {
         };
         for cached in self.cache.values_mut() {
             if let Some(retry) = &mut cached.retry {
-                if retry.next <= now {
+                if retry.next <= now && self.protocol == rusterisk_config::Protocol::Udp {
                     output.datagrams.push(Datagram {
                         peer: cached.peer,
                         bytes: cached.bytes.clone(),

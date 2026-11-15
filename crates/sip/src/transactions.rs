@@ -1,11 +1,12 @@
 use crate::{Datagram, SipError};
-use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Request, Response};
+use rsipstack::sip::{HeadersExt, Request, Response, headers::untyped::ToTypedHeader};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
 enum Retry {
     Backoff,
     Provisional,
+    Reliable,
 }
 
 struct Pending {
@@ -33,12 +34,17 @@ fn key(message: &impl HeadersExt) -> Result<String, SipError> {
 }
 
 impl Transactions {
+    pub(super) fn disconnected(&mut self, peer: SocketAddr) {
+        self.requests.retain(|_, pending| pending.peer != peer);
+    }
+
     pub fn track(
         &mut self,
         request: Request,
         peer: SocketAddr,
         bytes: &[u8],
         now: u64,
+        reliable: bool,
     ) -> Result<(), SipError> {
         self.requests.retain(|_, pending| pending.expires > now);
         let key = key(&request)?;
@@ -61,7 +67,11 @@ impl Transactions {
                 next: now.saturating_add(500),
                 interval: 500,
                 expires: now.saturating_add(32_000),
-                retry: Retry::Backoff,
+                retry: if reliable {
+                    Retry::Reliable
+                } else {
+                    Retry::Backoff
+                },
             },
         );
         Ok(())
@@ -85,7 +95,9 @@ impl Transactions {
         }
         let code = response.status_code.code();
         if (100..200).contains(&code) {
-            pending.retry = Retry::Provisional;
+            if !matches!(pending.retry, Retry::Reliable) {
+                pending.retry = Retry::Provisional;
+            }
         } else if (200..700).contains(&code) {
             self.requests.remove(&key);
         } else {
@@ -98,7 +110,7 @@ impl Transactions {
         self.requests.retain(|_, pending| pending.expires > now);
         let mut datagrams = Vec::new();
         for pending in self.requests.values_mut() {
-            if pending.next <= now {
+            if pending.next <= now && !matches!(pending.retry, Retry::Reliable) {
                 datagrams.push(Datagram {
                     peer: pending.peer,
                     bytes: pending.bytes.clone(),
@@ -106,6 +118,7 @@ impl Transactions {
                 pending.interval = match pending.retry {
                     Retry::Backoff => (pending.interval * 2).min(4000),
                     Retry::Provisional => 4000,
+                    Retry::Reliable => pending.interval,
                 };
                 pending.next = now.saturating_add(pending.interval);
             }

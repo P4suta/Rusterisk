@@ -1,12 +1,12 @@
 use crate::{Datagram, DialogReply, Engine, Output, Session, SipError, SipEvent};
 use rsipstack::sip::{
+    Header, HeadersExt, Method, Request, Response, SipMessage, Uri,
     headers::{
         auth::{Algorithm, AuthQop, Qop, Scheme},
         typed::{Authorization, WwwAuthenticate},
         untyped::ToTypedHeader,
     },
     services::DigestGenerator,
-    Header, HeadersExt, Method, Request, Response, SipMessage, Uri,
 };
 use rusterisk_config::{Auth, Codec};
 use std::net::SocketAddr;
@@ -44,6 +44,7 @@ pub(crate) struct Outgoing {
     id: String,
     generation: u64,
     peer: SocketAddr,
+    reliable: bool,
     invite: Request,
     bytes: Vec<u8>,
     remote_to: String,
@@ -65,6 +66,29 @@ struct DialogMedia {
     peer_description: Vec<u8>,
     answer_version: u64,
     pending: Option<InviteAnswer>,
+}
+
+impl Engine {
+    pub(super) fn outgoing_disconnected(&mut self, peer: SocketAddr, events: &mut Vec<SipEvent>) {
+        self.outgoing.retain(|_, dialog| {
+            if dialog.peer != peer {
+                return true;
+            }
+            match dialog.state {
+                State::Calling { .. } | State::Proceeding | State::Established(_) => {
+                    events.push(SipEvent::Ended {
+                        id: dialog.id.clone(),
+                        generation: dialog.generation,
+                        cause: 41,
+                    })
+                }
+                State::CancelPending { .. }
+                | State::Cancelling { .. }
+                | State::Terminated { .. } => {}
+            }
+            false
+        });
+    }
 }
 
 struct InviteAnswer {
@@ -138,7 +162,7 @@ fn authenticate(
         Algorithm::Md5 => Algorithm::Md5,
         Algorithm::Md5Sess => Algorithm::Md5Sess,
         Algorithm::Sha256 | Algorithm::Sha256Sess | Algorithm::Sha512 | Algorithm::Sha512Sess => {
-            return Ok(None)
+            return Ok(None);
         }
     };
     let authorization_name = if proxy {
@@ -278,7 +302,11 @@ fn related(
     } else {
         &dialog.remote_contact
     };
-    let bytes = format!("{method} {uri} SIP/2.0\r\nVia: {via}\r\nFrom: {}\r\nTo: {to}\r\nCall-ID: {}\r\nCSeq: {cseq} {method}\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", dialog.invite.from_header()?.value(), dialog.invite.call_id_header()?.value());
+    let bytes = format!(
+        "{method} {uri} SIP/2.0\r\nVia: {via}\r\nFrom: {}\r\nTo: {to}\r\nCall-ID: {}\r\nCSeq: {cseq} {method}\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
+        dialog.invite.from_header()?.value(),
+        dialog.invite.call_id_header()?.value()
+    );
     let mut parsed = request(&bytes)?;
     if method == Method::Ack {
         for header in dialog.invite.headers.iter().filter(|header| {
@@ -307,7 +335,12 @@ fn formats(codecs: &[Codec], local: SocketAddr, serial: u64) -> String {
     } else {
         "101"
     };
-    let mut body = format!("v=0\r\no=rusterisk {serial} {serial} IN {family} {}\r\ns=Rusterisk\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {payloads} {events}\r\n", local.ip(), local.ip(), local.port());
+    let mut body = format!(
+        "v=0\r\no=rusterisk {serial} {serial} IN {family} {}\r\ns=Rusterisk\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {payloads} {events}\r\n",
+        local.ip(),
+        local.ip(),
+        local.port()
+    );
     for codec in codecs {
         body.push_str(match codec {
             Codec::Pcmu => "a=rtpmap:0 PCMU/8000\r\n",
@@ -416,6 +449,7 @@ impl Engine {
             None => uri.host_with_port.to_string().parse::<SocketAddr>()?,
         };
         let signaling = transport.bind;
+        let protocol = transport.protocol;
         let token = self.token()?;
         let body = formats(&endpoint.codecs, outbound.local_rtp, self.serial);
         let caller = if outbound.caller.is_empty() {
@@ -423,13 +457,20 @@ impl Engine {
         } else {
             &outbound.caller
         };
-        let bytes = format!("INVITE {uri} SIP/2.0\r\nVia: SIP/2.0/UDP {signaling};branch=z9hG4bK-{token};rport\r\nFrom: <sip:{caller}@{}>;tag={token}\r\nTo: <{uri}>\r\nCall-ID: {token}@rusterisk\r\nCSeq: 1 INVITE\r\nContact: <sip:rusterisk@{signaling}>\r\nMax-Forwards: 70\r\nAllow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, REFER\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", signaling.ip(), body.len());
+        let token_transport = crate::transport::token(protocol);
+        let contact = crate::transport::contact(protocol, signaling);
+        let bytes = format!(
+            "INVITE {uri} SIP/2.0\r\nVia: SIP/2.0/{token_transport} {signaling};branch=z9hG4bK-{token};rport\r\nFrom: <sip:{caller}@{}>;tag={token}\r\nTo: <{uri}>\r\nCall-ID: {token}@rusterisk\r\nCSeq: 1 INVITE\r\nContact: {contact}\r\nMax-Forwards: 70\r\nAllow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, REFER\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}",
+            signaling.ip(),
+            body.len()
+        );
         let invite = request(&bytes)?;
         let call_id = invite.call_id_header()?.value().to_owned();
         let dialog = Outgoing {
             id: outbound.id,
             generation: outbound.generation,
             peer,
+            reliable: protocol != rusterisk_config::Protocol::Udp,
             remote_to: invite.to_header()?.value().into(),
             remote_contact: uri,
             invite,
@@ -514,7 +555,7 @@ impl Engine {
                 return Ok(Output {
                     datagrams: Vec::new(),
                     events: Vec::new(),
-                })
+                });
             }
         };
         Ok(Output::response(dialog.peer, packet))
@@ -575,7 +616,7 @@ impl Engine {
                         .unwrap_or(dialog.transaction_deadline)
                         > now =>
                 {
-                    if *retry <= now {
+                    if *retry <= now && !dialog.reliable {
                         output.datagrams.push(Datagram {
                             peer: dialog.peer,
                             bytes: dialog.bytes.clone(),
@@ -587,7 +628,7 @@ impl Engine {
                 State::CancelPending {
                     retry, interval, ..
                 } => {
-                    if *retry <= now {
+                    if *retry <= now && !dialog.reliable {
                         output.datagrams.push(Datagram {
                             peer: dialog.peer,
                             bytes: dialog.bytes.clone(),
@@ -841,21 +882,22 @@ impl Engine {
                     "",
                 )?)));
             }
-            let updated =
-                match crate::incoming::direction_update(
-                    &media.peer_description,
-                    &request.body,
-                    &media.session,
-                ) {
-                    Ok(updated) => updated,
-                    Err(_) => return Ok(Some(DialogReply::response(crate::response(
+            let updated = match crate::incoming::direction_update(
+                &media.peer_description,
+                &request.body,
+                &media.session,
+            ) {
+                Ok(updated) => updated,
+                Err(_) => {
+                    return Ok(Some(DialogReply::response(crate::response(
                         request,
                         488,
                         "Not Acceptable Here",
                         "Warning: 399 rusterisk \"Only media direction changes are supported\"\r\n",
                         "",
-                    )?))),
-                };
+                    )?)));
+                }
+            };
             let target = request
                 .headers
                 .iter()

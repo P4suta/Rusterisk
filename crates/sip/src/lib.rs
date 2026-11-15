@@ -1,14 +1,14 @@
 use hmac::{Hmac, KeyInit, Mac};
 use rsipstack::sip::{
+    HeadersExt, Method, Request, SipMessage,
     headers::{
         auth::{Algorithm, AuthQop},
         typed::Authorization,
         untyped::ToTypedHeader,
     },
     services::DigestGenerator,
-    HeadersExt, Method, Request, SipMessage,
 };
-use rusterisk_config::{Codec, Config};
+use rusterisk_config::{Codec, Config, Protocol};
 use rusterisk_core::ContactPresence;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -17,10 +17,12 @@ use subtle::ConstantTimeEq;
 mod incoming;
 mod info;
 mod outgoing;
+mod peer_lifetime;
 mod request_identity;
 mod stream_framing;
 mod telephone;
 mod transactions;
+mod transport;
 pub use incoming::RejectReason;
 pub use outgoing::Outbound;
 use request_identity::RequestIdentity;
@@ -248,7 +250,13 @@ impl Session {
             Codec::Pcma => "PCMA/8000",
             Codec::Opus => "opus/48000/2",
         };
-        let mut output = format!("v=0\r\no=rusterisk {session_id} {version} IN {family} {}\r\ns=Rusterisk\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {}", local.ip(), local.ip(), local.port(), self.payload_type);
+        let mut output = format!(
+            "v=0\r\no=rusterisk {session_id} {version} IN {family} {}\r\ns=Rusterisk\r\nc=IN {family} {}\r\nt=0 0\r\nm=audio {} RTP/AVP {}",
+            local.ip(),
+            local.ip(),
+            local.port(),
+            self.payload_type
+        );
         if let Some(format) = self.telephone {
             output.push_str(&format!(" {}", format.payload_type()));
         }
@@ -399,10 +407,12 @@ pub struct PendingInvite {
     pub session: Session,
     pub local_tag: String,
     local: SocketAddr,
+    protocol: Protocol,
 }
 
 pub struct Engine {
     config: Config,
+    protocol: Protocol,
     configuration_generation: u64,
     seed: [u8; 32],
     serial: u64,
@@ -419,6 +429,7 @@ impl Engine {
     pub fn new(config: Config, seed: [u8; 32]) -> Self {
         Self {
             config,
+            protocol: Protocol::Udp,
             configuration_generation: 1,
             seed,
             serial: 0,
@@ -430,6 +441,10 @@ impl Engine {
             incoming: BTreeMap::new(),
             transactions: transactions::Transactions::default(),
         }
+    }
+    pub fn with_transport(mut self, protocol: Protocol) -> Self {
+        self.protocol = protocol;
+        self
     }
     pub fn pending(&self, id: &str) -> Option<&PendingInvite> {
         self.pending.get(id)
@@ -537,7 +552,9 @@ impl Engine {
             .first()
             .map(|auth| auth.realm.as_str())
             .unwrap_or("rusterisk");
-        let extra = format!("WWW-Authenticate: Digest realm=\"{realm}\", nonce=\"{nonce}\", algorithm=MD5, qop=\"auth\"\r\n");
+        let extra = format!(
+            "WWW-Authenticate: Digest realm=\"{realm}\", nonce=\"{nonce}\", algorithm=MD5, qop=\"auth\"\r\n"
+        );
         self.nonces.insert(
             nonce,
             Nonce {
@@ -566,8 +583,13 @@ impl Engine {
             match SipMessage::try_from(datagram.bytes.as_slice())? {
                 SipMessage::Request(request) => {
                     if !matches!(request.method, Method::Invite | Method::Ack) {
-                        self.transactions
-                            .track(request, datagram.peer, &datagram.bytes, now)?;
+                        self.transactions.track(
+                            request,
+                            datagram.peer,
+                            &datagram.bytes,
+                            now,
+                            self.protocol != Protocol::Udp,
+                        )?;
                     }
                 }
                 SipMessage::Response(_) => {}
@@ -744,7 +766,7 @@ impl Engine {
                                         "",
                                         "",
                                     )?,
-                                ))
+                                ));
                             }
                             Err(error) => return Err(error),
                         };
@@ -791,6 +813,7 @@ impl Engine {
                                 session,
                                 local_tag,
                                 local,
+                                protocol: self.protocol,
                             },
                         );
                         self.render_response(&request, 100, "Trying", "", "")?
