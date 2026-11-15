@@ -25,7 +25,7 @@ fn telephone_negotiation_prefers_the_audio_clock_and_preserves_the_peer_event_se
     for digit in [DtmfDigit::Four, DtmfDigit::A, DtmfDigit::B, DtmfDigit::C] {
         assert!(!telephone.supports(digit));
     }
-    let answer = session.answer("127.0.0.1:10004".parse()?, 1);
+    let answer = session.answer("127.0.0.1:10004".parse()?, 1)?;
     assert!(answer.contains("a=rtpmap:102 telephone-event/48000\r\n"));
     assert!(!answer.contains("telephone-event/8000"));
     assert_eq!(

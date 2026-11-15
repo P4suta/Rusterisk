@@ -1,5 +1,5 @@
 use crate::{Datagram, SipError};
-use rsipstack::sip::{HeadersExt, Request, Response, headers::untyped::ToTypedHeader};
+use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Request, Response};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 

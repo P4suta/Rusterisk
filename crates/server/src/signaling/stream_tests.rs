@@ -160,7 +160,8 @@ fn answer(request: &Request, local: SocketAddr, token: &str) -> Result<String, C
         &[Codec::Pcmu],
     )
     .map_err(failure)?
-    .answer("127.0.0.1:19000".parse().map_err(failure)?, 1);
+    .answer("127.0.0.1:19000".parse().map_err(failure)?, 1)
+    .map_err(failure)?;
     Ok(format!(
         "SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=phone\r\nCall-ID: {}\r\nCSeq: {}\r\nContact: <sip:phone@{local};transport={}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}",
         request.top_via_header().map_err(failure)?.value(),

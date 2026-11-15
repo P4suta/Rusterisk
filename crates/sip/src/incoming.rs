@@ -1,8 +1,8 @@
 use crate::{
-    Datagram, DialogReply, Engine, Output, PendingInvite, RequestIdentity, Session, SipError,
-    SipEvent, response,
+    response, Datagram, DialogReply, Engine, Output, PendingInvite, RequestIdentity, Session,
+    SipError, SipEvent,
 };
-use rsipstack::sip::{HeadersExt, Method, Request, SipMessage, headers::untyped::ToTypedHeader};
+use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, Request, SipMessage};
 use std::net::SocketAddr;
 
 enum State {
@@ -316,6 +316,28 @@ impl Engine {
         local: SocketAddr,
         now: u64,
     ) -> Result<Output, SipError> {
+        self.answer_inner(id, generation, local, None, now)
+    }
+
+    pub fn answer_with_sdp(
+        &mut self,
+        id: &str,
+        generation: u64,
+        local: SocketAddr,
+        description: &crate::WebRtcDescription,
+        now: u64,
+    ) -> Result<Output, SipError> {
+        self.answer_inner(id, generation, local, Some(description), now)
+    }
+
+    fn answer_inner(
+        &mut self,
+        id: &str,
+        generation: u64,
+        local: SocketAddr,
+        description: Option<&crate::WebRtcDescription>,
+        now: u64,
+    ) -> Result<Output, SipError> {
         if generation == 0 || local.port() == 0 || self.incoming.len() >= 64 {
             return Err(SipError::Capacity);
         }
@@ -325,6 +347,26 @@ impl Engine {
             .find(|(_, invite)| invite.id == id)
             .ok_or(SipError::InvalidPacket)?;
         let key = key.clone();
+        let (body, telephone) = match (&invite.session.security, description) {
+            (crate::SessionSecurity::Rtp, None) => (
+                invite.session.answer(local, generation)?,
+                invite.session.telephone,
+            ),
+            (crate::SessionSecurity::WebRtc(_), Some(description)) => {
+                match description.setup() {
+                    crate::DtlsSetup::Active | crate::DtlsSetup::Passive => {}
+                    crate::DtlsSetup::ActPass => return Err(SipError::Unsupported),
+                }
+                let local_session = Session::parse(description.as_str(), &[invite.session.codec])?;
+                if local_session.payload_type != invite.session.payload_type {
+                    return Err(SipError::Unsupported);
+                }
+                (description.as_str().to_owned(), local_session.telephone)
+            }
+            (crate::SessionSecurity::Rtp, Some(_)) | (crate::SessionSecurity::WebRtc(_), None) => {
+                return Err(SipError::Unsupported)
+            }
+        };
         let extra = format!(
             "Contact: {}\r\nAllow: INVITE, ACK, CANCEL, BYE, OPTIONS\r\nSupported: \r\n",
             crate::transport::contact(invite.protocol, invite.local)
@@ -334,12 +376,13 @@ impl Engine {
             200,
             "OK",
             &extra,
-            &invite.session.answer(local, generation),
+            &body,
         )?;
         let sequence = invite.request.cseq_header()?.typed()?.seq;
         let remote_target = invite.request.contact_header()?.typed()?.uri;
         let offer = invite.request.body.clone();
-        let invite = self.pending.remove(&key).ok_or(SipError::InvalidPacket)?;
+        let mut invite = self.pending.remove(&key).ok_or(SipError::InvalidPacket)?;
+        invite.session.telephone = telephone;
         self.update_invite_reply(&invite, &bytes, now)?;
         let mut output = Output::response(invite.peer, bytes.clone());
         output.events.push(SipEvent::Answered {
@@ -453,22 +496,19 @@ impl Engine {
                 }
                 State::Established => {}
             }
-            let updated = match direction_update(
-                &dialog.offer,
-                &request.body,
-                &dialog.invite.session,
-            ) {
-                Ok(updated) => updated,
-                Err(_) => {
-                    return Ok(Some(DialogReply::response(response(
+            let updated =
+                match direction_update(&dialog.offer, &request.body, &dialog.invite.session) {
+                    Ok(updated) => updated,
+                    Err(_) => {
+                        return Ok(Some(DialogReply::response(response(
                         request,
                         488,
                         "Not Acceptable Here",
                         "Warning: 399 rusterisk \"Only media direction changes are supported\"\r\n",
                         "",
                     )?)));
-                }
-            };
+                    }
+                };
             let target = request
                 .headers
                 .iter()
@@ -495,7 +535,7 @@ impl Engine {
                 200,
                 "OK",
                 &extra,
-                &updated.answer_with_version(dialog.local_media, dialog.generation, version),
+                &updated.answer_with_version(dialog.local_media, dialog.generation, version)?,
             )?;
             let events = if changed {
                 [SipEvent::PeerDirection {

@@ -1,12 +1,12 @@
 use crate::{Datagram, DialogReply, Engine, Output, Session, SipError, SipEvent};
 use rsipstack::sip::{
-    Header, HeadersExt, Method, Request, Response, SipMessage, Uri,
     headers::{
         auth::{Algorithm, AuthQop, Qop, Scheme},
         typed::{Authorization, WwwAuthenticate},
         untyped::ToTypedHeader,
     },
     services::DigestGenerator,
+    Header, HeadersExt, Method, Request, Response, SipMessage, Uri,
 };
 use rusterisk_config::{Auth, Codec};
 use std::net::SocketAddr;
@@ -389,6 +389,35 @@ impl Engine {
     }
 
     pub fn originate(&mut self, outbound: Outbound, now: u64) -> Result<Output, SipError> {
+        self.originate_inner(outbound, None, None, now)
+    }
+
+    pub fn originate_with_sdp(
+        &mut self,
+        outbound: Outbound,
+        description: &crate::WebRtcDescription,
+        now: u64,
+    ) -> Result<Output, SipError> {
+        self.originate_inner(outbound, None, Some(description.as_str()), now)
+    }
+
+    pub fn originate_to_with_sdp(
+        &mut self,
+        outbound: Outbound,
+        peer: SocketAddr,
+        description: &crate::WebRtcDescription,
+        now: u64,
+    ) -> Result<Output, SipError> {
+        self.originate_inner(outbound, Some(peer), Some(description.as_str()), now)
+    }
+
+    pub(crate) fn originate_inner(
+        &mut self,
+        outbound: Outbound,
+        resolved_peer: Option<SocketAddr>,
+        sdp: Option<&str>,
+        now: u64,
+    ) -> Result<Output, SipError> {
         if self.outgoing.len() >= 64
             || outbound.id.is_empty()
             || outbound.id.len() > 128
@@ -422,6 +451,16 @@ impl Engine {
             .find(|endpoint| endpoint.name == outbound.endpoint)
             .ok_or(SipError::InvalidPacket)?
             .clone();
+        if endpoint.webrtc != sdp.is_some() {
+            return Err(SipError::Unsupported);
+        }
+        if let Some(sdp) = sdp {
+            let description = crate::WebRtcDescription::parse(sdp)?;
+            if description.setup() != crate::DtlsSetup::ActPass {
+                return Err(SipError::Unsupported);
+            }
+            Session::parse(description.as_str(), &endpoint.codecs)?;
+        }
         let transport = self
             .config
             .transports
@@ -439,19 +478,25 @@ impl Engine {
             .iter()
             .filter(|aor| endpoint.aors.contains(&aor.name))
             .find_map(|aor| aor.contact.as_deref());
-        let uri = match (registered, contact) {
-            (Some(peer), _) => Uri::try_from(format!("sip:{}@{peer}", endpoint.name))?,
-            (None, Some(contact)) => Uri::try_from(contact)?,
-            (None, None) => return Err(SipError::InvalidPacket),
+        let uri = match (resolved_peer, registered, contact) {
+            (Some(_), _, Some(contact)) | (None, None, Some(contact)) => Uri::try_from(contact)?,
+            (None, Some(peer), _) => Uri::try_from(format!("sip:{}@{peer}", endpoint.name))?,
+            (Some(_), _, None) | (None, None, None) => return Err(SipError::InvalidPacket),
         };
-        let peer = match registered {
+        let peer = match resolved_peer.or(registered) {
             Some(peer) => peer,
             None => uri.host_with_port.to_string().parse::<SocketAddr>()?,
         };
+        if peer.port() == 0 || peer.ip().is_unspecified() || peer.ip().is_multicast() {
+            return Err(SipError::InvalidPacket);
+        }
         let signaling = transport.bind;
         let protocol = transport.protocol;
         let token = self.token()?;
-        let body = formats(&endpoint.codecs, outbound.local_rtp, self.serial);
+        let body = match sdp {
+            Some(sdp) => sdp.to_owned(),
+            None => formats(&endpoint.codecs, outbound.local_rtp, self.serial),
+        };
         let caller = if outbound.caller.is_empty() {
             "rusterisk"
         } else {
@@ -916,7 +961,7 @@ impl Engine {
                 200,
                 "OK",
                 &extra,
-                &updated.answer_with_version(dialog.local_media, dialog.session_id, version),
+                &updated.answer_with_version(dialog.local_media, dialog.session_id, version)?,
             )?;
             let events = if updated.direction != media.session.direction {
                 [SipEvent::PeerDirection {

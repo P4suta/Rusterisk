@@ -19,6 +19,7 @@ mod info;
 mod outgoing;
 mod peer_lifetime;
 mod request_identity;
+mod session_description;
 mod stream_framing;
 mod telephone;
 mod transactions;
@@ -27,6 +28,7 @@ mod websocket_framing;
 pub use incoming::RejectReason;
 pub use outgoing::Outbound;
 use request_identity::RequestIdentity;
+pub use session_description::{DtlsSetup, SessionSecurity, WebRtcDescription};
 pub use stream_framing::{SipStreamDecoder, StreamFramingError, StreamItem};
 pub use telephone::DtmfFormat;
 pub use websocket_framing::validate_websocket_message;
@@ -109,6 +111,7 @@ pub struct Session {
     pub payload_type: u8,
     pub telephone: Option<DtmfFormat>,
     pub direction: Direction,
+    pub security: SessionSecurity,
 }
 
 impl Session {
@@ -125,6 +128,7 @@ impl Session {
         let mut dtmf = BTreeMap::new();
         let mut parameters = BTreeMap::new();
         let mut direction = Direction::SendRecv;
+        let mut security = SessionSecurity::Rtp;
         for line in source.lines().map(str::trim) {
             if let Some(connection) = line
                 .strip_prefix("c=IN IP4 ")
@@ -136,9 +140,15 @@ impl Session {
                     return Err(SipError::Unsupported);
                 }
                 let parts: Vec<&str> = media.split_whitespace().collect();
-                let ["audio", number, "RTP/AVP" | "RTP/AVPF", formats @ ..] = parts.as_slice()
-                else {
+                let ["audio", number, protocol, formats @ ..] = parts.as_slice() else {
                     return Err(SipError::Unsupported);
+                };
+                security = match *protocol {
+                    "RTP/AVP" | "RTP/AVPF" => SessionSecurity::Rtp,
+                    "UDP/TLS/RTP/SAVPF" => {
+                        SessionSecurity::WebRtc(WebRtcDescription::parse(source)?)
+                    }
+                    _ => return Err(SipError::Unsupported),
                 };
                 if formats.is_empty() || formats.len() > 16 {
                     return Err(SipError::InvalidPacket);
@@ -230,13 +240,14 @@ impl Session {
                     payload_type: *payload_type,
                     telephone,
                     direction,
+                    security,
                 });
             }
         }
         Err(SipError::Unsupported)
     }
 
-    pub fn answer(&self, local: SocketAddr, session_id: u64) -> String {
+    pub fn answer(&self, local: SocketAddr, session_id: u64) -> Result<String, SipError> {
         self.answer_with_version(local, session_id, session_id)
     }
 
@@ -245,7 +256,10 @@ impl Session {
         local: SocketAddr,
         session_id: u64,
         version: u64,
-    ) -> String {
+    ) -> Result<String, SipError> {
+        if !matches!(&self.security, SessionSecurity::Rtp) {
+            return Err(SipError::Unsupported);
+        }
         let family = if local.is_ipv4() { "IP4" } else { "IP6" };
         let format = match self.codec {
             Codec::Pcmu => "PCMU/8000",
@@ -277,7 +291,7 @@ impl Session {
             Direction::RecvOnly => "a=sendonly\r\n",
             Direction::Inactive => "a=inactive\r\n",
         });
-        output
+        Ok(output)
     }
 }
 
@@ -757,8 +771,13 @@ impl Engine {
                             std::str::from_utf8(&request.body)?,
                             &endpoint.codecs,
                         ) {
-                            Ok(session) => session,
-                            Err(SipError::Unsupported) => {
+                            Ok(session)
+                                if endpoint.webrtc
+                                    == matches!(&session.security, SessionSecurity::WebRtc(_)) =>
+                            {
+                                session
+                            }
+                            Ok(_) | Err(SipError::Unsupported) => {
                                 return Ok(Output::response(
                                     peer,
                                     self.render_response(

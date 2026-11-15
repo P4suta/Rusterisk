@@ -79,7 +79,9 @@ async fn answer_dialog(
         &[Codec::Pcmu],
     )
     .map_err(failure)?;
-    let body = offered.answer(audio.local_addr().map_err(failure)?, 1);
+    let body = offered
+        .answer(audio.local_addr().map_err(failure)?, 1)
+        .map_err(failure)?;
     let reply = format!("SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=phone\r\nCall-ID: {}\r\nCSeq: {}\r\nContact: <sip:phone@{}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", request.top_via_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.to_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value(), request.cseq_header().map_err(failure)?.value(), signal.local_addr().map_err(failure)?, body.len());
     signal
         .send_to(reply.as_bytes(), peer)
@@ -162,8 +164,10 @@ async fn update_direction(
         payload_type: 0,
         telephone: Some(DtmfFormat::new(101, 8000).map_err(failure)?),
         direction: Direction::SendRecv,
+        security: rusterisk_sip::SessionSecurity::Rtp,
     }
     .answer(audio.local_addr().map_err(failure)?, 1)
+    .map_err(failure)?
     .replace("o=rusterisk 1 1 IN", &format!("o=rusterisk 1 {version} IN"))
     .replace("a=sendrecv", &format!("a={direction}"));
     let offer = ack.replace("ACK sip:", "INVITE sip:")
@@ -585,8 +589,10 @@ async fn invite(
         payload_type: 0,
         telephone: Some(DtmfFormat::new(101, 8000).map_err(failure)?),
         direction: Direction::SendRecv,
+        security: rusterisk_sip::SessionSecurity::Rtp,
     }
-    .answer(audio.local_addr().map_err(failure)?, 1);
+    .answer(audio.local_addr().map_err(failure)?, 1)
+    .map_err(failure)?;
     let packet = |sequence: u32, authorization: &str| {
         format!("INVITE {uri} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK-incoming-{sequence};rport\r\nFrom: <sip:spoofed@localhost>;tag=caller\r\nTo: <{uri}>\r\nCall-ID: incoming-test\r\nCSeq: {sequence} INVITE\r\nContact: <sip:phone@{local}>\r\nMax-Forwards: 70\r\n{authorization}Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", body.len())
     };
