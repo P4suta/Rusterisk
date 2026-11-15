@@ -11,7 +11,26 @@ export type ApplicationSnapshot = {
 	readonly bridge_ids: readonly string[];
 	readonly endpoint_ids: readonly string[];
 	readonly device_names: readonly string[];
+	readonly events_allowed: readonly EventFilter[];
+	readonly events_disallowed: readonly EventFilter[];
 };
+
+type EventFilter = {
+	readonly type: string;
+};
+
+function filters(value: unknown): readonly EventFilter[] {
+	if (!Array.isArray(value) || value.length > 128) {
+		throw new Error("invalid event filter list");
+	}
+	const values: unknown[] = value;
+	return values.map((item: unknown): EventFilter => {
+		if (typeof item !== "object" || item === null || !("type" in item)) {
+			throw new Error("invalid event filter");
+		}
+		return { type: identifier(item.type) };
+	});
+}
 
 function strings(value: unknown): readonly string[] {
 	if (!Array.isArray(value) || value.length > 256) {
@@ -34,7 +53,9 @@ export function application(value: unknown): ApplicationSnapshot {
 		!("channel_ids" in value) ||
 		!("bridge_ids" in value) ||
 		!("endpoint_ids" in value) ||
-		!("device_names" in value)
+		!("device_names" in value) ||
+		!("events_allowed" in value) ||
+		!("events_disallowed" in value)
 	) {
 		throw new Error("invalid app snapshot");
 	}
@@ -44,6 +65,8 @@ export function application(value: unknown): ApplicationSnapshot {
 		bridge_ids: strings(value.bridge_ids),
 		endpoint_ids: strings(value.endpoint_ids),
 		device_names: strings(value.device_names),
+		events_allowed: filters(value.events_allowed),
+		events_disallowed: filters(value.events_disallowed),
 	};
 }
 

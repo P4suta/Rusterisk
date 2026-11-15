@@ -68,6 +68,8 @@ await test("app snapshots validate membership arrays from the existing client", 
 			bridge_ids: [],
 			endpoint_ids: [],
 			device_names: [],
+			events_allowed: [{ type: "StasisStart" }],
+			events_disallowed: [],
 		}),
 		{
 			name: "compat-node",
@@ -75,6 +77,8 @@ await test("app snapshots validate membership arrays from the existing client", 
 			bridge_ids: [],
 			endpoint_ids: [],
 			device_names: [],
+			events_allowed: [{ type: "StasisStart" }],
+			events_disallowed: [],
 		},
 	);
 	for (const invalid of [
