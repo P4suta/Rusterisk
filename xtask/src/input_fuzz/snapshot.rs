@@ -22,6 +22,7 @@ pub struct Snapshot {
 enum FileBounds {
     Project,
     Vendor,
+    Archive,
 }
 
 fn directory(path: &Path) -> Result<(), FuzzError> {
@@ -86,7 +87,7 @@ fn add_file(
     }
     let limit = match bounds {
         FileBounds::Project => 1024 * 1024,
-        FileBounds::Vendor => 8 * 1024 * 1024,
+        FileBounds::Vendor | FileBounds::Archive => 8 * 1024 * 1024,
     };
     let bytes = read_bounded(path, limit)?;
     let total: usize = files.iter().map(|file| file.bytes.len()).sum();
@@ -153,6 +154,12 @@ fn vendor(root: &Path, manifest: &toml::Value, files: &mut Vec<File>) -> Result<
     if path.as_str() != Some("vendor/str0m") {
         return Err(FuzzError::Manifest);
     }
+    add_file(
+        root,
+        &root.join("vendor/archives/str0m-0.25.0.crate"),
+        files,
+        FileBounds::Archive,
+    )?;
     for path in ["vendor/str0m-source.toml", "vendor/str0m.patch"] {
         add(root, &root.join(path), files)?;
     }

@@ -68,6 +68,7 @@ fn vendored_dependency_is_captured_only_for_the_exact_workspace_patch() -> Resul
             "vendor/str0m/Cargo.toml",
             "vendor/str0m-source.toml",
             "vendor/str0m.patch",
+            "vendor/archives/str0m-0.25.0.crate",
         ] {
             super::write_new(&root.join(file), b"vendor fixture")?;
         }
@@ -82,6 +83,7 @@ fn vendored_dependency_is_captured_only_for_the_exact_workspace_patch() -> Resul
             "vendor/str0m/Cargo.toml",
             "vendor/str0m-source.toml",
             "vendor/str0m.patch",
+            "vendor/archives/str0m-0.25.0.crate",
         ] {
             assert!(snapshot
                 .files
@@ -99,6 +101,7 @@ fn vendored_dependency_is_captured_only_for_the_exact_workspace_patch() -> Resul
             "vendor/str0m/src/lib.rs",
             "vendor/str0m-source.toml",
             "vendor/str0m.patch",
+            "vendor/archives/str0m-0.25.0.crate",
         ] {
             std::fs::write(source.join(file), b"changed")?;
             assert!(matches!(
@@ -134,6 +137,7 @@ fn vendor(root: &Path) -> Result<(), FuzzError> {
         "vendor/str0m/Cargo.toml",
         "vendor/str0m-source.toml",
         "vendor/str0m.patch",
+        "vendor/archives/str0m-0.25.0.crate",
     ] {
         super::write_new(&root.join(file), b"fixture")?;
     }
@@ -191,6 +195,8 @@ fn vendor_symlinks_are_refused_at_each_tree_and_record_boundary() -> Result<(), 
         ("vendor-file", "vendor/str0m/Cargo.toml"),
         ("vendor-record", "vendor/str0m-source.toml"),
         ("vendor-patch", "vendor/str0m.patch"),
+        ("archive-parent", "vendor/archives"),
+        ("archive-file", "vendor/archives/str0m-0.25.0.crate"),
     ] {
         fixture(name, |root, directory| {
             vendor(root)?;
@@ -202,6 +208,33 @@ fn vendor_symlinks_are_refused_at_each_tree_and_record_boundary() -> Result<(), 
         })?;
     }
     Ok(())
+}
+
+#[test]
+fn published_archive_has_a_separate_file_limit_and_does_not_consume_the_vendor_tree_budget(
+) -> Result<(), FuzzError> {
+    fixture("archive-bounds", |root, directory| {
+        vendor(root)?;
+        let name = "vendor/archives/str0m-0.25.0.crate";
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join(name))?
+            .set_len(8 * 1024 * 1024)?;
+        sparse(root, "vendor/str0m/left", 6 * 1024 * 1024)?;
+        sparse(root, "vendor/str0m/right", 6 * 1024 * 1024 - 7)?;
+        let snapshot = Snapshot::read(root)?;
+        let source = directory.join("source");
+        snapshot.write(&source, &directory.join("state"))?;
+        assert_eq!(std::fs::metadata(source.join(name))?.len(), 8 * 1024 * 1024);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join(name))?
+            .set_len(8 * 1024 * 1024 + 1)?;
+        assert!(Snapshot::read(root).is_err());
+        std::fs::remove_file(root.join(name))?;
+        assert!(Snapshot::read(root).is_err());
+        Ok(())
+    })
 }
 
 #[test]
