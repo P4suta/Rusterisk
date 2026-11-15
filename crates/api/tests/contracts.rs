@@ -1,6 +1,24 @@
 use rusterisk_api::{openapi, swagger, ChannelId, Event, EventKind, OPERATIONS};
 
 #[test]
+fn endpoint_availability_is_optional_and_accepts_only_reference_states(
+) -> Result<(), serde_json::Error> {
+    let minimal = serde_json::json!({"technology":"PJSIP", "resource":"phone", "channel_ids":[]});
+    let endpoint: rusterisk_api::Endpoint = serde_json::from_value(minimal.clone())?;
+    assert_eq!(serde_json::to_value(endpoint)?, minimal);
+    for state in ["unknown", "offline", "online"] {
+        let mut value = minimal.clone();
+        value["state"] = state.into();
+        let endpoint: rusterisk_api::Endpoint = serde_json::from_value(value.clone())?;
+        assert_eq!(serde_json::to_value(endpoint)?, value);
+    }
+    let mut invalid = minimal;
+    invalid["state"] = "connected".into();
+    assert!(serde_json::from_value::<rusterisk_api::Endpoint>(invalid).is_err());
+    Ok(())
+}
+
+#[test]
 fn hold_events_describe_the_optional_requested_music_class(
 ) -> Result<(), rusterisk_api::SwaggerError> {
     let models = swagger("events")?;

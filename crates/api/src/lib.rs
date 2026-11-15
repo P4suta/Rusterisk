@@ -139,8 +139,17 @@ pub struct Application {
 pub struct Endpoint {
     pub technology: String,
     pub resource: String,
-    pub state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<EndpointState>,
     pub channel_ids: Vec<ChannelId>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum EndpointState {
+    Unknown,
+    Offline,
+    Online,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
