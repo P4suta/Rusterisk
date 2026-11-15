@@ -11,6 +11,28 @@ fn identifiers_are_bounded_path_segments() {
 }
 
 #[test]
+fn recording_metadata_can_be_absent_and_available_fields_roundtrip() -> Result<(), serde_json::Error>
+{
+    let minimal = serde_json::json!({"name":"call", "format":"wav", "state":"queued", "target_uri":"channel:phone"});
+    let recording: rusterisk_api::LiveRecording = serde_json::from_value(minimal.clone())?;
+    assert_eq!(serde_json::to_value(recording)?, minimal);
+    let detailed = serde_json::json!({"name":"call", "format":"wav", "state":"failed", "target_uri":"channel:phone",
+        "duration":5, "talking_duration":3, "silence_duration":2, "cause":"write failed"});
+    let recording: rusterisk_api::LiveRecording = serde_json::from_value(detailed.clone())?;
+    assert_eq!(serde_json::to_value(recording)?, detailed);
+    Ok(())
+}
+
+#[test]
+fn continuing_playback_preserves_its_current_and_next_media() -> Result<(), serde_json::Error> {
+    let value = serde_json::json!({"type":"PlaybackContinuing", "application":"calls", "timestamp":"now",
+        "playback":{"id":"play", "media_uri":"sound:first", "next_media_uri":"sound:second", "target_uri":"channel:phone", "language":"en", "state":"continuing"}});
+    let event: Event = serde_json::from_value(value.clone())?;
+    assert_eq!(serde_json::to_value(event)?, value);
+    Ok(())
+}
+
+#[test]
 fn declared_operations_match_complete_paths_and_their_exact_method() {
     for operation in OPERATIONS {
         let path = operation

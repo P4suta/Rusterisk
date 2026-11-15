@@ -139,6 +139,8 @@ pub struct Endpoint {
 pub struct Playback {
     pub id: ChannelId,
     pub media_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_media_uri: Option<String>,
     pub target_uri: String,
     pub language: String,
     pub state: PlaybackState,
@@ -162,7 +164,14 @@ pub struct LiveRecording {
     pub format: String,
     pub state: RecordingState,
     pub target_uri: String,
-    pub duration: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub talking_duration: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub silence_duration: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -270,6 +279,9 @@ pub enum EventKind {
         channel: Channel,
     },
     PlaybackStarted {
+        playback: Playback,
+    },
+    PlaybackContinuing {
         playback: Playback,
     },
     PlaybackFinished {

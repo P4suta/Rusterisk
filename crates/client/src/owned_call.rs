@@ -410,6 +410,7 @@ impl Calls {
             api::EventKind::BridgeCreated { .. }
             | api::EventKind::BridgeDestroyed { .. }
             | api::EventKind::PlaybackStarted { .. }
+            | api::EventKind::PlaybackContinuing { .. }
             | api::EventKind::PlaybackFinished { .. }
             | api::EventKind::RecordingStarted { .. }
             | api::EventKind::RecordingFinished { .. }
