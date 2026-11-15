@@ -4,19 +4,22 @@ use rusterisk_api::{
     RecordingOptions,
 };
 use rusterisk_core::{
-    AudioGate, Call, CallEvent, CallState, DtmfCommand, DtmfDigit, DtmfError, DtmfOutbox,
-    DtmfTiming, DtmfToken, MediaConnection, MediaState, MediaTaskError, MediaTaskToken, MediaTasks,
-    MuteDirection, PeerMediaDirection, RecordingControl, StasisApplication, StasisMembership,
-    Transition,
+    AudioGate, Call, CallEvent, CallState, ContactPresence, DtmfCommand, DtmfDigit, DtmfError,
+    DtmfOutbox, DtmfTiming, DtmfToken, MediaConnection, MediaState, MediaTaskError, MediaTaskToken,
+    MediaTasks, MuteDirection, PeerMediaDirection, RecordingControl, StasisApplication,
+    StasisMembership, Transition,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 mod dial;
 mod dialplan;
+mod endpoints;
 mod playback;
 mod recording;
 mod stasis;
 use dialplan::DialplanFrame;
+pub use endpoints::EndpointKey;
+use endpoints::Endpoints;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControlError {
@@ -184,6 +187,13 @@ pub enum Action {
     GetChannel(ChannelId),
     ListApplications,
     GetApplication(String),
+    ListEndpoints {
+        technology: Option<String>,
+    },
+    GetEndpoint {
+        technology: String,
+        resource: String,
+    },
     GetVariable {
         channel: ChannelId,
         variable: String,
@@ -248,6 +258,8 @@ impl Action {
             Self::ListChannels
             | Self::ListApplications
             | Self::GetApplication(_)
+            | Self::ListEndpoints { .. }
+            | Self::GetEndpoint { .. }
             | Self::GetRecording(_)
             | Self::GetPlayback(_)
             | Self::GetChannel(_)
@@ -283,6 +295,8 @@ impl Action {
             Self::ListChannels
             | Self::ListApplications
             | Self::GetApplication(_)
+            | Self::ListEndpoints { .. }
+            | Self::GetEndpoint { .. }
             | Self::GetRecording(_)
             | Self::GetPlayback(_)
             | Self::GetChannel(_)
@@ -399,6 +413,10 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
+    EndpointContact {
+        key: EndpointKey,
+        presence: ContactPresence,
+    },
     PeerDirection {
         key: CallKey,
         direction: PeerMediaDirection,
@@ -519,6 +537,7 @@ impl Outcome {
 
 struct ChannelEntry {
     call: Call,
+    endpoint: String,
     snapshot: Channel,
     arguments: Vec<String>,
     deadline: Option<u64>,
@@ -635,6 +654,7 @@ pub struct Control {
     playbacks: BTreeMap<ChannelId, playback::PlaybackEntry>,
     recordings: BTreeMap<ChannelId, recording::RecordingEntry>,
     dialplan_program: rusterisk_config::Dialplan,
+    endpoints: Endpoints,
 }
 
 impl Control {
@@ -747,6 +767,7 @@ impl Control {
             incoming.id,
             ChannelEntry {
                 call,
+                endpoint: incoming.endpoint,
                 snapshot,
                 arguments,
                 deadline: None,
@@ -773,6 +794,12 @@ impl Control {
         Self::with_dialplan(capacity, rusterisk_config::Dialplan { steps: Vec::new() })
     }
 
+    pub fn with_configuration(capacity: usize, config: &rusterisk_config::Config) -> Self {
+        let mut control = Self::with_dialplan(capacity, config.dialplan.clone());
+        control.endpoints = Endpoints::configured(config);
+        control
+    }
+
     pub fn with_dialplan(capacity: usize, program: rusterisk_config::Dialplan) -> Self {
         Self {
             capacity: capacity.min(64),
@@ -783,6 +810,7 @@ impl Control {
             playbacks: BTreeMap::new(),
             recordings: BTreeMap::new(),
             dialplan_program: program,
+            endpoints: Endpoints::default(),
         }
     }
 
@@ -922,6 +950,13 @@ impl Control {
                     .collect::<Result<Vec<_>, _>>()?,
             ),
             Action::GetApplication(name) => Outcome::json(self.application(&name)?),
+            Action::ListEndpoints { technology } => {
+                Outcome::json(self.endpoint_list(technology.as_deref())?)
+            }
+            Action::GetEndpoint {
+                technology,
+                resource,
+            } => Outcome::json(self.endpoint(&technology, &resource)?),
             Action::GetVariable { channel, variable } => {
                 let entry = self
                     .channels
@@ -974,6 +1009,10 @@ impl Control {
                     ));
                 }
                 let generation = self.generation()?;
+                let endpoint_resource = endpoint
+                    .strip_prefix("PJSIP/")
+                    .ok_or(ControlError::Invalid("Invalid endpoint technology"))?
+                    .to_owned();
                 let deadline = now_ms
                     .checked_add(u64::from(timeout) * 1000)
                     .ok_or(ControlError::Capacity)?;
@@ -1025,6 +1064,7 @@ impl Control {
                     id,
                     ChannelEntry {
                         call: Call::outgoing(generation).reserve_stasis(application)?,
+                        endpoint: endpoint_resource,
                         snapshot,
                         arguments: args,
                         deadline: Some(deadline),
@@ -1570,6 +1610,10 @@ impl Control {
         now: u64,
     ) -> Result<Outcome, ControlError> {
         match signal {
+            Signal::EndpointContact { key, presence } => {
+                self.endpoints.observe(&key, presence);
+                Ok(Outcome::empty())
+            }
             Signal::PeerDirection { key, direction } => {
                 let mut outcome = Outcome::empty();
                 if let Some(entry) = self.channels.get_mut(&key.id).filter(|entry| {

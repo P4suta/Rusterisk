@@ -35,6 +35,12 @@ pub use recording_stop_keys::RecordingStopKey;
 pub use stasis::{StasisApplication, StasisMembership};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContactPresence {
+    Present,
+    Absent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CallState {
     Down,
     Ringing,

@@ -171,7 +171,7 @@ impl Controller {
                 shutdown,
             },
             Runner {
-                control: Control::with_dialplan(capacity, config.dialplan.clone()),
+                control: Control::with_configuration(capacity, &config),
                 config,
                 requests: request_receiver,
                 signals: signal_receiver,

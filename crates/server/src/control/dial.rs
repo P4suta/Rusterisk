@@ -452,6 +452,10 @@ impl Control {
                 id,
                 ChannelEntry {
                     call: Call::outgoing(generation),
+                    endpoint: endpoint
+                        .strip_prefix("PJSIP/")
+                        .ok_or(ControlError::Invalid("Invalid endpoint technology"))?
+                        .into(),
                     snapshot: child,
                     arguments: Vec::new(),
                     deadline: None,

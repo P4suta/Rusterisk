@@ -63,6 +63,7 @@ impl Runner {
             | Signal::PlaybackFinished { .. }
             | Signal::DtmfReady { .. }
             | Signal::PeerDirection { .. }
+            | Signal::EndpointContact { .. }
             | Signal::DtmfFinished { .. }
             | Signal::DtmfReceived { .. }
             | Signal::Milestone { .. }

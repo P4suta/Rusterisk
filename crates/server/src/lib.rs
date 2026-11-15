@@ -11,8 +11,8 @@ pub mod signaling;
 pub mod storage;
 mod websocket;
 pub use control::{
-    Action, CallHistoryEvent, CallKey, Control, ControlError, Effect, IncomingCall, IncomingTarget,
-    MediaOwner, Milestone, Outcome, PlaybackCompletion, Signal,
+    Action, CallHistoryEvent, CallKey, Control, ControlError, Effect, EndpointKey, IncomingCall,
+    IncomingTarget, MediaOwner, Milestone, Outcome, PlaybackCompletion, Signal,
 };
 pub(crate) use runner::StoredRecordingOperation;
 pub(crate) use runner::StoredRecordingResponse;
