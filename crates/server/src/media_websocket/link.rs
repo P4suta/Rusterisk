@@ -90,6 +90,25 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
     }
 
     async fn command(&mut self, command: MediaCommand) -> Result<bool, MediaError> {
+        let queue_command = match &command {
+            MediaCommand::StartMediaBuffering => Some("START_MEDIA_BUFFERING"),
+            MediaCommand::StopMediaBuffering { .. } => Some("STOP_MEDIA_BUFFERING"),
+            MediaCommand::MarkMedia { .. } => Some("MARK_MEDIA"),
+            MediaCommand::FlushMedia => Some("FLUSH_MEDIA"),
+            MediaCommand::ReportQueueDrained => Some("REPORT_QUEUE_DRAINED"),
+            MediaCommand::PauseMedia => Some("PAUSE_MEDIA"),
+            MediaCommand::ContinueMedia => Some("CONTINUE_MEDIA"),
+            MediaCommand::SetMediaDirection { .. } => Some("SET_MEDIA_DIRECTION"),
+            MediaCommand::Answer | MediaCommand::Hangup | MediaCommand::GetStatus => None,
+        };
+        if let Some(name) = queue_command.filter(|_| self.options.format == MediaFormat::Opus) {
+            self.event(MediaEvent::Error {
+                channel_id: self.options.channel_id.clone(),
+                error_text: format!("{name} not supported in passthrough mode"),
+            })
+            .await?;
+            return Ok(false);
+        }
         let restricted = match &command {
             MediaCommand::StartMediaBuffering => Some("START_MEDIA_BUFFERING"),
             MediaCommand::StopMediaBuffering { .. } => Some("STOP_MEDIA_BUFFERING"),

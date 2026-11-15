@@ -48,6 +48,10 @@ struct Harness {
 
 impl Harness {
     fn start(format: MediaControlFormat) -> Result<Self, MediaError> {
+        Self::with_media(format, MediaFormat::Pcmu)
+    }
+
+    fn with_media(format: MediaControlFormat, media: MediaFormat) -> Result<Self, MediaError> {
         let (peer, input) = mpsc::channel(64);
         let (output, messages) = mpsc::channel(64);
         let (incoming, frames) = mpsc::channel(3);
@@ -74,7 +78,7 @@ impl Harness {
                 connection_id: id.clone(),
                 channel_id: id,
                 channel: "WebSocket/INCOMING/channel".into(),
-                format: MediaFormat::Pcmu,
+                format: media,
                 control_format: format,
                 direction: MediaDirection::Both,
                 auto_answer: true,
@@ -130,6 +134,33 @@ impl Harness {
         self.task.await.map_err(failure)??;
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn packet_audio_rejects_queue_commands_with_the_reference_error() -> Result<(), MediaError> {
+    let mut harness = Harness::with_media(MediaControlFormat::Json, MediaFormat::Opus)?;
+    let result = async {
+        let start: MediaEvent = serde_json::from_str(&harness.text().await?).map_err(failure)?;
+        assert!(matches!(start, MediaEvent::MediaStart { format: MediaFormat::Opus, optimal_frame_size: 0, .. }));
+        for (name, command) in [
+            ("START_MEDIA_BUFFERING", MediaCommand::StartMediaBuffering),
+            ("STOP_MEDIA_BUFFERING", MediaCommand::StopMediaBuffering { correlation_id: None }),
+            ("MARK_MEDIA", MediaCommand::MarkMedia { correlation_id: None }),
+            ("FLUSH_MEDIA", MediaCommand::FlushMedia),
+            ("REPORT_QUEUE_DRAINED", MediaCommand::ReportQueueDrained),
+            ("PAUSE_MEDIA", MediaCommand::PauseMedia),
+            ("CONTINUE_MEDIA", MediaCommand::ContinueMedia),
+            ("SET_MEDIA_DIRECTION", MediaCommand::SetMediaDirection { direction: MediaDirection::In }),
+        ] {
+            harness.command(command).await?;
+            let event: MediaEvent = serde_json::from_str(&harness.text().await?).map_err(failure)?;
+            assert!(matches!(event, MediaEvent::Error { error_text, .. } if error_text == format!("{name} not supported in passthrough mode")));
+        }
+        assert!(matches!(harness.status().await?, MediaEvent::Status { queue_length: 0, media_paused: false, bulk_media: false, .. }));
+        Ok(())
+    }.await;
+    harness.close().await?;
+    result
 }
 
 #[tokio::test]
