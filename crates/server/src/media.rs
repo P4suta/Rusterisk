@@ -48,11 +48,15 @@ enum Command {
         token: MediaTaskToken,
         operation: PlaybackControl,
     },
-    Record {
+    ReserveRecording {
         token: MediaTaskToken,
         target: RecordingTarget,
-        sink: RecordingSink,
         completed: oneshot::Sender<Result<(), WorkerError>>,
+        reply: oneshot::Sender<Result<(), MediaError>>,
+    },
+    AttachRecording {
+        token: MediaTaskToken,
+        sink: RecordingSink,
         reply: oneshot::Sender<Result<(), MediaError>>,
     },
     EndRecording {
@@ -164,13 +168,22 @@ impl MediaPort {
         token: MediaTaskToken,
         sink: RecordingSink,
     ) -> Result<oneshot::Receiver<Result<(), WorkerError>>, MediaError> {
+        let completion = self.reserve_recording(target, token).await?;
+        self.attach_recording(token, sink).await?;
+        Ok(completion)
+    }
+
+    pub async fn reserve_recording(
+        &self,
+        target: RecordingTarget,
+        token: MediaTaskToken,
+    ) -> Result<oneshot::Receiver<Result<(), WorkerError>>, MediaError> {
         let (completed, completion) = oneshot::channel();
         let (reply, response) = oneshot::channel();
         self.commands
-            .try_send(Command::Record {
+            .try_send(Command::ReserveRecording {
                 token,
                 target,
-                sink,
                 completed,
                 reply,
             })
@@ -180,6 +193,21 @@ impl MediaPort {
             .map_err(|error| MediaError::Transport(error.to_string()))?
             .map_err(|error| MediaError::Transport(error.to_string()))??;
         Ok(completion)
+    }
+
+    pub async fn attach_recording(
+        &self,
+        token: MediaTaskToken,
+        sink: RecordingSink,
+    ) -> Result<(), MediaError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .try_send(Command::AttachRecording { token, sink, reply })
+            .map_err(|_| MediaError::Capacity)?;
+        tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+            .map_err(|error| MediaError::Transport(error.to_string()))?
     }
 
     pub fn stop_recording(
@@ -421,10 +449,9 @@ impl MediaHub {
             Command::ControlPlayback { token, operation } => {
                 self.playbacks.control(token, operation)
             }
-            Command::Record {
+            Command::ReserveRecording {
                 token,
                 target,
-                sink,
                 completed,
                 reply,
             } => {
@@ -434,10 +461,19 @@ impl MediaHub {
                         RecordingTarget::Bridge(_) => true,
                     };
                     let result = if valid {
-                        self.recordings.begin(token, target, sink, completed)
+                        self.recordings.reserve(token, target, completed)
                     } else {
                         Err(MediaError::UnknownStream)
                     };
+                    let admitted = result.is_ok();
+                    if reply.send(result).is_err() && admitted {
+                        self.recordings.end(token, RecordingEnd::Cancel);
+                    }
+                }
+            }
+            Command::AttachRecording { token, sink, reply } => {
+                if !reply.is_closed() {
+                    let result = self.recordings.attach(token, sink);
                     let admitted = result.is_ok();
                     if reply.send(result).is_err() && admitted {
                         self.recordings.end(token, RecordingEnd::Cancel);

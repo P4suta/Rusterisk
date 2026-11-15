@@ -18,6 +18,72 @@ fn id(value: &str) -> Result<ChannelId, MediaError> {
 }
 
 #[tokio::test]
+async fn a_deleted_bridge_rejects_late_recording_files_without_stopping_its_replacement(
+) -> Result<(), MediaError> {
+    let directory = tempfile::tempdir().map_err(failure)?;
+    let (storage, worker) = StorageWorker::start(directory.path().to_owned())
+        .await
+        .map_err(failure)?;
+    let (media, hub, _notices) = MediaHub::new(1);
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(hub.run(stopped));
+    let result = async {
+        let mut old_tasks = MediaTasks::new(10);
+        let old = old_tasks
+            .reserve(MediaTaskKind::Recording)
+            .map_err(|_| MediaError::Capacity)?;
+        let old_done = media
+            .reserve_recording(RecordingTarget::Bridge(10), old)
+            .await?;
+        media.release_bridge(10)?;
+        let mut current_tasks = MediaTasks::new(20);
+        let current = current_tasks
+            .reserve(MediaTaskKind::Recording)
+            .map_err(|_| MediaError::Capacity)?;
+        let current_done = media
+            .reserve_recording(RecordingTarget::Bridge(20), current)
+            .await?;
+        let late = storage.record(id("late")?, 8000).await.map_err(failure)?;
+        assert!(matches!(
+            media.attach_recording(old, late).await,
+            Err(MediaError::UnknownStream)
+        ));
+        let sink = storage
+            .record(id("current")?, 8000)
+            .await
+            .map_err(failure)?;
+        media.attach_recording(current, sink).await?;
+        media.release_bridge(10)?;
+        media.stop_recording(current, RecordingEnd::Finish)?;
+        for done in [old_done, current_done] {
+            tokio::time::timeout(Duration::from_secs(2), done)
+                .await
+                .map_err(failure)?
+                .map_err(failure)?
+                .map_err(failure)?;
+        }
+        let replacement = storage.record(id("late")?, 8000).await.map_err(failure)?;
+        replacement.cancel().await.map_err(failure)?;
+        assert_eq!(
+            storage
+                .recordings()
+                .await
+                .map_err(failure)?
+                .iter()
+                .map(|recording| recording.name.as_str())
+                .collect::<Vec<_>>(),
+            ["current"]
+        );
+        Ok(())
+    }
+    .await;
+    stop.send_replace(true);
+    task.await.map_err(failure)??;
+    worker.close().await.map_err(failure)?;
+    result
+}
+
+#[tokio::test]
 async fn channel_and_bridge_recordings_contain_their_actual_received_audio(
 ) -> Result<(), MediaError> {
     let directory = tempfile::tempdir().map_err(failure)?;
