@@ -28,6 +28,7 @@ pub enum Error {
     WebSocket(String),
     EventLagged(u64),
     CallEnded(CallCompletion),
+    StasisExited,
     CallFailed(CallFailure),
     Cleanup(String),
 }
@@ -47,6 +48,7 @@ impl std::fmt::Display for Error {
             Self::WebSocket(message) => write!(f, "event transport: {message}"),
             Self::EventLagged(count) => write!(f, "event consumer missed {count} events"),
             Self::CallEnded(completion) => write!(f, "call completed: {completion:?}"),
+            Self::StasisExited => f.write_str("channel left Stasis"),
             Self::CallFailed(failure) => f.write_str(&failure.message),
             Self::Cleanup(message) => write!(f, "call cleanup: {message}"),
         }

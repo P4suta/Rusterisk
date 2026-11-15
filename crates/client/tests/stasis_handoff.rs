@@ -41,6 +41,7 @@ async fn handoff(operation: Handoff) -> Result<(), Error> {
         let released = call.wait_completion(Duration::from_secs(2)).await?;
         assert_eq!(released.progress.completion(), Some(CallCompletion::StasisExited));
         assert_eq!(released.cleanup, rusterisk_client::Cleanup::Complete);
+        assert!(matches!(call.wait(CallMilestone::MediaConnected, Duration::from_secs(1)).await, Err(Error::StasisExited)));
         assert_eq!(client.channel(&id).await?.state, api::ChannelState::Up);
         if matches!(operation, Handoff::App) {
             let entered = tokio::time::timeout(Duration::from_secs(2), destination.next_event()).await.map_err(|_| Error::Timeout)??;

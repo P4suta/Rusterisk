@@ -64,6 +64,7 @@ impl From<Error> for CallFailure {
             | Error::WebSocket(_)
             | Error::EventLagged(_)
             | Error::CallEnded(_)
+            | Error::StasisExited
             | Error::CallFailed(_)
             | Error::Cleanup(_) => None,
         };
@@ -140,9 +141,10 @@ impl OwnedCall {
                             Some(failure) => Error::CallFailed(failure),
                             None => Error::CallEnded(completion),
                         },
-                        CallCompletion::Cancelled
-                        | CallCompletion::Ended
-                        | CallCompletion::StasisExited => Error::CallEnded(completion),
+                        CallCompletion::Cancelled | CallCompletion::Ended => {
+                            Error::CallEnded(completion)
+                        }
+                        CallCompletion::StasisExited => Error::StasisExited,
                     });
                 }
                 if snapshot.progress.has_reached(milestone) {
