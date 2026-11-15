@@ -10,6 +10,8 @@ use std::{future::IntoFuture, net::Ipv4Addr, time::Duration};
 mod external_audio;
 #[path = "reference/external_streams.rs"]
 mod external_streams;
+#[path = "reference/external_websockets.rs"]
+mod external_websockets;
 
 async fn compare_external_admission(
     client: &Client,
@@ -291,7 +293,7 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
         configuration,
         controller.clone(),
         effects,
-        media,
+        media.clone(),
         notices,
     )
     .await
@@ -304,7 +306,11 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(
-        axum::serve(listener, rusterisk_server::http::router(controller.clone())).into_future(),
+        axum::serve(
+            listener,
+            rusterisk_server::http::router_with_media(controller.clone(), media),
+        )
+        .into_future(),
     );
     let result = async {
         let actual = Client::new(&format!("http://{address}"), "app", "test-password")?;
@@ -457,6 +463,20 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
             &mut reference_session,
             app.as_str(),
             callback_ip,
+        )
+        .await?;
+        external_websockets::compare(
+            &actual,
+            &format!("http://{address}"),
+            &mut actual_session,
+            app.as_str(),
+        )
+        .await?;
+        external_websockets::compare(
+            &reference,
+            &reference_address,
+            &mut reference_session,
+            app.as_str(),
         )
         .await?;
         compare_subscriptions(&actual, &reference, app.as_str()).await?;
