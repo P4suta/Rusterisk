@@ -66,9 +66,7 @@ impl Client {
     ) -> Result<api::Channel, Error> {
         api::ChannelId::try_from(app.to_owned())?;
         let remote = target.remote().to_string();
-        let session = uuid::Uuid::from_bytes(target.session())
-            .hyphenated()
-            .to_string();
+        let session = target.session_text();
         self.request(
             "channels.externalMedia",
             &[],
