@@ -152,6 +152,16 @@ pub enum IncomingTarget {
 
 #[derive(Clone, Debug)]
 pub enum Action {
+    ExternalWebSocketClient {
+        id: ChannelId,
+        app: String,
+        client: String,
+        format: rusterisk_api::MediaFormat,
+        control_format: Option<rusterisk_api::MediaControlFormat>,
+        direction: rusterisk_api::MediaDirection,
+        auto_answer: bool,
+        data: String,
+    },
     ExternalWebSocket {
         id: ChannelId,
         app: String,
@@ -316,6 +326,7 @@ impl Action {
             Self::Hangup(_) | Self::Continue { .. } | Self::DestroyBridge(_) => 2,
             Self::Originate { .. }
             | Self::ExternalWebSocket { .. }
+            | Self::ExternalWebSocketClient { .. }
             | Self::ExternalRtp { .. }
             | Self::ExternalAudioSocket { .. }
             | Self::RecordChannel { .. }
@@ -352,6 +363,7 @@ impl Action {
             | Self::GetBridge(_) => true,
             Self::Originate { .. }
             | Self::ExternalWebSocket { .. }
+            | Self::ExternalWebSocketClient { .. }
             | Self::ExternalRtp { .. }
             | Self::ExternalAudioSocket { .. }
             | Self::FilterApplication { .. }
@@ -385,6 +397,11 @@ impl Action {
 
 #[derive(Clone, Debug)]
 pub enum Effect {
+    ConnectWebSocket {
+        key: CallKey,
+        client: rusterisk_config::WebSocketClient,
+        options: rusterisk_api::WebSocketMediaOptions,
+    },
     ReserveWebSocket {
         key: CallKey,
     },
@@ -477,6 +494,10 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
+    WebSocketAdmitted {
+        key: CallKey,
+        result: Result<(), ControlError>,
+    },
     AudioSocketAdmitted {
         key: CallKey,
         result: Result<(), ControlError>,
@@ -627,6 +648,8 @@ enum ChannelKind {
     AudioSocketAdmitted,
     WebSocketPending,
     WebSocketClaimed,
+    WebSocketClientPending,
+    WebSocketClientAdmitted,
 }
 
 struct ChannelEntry {
@@ -993,6 +1016,40 @@ impl Control {
         now_ms: u64,
     ) -> Result<Outcome, ControlError> {
         match action {
+            Action::ExternalWebSocketClient {
+                id,
+                app,
+                client,
+                format,
+                control_format,
+                direction,
+                auto_answer,
+                data,
+            } => {
+                let client = self
+                    .websocket
+                    .clients
+                    .iter()
+                    .find(|entry| entry.name == client)
+                    .cloned()
+                    .ok_or(ControlError::Invalid(
+                        "external_host must be a valid websocket_client connection id.",
+                    ))?;
+                let options = rusterisk_api::WebSocketMediaOptions {
+                    format,
+                    control_format: self.media_control_format(control_format),
+                    direction,
+                    auto_answer,
+                };
+                self.external_media(
+                    id,
+                    app,
+                    external_media::Target::WebSocketClient { client, options },
+                    data,
+                    timestamp,
+                    now_ms,
+                )
+            }
             Action::ExternalWebSocket {
                 id,
                 app,
@@ -1010,14 +1067,7 @@ impl Control {
                     channel_id: id,
                     channel: String::new(),
                     format,
-                    control_format: control_format.unwrap_or(match self.websocket.control_format {
-                        rusterisk_config::WebSocketControlFormat::PlainText => {
-                            rusterisk_api::MediaControlFormat::PlainText
-                        }
-                        rusterisk_config::WebSocketControlFormat::Json => {
-                            rusterisk_api::MediaControlFormat::Json
-                        }
-                    }),
+                    control_format: self.media_control_format(control_format),
                     direction,
                     auto_answer,
                     channel_variables: BTreeMap::new(),
@@ -1813,6 +1863,9 @@ impl Control {
         now: u64,
     ) -> Result<Outcome, ControlError> {
         match signal {
+            Signal::WebSocketAdmitted { key, result } => {
+                self.websocket_client_admitted(key, result, timestamp)
+            }
             Signal::ExternalRtpAdmitted { key, result } => {
                 self.external_rtp_admitted(key, result, timestamp)
             }
@@ -1971,10 +2024,12 @@ impl Control {
                 match entry.kind {
                     ChannelKind::ExternalRtpPending
                     | ChannelKind::AudioSocketPending
+                    | ChannelKind::WebSocketClientPending
                     | ChannelKind::WebSocketPending => return Ok(Outcome::empty()),
                     ChannelKind::Sip
                     | ChannelKind::ExternalRtpAdmitted
                     | ChannelKind::AudioSocketAdmitted
+                    | ChannelKind::WebSocketClientAdmitted
                     | ChannelKind::WebSocketClaimed => {}
                 }
                 let entry = self

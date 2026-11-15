@@ -21,6 +21,7 @@ mod recording;
 #[cfg(test)]
 mod stream_tests;
 mod transport;
+mod websocket;
 
 struct Listener {
     name: String,
@@ -76,6 +77,8 @@ pub struct Signaling {
     external_media: BTreeSet<CallKey>,
     stream_admissions: BTreeMap<CallKey, external_media::PendingStream>,
     stream_jobs: JoinSet<external_media::StreamCompletion>,
+    websocket_admissions: BTreeMap<CallKey, websocket::PendingWebSocket>,
+    websocket_jobs: JoinSet<websocket::Completion>,
     storage: Option<StoragePort>,
     playbacks: JoinSet<(MediaOwner, MediaTaskToken, Result<(), ControlError>)>,
     recordings: JoinSet<recording::Completion>,
@@ -142,6 +145,8 @@ impl Signaling {
             external_media: BTreeSet::new(),
             stream_admissions: BTreeMap::new(),
             stream_jobs: JoinSet::new(),
+            websocket_admissions: BTreeMap::new(),
+            websocket_jobs: JoinSet::new(),
             storage: None,
             playbacks: JoinSet::new(),
             recordings: JoinSet::new(),
@@ -413,7 +418,12 @@ impl Signaling {
     }
 
     async fn admit(&mut self, listener: usize, incoming: IncomingCall) -> Result<(), ControlError> {
-        if self.calls.len() + self.external_media.len() + self.stream_admissions.len() >= 64 {
+        if self.calls.len()
+            + self.external_media.len()
+            + self.stream_admissions.len()
+            + self.websocket_admissions.len()
+            >= 64
+        {
             return Err(ControlError::Capacity);
         }
         let dtmf = self
@@ -444,7 +454,12 @@ impl Signaling {
         timeout: Option<u32>,
         now: u64,
     ) -> Result<(), ControlError> {
-        if self.calls.len() + self.external_media.len() + self.stream_admissions.len() >= 64 {
+        if self.calls.len()
+            + self.external_media.len()
+            + self.stream_admissions.len()
+            + self.websocket_admissions.len()
+            >= 64
+        {
             return Err(ControlError::Capacity);
         }
         let name = endpoint
@@ -507,6 +522,19 @@ impl Signaling {
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
+            Effect::ConnectWebSocket {
+                key,
+                client,
+                options,
+            } => {
+                if let Err(error) = self.start_websocket(key.clone(), client, options) {
+                    self.notify(Signal::WebSocketAdmitted {
+                        key,
+                        result: Err(error),
+                    })
+                    .await?;
+                }
+            }
             Effect::ReserveWebSocket { key } => {
                 self.external_media.insert(key.clone());
                 self.notify(Signal::DtmfReady {
@@ -704,6 +732,9 @@ impl Signaling {
                 .control_playback(token, operation)
                 .map_err(failure)?,
             Effect::Release { key } => {
+                if let Some(pending) = self.websocket_admissions.remove(&key) {
+                    pending.cancel.send_replace(true);
+                }
                 if let Some(pending) = self.stream_admissions.remove(&key) {
                     pending.cancel.send_replace(true);
                 }
@@ -955,14 +986,22 @@ impl Signaling {
                     }
                 }
                 notice = self.notices.recv() => match notice {
-                    Some(MediaNotice::Answer { key }) => self.notify(Signal::Milestone { key, milestone: Milestone::Answered }).await?,
+                    Some(MediaNotice::Answer { key }) => {
+                        if let Some(pending) = self.websocket_admissions.get_mut(&key) { pending.answered = true; }
+                        else { self.notify(Signal::Milestone { key, milestone: Milestone::Answered }).await?; }
+                    },
                     Some(MediaNotice::DtmfFinished { key, token }) => self.notify(Signal::DtmfFinished { key, token }).await?,
                     Some(MediaNotice::Dtmf { key, tone }) => self.notify(Signal::DtmfReceived { key, digit: tone.digit, duration_ms: tone.duration_ms }).await?,
                     Some(MediaNotice::Connected { key }) => {
                         if let Some(pending) = self.stream_admissions.get_mut(&key) { pending.received = true; }
+                        else if let Some(pending) = self.websocket_admissions.get_mut(&key) { pending.received = true; }
                         else { self.notify(Signal::Milestone { key, milestone: Milestone::MediaConnected }).await?; }
                     },
                     Some(MediaNotice::Stopped { key, result }) => {
+                        if let Some(pending) = self.websocket_admissions.remove(&key) {
+                            pending.cancel.send_replace(true);
+                            self.notify(Signal::WebSocketAdmitted { key: key.clone(), result: Err(ControlError::Adapter("WebSocket ended during admission".into())) }).await?;
+                        }
                         if let Some(pending) = self.stream_admissions.remove(&key) {
                             pending.cancel.send_replace(true);
                             self.notify(Signal::AudioSocketAdmitted { key: key.clone(), result: Err(ControlError::Adapter("AudioSocket ended during admission".into())) }).await?;
@@ -992,6 +1031,10 @@ impl Signaling {
                     let completed = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
                     self.audio_socket_completed(completed).await?;
                 },
+                result = self.websocket_jobs.join_next(), if !self.websocket_jobs.is_empty() => {
+                    let completed = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
+                    self.websocket_completed(completed).await?;
+                },
                 _instant = tick.tick() => {
                     let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
                     for listener in 0..self.listeners.len() {
@@ -1011,6 +1054,9 @@ impl Signaling {
         let mut cleanup = Ok(());
         let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
         if let Err(error) = self.finish_streams().await {
+            cleanup = Err(error);
+        }
+        if let Err(error) = self.finish_websockets().await {
             cleanup = Err(error);
         }
         for (key, call) in std::mem::take(&mut self.calls) {

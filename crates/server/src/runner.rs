@@ -515,7 +515,9 @@ impl Runner {
                 );
                 let external = matches!(
                     &action,
-                    Action::ExternalRtp { .. } | Action::ExternalAudioSocket { .. }
+                    Action::ExternalRtp { .. }
+                        | Action::ExternalAudioSocket { .. }
+                        | Action::ExternalWebSocketClient { .. }
                 );
                 let result = self
                     .authorize(&credentials, origin.as_deref(), action.read_only())
@@ -559,6 +561,7 @@ impl Runner {
                             | Effect::ReleaseBridge { .. }
                             | Effect::DialBridge { .. } => None,
                             Effect::ConnectExternalRtp { key, .. }
+                            | Effect::ConnectWebSocket { key, .. }
                             | Effect::ConnectAudioSocket { key, .. } => {
                                 Some(Admission::ExternalMedia(key.clone()))
                             }

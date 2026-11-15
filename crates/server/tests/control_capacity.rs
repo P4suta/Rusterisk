@@ -121,6 +121,7 @@ async fn check_dial_capacity(connected: bool) -> Result<(), ControlError> {
                 Some(
                     rusterisk_server::Effect::Start { .. }
                     | rusterisk_server::Effect::ReserveWebSocket { .. }
+                    | rusterisk_server::Effect::ConnectWebSocket { .. }
                     | rusterisk_server::Effect::ConnectExternalRtp { .. }
                     | rusterisk_server::Effect::ConnectAudioSocket { .. }
                     | rusterisk_server::Effect::Playback { .. }

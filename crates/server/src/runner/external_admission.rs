@@ -18,6 +18,18 @@ impl Pending {
 }
 
 impl Runner {
+    pub(super) fn complete_websocket_admission(
+        &mut self,
+        key: CallKey,
+        result: Result<(), ControlError>,
+        now: u64,
+    ) -> Result<(), ControlError> {
+        let signal = Signal::WebSocketAdmitted {
+            key: key.clone(),
+            result: result.clone(),
+        };
+        self.complete_media_admission(key, signal, result, now)
+    }
     pub(super) fn complete_external_admission(
         &mut self,
         key: CallKey,

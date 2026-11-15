@@ -142,6 +142,7 @@ fn all_failed_attempts_resume_once_and_late_failures_do_not_end_the_parent(
             Effect::Start { key, .. } => Ok(key),
             Effect::ConnectExternalRtp { .. }
             | Effect::ReserveWebSocket { .. }
+            | Effect::ConnectWebSocket { .. }
             | Effect::ConnectAudioSocket { .. }
             | Effect::Dtmf { .. }
             | Effect::Playback { .. }

@@ -26,7 +26,11 @@ impl Signaling {
         key: CallKey,
         target: AudioSocketTarget,
     ) -> Result<(), ControlError> {
-        if self.calls.len() + self.external_media.len() + self.stream_admissions.len() >= 64
+        if self.calls.len()
+            + self.external_media.len()
+            + self.stream_admissions.len()
+            + self.websocket_admissions.len()
+            >= 64
             || self.stream_jobs.len() >= 64
         {
             return Err(ControlError::Capacity);
@@ -134,7 +138,12 @@ impl Signaling {
         key: CallKey,
         target: ExternalRtpTarget,
     ) -> Result<SocketAddr, ControlError> {
-        if self.calls.len() + self.external_media.len() + self.stream_admissions.len() >= 64 {
+        if self.calls.len()
+            + self.external_media.len()
+            + self.stream_admissions.len()
+            + self.websocket_admissions.len()
+            >= 64
+        {
             return Err(ControlError::Capacity);
         }
         let ip = match target.remote().ip() {

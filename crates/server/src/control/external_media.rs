@@ -11,9 +11,27 @@ pub(super) enum Target {
     Rtp(ExternalRtpTarget),
     AudioSocket(rusterisk_api::AudioSocketTarget),
     WebSocket(crate::media_websocket::MediaLinkOptions),
+    WebSocketClient {
+        client: rusterisk_config::WebSocketClient,
+        options: rusterisk_api::WebSocketMediaOptions,
+    },
 }
 
 impl Control {
+    pub(super) fn media_control_format(
+        &self,
+        format: Option<rusterisk_api::MediaControlFormat>,
+    ) -> rusterisk_api::MediaControlFormat {
+        format.unwrap_or(match self.websocket.control_format {
+            rusterisk_config::WebSocketControlFormat::PlainText => {
+                rusterisk_api::MediaControlFormat::PlainText
+            }
+            rusterisk_config::WebSocketControlFormat::Json => {
+                rusterisk_api::MediaControlFormat::Json
+            }
+        })
+    }
+
     pub(super) fn external_media(
         &mut self,
         id: ChannelId,
@@ -23,6 +41,10 @@ impl Control {
         timestamp: &str,
         now: u64,
     ) -> Result<Outcome, ControlError> {
+        if matches!(&target, Target::WebSocketClient { options, .. } if options.format == rusterisk_api::MediaFormat::Opus)
+        {
+            return Err(ControlError::Unsupported);
+        }
         if let Target::WebSocket(options) = &target {
             if options.format == rusterisk_api::MediaFormat::Opus {
                 return Err(ControlError::Unsupported);
@@ -51,7 +73,7 @@ impl Control {
             .ok_or(ControlError::NotFound("Application not found"))?;
         let timeout = match &target {
             Target::WebSocket(_) => 30000,
-            Target::Rtp(_) | Target::AudioSocket(_) => 5000,
+            Target::Rtp(_) | Target::AudioSocket(_) | Target::WebSocketClient { .. } => 5000,
         };
         let deadline = now.checked_add(timeout).ok_or(ControlError::Capacity)?;
         let generation = self.generation()?;
@@ -62,6 +84,23 @@ impl Control {
         let mut variables = BTreeMap::new();
         let mut websocket = None;
         let (kind, name, effect) = match target {
+            Target::WebSocketClient { client, options } => {
+                let name = format!("WebSocket/{}/{generation:08x}", client.name);
+                variables.insert("MEDIA_WEBSOCKET_CONNECTION_ID".into(), client.name.clone());
+                variables.insert(
+                    "MEDIA_WEBSOCKET_OPTIMAL_FRAME_SIZE".into(),
+                    options.format.optimal_frame_size().to_string(),
+                );
+                (
+                    ChannelKind::WebSocketClientPending,
+                    name,
+                    Effect::ConnectWebSocket {
+                        key: key.clone(),
+                        client,
+                        options,
+                    },
+                )
+            }
             Target::WebSocket(mut options) => {
                 let name = format!("WebSocket/INCOMING/{generation:08x}");
                 options.channel = name.clone();
@@ -176,6 +215,9 @@ impl Control {
             | ChannelKind::AudioSocketAdmitted
             | ChannelKind::WebSocketPending
             | ChannelKind::WebSocketClaimed => return Ok(Outcome::empty()),
+            ChannelKind::WebSocketClientPending | ChannelKind::WebSocketClientAdmitted => {
+                return Ok(Outcome::empty())
+            }
             ChannelKind::ExternalRtpPending => {}
         }
         let local = match result {
@@ -218,12 +260,49 @@ impl Control {
             | ChannelKind::AudioSocketAdmitted
             | ChannelKind::WebSocketPending
             | ChannelKind::WebSocketClaimed => return Ok(Outcome::empty()),
+            ChannelKind::WebSocketClientPending | ChannelKind::WebSocketClientAdmitted => {
+                return Ok(Outcome::empty())
+            }
         }
         match result {
             Ok(()) => {}
             Err(_) => return self.end(&key.id, timestamp, 21),
         }
         entry.kind = ChannelKind::AudioSocketAdmitted;
+        Outcome::json(&entry.snapshot)
+    }
+
+    pub(super) fn websocket_client_admitted(
+        &mut self,
+        key: CallKey,
+        result: Result<(), ControlError>,
+        timestamp: &str,
+    ) -> Result<Outcome, ControlError> {
+        let Some(entry) = self
+            .channels
+            .get_mut(&key.id)
+            .filter(|entry| entry.call.generation() == key.generation)
+        else {
+            let mut outcome = Outcome::empty();
+            outcome.effects.push(Effect::Release { key });
+            return Ok(outcome);
+        };
+        match entry.kind {
+            ChannelKind::WebSocketClientPending => {}
+            ChannelKind::Sip
+            | ChannelKind::ExternalRtpPending
+            | ChannelKind::ExternalRtpAdmitted
+            | ChannelKind::AudioSocketPending
+            | ChannelKind::AudioSocketAdmitted
+            | ChannelKind::WebSocketPending
+            | ChannelKind::WebSocketClaimed
+            | ChannelKind::WebSocketClientAdmitted => return Ok(Outcome::empty()),
+        }
+        match result {
+            Ok(()) => {}
+            Err(_) => return self.end(&key.id, timestamp, 21),
+        }
+        entry.kind = ChannelKind::WebSocketClientAdmitted;
         Outcome::json(&entry.snapshot)
     }
 

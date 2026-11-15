@@ -24,6 +24,10 @@ fn client_connector(config: ::tokio_rustls::rustls::ClientConfig) -> tokio_tungs
 }
 
 impl TlsClientContext {
+    pub(crate) fn websocket_connector(&self) -> tokio_tungstenite::Connector {
+        self.0.clone()
+    }
+
     pub(crate) fn load(ca_list_file: Option<&str>) -> Result<Self, ControlError> {
         let mut roots = RootCertStore::empty();
         match ca_list_file {
