@@ -1,6 +1,16 @@
 use rusterisk_api::{openapi, swagger, ChannelId, Event, EventKind, OPERATIONS};
 
 #[test]
+fn endpoint_state_events_preserve_the_complete_resource_snapshot() -> Result<(), serde_json::Error>
+{
+    let value = serde_json::json!({"type":"EndpointStateChange", "application":"calls", "timestamp":"now", "endpoint":{"technology":"PJSIP", "resource":"phone", "state":"online", "channel_ids":[]}});
+    let event: Event = serde_json::from_value(value.clone())?;
+    assert_eq!(event.kind.event_type(), "EndpointStateChange");
+    assert_eq!(serde_json::to_value(event)?, value);
+    Ok(())
+}
+
+#[test]
 fn app_snapshots_preserve_required_event_filters() -> Result<(), serde_json::Error> {
     let value = serde_json::from_str::<serde_json::Value>(
         r#"{"name":"calls","channel_ids":[],"bridge_ids":[],"endpoint_ids":[],"device_names":[],"events_allowed":[{"type":"StasisStart"}],"events_disallowed":[{"type":"ChannelVarset"}]}"#,

@@ -261,6 +261,9 @@ pub struct Event {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
 pub enum EventKind {
+    EndpointStateChange {
+        endpoint: Endpoint,
+    },
     StasisStart {
         args: Vec<String>,
         channel: Channel,
@@ -360,6 +363,7 @@ pub enum EventKind {
 impl EventKind {
     pub const fn event_type(&self) -> &'static str {
         match self {
+            Self::EndpointStateChange { .. } => "EndpointStateChange",
             Self::StasisStart { .. } => "StasisStart",
             Self::StasisEnd { .. } => "StasisEnd",
             Self::ChannelCreated { .. } => "ChannelCreated",

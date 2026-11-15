@@ -247,6 +247,7 @@ impl Control {
             | EventKind::RecordingFinished { .. }
             | EventKind::RecordingFailed { .. } => [None, None],
             EventKind::StasisStart { .. }
+            | EventKind::EndpointStateChange { .. }
             | EventKind::StasisEnd { .. }
             | EventKind::ApplicationMoveFailed { .. }
             | EventKind::ApplicationReplaced { .. } => [None, None],

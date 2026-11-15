@@ -670,6 +670,7 @@ impl Calls {
             | api::EventKind::ChannelUnhold { channel }
             | api::EventKind::ChannelUserevent { channel, .. } => (channel, None, None),
             api::EventKind::BridgeCreated { .. }
+            | api::EventKind::EndpointStateChange { .. }
             | api::EventKind::BridgeDestroyed { .. }
             | api::EventKind::PlaybackStarted { .. }
             | api::EventKind::PlaybackContinuing { .. }
