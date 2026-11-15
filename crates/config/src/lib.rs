@@ -1001,7 +1001,7 @@ pub enum Application {
         arguments: Vec<String>,
     },
     Playback(String),
-    Wait(u16),
+    Wait(WaitDuration),
     Goto {
         context: Option<String>,
         extension: Option<String>,
@@ -1098,9 +1098,7 @@ impl Dialplan {
                 "Hangup" if arguments.is_empty() => Application::Hangup,
                 "Playback" if valid_name(arguments) => Application::Playback(arguments.into()),
                 "Wait" => Application::Wait(
-                    arguments
-                        .parse()
-                        .map_err(|_| error("Wait requires seconds"))?,
+                    WaitDuration::parse(arguments).map_err(|reason| error(&reason.to_string()))?,
                 ),
                 "Stasis" => {
                     let mut parts = arguments.split(',');

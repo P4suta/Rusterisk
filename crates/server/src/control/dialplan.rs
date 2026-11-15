@@ -478,7 +478,7 @@ impl Control {
                 Application::Dial { .. } => DialplanInstruction::Dial,
                 Application::Stasis { .. } => DialplanInstruction::Stasis,
                 Application::Playback(_) => DialplanInstruction::Playback,
-                Application::Wait(seconds) => DialplanInstruction::Wait(u32::from(*seconds) * 1000),
+                Application::Wait(duration) => DialplanInstruction::Wait(duration.milliseconds()),
                 Application::Goto { .. } => DialplanInstruction::Goto,
                 Application::Hangup => DialplanInstruction::Hangup,
             };
@@ -565,8 +565,8 @@ impl Control {
                         ),
                     )?;
                 }
-                Application::Wait(seconds) => {
-                    self.set_dialplan_location(key, "Wait", seconds.to_string())?;
+                Application::Wait(duration) => {
+                    self.set_dialplan_location(key, "Wait", duration.argument().to_owned())?;
                     machine.tick(now);
                     continue;
                 }

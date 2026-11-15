@@ -31,14 +31,15 @@ fn waits_resume_the_starting_program_and_stasis_observes_the_current_priority(
     control.subscribe("calls")?;
     let key = incoming(&mut control, "first")?;
     let program = Dialplan::parse(
-        "[internal]\nexten => 200,1,NoOp(begin ${EXTEN})\nsame => n,Wait(1)\nsame => n,Goto(other,300,7)\n[other]\nexten => 300,7,Stasis(calls,${CONTEXT},${EXTEN},${PRIORITY})\nsame => n,Hangup()\n",
+        "[internal]\nexten => 200,1,NoOp(begin ${EXTEN})\nsame => n,Wait(0.125)\nsame => n,Goto(other,300,7)\n[other]\nexten => 300,7,Stasis(calls,${CONTEXT},${EXTEN},${PRIORITY})\nsame => n,Hangup()\n",
     ).map_err(failure)?;
     let started = control.start_dialplan(&key, program, 50, "now")?;
     assert!(started.effects.is_empty());
     assert!(started.events.is_empty());
     assert_eq!(control.channel(&key.id)?.dialplan.app_name, "Wait");
-    assert!(control.tick_dialplans(1049, "later")?.events.is_empty());
-    let entered = control.tick_dialplans(1050, "later")?;
+    assert_eq!(control.channel(&key.id)?.dialplan.app_data, "0.125");
+    assert!(control.tick_dialplans(174, "later")?.events.is_empty());
+    let entered = control.tick_dialplans(175, "later")?;
     assert_eq!(entered.events.len(), 2);
     assert!(
         matches!(&entered.events[0].kind, EventKind::ChannelCreated { channel } if channel.id == key.id)
@@ -91,6 +92,29 @@ fn immediate_hangup_and_missing_routes_release_only_their_own_channel() -> Resul
         Err(ControlError::Conflict(_))
     ));
     assert!(control.channel(&replacement.id).is_ok());
+    Ok(())
+}
+
+#[test]
+fn zero_and_sub_millisecond_waits_continue_without_a_timer_turn() -> Result<(), ControlError> {
+    for argument in ["0", "0.0009", "0ms"] {
+        let mut control = Control::new(4);
+        control.subscribe("calls")?;
+        let key = incoming(&mut control, "immediate")?;
+        let program = Dialplan::parse(&format!(
+            "[internal]\nexten => 200,1,Wait({argument})\nsame => n,Stasis(calls)\n"
+        ))
+        .map_err(failure)?;
+        let started = control.start_dialplan(&key, program, 50, "now")?;
+        assert!(
+            started
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, EventKind::StasisStart { .. })),
+            "{argument}"
+        );
+        assert_eq!(control.channel(&key.id)?.dialplan.priority, 2);
+    }
     Ok(())
 }
 
