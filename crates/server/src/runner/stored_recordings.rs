@@ -64,6 +64,21 @@ async fn execute(storage: StoragePort, operation: Operation) -> Result<Response,
     }
 }
 
+async fn reply_query<F: std::future::Future<Output = Result<Response, ControlError>>>(
+    mut reply: oneshot::Sender<Result<Response, ControlError>>,
+    query: F,
+) {
+    tokio::select! {
+        biased;
+        () = reply.closed() => tracing::debug!("stored recording requester disconnected during its query"),
+        result = query => {
+            if reply.send(result).is_err() {
+                tracing::debug!("stored recording requester disconnected");
+            }
+        }
+    }
+}
+
 impl Controller {
     pub(crate) async fn stored_recording(
         &self,
@@ -108,15 +123,8 @@ impl Runner {
             });
         match admitted {
             Ok(storage) => {
-                self.stored_jobs.spawn(async move {
-                    if reply.is_closed() {
-                        return;
-                    }
-                    let result = execute(storage, operation).await;
-                    if reply.send(result).is_err() {
-                        tracing::debug!("stored recording requester disconnected");
-                    }
-                });
+                self.stored_jobs
+                    .spawn(reply_query(reply, execute(storage, operation)));
             }
             Err(error) => {
                 if reply.send(Err(error)).is_err() {
@@ -159,10 +167,34 @@ impl Runner {
 
 #[cfg(test)]
 mod tests {
+    use super::{reply_query, Response};
     use crate::{ControlError, Controller};
     use rusterisk_config::Config;
     use std::time::Duration;
     use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn dropping_a_requester_releases_its_pending_storage_query() -> Result<(), ControlError> {
+        let (reply, response) = oneshot::channel();
+        let (lifetime, mut released) = oneshot::channel::<()>();
+        let (entered, started) = oneshot::channel();
+        let query = tokio::spawn(reply_query(reply, async move {
+            let _lifetime = lifetime;
+            entered.send(()).map_err(|_| ControlError::Capacity)?;
+            std::future::pending::<Result<Response, ControlError>>().await
+        }));
+        started.await.map_err(|_| ControlError::Capacity)?;
+        drop(response);
+        tokio::time::timeout(Duration::from_secs(1), query)
+            .await
+            .map_err(|error| ControlError::Adapter(error.to_string()))?
+            .map_err(|error| ControlError::Adapter(error.to_string()))?;
+        assert!(matches!(
+            released.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        ));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn shutdown_joins_remaining_queries_after_another_query_has_been_canceled(
