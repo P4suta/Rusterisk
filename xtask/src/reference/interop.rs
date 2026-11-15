@@ -112,6 +112,8 @@ impl Interop {
                 "--tmpfs",
                 "/var/spool/asterisk:uid=65532,gid=65532,mode=0700,size=32m",
                 "--tmpfs",
+                "/var/spool/asterisk/recording:uid=65532,gid=65532,mode=0700,size=16m",
+                "--tmpfs",
                 "/var/log/asterisk:uid=65532,gid=65532,mode=0700,size=8m",
                 "--tmpfs",
                 "/tmp:mode=1777,size=16m",

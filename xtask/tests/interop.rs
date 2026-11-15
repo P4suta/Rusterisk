@@ -111,6 +111,7 @@ fn interop_uses_an_ephemeral_local_port_and_bounded_disposable_state() -> Result
         "--read-only",
         "--cap-drop=ALL",
         "--security-opt=no-new-privileges",
+        "/var/spool/asterisk/recording:uid=65532,gid=65532,mode=0700,size=16m",
     ] {
         assert!(
             start.arguments.iter().any(|value| value == argument),
