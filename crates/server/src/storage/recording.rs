@@ -243,9 +243,11 @@ mod tests {
     ) -> Result<(), WorkerError> {
         let (commands, _receiver) = mpsc::channel(64);
         let (_stop, stopped) = watch::channel(false);
+        let (wake, _notifications) = mpsc::channel(1);
         let port = StoragePort {
             commands,
             stop: stopped,
+            wake,
         };
         let (frames, mut input) = mpsc::channel(3);
         let (lifetime, mut owner) = oneshot::channel();

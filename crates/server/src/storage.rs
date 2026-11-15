@@ -48,7 +48,6 @@ impl From<std::io::Error> for WorkerError {
 }
 
 enum Command {
-    Wake,
     Play {
         media: PlaybackMedia,
         output: mpsc::Sender<Frame>,
@@ -95,11 +94,12 @@ enum Command {
 pub struct StoragePort {
     commands: mpsc::Sender<Command>,
     stop: watch::Receiver<bool>,
+    wake: mpsc::Sender<()>,
 }
 
 impl StoragePort {
     fn wake(&self) {
-        match self.commands.try_send(Command::Wake) {
+        match self.wake.try_send(()) {
             Ok(())
             | Err(mpsc::error::TrySendError::Full(_) | mpsc::error::TrySendError::Closed(_)) => {}
         }
@@ -114,7 +114,9 @@ impl StoragePort {
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => WorkerError::Capacity,
                 mpsc::error::TrySendError::Closed(_) => WorkerError::Closed,
-            })
+            })?;
+        self.wake();
+        Ok(())
     }
 
     pub async fn start_call(&self, id: ChannelId, timestamp: &str) -> Result<(), WorkerError> {
@@ -188,7 +190,6 @@ fn command(
     command: Command,
 ) {
     match command {
-        Command::Wake => {}
         Command::Play {
             media,
             output,
@@ -269,6 +270,7 @@ fn serve(
     mut store: Store,
     root: PathBuf,
     mut commands: mpsc::Receiver<Command>,
+    mut wakes: mpsc::Receiver<()>,
     stop: watch::Receiver<bool>,
 ) {
     let mut recordings = RecordingSet::new(root.clone());
@@ -285,16 +287,25 @@ fn serve(
             playbacks.pump();
             break;
         }
-        match commands.blocking_recv() {
-            Some(next) => {
-                recordings.pump();
-                playbacks.pump();
-                command(&mut store, &mut recordings, &mut playbacks, next);
-                recordings.pump();
-                playbacks.pump();
-            }
-            None => break,
+        if wakes.blocking_recv().is_none() {
+            break;
         }
+        for _ in 0..64 {
+            match commands.try_recv() {
+                Ok(next) => {
+                    recordings.pump();
+                    playbacks.pump();
+                    command(&mut store, &mut recordings, &mut playbacks, next);
+                    recordings.pump();
+                    playbacks.pump();
+                }
+                Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                    break
+                }
+            }
+        }
+        recordings.pump();
+        playbacks.pump();
     }
 }
 
@@ -302,7 +313,7 @@ pub struct StorageWorker {
     thread: Option<JoinHandle<()>>,
     completed: Option<oneshot::Receiver<()>>,
     stop: watch::Sender<bool>,
-    commands: mpsc::Sender<Command>,
+    wake: mpsc::Sender<()>,
 }
 
 impl StorageWorker {
@@ -311,12 +322,14 @@ impl StorageWorker {
             return Err(WorkerError::Invalid);
         }
         let (commands, receiver) = mpsc::channel(64);
+        let (wake, wakes) = mpsc::channel(1);
         let (stop, stopped) = watch::channel(false);
         let (ready, startup) = oneshot::channel();
         let (completed, completion) = oneshot::channel();
         let port = StoragePort {
             commands: commands.clone(),
             stop: stopped.clone(),
+            wake: wake.clone(),
         };
         let thread = std::thread::Builder::new()
             .name("rusterisk-storage".into())
@@ -324,7 +337,7 @@ impl StorageWorker {
                 match Store::open(&root) {
                     Ok(store) => {
                         if ready.send(Ok(())).is_ok() {
-                            serve(store, root, receiver, stopped);
+                            serve(store, root, receiver, wakes, stopped);
                         }
                     }
                     Err(error) => {
@@ -341,7 +354,7 @@ impl StorageWorker {
             thread: Some(thread),
             completed: Some(completion),
             stop,
-            commands,
+            wake,
         };
         match receive(startup).await {
             Ok(()) => Ok((port, worker)),
@@ -356,7 +369,7 @@ impl StorageWorker {
 
     fn begin_close(&self) {
         self.stop.send_replace(true);
-        match self.commands.try_send(Command::Wake) {
+        match self.wake.try_send(()) {
             Ok(())
             | Err(mpsc::error::TrySendError::Full(_) | mpsc::error::TrySendError::Closed(_)) => {}
         }
@@ -402,18 +415,43 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::{mpsc, watch};
 
+    #[test]
+    fn audio_wake_notifications_do_not_consume_storage_command_capacity() -> Result<(), WorkerError>
+    {
+        let (commands, receiver) = mpsc::channel(64);
+        let (_stop, stopped) = watch::channel(false);
+        let (wake, notifications) = mpsc::channel(1);
+        let port = StoragePort {
+            commands,
+            stop: stopped,
+            wake,
+        };
+        for _ in 0..1000 {
+            port.wake();
+        }
+        assert_eq!(receiver.len(), 0);
+        assert_eq!(notifications.len(), 1);
+        let (reply, _response) = tokio::sync::oneshot::channel();
+        port.send(Command::Recordings { reply })?;
+        assert_eq!(receiver.len(), 1);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn queued_storage_work_is_bounded_before_the_worker_accepts_more(
     ) -> Result<(), WorkerError> {
         let (commands, receiver) = mpsc::channel(64);
         let (stop, stopped) = watch::channel(false);
+        let (wake, _notifications) = mpsc::channel(1);
         let port = StoragePort {
             commands: commands.clone(),
             stop: stopped,
+            wake,
         };
         for _ in 0..64 {
+            let (reply, _response) = tokio::sync::oneshot::channel();
             commands
-                .try_send(Command::Wake)
+                .try_send(Command::Recordings { reply })
                 .map_err(|_| WorkerError::Capacity)?;
         }
         let id = ChannelId::try_from("refused".to_owned()).map_err(|_| WorkerError::Invalid)?;
