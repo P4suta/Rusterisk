@@ -4,6 +4,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+#[cfg(test)]
+mod tests;
+
 #[derive(PartialEq, Eq)]
 pub struct File {
     pub path: PathBuf,
@@ -141,6 +144,13 @@ impl Snapshot {
             }
         }
         write_new(&state.join("fuzz/Cargo.toml"), self.normalized.as_bytes())
+    }
+
+    pub fn verify_source(&self, source: &Path) -> Result<(), FuzzError> {
+        if Self::read(source)?.files != self.files {
+            return Err(FuzzError::SourceChanged);
+        }
+        Ok(())
     }
 
     pub fn check_harness(&self, state: &Path) -> Result<(), FuzzError> {

@@ -18,6 +18,7 @@ pub const NIGHTLY: &str = "nightly-2026-08-21";
 pub enum FuzzError {
     Plan,
     Manifest,
+    SourceChanged,
     Inventory,
     Results,
     Io(std::io::Error),
@@ -34,6 +35,7 @@ impl std::fmt::Display for FuzzError {
         match self {
             Self::Plan => formatter.write_str("invalid bounded input fuzz plan"),
             Self::Manifest => formatter.write_str("fuzz manifest must bind every target to production workspace dependencies"),
+            Self::SourceChanged => formatter.write_str("captured fuzz source changed during execution"),
             Self::Inventory => formatter.write_str("fuzz inventory must contain every maintained target exactly once"),
             Self::Results => formatter.write_str("input fuzz requires nonempty complete native execution without crashes or timeouts"),
             Self::Io(error) => error.fmt(formatter),

@@ -245,9 +245,7 @@ pub fn execute(scope: Scope, execution: Execution, image: &str) -> Result<(), Fu
                 }
             }
         }
-        if Snapshot::read(&root)?.files != snapshot.files {
-            return Err(FuzzError::Manifest);
-        }
+        snapshot.verify_source(&source)?;
         snapshot.check_harness(&state)?;
         println!("input fuzz: every selected target completed without crashes");
         Ok(())
