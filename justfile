@@ -31,6 +31,9 @@ reference-build *arguments="--dry-run":
 verification-build *arguments="--dry-run":
     cargo run --locked --target-dir target/xtask --package xtask -- verification-build {{ arguments }}
 
+browser-build *arguments="--dry-run":
+    cargo run --locked --target-dir target/xtask --package xtask -- browser-build {{ arguments }}
+
 interop *arguments="":
     cargo run --locked --target-dir target/xtask --package xtask -- interop {{ arguments }}
 

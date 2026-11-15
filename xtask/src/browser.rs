@@ -1,4 +1,6 @@
 use sha2::{Digest, Sha256};
+mod build;
+pub use build::Build;
 use std::{
     io::{Read, Write},
     path::Path,

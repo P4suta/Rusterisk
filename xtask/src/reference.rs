@@ -75,7 +75,7 @@ fn step(arguments: &[&str], seconds: u64) -> Step {
     }
 }
 
-fn valid_identity(identity: &str) -> bool {
+pub(crate) fn valid_identity(identity: &str) -> bool {
     !identity.is_empty()
         && identity.len() <= 64
         && identity
@@ -108,7 +108,7 @@ impl ReferenceBuild {
     }
 }
 
-fn build_steps(name: &str, tag: &str, context: &str, seconds: u64) -> Vec<Step> {
+pub(crate) fn build_steps(name: &str, tag: &str, context: &str, seconds: u64) -> Vec<Step> {
     [
         step(&["buildx", "create", "--name", name, "--driver", "docker-container", "--driver-opt", "memory=2g,memory-swap=2g,cpu-quota=200000,cpu-period=100000,restart-policy=no,image=moby/buildkit@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe"], 30),
         step(&["buildx", "inspect", "--bootstrap", name], 180),
