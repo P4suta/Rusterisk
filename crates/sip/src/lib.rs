@@ -630,6 +630,12 @@ impl Engine {
                 DialogReply::Rejected(bytes) => return Ok(Output::response(peer, bytes)),
             }
         }
+        if request.method == Method::Invite && request.to_header()?.typed()?.tag().is_some() {
+            return Ok(Output::response(
+                peer,
+                response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
+            ));
+        }
         let mut events = Vec::new();
         let reply = match request.method {
             Method::Options => response(

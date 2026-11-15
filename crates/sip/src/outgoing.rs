@@ -732,7 +732,7 @@ impl Engine {
         peer: SocketAddr,
         now: u64,
     ) -> Result<Option<DialogReply>, SipError> {
-        if !matches!(request.method, Method::Bye | Method::Info) {
+        if !matches!(request.method, Method::Bye | Method::Info | Method::Invite) {
             return Ok(None);
         }
         let Some(dialog) = self.outgoing.get_mut(request.call_id_header()?.value()) else {
@@ -757,6 +757,16 @@ impl Engine {
                 "Server Internal Error",
                 "",
                 "",
+            )?)));
+        }
+        if request.method == Method::Invite {
+            let (code, phrase) = if matches!(dialog.state, State::Established(_)) {
+                (501, "Not Implemented")
+            } else {
+                (481, "Call/Transaction Does Not Exist")
+            };
+            return Ok(Some(DialogReply::Rejected(crate::response(
+                request, code, phrase, "", "",
             )?)));
         }
         dialog.remote_cseq = Some(sequence);

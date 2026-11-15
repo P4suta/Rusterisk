@@ -303,7 +303,7 @@ impl Engine {
         peer: SocketAddr,
         now: u64,
     ) -> Result<Option<DialogReply>, SipError> {
-        if !matches!(request.method, Method::Bye | Method::Info) {
+        if !matches!(request.method, Method::Bye | Method::Info | Method::Invite) {
             return Ok(None);
         }
         let mut matched = None;
@@ -324,6 +324,15 @@ impl Engine {
                 "Server Internal Error",
                 "",
                 "",
+            )?)));
+        }
+        if request.method == Method::Invite {
+            let (code, phrase) = match dialog.state {
+                State::Terminated { .. } => (481, "Call/Transaction Does Not Exist"),
+                State::AwaitingAck { .. } | State::Established => (501, "Not Implemented"),
+            };
+            return Ok(Some(DialogReply::Rejected(response(
+                request, code, phrase, "", "",
             )?)));
         }
         if request.method == Method::Info {

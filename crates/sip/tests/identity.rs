@@ -151,6 +151,65 @@ fn merged_invitation_branches_do_not_create_or_replace_an_owned_call() -> Result
     Ok(())
 }
 
+fn tagged_invitation(wire: &str, tag: &str, sequence: u32) -> Result<String, SipError> {
+    let mut packet = request(wire.as_bytes())?;
+    let to = packet.to_header()?.typed()?.with_tag(tag.into());
+    packet.to_header_mut()?.replace(to.to_string());
+    packet
+        .cseq_header_mut()?
+        .replace(format!("{sequence} INVITE"));
+    reauthenticate(
+        &packet
+            .to_string()
+            .replace("z9hG4bK-2", &format!("z9hG4bK-update-{sequence}")),
+        2,
+    )
+}
+
+#[test]
+fn tagged_invitations_never_enter_initial_call_admission() -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (original, wire, _) = authenticated_invite(&mut engine)?;
+    let id = incoming_id(&original)?;
+    let unknown = tagged_invitation(&wire, "unknown", 3)?;
+    let rejected = engine.receive(unknown.as_bytes(), peer, 2)?;
+    assert!(rejected.datagrams[0].bytes.starts_with(b"SIP/2.0 481"));
+    assert!(rejected.events.is_empty());
+    assert!(engine.pending(&id).is_some());
+    let answered = engine.answer(&id, 7, "127.0.0.1:10000".parse()?, 3)?;
+    engine.receive(
+        &incoming_request(&answered.datagrams[0].bytes, "ACK", 2)?,
+        peer,
+        4,
+    )?;
+    let reply = match SipMessage::try_from(answered.datagrams[0].bytes.as_slice())? {
+        SipMessage::Response(reply) => reply,
+        SipMessage::Request(_) => return Err(SipError::InvalidPacket),
+    };
+    let tag = reply
+        .to_header()?
+        .typed()?
+        .tag()
+        .ok_or(SipError::InvalidPacket)?
+        .value()
+        .to_owned();
+    let update = tagged_invitation(&wire, &tag, 4)?;
+    let unsupported = engine.receive(update.as_bytes(), peer, 5)?;
+    assert!(unsupported.datagrams[0].bytes.starts_with(b"SIP/2.0 501"));
+    assert!(unsupported.events.is_empty());
+    assert!(engine.active_session(&id, 7).is_some());
+    let ended = engine.receive(
+        &incoming_request(&answered.datagrams[0].bytes, "BYE", 5)?,
+        peer,
+        6,
+    )?;
+    assert!(
+        matches!(&ended.events[..], [SipEvent::Ended { id: ended, generation: 7, .. }] if ended == &id)
+    );
+    Ok(())
+}
+
 #[test]
 fn authenticated_identity_is_distinct_from_caller_id_and_retransmission_is_idempotent(
 ) -> Result<(), SipError> {
