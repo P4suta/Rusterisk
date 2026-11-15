@@ -18,6 +18,10 @@ const MAX_DIRECTORY_ENTRIES: usize = 4096;
 #[derive(Debug)]
 pub enum StorageError {
     Io(std::io::Error),
+    PublicationCleanup {
+        operation: std::io::Error,
+        cleanup: std::io::Error,
+    },
     Database(rusqlite::Error),
     Media(rusterisk_media::MediaError),
     InvalidName,
@@ -35,6 +39,12 @@ impl std::fmt::Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(error) => write!(f, "recording I/O: {error}"),
+            Self::PublicationCleanup { operation, cleanup } => {
+                write!(
+                    f,
+                    "recording publication failed: {operation}, stage cleanup failed: {cleanup}"
+                )
+            }
             Self::Database(error) => write!(f, "metadata: {error}"),
             Self::Media(error) => write!(f, "{error}"),
             Self::InvalidName => f.write_str("invalid recording or call name"),

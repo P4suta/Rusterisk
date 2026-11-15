@@ -77,3 +77,44 @@ fn recording_copies_publish_exact_complete_bytes_and_reserve_their_destination(
     assert_eq!(reopened.recordings()?.len(), 2);
     Ok(())
 }
+
+#[test]
+fn failed_copy_publication_removes_its_stage_and_preserves_the_existing_destination(
+) -> Result<(), StorageError> {
+    let directory = tempfile::tempdir()?;
+    let store = Store::open(directory.path())?;
+    let mut source = Recorder::create(directory.path(), "source", 8000)?;
+    source.write(Frame::new(&[1234; 160], 8000)?)?;
+    source.finish()?;
+    let mut copy = store.prepare_recording_copy("source", "copy")?;
+    while !copy.is_ready() {
+        copy.advance()?;
+    }
+    let destination = directory.path().join("recordings/copy.wav");
+    std::fs::write(&destination, b"existing destination")?;
+    assert!(matches!(copy.finish(), Err(StorageError::Io(_))));
+    assert_eq!(std::fs::read(&destination)?, b"existing destination");
+    assert!(!directory.path().join("recordings/copy.copying").exists());
+    std::fs::remove_file(destination)?;
+    store.prepare_recording_copy("source", "copy")?.cancel()?;
+    let incomplete = store.prepare_recording_copy("source", "incomplete")?;
+    assert!(matches!(
+        incomplete.finish(),
+        Err(StorageError::InvalidState)
+    ));
+    assert!(!directory
+        .path()
+        .join("recordings/incomplete.copying")
+        .exists());
+    let mut missing = store.prepare_recording_copy("source", "missing-stage")?;
+    while !missing.is_ready() {
+        missing.advance()?;
+    }
+    std::fs::remove_file(directory.path().join("recordings/missing-stage.copying"))?;
+    let Err(StorageError::PublicationCleanup { operation, cleanup }) = missing.finish() else {
+        return Err(StorageError::InvalidState);
+    };
+    assert_eq!(operation.kind(), std::io::ErrorKind::NotFound);
+    assert_eq!(cleanup.kind(), std::io::ErrorKind::NotFound);
+    Ok(())
+}

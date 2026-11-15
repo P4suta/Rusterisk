@@ -69,12 +69,21 @@ impl RecordingCopy {
 
     pub fn finish(self) -> Result<StoredRecording, StorageError> {
         if !self.is_ready() {
+            self.cancel()?;
             return Err(StorageError::InvalidState);
         }
-        self.file.sync_all()?;
+        let synchronized = self.file.sync_all();
         drop(self.file);
-        std::fs::hard_link(&self.path, self.path.with_extension("wav"))?;
-        std::fs::remove_file(self.path)?;
+        let publication = synchronized
+            .and_then(|()| std::fs::hard_link(&self.path, self.path.with_extension("wav")));
+        let cleanup = std::fs::remove_file(self.path);
+        match (publication, cleanup) {
+            (Ok(()), Ok(())) => {}
+            (Err(operation), Err(cleanup)) => {
+                return Err(StorageError::PublicationCleanup { operation, cleanup });
+            }
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(StorageError::Io(error)),
+        }
         Ok(StoredRecording {
             name: self.name,
             format: "wav".into(),
