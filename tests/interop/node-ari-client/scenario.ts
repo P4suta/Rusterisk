@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import ari from "ari-client";
 import type { ApplicationSnapshot, EndpointSnapshot } from "./contracts.ts";
 import { application, endpoint, target } from "./contracts.ts";
+import { deadline } from "./deadline.ts";
 
 type Snapshot = {
 	readonly endpoints: readonly EndpointSnapshot[];
@@ -9,10 +10,18 @@ type Snapshot = {
 };
 
 async function snapshot(address: string): Promise<Snapshot> {
-	const client = await ari.connect(target(address), "app", "test-password");
-	await client.start("compat-node");
+	const client = await deadline(
+		`discovery at ${target(address)}`,
+		ari.connect(target(address), "app", "test-password"),
+		5000,
+	);
+	await deadline("event subscription", client.start("compat-node"), 5000);
 	try {
-		const resources: unknown = await client.endpoints.list();
+		const resources: unknown = await deadline(
+			"endpoint list",
+			client.endpoints.list(),
+			5000,
+		);
 		if (!Array.isArray(resources) || resources.length > 256) {
 			throw new Error("invalid endpoint list");
 		}
@@ -27,7 +36,11 @@ async function snapshot(address: string): Promise<Snapshot> {
 						: 0;
 			});
 		const app = application(
-			await client.applications.get({ applicationName: "compat-node" }),
+			await deadline(
+				"app query",
+				client.applications.get({ applicationName: "compat-node" }),
+				5000,
+			),
 		);
 		return { endpoints, application: app };
 	} finally {
@@ -37,5 +50,7 @@ async function snapshot(address: string): Promise<Snapshot> {
 
 const reference = target(process.env.RUSTERISK_REFERENCE_URL);
 const actual = target(process.env.RUSTERISK_ACTUAL_URL);
-assert.deepEqual(await snapshot(actual), await snapshot(reference));
+for (let attempt = 0; attempt < 5; attempt += 1) {
+	assert.deepEqual(await snapshot(actual), await snapshot(reference));
+}
 console.log("Existing client resource comparison passed.");
