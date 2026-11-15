@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 mod expansion;
+mod registration;
 mod wait_duration;
 mod websocket;
 pub use expansion::{expand_variables, ExpansionError};
@@ -12,6 +13,7 @@ const MAX_FILE: usize = 1024 * 1024;
 const MAX_SECTIONS: usize = 256;
 const MAX_OPTIONS: usize = 128;
 pub const MAX_TRANSPORTS: usize = 16;
+pub const MAX_REGISTRATIONS: usize = 16;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret(String);
@@ -348,7 +350,14 @@ pub struct Registration {
     pub outbound_auth: String,
     pub server_uri: String,
     pub client_uri: String,
-    pub expiration: u16,
+    pub expiration: u32,
+    pub contact_user: String,
+    pub retry_interval: u32,
+    pub forbidden_retry_interval: u32,
+    pub fatal_retry_interval: u32,
+    pub max_retries: u32,
+    pub max_random_initial_delay: u32,
+    pub auth_rejection_permanent: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -858,15 +867,48 @@ impl Config {
                         "server_uri",
                         "client_uri",
                         "expiration",
+                        "contact_user",
+                        "retry_interval",
+                        "forbidden_retry_interval",
+                        "fatal_retry_interval",
+                        "max_retries",
+                        "max_random_initial_delay",
+                        "auth_rejection_permanent",
                     ],
                 )?;
+                if self.registrations.len() >= MAX_REGISTRATIONS {
+                    return Err(ConfigError::at(
+                        file,
+                        section.line,
+                        "registration client limit is 16",
+                    ));
+                }
                 self.registrations.push(Registration {
                     name: section.name.clone(),
                     transport: section.required(file, "transport")?.into(),
                     outbound_auth: section.required(file, "outbound_auth")?.into(),
                     server_uri: section.required(file, "server_uri")?.into(),
                     client_uri: section.required(file, "client_uri")?.into(),
-                    expiration: section.number(file, "expiration", 300)?,
+                    expiration: section.number(file, "expiration", 3600)?,
+                    contact_user: registration::contact_user(file, &section)?,
+                    retry_interval: section.number(file, "retry_interval", 60)?,
+                    forbidden_retry_interval: section.number(
+                        file,
+                        "forbidden_retry_interval",
+                        0,
+                    )?,
+                    fatal_retry_interval: section.number(file, "fatal_retry_interval", 0)?,
+                    max_retries: section.number(file, "max_retries", 10)?,
+                    max_random_initial_delay: section.number(
+                        file,
+                        "max_random_initial_delay",
+                        10,
+                    )?,
+                    auth_rejection_permanent: section.flag(
+                        file,
+                        "auth_rejection_permanent",
+                        true,
+                    )?,
                 });
             }
             "identify" => {
