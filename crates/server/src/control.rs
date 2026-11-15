@@ -369,6 +369,7 @@ pub enum CallHistoryEvent {
 #[derive(Debug)]
 pub struct Outcome {
     pub status: u16,
+    pub location: Option<String>,
     pub body: Option<Value>,
     pub effects: Vec<Effect>,
     pub events: Vec<Event>,
@@ -379,6 +380,7 @@ impl Outcome {
     pub(crate) fn empty() -> Self {
         Self {
             status: 204,
+            location: None,
             body: None,
             effects: Vec::new(),
             events: Vec::new(),
@@ -388,6 +390,7 @@ impl Outcome {
     fn json(value: impl serde::Serialize) -> Result<Self, ControlError> {
         Ok(Self {
             status: 200,
+            location: None,
             body: Some(serde_json::to_value(value)?),
             effects: Vec::new(),
             events: Vec::new(),

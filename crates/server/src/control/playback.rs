@@ -80,6 +80,7 @@ impl Control {
         };
         let mut outcome = Outcome::json(playback.snapshot(&id))?;
         outcome.status = 201;
+        outcome.location = Some(format!("/ari/playbacks/{id}"));
         self.playbacks.insert(id, playback);
         self.next_playback(&key, &mut outcome)?;
         Ok(outcome)

@@ -200,7 +200,7 @@ async fn http_bridge_lifecycle_and_known_unsupported_operations_have_ari_errors(
     assert_eq!(error.message, "Bridge not found");
     assert_eq!(
         app.clone()
-            .oneshot(request("POST", "/ari/channels/x/play", Some("test"))?)
+            .oneshot(request("POST", "/ari/channels/x/record", Some("test"))?)
             .await
             .map_err(|error| ControlError::Adapter(error.to_string()))?
             .status(),

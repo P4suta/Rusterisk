@@ -1,3 +1,4 @@
+use crate::media::PlaybackControl;
 use crate::{Action, ControlError, Controller, Credentials, Outcome};
 use axum::{
     body::Bytes,
@@ -8,7 +9,7 @@ use axum::{
     Json, Router,
 };
 use base64::Engine;
-use rusterisk_api::ChannelId;
+use rusterisk_api::{ChannelId, InvalidMediaUri, MediaUri};
 use rusterisk_core::{DtmfTiming, MuteDirection};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -164,10 +165,60 @@ fn digit_timing(parameters: &BTreeMap<String, String>) -> Result<DtmfTiming, Con
     )?)
 }
 
-fn response(outcome: Outcome) -> Response {
-    match outcome.body {
-        Some(body) => (StatusCode::OK, Json(body)).into_response(),
-        None => StatusCode::NO_CONTENT.into_response(),
+fn response(outcome: Outcome) -> Result<Response, ControlError> {
+    let status = StatusCode::from_u16(outcome.status)
+        .map_err(|error| ControlError::Encoding(error.to_string()))?;
+    let mut response = match outcome.body {
+        Some(body) => (status, Json(body)).into_response(),
+        None => status.into_response(),
+    };
+    if let Some(location) = outcome.location {
+        response.headers_mut().insert(
+            axum::http::header::LOCATION,
+            location
+                .parse()
+                .map_err(|error: axum::http::header::InvalidHeaderValue| {
+                    ControlError::Encoding(error.to_string())
+                })?,
+        );
+    }
+    Ok(response)
+}
+
+fn play_channel(
+    channel: &str,
+    playback: ChannelId,
+    parameters: &BTreeMap<String, String>,
+) -> Result<Action, ControlError> {
+    if parameters
+        .get("lang")
+        .is_some_and(|language| !language.is_empty())
+    {
+        return Err(ControlError::Unsupported);
+    }
+    let media =
+        MediaUri::try_from(required(parameters, "media")?).map_err(|error| match error {
+            InvalidMediaUri::Unsupported => ControlError::Unsupported,
+            InvalidMediaUri::Syntax | InvalidMediaUri::Name => {
+                ControlError::Invalid("Invalid media URI")
+            }
+        })?;
+    Ok(Action::PlayChannel {
+        channel: id(channel)?,
+        id: playback,
+        media,
+    })
+}
+
+fn playback_control(
+    parameters: &BTreeMap<String, String>,
+) -> Result<PlaybackControl, ControlError> {
+    match required(parameters, "operation")? {
+        "pause" => Ok(PlaybackControl::Pause),
+        "unpause" => Ok(PlaybackControl::Resume),
+        "stop" => Ok(PlaybackControl::Stop),
+        "restart" | "forward" | "reverse" => Err(ControlError::Unsupported),
+        _ => Err(ControlError::Invalid("Invalid playback operation")),
     }
 }
 
@@ -288,6 +339,21 @@ async fn dispatch(
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let action = match (method.as_str(), segments.as_slice()) {
+        ("POST", ["ari", "channels", channel, "play"]) => {
+            play_channel(channel, optional_id(parameters, "playbackId")?, parameters)?
+        }
+        ("POST", ["ari", "channels", channel, "play", playback]) => {
+            play_channel(channel, id(playback)?, parameters)?
+        }
+        ("GET", ["ari", "playbacks", playback]) => Action::GetPlayback(id(playback)?),
+        ("DELETE", ["ari", "playbacks", playback]) => Action::ControlPlayback {
+            id: id(playback)?,
+            operation: PlaybackControl::Stop,
+        },
+        ("POST", ["ari", "playbacks", playback, "control"]) => Action::ControlPlayback {
+            id: id(playback)?,
+            operation: playback_control(parameters)?,
+        },
         ("GET", ["ari", "channels"]) => Action::ListChannels,
         ("POST", ["ari", "channels"]) => Action::Originate {
             id: optional_id(parameters, "channelId")?,
@@ -391,9 +457,7 @@ async fn dispatch(
         }
         _ => return Err(ControlError::NotFound("Resource not found")),
     };
-    Ok(response(
-        controller.execute(credentials, origin, action).await?,
-    ))
+    response(controller.execute(credentials, origin, action).await?)
 }
 
 async fn api(
