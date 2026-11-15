@@ -87,6 +87,7 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
     std::fs::create_dir_all("target/interop")?;
     copy_configuration(Path::new("tests/interop/asterisk"), &configuration)?;
     let result = (|| {
+        std::fs::create_dir(configuration.join("sounds"))?;
         perform(&start)?;
         let address = published_address(&captured(&plan.port(), &identity, "port")?)
             .map_err(|_| ProcessError::InvalidOutput)?;

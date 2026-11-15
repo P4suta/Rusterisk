@@ -122,6 +122,11 @@ impl Interop {
                     "type=bind,source={},target=/etc/asterisk,readonly",
                     self.configuration
                 ),
+                "--mount",
+                &format!(
+                    "type=bind,source={}/sounds,target=/var/lib/asterisk/sounds,readonly",
+                    self.configuration
+                ),
                 "--entrypoint",
                 "/usr/bin/timeout",
                 "rusterisk-asterisk-reference:22.9.0",

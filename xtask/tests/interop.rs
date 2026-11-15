@@ -119,6 +119,8 @@ fn interop_uses_an_ephemeral_local_port_and_bounded_disposable_state() -> Result
     }
     assert!(start.arguments.iter().any(|value| value
         == "type=bind,source=/workspace/tests/interop/asterisk,target=/etc/asterisk,readonly"));
+    assert!(start.arguments.iter().any(|value| value
+        == "type=bind,source=/workspace/tests/interop/asterisk/sounds,target=/var/lib/asterisk/sounds,readonly"));
     assert_eq!(
         plan.port().arguments,
         ["port", "rusterisk-interop-fixture", "8088/tcp"]
