@@ -17,6 +17,8 @@ Inspect only the runner's container for one private IPv4 address.
 Pass the address to the bounded comparison process.
 Choose datagram return addresses through an operating system route probe.
 Resolve `host.docker.internal` inside the reference for stream callbacks.
+Add `host.docker.internal:host-gateway` on Linux through Docker's [`--add-host`](https://docs.docker.com/reference/cli/docker/container/run/#add-entries-to-container-hosts-file---add-host) flag.
+Keep runtime hostname resolution on macOS and Windows.
 Keep the reference's existing processor, memory, port range, and lifetime limits.
 
 ## Alternatives

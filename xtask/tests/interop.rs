@@ -1,4 +1,36 @@
-use xtask::reference::{published_address, Interop, ReferenceError};
+use xtask::reference::{published_address, CallbackHost, Interop, ReferenceError};
+
+#[test]
+fn native_linux_callbacks_add_the_host_gateway_without_overriding_managed_dns(
+) -> Result<(), ReferenceError> {
+    let plan = Interop::new("fixture", "/workspace/tests/interop/asterisk")?;
+    let managed = plan.start_for(CallbackHost::ManagedDns);
+    let mut linux = plan.start_for(CallbackHost::DockerGateway);
+    let mapping = "--add-host=host.docker.internal:host-gateway";
+    assert!(!managed
+        .arguments
+        .iter()
+        .any(|argument| argument.starts_with("--add-host")));
+    assert_eq!(
+        linux
+            .arguments
+            .iter()
+            .filter(|argument| argument.as_str() == mapping)
+            .count(),
+        1
+    );
+    linux.arguments.retain(|argument| argument != mapping);
+    assert_eq!(linux.arguments, managed.arguments);
+    assert_eq!(linux.budget, managed.budget);
+    assert_eq!(
+        plan.start()
+            .arguments
+            .iter()
+            .any(|argument| argument == mapping),
+        cfg!(target_os = "linux")
+    );
+    Ok(())
+}
 
 #[test]
 fn callback_inspection_accepts_only_one_unicast_host_address() -> Result<(), ReferenceError> {

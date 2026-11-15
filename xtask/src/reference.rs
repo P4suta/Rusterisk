@@ -1,6 +1,6 @@
 use std::time::Duration;
 mod interop;
-pub use interop::{callback_address, media_address, published_address, Interop};
+pub use interop::{callback_address, media_address, published_address, CallbackHost, Interop};
 
 pub struct Step {
     pub arguments: Vec<String>,

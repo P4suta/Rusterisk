@@ -6,6 +6,12 @@ pub struct Interop {
     configuration: String,
 }
 
+#[derive(Clone, Copy)]
+pub enum CallbackHost {
+    DockerGateway,
+    ManagedDns,
+}
+
 pub fn callback_address(output: &str) -> Result<std::net::Ipv4Addr, ReferenceError> {
     if output.len() > 128 {
         return Err(ReferenceError::InvalidAddress);
@@ -80,7 +86,15 @@ impl Interop {
     }
 
     pub fn start(&self) -> Step {
-        step(
+        self.start_for(if cfg!(target_os = "linux") {
+            CallbackHost::DockerGateway
+        } else {
+            CallbackHost::ManagedDns
+        })
+    }
+
+    pub fn start_for(&self, callback: CallbackHost) -> Step {
+        let mut start = step(
             &[
                 "run",
                 "--detach",
@@ -120,7 +134,14 @@ impl Interop {
                 "/etc/asterisk/asterisk.conf",
             ],
             30,
-        )
+        );
+        match callback {
+            CallbackHost::DockerGateway => start
+                .arguments
+                .insert(1, "--add-host=host.docker.internal:host-gateway".into()),
+            CallbackHost::ManagedDns => {}
+        }
+        start
     }
 
     pub fn port(&self) -> Step {
