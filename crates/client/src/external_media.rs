@@ -1,6 +1,36 @@
 use crate::{api, Client, Error};
 
 impl Client {
+    pub async fn external_websocket_client(
+        &self,
+        id: &api::ChannelId,
+        app: &str,
+        connection: &str,
+        options: api::WebSocketMediaOptions,
+        data: &str,
+    ) -> Result<api::Channel, Error> {
+        api::ChannelId::try_from(app.to_owned())?;
+        api::ChannelId::try_from(connection.to_owned())?;
+        let transport_data = options.transport_data();
+        self.request(
+            "channels.externalMedia",
+            &[],
+            &[
+                ("channelId", id.as_str()),
+                ("app", app),
+                ("external_host", connection),
+                ("format", options.format.as_str()),
+                ("encapsulation", "none"),
+                ("transport", "websocket"),
+                ("connection_type", "client"),
+                ("direction", options.direction.as_str()),
+                ("data", data),
+                ("transport_data", &transport_data),
+            ],
+        )
+        .await
+    }
+
     pub async fn external_websocket(
         &self,
         id: &api::ChannelId,
