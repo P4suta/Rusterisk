@@ -27,6 +27,13 @@ pub struct WebSocketClient {
 
 fn client(section: Section) -> Result<WebSocketClient, ConfigError> {
     let file = "websocket_client.conf";
+    if section.name.contains('/') || matches!(section.name.as_str(), "." | "..") {
+        return Err(ConfigError::at(
+            file,
+            section.line,
+            "invalid media connection id",
+        ));
+    }
     let error = |key: &str, reason: &str| ConfigError::at(file, section.position(key), reason);
     section.check(
         file,

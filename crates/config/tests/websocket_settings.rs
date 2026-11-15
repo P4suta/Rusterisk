@@ -94,3 +94,14 @@ fn media_clients_accept_a_bounded_trust_file_only_for_verified_tls() -> Result<(
     );
     Ok(())
 }
+
+#[test]
+fn media_connection_names_must_fit_the_typed_protocol_identifier() -> Result<(), ConfigError> {
+    for name in ["agent/path", ".", ".."] {
+        let result = base()?.with_websocket_configuration("", &format!("[{name}]\ntype=websocket_client\nconnection_type=per_call_config\nuri=ws://localhost/media\nprotocols=media\n"));
+        assert!(
+            matches!(result, Err(ConfigError { file, line: 1, reason }) if file == "websocket_client.conf" && reason == "invalid media connection id")
+        );
+    }
+    Ok(())
+}
