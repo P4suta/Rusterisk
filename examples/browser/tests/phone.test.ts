@@ -14,12 +14,15 @@ class Port implements PhonePort<Capture> {
 	public calls: string[] = [];
 	public capture: Capture | undefined;
 	public session: SessionEvents | undefined;
+	public rejectConnection: boolean = false;
 	public connect(
 		_options: ConnectionOptions,
 		events: CallEvents,
 	): Promise<void> {
 		this.events = events;
 		this.calls.push("connect");
+		if (this.rejectConnection)
+			return Promise.reject(new Error("Registration refused."));
 		return Promise.resolve();
 	}
 	public disconnect(): Promise<void> {
@@ -163,13 +166,34 @@ await test("microphone denial leaves recovery available without sending an outgo
 	await phone.connect(options);
 	await phone.call("sip:100@localhost");
 	assert.equal(phone.state.call, "idle");
-	assert.match(phone.state.error, /microphone permission/i);
+	assert.equal(phone.state.problem?.area, "call");
+	assert.match(phone.state.problem.message, /microphone permission/i);
 	assert.deepEqual(port.calls, ["connect"]);
 	denied = false;
 	await phone.call("sip:100@localhost");
 	assert.equal(phone.state.call, "calling");
 	await phone.hangup();
 	assert.equal(stops, 1);
+	await phone.disconnect();
+});
+
+await test("connection failures belong to the connection form and remain available for recovery", async (): Promise<void> => {
+	const port = new Port();
+	port.rejectConnection = true;
+	const phone = new Phone(
+		port,
+		(): Promise<Capture> =>
+			Promise.reject(new Error("Connecting must not capture audio.")),
+		(): void => {},
+	);
+	await phone.connect(options);
+	assert.equal(phone.state.connection, "disconnected");
+	assert.equal(phone.state.problem?.area, "connection");
+	assert.match(phone.state.problem.message, /server address and account/i);
+	port.rejectConnection = false;
+	await phone.connect(options);
+	assert.equal(phone.state.problem, undefined);
+	assert.equal(phone.state.connection, "registered");
 	await phone.disconnect();
 });
 

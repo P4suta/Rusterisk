@@ -15,6 +15,11 @@ export interface SessionEvents {
 	ended(): void;
 }
 
+export interface PhoneProblem {
+	readonly area: "connection" | "call";
+	readonly message: string;
+}
+
 export interface CallEvents {
 	incoming(caller: string): SessionEvents | undefined;
 	disconnected(): void;
@@ -44,7 +49,7 @@ export interface PhoneState {
 		| "active"
 		| "ending";
 	readonly caller: string;
-	readonly error: string;
+	readonly problem: PhoneProblem | undefined;
 }
 
 export class Phone<C extends Capture> {
@@ -59,7 +64,7 @@ export class Phone<C extends Capture> {
 		connection: "disconnected",
 		call: "idle",
 		caller: "",
-		error: "",
+		problem: undefined,
 	};
 
 	public constructor(
@@ -108,7 +113,7 @@ export class Phone<C extends Capture> {
 	public async connect(options: ConnectionOptions): Promise<void> {
 		if (this.current.connection !== "disconnected") return;
 		const token = ++this.connectionToken;
-		this.publish({ connection: "connecting", error: "" });
+		this.publish({ connection: "connecting", problem: undefined });
 		try {
 			await this.port.connect(options, {
 				incoming: (caller: string): SessionEvents | undefined => {
@@ -122,7 +127,7 @@ export class Phone<C extends Capture> {
 					this.publish({
 						call: "incoming",
 						caller: caller.slice(0, 256),
-						error: "",
+						problem: undefined,
 					});
 					return this.session(this.callToken);
 				},
@@ -134,7 +139,10 @@ export class Phone<C extends Capture> {
 						connection: "disconnected",
 						call: "idle",
 						caller: "",
-						error: "Connection lost. Connect again to receive calls.",
+						problem: {
+							area: "connection",
+							message: "Connection lost. Connect again to receive calls.",
+						},
 					});
 				},
 			});
@@ -144,8 +152,11 @@ export class Phone<C extends Capture> {
 			if (this.connectionToken === token)
 				this.publish({
 					connection: "disconnected",
-					error:
-						"Connection failed. Check the server address and account, then connect again.",
+					problem: {
+						area: "connection",
+						message:
+							"Connection failed. Check the server address and account, then connect again.",
+					},
 				});
 		}
 	}
@@ -162,13 +173,16 @@ export class Phone<C extends Capture> {
 			connection: "disconnecting",
 			call: "idle",
 			caller: "",
-			error: "",
+			problem: undefined,
 		});
 		try {
 			await this.port.disconnect();
 		} catch {
 			this.publish({
-				error: "Disconnect failed. Close the page to end the connection.",
+				problem: {
+					area: "connection",
+					message: "Disconnect failed. Close the page to end the connection.",
+				},
 			});
 		}
 		this.publish({ connection: "disconnected" });
@@ -185,7 +199,7 @@ export class Phone<C extends Capture> {
 		const captureToken = ++this.captureToken;
 		this.publish({
 			call: incoming ? "answer-microphone" : "call-microphone",
-			error: "",
+			problem: undefined,
 		});
 		try {
 			const capture = await this.acquire();
@@ -206,9 +220,12 @@ export class Phone<C extends Capture> {
 				error instanceof DOMException && error.name === "NotAllowedError";
 			this.publish({
 				call: incoming ? "incoming" : "idle",
-				error: denied
-					? "Microphone permission was denied. Allow microphone access in browser settings, then try again."
-					: "The call could not start. Check microphone availability and the destination, then try again.",
+				problem: {
+					area: "call",
+					message: denied
+						? "Microphone permission was denied. Allow microphone access in browser settings, then try again."
+						: "The call could not start. Check microphone availability and the destination, then try again.",
+				},
 			});
 		}
 	}
@@ -224,18 +241,22 @@ export class Phone<C extends Capture> {
 		if (this.current.call === "idle" || this.current.call === "ending") return;
 		if (this.current.call === "call-microphone") {
 			this.release();
-			this.publish({ call: "idle", caller: "", error: "" });
+			this.publish({ call: "idle", caller: "", problem: undefined });
 			return;
 		}
 		this.capture?.stop();
 		this.capture = undefined;
 		this.captureToken += 1;
-		this.publish({ call: "ending", error: "" });
+		this.publish({ call: "ending", problem: undefined });
 		try {
 			await this.port.hangup();
 		} catch {
 			this.publish({
-				error: "The call could not end. Disconnect to close the connection.",
+				problem: {
+					area: "call",
+					message:
+						"The call could not end. Disconnect to close the connection.",
+				},
 			});
 		}
 	}

@@ -20,6 +20,7 @@ main {
 	max-inline-size: 42rem;
 	margin-inline: auto;
 	padding: 1.5rem;
+	overflow-wrap: anywhere;
 }
 
 h1 {
@@ -30,7 +31,6 @@ h1 {
 
 p {
 	margin-block: 1.5em;
-	overflow-wrap: anywhere;
 }
 
 fieldset {
@@ -120,7 +120,7 @@ button:disabled {
 	margin-block: 1rem;
 }
 
-#error {
+form [role="alert"] {
 	border: 2px solid black;
 	padding: 1rem;
 	font-weight: 600;

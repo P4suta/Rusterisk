@@ -10,14 +10,16 @@
 	<body>
 		<main>
 			<h1>Browser calls</h1>
-			<p>Connect with your signaling account to make and receive one call at a time.</p>
+			<p>Connect with your Session Initiation Protocol (SIP) account to make and receive one call at a time.</p>
+			<p id="startup-help">Enable JavaScript or reload the page if call controls remain unavailable.</p>
 			<noscript><p>Enable JavaScript to connect and make calls.</p></noscript>
 			<form id="connection-form">
 				<fieldset id="connection-fields" disabled>
 					<legend>Connection</legend>
 					<label for="server"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="7" rx="1"/><rect x="4" y="14" width="16" height="7" rx="1"/><path d="M7 7h1m-1 11h1"/></svg>WebSocket server URL</label>
 					<input id="server" name="server" type="url" maxlength="2048" required autocomplete="url" spellcheck="false" aria-describedby="server-help">
-					<p id="server-help">Use the server's secure WebSocket URL ending in /ws.</p>
+					<p id="server-help">Use the server's WebSocket URL ending in /ws.
+Remote servers require wss://, and the local example uses ws://127.0.0.1:8088/ws.</p>
 					<label for="address"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-3a8 8 0 0 1 16 0v3"/></svg>Account SIP address</label>
 					<input id="address" name="address" type="text" maxlength="256" required spellcheck="false" autocapitalize="none" aria-describedby="address-help">
 					<p id="address-help">Use the address supplied for your account, such as sip:alice@example.com.</p>
@@ -25,14 +27,16 @@
 					<input id="username" name="username" type="text" maxlength="128" required autocomplete="username" spellcheck="false" autocapitalize="none">
 					<label for="password"><svg aria-hidden="true" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="1"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 4v3"/></svg>Password</label>
 					<input id="password" name="password" type="password" maxlength="4096" required autocomplete="current-password">
+					<p id="ice-help">Interactive Connectivity Establishment (ICE) servers help the browser find a network path for the call.
+Keep [] for a local connection, or enter the JSON array supplied by your server administrator.</p>
 					<label for="ice"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="4" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="M12 6v5m-7 6v-6h14v6"/></svg>ICE servers, optional</label>
 					<textarea id="ice" name="ice" rows="3" maxlength="8192" spellcheck="false" aria-describedby="ice-help">[]</textarea>
-					<p id="ice-help">Keep [] for a local connection, or enter the STUN and TURN settings supplied by your server administrator as a JSON array.</p>
 				</fieldset>
 				<div class="actions">
 					<button id="connect" type="submit" disabled><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 3v5m8-5v5M5 8h14v3a7 7 0 0 1-14 0zm7 10v3"/></svg>Connect</button>
 					<button id="disconnect" type="button" disabled><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M8 3v5m8-5v5M5 8h14v3a7 7 0 0 1-14 0zm7 10v3M3 3l18 18"/></svg>Disconnect</button>
 				</div>
+				<p id="connection-error" role="alert" hidden></p>
 			</form>
 			<p id="connection-status" role="status" aria-live="polite" aria-atomic="true">Disconnected</p>
 			<form id="call-form">
@@ -40,16 +44,16 @@
 					<legend>Call</legend>
 					<label for="destination"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 3H3v4c0 8 6 14 14 14h4v-4l-5-2-2 3a17 17 0 0 1-8-8l3-2z"/></svg>Destination SIP address</label>
 					<input id="destination" name="destination" type="text" maxlength="256" required spellcheck="false" autocapitalize="none" aria-describedby="microphone-help">
-					<p id="microphone-help">Your microphone is requested only when you select Call or Answer.</p>
+					<p id="microphone-help">The browser requests your microphone only when you select Call or Answer.</p>
 				</fieldset>
 				<div class="actions">
 					<button id="call" type="submit" disabled><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 3H3v4c0 8 6 14 14 14h4v-4l-5-2-2 3a17 17 0 0 1-8-8l3-2z"/></svg>Call</button>
 					<button id="answer" type="button" disabled><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 3H3v4c0 8 6 14 14 14h4v-4l-5-2-2 3a17 17 0 0 1-8-8l3-2zM14 3h7v7m0-7-8 8"/></svg>Answer</button>
 					<button id="hangup" type="button" disabled><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 15v5h5v-5m8 0v5h5v-5M3 15a15 15 0 0 1 18 0M4 4l16 16"/></svg>End call</button>
 				</div>
+				<p id="call-error" role="alert" hidden></p>
 			</form>
 			<p id="call-status" role="status" aria-live="polite" aria-atomic="true">No active call</p>
-			<p id="error" role="alert" hidden></p>
 			<!-- biome-ignore lint/a11y/useMediaCaption: Live audio-only calls fall outside https://www.w3.org/TR/WCAG22/#captions-live. -->
 			<audio id="remote-audio" controls aria-label="Received call audio"></audio>
 			<p id="playback-help" hidden>Use the audio player's Play control to hear the call.</p>

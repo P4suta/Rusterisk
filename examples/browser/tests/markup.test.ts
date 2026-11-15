@@ -30,6 +30,16 @@ await test("browser call markup gives every input an explicit visible label and 
 		"utf8",
 	);
 	const nodes = elements(parse(source));
+	const startup = nodes.find(
+		(node: Element): boolean => attribute(node, "id") === "startup-help",
+	);
+	assert.ok(
+		startup,
+		"Disabled startup controls require a visible recovery message.",
+	);
+	assert.equal(attribute(startup, "hidden"), undefined);
+	assert.match(text(startup), /reload the page/i);
+	assert.match(text(startup), /enable JavaScript/i);
 	assert.equal(
 		nodes.filter((node: Element): boolean => node.tagName === "main").length,
 		1,
@@ -74,6 +84,16 @@ await test("browser call markup gives every input an explicit visible label and 
 	assert.ok(
 		nodes.some((node: Element): boolean => attribute(node, "role") === "alert"),
 	);
+	for (const form of nodes.filter(
+		(node: Element): boolean => node.tagName === "form",
+	))
+		assert.equal(
+			elements(form).filter(
+				(node: Element): boolean => attribute(node, "role") === "alert",
+			).length,
+			1,
+			"Each form must own its recovery message.",
+		);
 	assert.ok(
 		nodes.some(
 			(node: Element): boolean =>

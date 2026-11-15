@@ -8,7 +8,7 @@ await test("call controls expose connection, incoming answers, and cancellation 
 		connection: "disconnected",
 		call: "idle",
 		caller: "",
-		error: "",
+		problem: undefined,
 	};
 	assert.deepEqual(presentation(idle), {
 		connection: "Disconnected",
