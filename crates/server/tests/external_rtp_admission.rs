@@ -30,6 +30,96 @@ fn create(name: &str) -> Result<Action, ControlError> {
 }
 
 #[tokio::test]
+async fn abandoned_external_requests_release_their_generation_and_reject_late_completion(
+) -> Result<(), ControlError> {
+    let configuration = Config::parse(
+        "[general]\nbindaddr=127.0.0.1\n",
+        "[app]\ntype=user\npassword=test-password\n",
+        "",
+        "",
+        "",
+    )
+    .map_err(failure)?;
+    let (controller, runner, mut effects) = Controller::new(configuration, 4);
+    let task = tokio::spawn(runner.run());
+    let result = async {
+        let _subscription = controller
+            .subscribe(credentials()?, None, "calls".into())
+            .await?;
+        let abandoned = {
+            let mut request =
+                std::pin::pin!(controller.execute(credentials()?, None, create("reused")?));
+            assert!(
+                poll_fn(|context| Poll::Ready(request.as_mut().poll(context).is_pending())).await
+            );
+            let Effect::ConnectExternalRtp { key, .. } =
+                effects.recv().await.ok_or(ControlError::Capacity)?
+            else {
+                return Err(ControlError::Unsupported);
+            };
+            assert!(
+                poll_fn(|context| Poll::Ready(request.as_mut().poll(context).is_pending())).await
+            );
+            key
+        };
+        let released = tokio::time::timeout(Duration::from_secs(1), effects.recv())
+            .await
+            .map_err(failure)?
+            .ok_or(ControlError::Capacity)?;
+        assert!(matches!(released, Effect::Release { key } if key == abandoned));
+        let mut replacement =
+            std::pin::pin!(controller.execute(credentials()?, None, create("reused")?));
+        assert!(
+            poll_fn(|context| Poll::Ready(replacement.as_mut().poll(context).is_pending())).await
+        );
+        let Effect::ConnectExternalRtp { key: current, .. } =
+            effects.recv().await.ok_or(ControlError::Capacity)?
+        else {
+            return Err(ControlError::Unsupported);
+        };
+        assert_ne!(current.generation, abandoned.generation);
+        controller
+            .signal(Signal::ExternalRtpAdmitted {
+                key: abandoned.clone(),
+                result: Ok("127.0.0.1:10000".parse().map_err(failure)?),
+            })
+            .await?;
+        let released = tokio::time::timeout(Duration::from_secs(1), effects.recv())
+            .await
+            .map_err(failure)?
+            .ok_or(ControlError::Capacity)?;
+        assert!(matches!(released, Effect::Release { key } if key == abandoned));
+        assert!(
+            poll_fn(|context| Poll::Ready(replacement.as_mut().poll(context).is_pending())).await
+        );
+        controller
+            .signal(Signal::ExternalRtpAdmitted {
+                key: current,
+                result: Ok("127.0.0.1:10002".parse().map_err(failure)?),
+            })
+            .await?;
+        let response = tokio::time::timeout(Duration::from_secs(1), replacement)
+            .await
+            .map_err(failure)??;
+        let channel: Channel =
+            serde_json::from_value(response.body.ok_or(ControlError::Capacity)?)?;
+        assert_eq!(
+            channel
+                .channelvars
+                .as_ref()
+                .and_then(|variables| variables.get("UNICASTRTP_LOCAL_PORT"))
+                .map(String::as_str),
+            Some("10002")
+        );
+        Ok(())
+    }
+    .await;
+    controller.shutdown();
+    task.await.map_err(failure)??;
+    result
+}
+
+#[tokio::test]
 async fn external_replies_wait_for_transport_variables_while_other_requests_progress(
 ) -> Result<(), ControlError> {
     let configuration = Config::parse(
