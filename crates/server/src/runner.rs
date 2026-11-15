@@ -7,11 +7,13 @@ use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
+mod call_lifetime;
 mod external_admission;
 mod history;
 mod media_connections;
 mod recording_admission;
 mod stored_recordings;
+pub(crate) use call_lifetime::CallLease;
 use history::HistoryRecorder;
 pub use media_connections::{ClaimedMediaConnection, MediaConnectionLease};
 pub(crate) use stored_recordings::Operation as StoredRecordingOperation;
@@ -52,6 +54,11 @@ impl Credentials {
 }
 
 enum Request {
+    CallLifetime {
+        key: CallKey,
+        lifetime: mpsc::Receiver<()>,
+        reply: oneshot::Sender<Result<(), ControlError>>,
+    },
     ClaimMediaConnection {
         connection_id: rusterisk_api::ChannelId,
         origin: Option<String>,
@@ -137,6 +144,7 @@ pub struct Runner {
     recording_admissions: BTreeMap<rusterisk_core::MediaTaskToken, recording_admission::Pending>,
     external_admissions: BTreeMap<CallKey, external_admission::Pending>,
     media_leases: BTreeMap<CallKey, mpsc::Receiver<()>>,
+    call_lifetimes: BTreeMap<CallKey, mpsc::Receiver<()>>,
 }
 
 pub struct Subscription {
@@ -209,6 +217,7 @@ impl Controller {
                 recording_admissions: BTreeMap::new(),
                 external_admissions: BTreeMap::new(),
                 media_leases: BTreeMap::new(),
+                call_lifetimes: BTreeMap::new(),
             },
             effect_receiver,
         )
@@ -393,6 +402,9 @@ impl Runner {
     }
 
     fn emit_effect(&mut self, effect: Effect) -> Result<(), ControlError> {
+        if let Effect::Release { key } = &effect {
+            self.call_lifetimes.remove(key);
+        }
         let effect = if self.pending_effects.is_empty() {
             match self.effects.try_send(effect) {
                 Ok(()) => return Ok(()),
@@ -449,6 +461,11 @@ impl Runner {
 
     fn request(&mut self, request: Request, now_ms: u64) -> Result<(), ControlError> {
         match request {
+            Request::CallLifetime {
+                key,
+                lifetime,
+                reply,
+            } => self.claim_call_lifetime(key, lifetime, reply),
             Request::ClaimMediaConnection {
                 connection_id,
                 origin,
@@ -803,6 +820,7 @@ impl Runner {
 
     async fn close(&mut self) -> Result<(), ControlError> {
         self.media_leases.clear();
+        self.call_lifetimes.clear();
         self.close_recording_admissions();
         self.close_external_admissions();
         let result = self
