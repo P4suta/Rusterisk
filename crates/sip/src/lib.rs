@@ -517,7 +517,7 @@ impl Engine {
                         .find(|auth| {
                             auth.name == endpoint.auth
                                 && auth.username == authorization.username()
-                                && auth.realm == authorization.realm()
+                                && auth.inbound_realm() == authorization.realm()
                         })
                         .map(|auth| (index, auth))
                 })
@@ -567,8 +567,8 @@ impl Engine {
             .config
             .auth
             .first()
-            .map(|auth| auth.realm.as_str())
-            .unwrap_or("rusterisk");
+            .map(rusterisk_config::Auth::inbound_realm)
+            .unwrap_or("asterisk");
         let extra = format!(
             "WWW-Authenticate: Digest realm=\"{realm}\", nonce=\"{nonce}\", algorithm=MD5, qop=\"auth\"\r\n"
         );

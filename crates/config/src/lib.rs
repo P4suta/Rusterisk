@@ -291,6 +291,20 @@ pub struct Auth {
     pub realm: String,
 }
 
+impl Auth {
+    pub fn inbound_realm(&self) -> &str {
+        if self.realm.is_empty() {
+            "asterisk"
+        } else {
+            &self.realm
+        }
+    }
+
+    pub fn matches_outbound_realm(&self, realm: &str) -> bool {
+        self.realm.is_empty() || self.realm == "*" || self.realm == realm
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Aor {
     pub name: String,
@@ -738,7 +752,7 @@ impl Config {
                     name: section.name.clone(),
                     username: section.required(file, "username")?.into(),
                     password: Secret(section.required(file, "password")?.into()),
-                    realm: section.value("realm").unwrap_or("rusterisk").into(),
+                    realm: section.value("realm").unwrap_or("").into(),
                 });
             }
             "aor" => {

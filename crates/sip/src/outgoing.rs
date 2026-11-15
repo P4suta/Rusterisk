@@ -216,7 +216,7 @@ fn authenticate(
             dialog
                 .credentials
                 .iter()
-                .find(|auth| auth.realm.is_empty() || auth.realm == "*")
+                .find(|auth| auth.matches_outbound_realm(&challenge.realm))
         })
     else {
         return Ok(None);
