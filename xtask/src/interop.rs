@@ -2,7 +2,9 @@ use crate::TaskError;
 use std::{io::Read, path::Path, process::Command, time::Duration};
 use xtask::{
     process::{run, ProcessError},
-    reference::{callback_address, media_address, published_address, Interop, Step},
+    reference::{
+        callback_address, copy_configuration, media_address, published_address, Interop, Step,
+    },
 };
 
 fn perform(step: &Step) -> Result<(), ProcessError> {
@@ -39,11 +41,13 @@ fn captured(step: &Step, identity: &str, field: &str) -> Result<String, ProcessE
 
 pub fn execute(execute: bool) -> Result<(), TaskError> {
     let identity = super::execution_identity(execute)?;
-    let configuration = Path::new("tests/interop/asterisk").canonicalize()?;
-    let configuration = configuration
+    let configuration = std::env::current_dir()?
+        .join("target/interop")
+        .join(format!("{identity}.configuration"));
+    let configuration_path = configuration
         .to_str()
         .ok_or_else(|| TaskError::Contract("reference configuration path isn't Unicode".into()))?;
-    let plan = Interop::new(&identity, configuration)
+    let plan = Interop::new(&identity, configuration_path)
         .map_err(|error| TaskError::Contract(error.to_string()))?;
     let start = plan.start();
     let cleanup = plan.cleanup();
@@ -80,6 +84,8 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
         return Ok(());
     }
     super::node_check()?;
+    std::fs::create_dir_all("target/interop")?;
+    copy_configuration(Path::new("tests/interop/asterisk"), &configuration)?;
     let result = (|| {
         perform(&start)?;
         let address = published_address(&captured(&plan.port(), &identity, "port")?)
@@ -97,7 +103,8 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
                 .args(arguments)
                 .env("RUSTERISK_REFERENCE_URL", format!("http://{address}"))
                 .env("RUSTERISK_REFERENCE_MEDIA_IP", media.to_string())
-                .env("RUSTERISK_REFERENCE_CALLBACK_IP", callback.to_string()),
+                .env("RUSTERISK_REFERENCE_CALLBACK_IP", callback.to_string())
+                .env("RUSTERISK_REFERENCE_CONFIGURATION", &configuration),
             Duration::from_secs(300),
         )
     })();
@@ -106,9 +113,17 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
             eprintln!("reference logs failed: {error}");
         }
     }
-    match (result, perform(&cleanup)) {
+    let result = match (result, perform(&cleanup)) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(operation), Err(cleanup)) => Err(TaskError::ReferenceCleanup { operation, cleanup }),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(TaskError::Process(error)),
+    };
+    match (result, std::fs::remove_dir_all(configuration)) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(primary), Err(cleanup)) => Err(TaskError::Contract(format!(
+            "{primary}; reference configuration cleanup failed: {cleanup}"
+        ))),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(TaskError::Io(error)),
     }
 }

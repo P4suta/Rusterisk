@@ -1,5 +1,7 @@
 use std::time::Duration;
+mod configuration;
 mod interop;
+pub use configuration::copy_configuration;
 pub use interop::{callback_address, media_address, published_address, CallbackHost, Interop};
 
 pub struct Step {
