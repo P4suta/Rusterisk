@@ -139,7 +139,15 @@ fn snapshot(root: &Path) -> Result<(), TaskError> {
             ],
         )?;
     }
-    legacy(root)
+    legacy(root)?;
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    println!("check: npm --prefix examples/browser audit --audit-level=low");
+    xtask::process::run(
+        Command::new(npm).args(["--prefix", "examples/browser", "audit", "--audit-level=low"]),
+        Duration::from_secs(120),
+    )
+    .map_err(TaskError::Process)?;
+    Ok(())
 }
 
 pub(super) fn check() -> Result<(), TaskError> {
