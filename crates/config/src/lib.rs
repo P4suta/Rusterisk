@@ -2,8 +2,10 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 mod expansion;
+mod wait_duration;
 mod websocket;
 pub use expansion::{expand_variables, ExpansionError};
+pub use wait_duration::{InvalidWaitDuration, WaitDuration};
 pub use websocket::{WebSocketClient, WebSocketConfig, WebSocketControlFormat};
 
 const MAX_FILE: usize = 1024 * 1024;
