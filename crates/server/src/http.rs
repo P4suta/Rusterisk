@@ -13,6 +13,7 @@ use rusterisk_api::{ChannelId, InvalidMediaUri, MediaUri};
 use rusterisk_core::{DtmfTiming, MuteDirection, RecordingControl};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+mod external_media;
 mod recording;
 
 pub fn router(controller: Controller) -> Router {
@@ -399,6 +400,7 @@ async fn dispatch(
         };
     }
     let action = match (method.as_str(), segments.as_slice()) {
+        ("POST", ["ari", "channels", "externalMedia"]) => external_media::action(parameters)?,
         ("GET", ["ari", "applications"]) => Action::ListApplications,
         ("GET", ["ari", "applications", application]) => {
             Action::GetApplication(id(application)?.to_string())

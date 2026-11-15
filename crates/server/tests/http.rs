@@ -303,7 +303,7 @@ async fn http_bridge_lifecycle_and_known_unsupported_operations_have_ari_errors(
             .await
             .map_err(|error| ControlError::Adapter(error.to_string()))?
             .status(),
-        StatusCode::NOT_IMPLEMENTED
+        StatusCode::BAD_REQUEST
     );
     for path in ["/ari/channels/x/snoop", "/ari/channels/x/snoop/observer"] {
         assert_eq!(
