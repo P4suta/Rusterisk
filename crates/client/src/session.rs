@@ -25,10 +25,19 @@ impl Session {
         owned_call::originate(&self.commands, options).await
     }
     pub async fn next_event(&mut self) -> Result<api::Event, Error> {
-        self.events.recv().await.map_err(|error| match error {
-            broadcast::error::RecvError::Closed => Error::Closed,
-            broadcast::error::RecvError::Lagged(count) => Error::EventLagged(count),
-        })
+        match self.events.recv().await {
+            Ok(event) => Ok(event),
+            Err(broadcast::error::RecvError::Lagged(count)) => Err(Error::EventLagged(count)),
+            Err(broadcast::error::RecvError::Closed) => {
+                let result = match self.task.as_mut() {
+                    Some(task) => task.await.map_err(|_| Error::Closed)?,
+                    None => return Err(Error::Closed),
+                };
+                self.task = None;
+                result?;
+                Err(Error::Closed)
+            }
+        }
     }
 
     pub async fn shutdown(mut self) -> Result<(), Error> {
