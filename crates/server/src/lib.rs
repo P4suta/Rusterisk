@@ -15,4 +15,5 @@ pub use control::{
     MediaOwner, Milestone, Outcome, PlaybackCompletion, Signal,
 };
 pub(crate) use runner::StoredRecordingOperation;
+pub(crate) use runner::StoredRecordingResponse;
 pub use runner::{Controller, Credentials, Runner, Subscription};

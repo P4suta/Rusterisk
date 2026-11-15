@@ -12,6 +12,7 @@ mod recording_admission;
 mod stored_recordings;
 use history::HistoryRecorder;
 pub(crate) use stored_recordings::Operation as StoredRecordingOperation;
+pub(crate) use stored_recordings::Response as StoredRecordingResponse;
 
 struct StorageServices {
     port: StoragePort,
@@ -44,7 +45,7 @@ enum Request {
         credentials: Credentials,
         origin: Option<String>,
         operation: StoredRecordingOperation,
-        reply: oneshot::Sender<Result<Outcome, ControlError>>,
+        reply: oneshot::Sender<Result<StoredRecordingResponse, ControlError>>,
     },
     Incoming {
         call: IncomingCall,

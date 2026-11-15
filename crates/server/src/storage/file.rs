@@ -40,6 +40,17 @@ impl RecordingFile {
         self.length
     }
 
+    pub fn into_stream(
+        self,
+    ) -> impl futures_util::Stream<Item = Result<axum::body::Bytes, WorkerError>> {
+        futures_util::stream::try_unfold(self, |mut file| async move {
+            Ok(file
+                .read()
+                .await?
+                .map(|chunk| (axum::body::Bytes::copy_from_slice(chunk.as_ref()), file)))
+        })
+    }
+
     pub async fn read(&mut self) -> Result<Option<RecordingChunk>, WorkerError> {
         match &self.state {
             State::Complete => return Ok(None),

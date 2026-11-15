@@ -1,5 +1,5 @@
 use super::{receive, Controller, Credentials, Request, Runner};
-use crate::storage::{StoragePort, WorkerError};
+use crate::storage::{RecordingFile, StoragePort, WorkerError};
 use crate::{ControlError, Outcome};
 use rusterisk_api::ChannelId;
 use rusterisk_storage::StorageError;
@@ -8,13 +8,19 @@ use tokio::sync::oneshot;
 pub(crate) enum Operation {
     List,
     Get(ChannelId),
+    File(ChannelId),
     Delete(ChannelId),
+}
+
+pub(crate) enum Response {
+    Json(Outcome),
+    File(RecordingFile),
 }
 
 impl Operation {
     fn read_only(&self) -> bool {
         match self {
-            Self::List | Self::Get(_) => true,
+            Self::List | Self::Get(_) | Self::File(_) => true,
             Self::Delete(_) => false,
         }
     }
@@ -38,13 +44,22 @@ fn failure(error: WorkerError) -> ControlError {
     }
 }
 
-async fn execute(storage: StoragePort, operation: Operation) -> Result<Outcome, ControlError> {
+async fn execute(storage: StoragePort, operation: Operation) -> Result<Response, ControlError> {
     match operation {
-        Operation::List => Outcome::json(storage.recordings().await.map_err(failure)?),
-        Operation::Get(name) => Outcome::json(storage.recording(name).await.map_err(failure)?),
+        Operation::List => Outcome::json(storage.recordings().await.map_err(failure)?)
+            .map(Response::Json),
+        Operation::Get(name) => Outcome::json(storage.recording(name).await.map_err(failure)?)
+            .map(Response::Json),
+        Operation::File(name) => storage.recording_file(name).await.map(Response::File).map_err(|error| {
+            if matches!(&error, WorkerError::Storage(StorageError::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied) {
+                ControlError::Forbidden
+            } else {
+                failure(error)
+            }
+        }),
         Operation::Delete(name) => {
             storage.delete_recording(name).await.map_err(failure)?;
-            Ok(Outcome::empty())
+            Ok(Response::Json(Outcome::empty()))
         }
     }
 }
@@ -55,7 +70,7 @@ impl Controller {
         credentials: Credentials,
         origin: Option<String>,
         operation: Operation,
-    ) -> Result<Outcome, ControlError> {
+    ) -> Result<Response, ControlError> {
         let (reply, response) = oneshot::channel();
         self.requests
             .try_send(Request::StoredRecording {
@@ -75,7 +90,7 @@ impl Runner {
         credentials: Credentials,
         origin: Option<String>,
         operation: Operation,
-        reply: oneshot::Sender<Result<Outcome, ControlError>>,
+        reply: oneshot::Sender<Result<Response, ControlError>>,
     ) {
         if reply.is_closed() {
             return;

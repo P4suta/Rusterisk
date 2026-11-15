@@ -1,7 +1,7 @@
 use crate::media::{PlaybackControl, RecordingEnd};
 use crate::{Action, ControlError, Controller, Credentials, Outcome};
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
@@ -335,17 +335,29 @@ async fn dispatch(
         ("GET", ["ari", "recordings", "stored", name]) => {
             Some(crate::StoredRecordingOperation::Get(id(name)?))
         }
+        ("GET", ["ari", "recordings", "stored", name, "file"]) => {
+            Some(crate::StoredRecordingOperation::File(id(name)?))
+        }
         ("DELETE", ["ari", "recordings", "stored", name]) => {
             Some(crate::StoredRecordingOperation::Delete(id(name)?))
         }
         _ => None,
     };
     if let Some(operation) = stored {
-        return response(
-            controller
-                .stored_recording(credentials, origin, operation)
-                .await?,
-        );
+        return match controller
+            .stored_recording(credentials, origin, operation)
+            .await?
+        {
+            crate::StoredRecordingResponse::Json(outcome) => response(outcome),
+            crate::StoredRecordingResponse::File(file) => {
+                let length = file.length();
+                Response::builder()
+                    .header(axum::http::header::CONTENT_TYPE, "audio/wav")
+                    .header(axum::http::header::CONTENT_LENGTH, length)
+                    .body(Body::from_stream(file.into_stream()))
+                    .map_err(|error| ControlError::Encoding(error.to_string()))
+            }
+        };
     }
     let action = match (method.as_str(), segments.as_slice()) {
         ("POST", ["ari", "channels", channel, "record"]) => {

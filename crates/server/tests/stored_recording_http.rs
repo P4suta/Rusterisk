@@ -91,12 +91,48 @@ async fn stored_recording_routes_require_authentication_and_protect_writes_from_
             .map_err(failure)?;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(json::<StoredRecording>(response).await?.name, "saved");
+        let response = app
+            .clone()
+            .oneshot(request(
+                "GET",
+                "/ari/recordings/stored/saved/file",
+                "reader",
+            )?)
+            .await
+            .map_err(failure)?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "audio/wav");
+        let expected =
+            std::fs::read(directory.path().join("recordings/saved.wav")).map_err(failure)?;
+        assert_eq!(
+            response.headers()["content-length"],
+            expected.len().to_string()
+        );
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .map_err(failure)?
+            .to_bytes();
+        assert_eq!(bytes.as_ref(), expected);
         for name in ["missing", "pending"] {
             assert_eq!(
                 app.clone()
                     .oneshot(request(
                         "GET",
                         &format!("/ari/recordings/stored/{name}"),
+                        "reader"
+                    )?)
+                    .await
+                    .map_err(failure)?
+                    .status(),
+                StatusCode::NOT_FOUND
+            );
+            assert_eq!(
+                app.clone()
+                    .oneshot(request(
+                        "GET",
+                        &format!("/ari/recordings/stored/{name}/file"),
                         "reader"
                     )?)
                     .await
