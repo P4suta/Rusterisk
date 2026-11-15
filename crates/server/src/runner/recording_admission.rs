@@ -68,6 +68,7 @@ impl Runner {
             | Signal::DtmfReceived { .. }
             | Signal::Milestone { .. }
             | Signal::Terminated { .. } => None,
+            Signal::ExternalRtpAdmitted { .. } => None,
         };
         let mut outcome = self.control.signal_at(signal, &timestamp(), now)?;
         self.publish(&mut outcome)?;
@@ -324,7 +325,8 @@ mod tests {
                     | Effect::Answer { .. }
                     | Effect::Start { .. }
                     | Effect::ReleaseBridge { .. }
-                    | Effect::DialBridge { .. } => return Err(ControlError::Unsupported),
+                    | Effect::DialBridge { .. }
+                    | Effect::ConnectExternalRtp { .. } => return Err(ControlError::Unsupported),
                 }
             }
             Ok((releases, bridges, cancellations, recordings))

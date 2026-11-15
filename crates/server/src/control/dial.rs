@@ -452,6 +452,7 @@ impl Control {
             self.channels.insert(
                 id,
                 ChannelEntry {
+                    kind: super::ChannelKind::Sip,
                     call: Call::outgoing(generation),
                     endpoint: endpoint
                         .strip_prefix("PJSIP/")

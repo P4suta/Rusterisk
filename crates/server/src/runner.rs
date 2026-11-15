@@ -518,6 +518,7 @@ impl Runner {
                             | Effect::Bridge { .. }
                             | Effect::ReleaseBridge { .. }
                             | Effect::DialBridge { .. } => None,
+                            Effect::ConnectExternalRtp { .. } => None,
                         });
                         if let Err(error) = self.publish(&mut outcome) {
                             if reply.send(Err(error.clone())).is_err() {

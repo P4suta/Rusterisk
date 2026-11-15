@@ -554,6 +554,13 @@ impl Signaling {
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
+            Effect::ConnectExternalRtp { key, .. } => {
+                self.notify(Signal::ExternalRtpAdmitted {
+                    key,
+                    result: Err(ControlError::Unsupported),
+                })
+                .await?
+            }
             Effect::RecordMedia {
                 owner,
                 token,

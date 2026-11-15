@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod dial;
 mod dialplan;
 mod endpoints;
+mod external_media;
 mod playback;
 mod recording;
 mod stasis;
@@ -151,6 +152,12 @@ pub enum IncomingTarget {
 
 #[derive(Clone, Debug)]
 pub enum Action {
+    ExternalRtp {
+        id: ChannelId,
+        app: String,
+        target: rusterisk_api::ExternalRtpTarget,
+        data: String,
+    },
     RecordChannel {
         channel: ChannelId,
         name: ChannelId,
@@ -293,6 +300,7 @@ impl Action {
             | Self::Move { .. } => 0,
             Self::Hangup(_) | Self::Continue { .. } | Self::DestroyBridge(_) => 2,
             Self::Originate { .. }
+            | Self::ExternalRtp { .. }
             | Self::RecordChannel { .. }
             | Self::RecordBridge { .. }
             | Self::ControlRecording { .. }
@@ -326,6 +334,7 @@ impl Action {
             | Self::ListBridges
             | Self::GetBridge(_) => true,
             Self::Originate { .. }
+            | Self::ExternalRtp { .. }
             | Self::FilterApplication { .. }
             | Self::SubscribeResources { .. }
             | Self::UnsubscribeResources { .. }
@@ -357,6 +366,10 @@ impl Action {
 
 #[derive(Clone, Debug)]
 pub enum Effect {
+    ConnectExternalRtp {
+        key: CallKey,
+        target: rusterisk_api::ExternalRtpTarget,
+    },
     RecordMedia {
         owner: MediaOwner,
         token: MediaTaskToken,
@@ -438,6 +451,10 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
+    ExternalRtpAdmitted {
+        key: CallKey,
+        result: Result<std::net::SocketAddr, ControlError>,
+    },
     EndpointContact {
         key: EndpointKey,
         presence: ContactPresence,
@@ -571,7 +588,15 @@ impl Outcome {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelKind {
+    Sip,
+    ExternalRtpPending,
+    ExternalRtpAdmitted,
+}
+
 struct ChannelEntry {
+    kind: ChannelKind,
     call: Call,
     endpoint: String,
     snapshot: Channel,
@@ -805,6 +830,7 @@ impl Control {
         self.channels.insert(
             incoming.id,
             ChannelEntry {
+                kind: ChannelKind::Sip,
                 call,
                 endpoint: incoming.endpoint,
                 snapshot,
@@ -923,6 +949,12 @@ impl Control {
         now_ms: u64,
     ) -> Result<Outcome, ControlError> {
         match action {
+            Action::ExternalRtp {
+                id,
+                app,
+                target,
+                data,
+            } => self.external_rtp(id, app, target, data, timestamp, now_ms),
             Action::RecordChannel {
                 channel,
                 name,
@@ -1121,6 +1153,7 @@ impl Control {
                 self.channels.insert(
                     id,
                     ChannelEntry {
+                        kind: ChannelKind::Sip,
                         call: Call::outgoing(generation).reserve_stasis(application)?,
                         endpoint: endpoint_resource,
                         snapshot,
@@ -1684,6 +1717,9 @@ impl Control {
         now: u64,
     ) -> Result<Outcome, ControlError> {
         match signal {
+            Signal::ExternalRtpAdmitted { key, result } => {
+                self.external_rtp_admitted(key, result, timestamp)
+            }
             Signal::EndpointContact { key, presence } => {
                 let mut outcome = Outcome::empty();
                 if self.endpoints.observe(&key, presence) {
