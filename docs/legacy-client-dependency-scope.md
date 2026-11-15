@@ -2,7 +2,7 @@
 
 The private comparison fixture pins `ari-client` 2.2.0 and its locked dependencies.
 The historical client uses legacy HTTP and Swagger packages with known advisories.
-The comparison runs fixed resource queries on the owned Rusterisk listener and isolated Asterisk 22.9.0 container.
+The comparison runs fixed resource queries, endpoint subscriptions, and event filter updates on the owned Rusterisk listener and isolated Asterisk 22.9.0 container.
 The wrapper validates loopback targets and response snapshots, uses synthetic credentials, and bounds the child process to 30 seconds and a 128 MiB JavaScript heap.
 
 The dependency gate requires the reviewed package versions, registry archive locations, integrity fields, and development-only installation.
@@ -12,7 +12,8 @@ Changes to fixture operations require a fresh semantic review of the dependency 
 
 ## Multipart inputs
 
-The fixture operations use fixed query parameters and JSON responses.
+The fixture operations use fixed query parameters, JSON filter requests, and JSON responses.
+Filter requests contain fixed arrays of event type names.
 The scenarios don't construct multipart requests.
 The [predictable multipart boundary](https://github.com/advisories/GHSA-fjxv-7rqg-78g4) and [multipart field injection](https://github.com/advisories/GHSA-hmw2-7cc7-3qxx) conditions remain outside the exercised operations.
 
@@ -26,7 +27,8 @@ Remote origins, redirects, or cookie scenarios require another assessment.
 
 ## Query parameters and identifiers
 
-The resource operations send fixed scalar parameters.
+The resource operations send fixed scalar query parameters.
+Nested filter fields travel in JSON bodies without query parsing.
 The scenarios don't parse and reserialize hostile nested query objects or increase query parser limits.
 The scoped findings cover [array limits](https://github.com/advisories/GHSA-6rw7-vpxm-498p) and [constructor-based type checks](https://github.com/advisories/GHSA-4mjr-xmp4-gh2g) in `qs`.
 

@@ -18,11 +18,18 @@ Stored recordings support listing, metadata, copying, deletion, and streamed `au
 The ping endpoint returns a `pong` response.
 App queries report subscribed apps and their channel and bridge resources.
 Event filters support partial updates, rejection precedence, and reset through an empty request.
+Explicit subscriptions observe channels, bridges, configured endpoints, or all resources of one kind.
+Endpoint technology subscriptions also observe their channels.
+All-endpoint subscriptions report endpoint state changes.
+Subscription lists process sources in order and preserve earlier successful entries when a later source fails.
+Repeated specific subscriptions require matching removals.
+Resource deletion clears specific subscriptions before identifier reuse.
+Rusterisk supports [wildcard removal](adr/release-wildcard-interests-through-their-public-uri.md), while the reference rejects removal through the empty bridge identifier.
 Endpoint queries report configured resources, routing availability, and exact channel membership.
 Registration expiry changes routing availability without ending active calls.
 
 Known operations without working adapters return `501`.
-Explicit resource subscriptions, sound queries, server information, external media, and channel redirection still use that response.
+Sound queries, server information, external media, and channel redirection still use that response.
 Requests with JSON bodies other than event filter updates return `501` after body validation.
 Playback supports start, pause, resume, and stop.
 Seeking and media lists remain unsupported.

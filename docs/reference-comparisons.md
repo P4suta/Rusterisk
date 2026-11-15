@@ -50,6 +50,10 @@ The test normalizes endpoint list order by resource name.
 The test compares endpoint detail queries and error messages without normalization.
 Both clients compare event filter updates and reset.
 The Rust comparison also checks invalid filters and missing apps.
+Both clients compare endpoint subscriptions and removal.
+The Rust client checks technology subscription names, duplicate bridge interests, partial source batches, and deletion cleanup.
+The test explicitly compares successful Rusterisk wildcard removal with the reference's `501` response.
+The [wildcard cleanup decision](adr/release-wildcard-interests-through-their-public-uri.md) records the difference and reference cleanup method.
 Bridge comparisons cover creation, retrieval, listing, duplicate errors, and deletion.
 The test normalizes creation timestamps.
 The test checks `video_mode=none` for Rusterisk and `video_mode=talker` for the reference before comparing the remaining fields.
