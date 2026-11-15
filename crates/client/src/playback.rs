@@ -1,6 +1,33 @@
 use crate::{api, Client, Error};
 
 impl Client {
+    pub async fn playback(&self, id: &api::ChannelId) -> Result<api::Playback, Error> {
+        self.request("playbacks.get", &[("playbackId", id.as_str())], &[])
+            .await
+    }
+
+    pub async fn stop_playback(&self, id: &api::ChannelId) -> Result<(), Error> {
+        self.request("playbacks.stop", &[("playbackId", id.as_str())], &[])
+            .await
+    }
+
+    pub async fn pause_playback(&self, id: &api::ChannelId) -> Result<(), Error> {
+        self.playback_control(id, "pause").await
+    }
+
+    pub async fn resume_playback(&self, id: &api::ChannelId) -> Result<(), Error> {
+        self.playback_control(id, "unpause").await
+    }
+
+    async fn playback_control(&self, id: &api::ChannelId, operation: &str) -> Result<(), Error> {
+        self.request(
+            "playbacks.control",
+            &[("playbackId", id.as_str())],
+            &[("operation", operation)],
+        )
+        .await
+    }
+
     pub async fn play_channel(
         &self,
         channel: &api::ChannelId,
