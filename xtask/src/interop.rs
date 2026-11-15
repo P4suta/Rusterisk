@@ -2,7 +2,7 @@ use crate::TaskError;
 use std::{io::Read, path::Path, process::Command, time::Duration};
 use xtask::{
     process::{run, ProcessError},
-    reference::{media_address, published_address, Interop, Step},
+    reference::{callback_address, media_address, published_address, Interop, Step},
 };
 
 fn perform(step: &Step) -> Result<(), ProcessError> {
@@ -22,9 +22,9 @@ fn captured(step: &Step, identity: &str, field: &str) -> Result<String, ProcessE
             Command::new("docker").args(&step.arguments).stdout(file),
             step.budget,
         )?;
-        let mut output = String::with_capacity(129);
+        let mut output = String::with_capacity(1025);
         std::fs::File::open(&path)?
-            .take(129)
+            .take(1025)
             .read_to_string(&mut output)?;
         Ok(output)
     })();
@@ -48,7 +48,12 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
     let start = plan.start();
     let cleanup = plan.cleanup();
     println!("preflight: node-check");
-    for step in [&start, &plan.port(), &plan.media_address()] {
+    for step in [
+        &start,
+        &plan.port(),
+        &plan.media_address(),
+        &plan.callback_address(),
+    ] {
         println!(
             "budget={}s docker {}",
             step.budget.as_secs(),
@@ -81,11 +86,18 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
             .map_err(|_| ProcessError::InvalidOutput)?;
         let media = media_address(&captured(&plan.media_address(), &identity, "media")?)
             .map_err(|_| ProcessError::InvalidOutput)?;
+        let callback_output = captured(&plan.callback_address(), &identity, "callback")?;
+        let callback = callback_address(&callback_output).map_err(|_| {
+            eprintln!("invalid reference callback inspection: {callback_output:?}");
+            ProcessError::InvalidOutput
+        })?;
+        println!("reference callback address: {callback}");
         run(
             Command::new("cargo")
                 .args(arguments)
                 .env("RUSTERISK_REFERENCE_URL", format!("http://{address}"))
-                .env("RUSTERISK_REFERENCE_MEDIA_IP", media.to_string()),
+                .env("RUSTERISK_REFERENCE_MEDIA_IP", media.to_string())
+                .env("RUSTERISK_REFERENCE_CALLBACK_IP", callback.to_string()),
             Duration::from_secs(300),
         )
     })();

@@ -6,6 +6,34 @@ pub struct Interop {
     configuration: String,
 }
 
+pub fn callback_address(output: &str) -> Result<std::net::Ipv4Addr, ReferenceError> {
+    if output.len() > 128 {
+        return Err(ReferenceError::InvalidAddress);
+    }
+    let mut selected = None;
+    for line in output.lines() {
+        let mut fields = line.split_whitespace();
+        let address = fields
+            .next()
+            .ok_or(ReferenceError::InvalidAddress)?
+            .parse::<std::net::Ipv4Addr>()
+            .map_err(|_| ReferenceError::InvalidAddress)?;
+        if !matches!(fields.next(), Some("STREAM" | "DGRAM" | "RAW")) || fields.count() > 1 {
+            return Err(ReferenceError::InvalidAddress);
+        }
+        if address.is_unspecified()
+            || address.is_multicast()
+            || address.is_broadcast()
+            || address.is_loopback()
+            || selected.is_some_and(|selected| selected != address)
+        {
+            return Err(ReferenceError::InvalidAddress);
+        }
+        selected = Some(address);
+    }
+    selected.ok_or(ReferenceError::InvalidAddress)
+}
+
 pub fn media_address(output: &str) -> Result<std::net::Ipv4Addr, ReferenceError> {
     if output.len() > 128 {
         return Err(ReferenceError::InvalidAddress);
@@ -106,6 +134,19 @@ impl Interop {
                 "--format",
                 "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{\"\\n\"}}{{end}}",
                 &self.name,
+            ],
+            10,
+        )
+    }
+
+    pub fn callback_address(&self) -> Step {
+        step(
+            &[
+                "exec",
+                &self.name,
+                "getent",
+                "ahostsv4",
+                "host.docker.internal",
             ],
             10,
         )

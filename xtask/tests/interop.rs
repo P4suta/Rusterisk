@@ -1,6 +1,40 @@
 use xtask::reference::{published_address, Interop, ReferenceError};
 
 #[test]
+fn callback_inspection_accepts_only_one_unicast_host_address() -> Result<(), ReferenceError> {
+    assert_eq!(
+        xtask::reference::callback_address(
+            "0.250.250.254 STREAM host.docker.internal\n0.250.250.254 DGRAM\n0.250.250.254 RAW\n"
+        )?,
+        std::net::Ipv4Addr::new(0, 250, 250, 254)
+    );
+    let plan = Interop::new("fixture", "/workspace/tests/interop/asterisk")?;
+    assert_eq!(
+        plan.callback_address().arguments,
+        [
+            "exec",
+            "rusterisk-interop-fixture",
+            "getent",
+            "ahostsv4",
+            "host.docker.internal"
+        ]
+    );
+    assert_eq!(xtask::reference::callback_address("198.19.249.254 STREAM host.docker.internal\n198.19.249.254 DGRAM\n198.19.249.254 RAW\n")?, std::net::Ipv4Addr::new(198, 19, 249, 254));
+    for invalid in [
+        "",
+        "0.0.0.0 STREAM",
+        "224.0.0.1 STREAM",
+        "255.255.255.255 STREAM",
+        "192.168.215.1 STREAM\n192.168.215.2 DGRAM",
+        "192.168.215.1 UNRECOGNIZED",
+        &"x".repeat(513),
+    ] {
+        assert!(xtask::reference::callback_address(invalid).is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn reference_media_inspection_uses_one_private_container_address() -> Result<(), ReferenceError> {
     let plan = Interop::new("fixture", "/workspace/tests/interop/asterisk")?;
     assert_eq!(
