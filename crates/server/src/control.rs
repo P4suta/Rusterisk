@@ -1,4 +1,7 @@
-use rusterisk_api::{Bridge, Caller, Channel, ChannelId, ChannelState, Dialplan, Event, EventKind};
+use crate::media::PlaybackControl;
+use rusterisk_api::{
+    Bridge, Caller, Channel, ChannelId, ChannelState, Dialplan, Event, EventKind, MediaUri,
+};
 use rusterisk_core::{
     AudioGate, Call, CallEvent, CallState, DtmfCommand, DtmfDigit, DtmfError, DtmfOutbox,
     DtmfTiming, DtmfToken, MediaConnection, MediaState, MediaTaskError, MediaTaskToken, MediaTasks,
@@ -8,6 +11,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 mod dial;
 mod dialplan;
+mod playback;
 mod stasis;
 use dialplan::DialplanFrame;
 
@@ -125,6 +129,16 @@ pub enum IncomingTarget {
 
 #[derive(Clone, Debug)]
 pub enum Action {
+    PlayChannel {
+        channel: ChannelId,
+        id: ChannelId,
+        media: MediaUri,
+    },
+    GetPlayback(ChannelId),
+    ControlPlayback {
+        id: ChannelId,
+        operation: PlaybackControl,
+    },
     SendDtmf {
         channel: ChannelId,
         digits: String,
@@ -194,6 +208,7 @@ impl Action {
     pub(crate) const fn effect_budget(&self) -> usize {
         match self {
             Self::ListChannels
+            | Self::GetPlayback(_)
             | Self::GetChannel(_)
             | Self::GetVariable { .. }
             | Self::SetVariable { .. }
@@ -203,6 +218,8 @@ impl Action {
             | Self::Move { .. } => 0,
             Self::Hangup(_) | Self::Continue { .. } => 2,
             Self::Originate { .. }
+            | Self::PlayChannel { .. }
+            | Self::ControlPlayback { .. }
             | Self::SendDtmf { .. }
             | Self::Answer(_)
             | Self::Ring(_)
@@ -219,11 +236,14 @@ impl Action {
     pub const fn read_only(&self) -> bool {
         match self {
             Self::ListChannels
+            | Self::GetPlayback(_)
             | Self::GetChannel(_)
             | Self::GetVariable { .. }
             | Self::ListBridges
             | Self::GetBridge(_) => true,
             Self::Originate { .. }
+            | Self::PlayChannel { .. }
+            | Self::ControlPlayback { .. }
             | Self::SendDtmf { .. }
             | Self::SetVariable { .. }
             | Self::Hangup(_)
@@ -245,6 +265,15 @@ impl Action {
 
 #[derive(Clone, Debug)]
 pub enum Effect {
+    PlayChannel {
+        key: CallKey,
+        token: MediaTaskToken,
+        media: MediaUri,
+    },
+    ControlPlayback {
+        token: MediaTaskToken,
+        operation: PlaybackControl,
+    },
     Playback {
         key: CallKey,
         token: MediaTaskToken,
@@ -293,6 +322,10 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
+    PlaybackStarted {
+        key: CallKey,
+        token: MediaTaskToken,
+    },
     PlaybackFinished {
         key: CallKey,
         token: MediaTaskToken,
@@ -495,6 +528,7 @@ pub struct Control {
     channels: BTreeMap<ChannelId, ChannelEntry>,
     bridges: BTreeMap<ChannelId, BridgeEntry>,
     applications: BTreeMap<String, StasisApplication>,
+    playbacks: BTreeMap<ChannelId, playback::PlaybackEntry>,
     dialplan_program: rusterisk_config::Dialplan,
 }
 
@@ -637,6 +671,7 @@ impl Control {
             channels: BTreeMap::new(),
             bridges: BTreeMap::new(),
             applications: BTreeMap::new(),
+            playbacks: BTreeMap::new(),
             dialplan_program: program,
         }
     }
@@ -707,6 +742,11 @@ impl Control {
         now_ms: u64,
     ) -> Result<Outcome, ControlError> {
         match action {
+            Action::PlayChannel { channel, id, media } => self.play_channel(channel, id, media),
+            Action::GetPlayback(id) => self.get_playback(&id),
+            Action::ControlPlayback { id, operation } => {
+                self.control_playback(&id, operation, timestamp)
+            }
             Action::SendDtmf {
                 channel,
                 digits,
@@ -1205,6 +1245,15 @@ impl Control {
             application_name(&self.applications, entry.call.stasis())?.map(str::to_owned);
         let was_in_stasis = matches!(entry.call.stasis(), StasisMembership::Entered(_));
         let mut outcome = Outcome::empty();
+        self.end_channel_playbacks(
+            &CallKey {
+                id: id.clone(),
+                generation: entry.call.generation(),
+            },
+            application.as_deref(),
+            timestamp,
+            &mut outcome,
+        );
         if let Some(frame) = &mut entry.dialplan {
             if let Some(mut dial) = frame.dial.take() {
                 outcome.append(self.cancel_dial(&mut dial, timestamp)?);
@@ -1361,11 +1410,12 @@ impl Control {
         now: u64,
     ) -> Result<Outcome, ControlError> {
         match signal {
+            Signal::PlaybackStarted { key, token } => self.playback_started(&key, token, timestamp),
             Signal::PlaybackFinished {
                 key,
                 token,
                 completion,
-            } => self.finish_dialplan_playback(&key, token, completion),
+            } => self.finish_playback(&key, token, completion, timestamp),
             Signal::DtmfReady { key, events } => {
                 if let Some(entry) = self
                     .channels

@@ -2,7 +2,7 @@ use crate::media::{MediaNotice, MediaPort};
 use crate::rtp::{RtpSession, SocketPair};
 use crate::storage::{PlaybackMedia, StoragePort};
 use crate::{CallKey, ControlError, Controller, Effect, IncomingCall, Milestone, Signal};
-use rusterisk_api::ChannelId;
+use rusterisk_api::{ChannelId, MediaUri};
 use rusterisk_config::{Codec, Config, Dtmf, Protocol};
 use rusterisk_core::{AudioGate, DtmfCommand, MediaTaskToken};
 use rusterisk_media::{AudioFormat, AudioTarget, Gate, TelephoneFormat};
@@ -551,58 +551,23 @@ impl Signaling {
                     self.notify(Signal::Terminated { key, cause: 21 }).await?;
                 }
             }
-            Effect::Playback { key, token, media } => match &self.storage {
-                Some(storage) if self.playbacks.len() < 64 && self.calls.contains_key(&key) => {
-                    let storage = storage.clone();
-                    let port = self.media.clone();
-                    let completed = match port
-                        .reserve_playback(AudioTarget::Channel(key.clone()), token)
-                        .await
-                    {
-                        Ok(completed) => completed,
-                        Err(error) => {
-                            tracing::warn!(channel = %key.id, generation = key.generation, ?token, %error, "playback reservation failed");
-                            self.notify(Signal::PlaybackFinished {
-                                key,
-                                token,
-                                completion: crate::PlaybackCompletion::Failed,
-                            })
-                            .await?;
-                            return Ok(());
-                        }
-                    };
-                    self.playbacks.spawn(async move {
-                        let result = async {
-                            let name = ChannelId::try_from(media)?;
-                            let source = storage
-                                .play(PlaybackMedia::Sound(name))
-                                .await
-                                .map_err(failure)?;
-                            port
-                                .attach_playback(token, source)
-                                .await
-                                .map_err(failure)?;
-                            completed.await.map_err(failure)?.map_err(failure)
-                        }
-                        .await;
-                        if result.is_err() {
-                            if let Err(error) = port.stop_playback(token) {
-                                tracing::warn!(channel = %key.id, generation = key.generation, ?token, %error, "failed playback reservation cleanup deferred");
-                            }
-                        }
-                        (key, token, result)
-                    });
-                }
-                Some(_) | None => {
-                    tracing::warn!(channel = %key.id, generation = key.generation, ?token, "playback admission failed");
-                    self.notify(Signal::PlaybackFinished {
-                        key,
-                        token,
-                        completion: crate::PlaybackCompletion::Failed,
-                    })
-                    .await?;
-                }
-            },
+            Effect::Playback { key, token, media } => {
+                let media = ChannelId::try_from(media)
+                    .map(PlaybackMedia::Sound)
+                    .map_err(ControlError::from);
+                self.start_playback(key, token, media).await?;
+            }
+            Effect::PlayChannel { key, token, media } => {
+                let media = match media {
+                    MediaUri::Sound(name) => PlaybackMedia::Sound(name),
+                    MediaUri::Recording(name) => PlaybackMedia::Recording(name),
+                };
+                self.start_playback(key, token, Ok(media)).await?;
+            }
+            Effect::ControlPlayback { token, operation } => self
+                .media
+                .control_playback(token, operation)
+                .map_err(failure)?,
             Effect::Release { key } => {
                 if let Some(call) = self.calls.remove(&key) {
                     let output = self.terminate(call.listener, &key, now).map_err(failure)?;
@@ -620,6 +585,68 @@ impl Signaling {
                     None => Vec::new(),
                 };
                 self.apply_bridge(identity, channels)?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn start_playback(
+        &mut self,
+        key: CallKey,
+        token: MediaTaskToken,
+        media: Result<PlaybackMedia, ControlError>,
+    ) -> Result<(), ControlError> {
+        match &self.storage {
+            Some(storage) if self.playbacks.len() < 64 && self.calls.contains_key(&key) => {
+                let storage = storage.clone();
+                let port = self.media.clone();
+                let controller = self.controller.clone();
+                let completed = match port
+                    .reserve_playback(AudioTarget::Channel(key.clone()), token)
+                    .await
+                {
+                    Ok(completed) => completed,
+                    Err(error) => {
+                        tracing::warn!(channel = %key.id, generation = key.generation, ?token, %error, "playback reservation failed");
+                        self.notify(Signal::PlaybackFinished {
+                            key,
+                            token,
+                            completion: crate::PlaybackCompletion::Failed,
+                        })
+                        .await?;
+                        return Ok(());
+                    }
+                };
+                self.playbacks.spawn(async move {
+                        let result = async {
+                            let source = storage
+                                .play(media?)
+                                .await
+                                .map_err(failure)?;
+                            port
+                                .attach_playback(token, source)
+                                .await
+                                .map_err(failure)?;
+                            controller.signal(Signal::PlaybackStarted { key: key.clone(), token }).await?;
+                            completed.await.map_err(failure)?.map_err(failure)
+                        }
+                        .await;
+                        if result.is_err() {
+                            if let Err(error) = port.stop_playback(token) {
+                                tracing::warn!(channel = %key.id, generation = key.generation, ?token, %error, "failed playback reservation cleanup deferred");
+                            }
+                        }
+                        (key, token, result)
+                    });
+            }
+            Some(_) | None => {
+                tracing::warn!(channel = %key.id, generation = key.generation, ?token, "playback admission failed");
+                self.notify(Signal::PlaybackFinished {
+                    key,
+                    token,
+                    completion: crate::PlaybackCompletion::Failed,
+                })
+                .await?;
             }
         }
         Ok(())
