@@ -1,11 +1,6 @@
 use hmac::{Hmac, KeyInit, Mac};
 use rsipstack::sip::{
-    headers::{
-        auth::{Algorithm, AuthQop},
-        typed::Authorization,
-        untyped::ToTypedHeader,
-    },
-    HeadersExt, Method, Request, SipMessage, Uri,
+    headers::untyped::ToTypedHeader, HeadersExt, Method, Request, SipMessage, Uri,
 };
 use rusterisk_config::{Codec, Config, Protocol};
 use rusterisk_core::ContactPresence;
@@ -482,26 +477,27 @@ impl Engine {
         let Some(header) = request.authorization_header() else {
             return Ok(None);
         };
-        let authorization = match Authorization::parse(header.value()) {
+        let header = match digest::Header::parse(header.value()) {
+            Ok(header) => header,
+            Err(_) => return Ok(None),
+        };
+        let authorization = match header.authorization() {
             Ok(value) => value,
             Err(_) => return Ok(None),
         };
-        let Some(nonce) = self.nonces.get(&authorization.nonce) else {
+        let Some(nonce) = self.nonces.get(authorization.nonce()) else {
             return Ok(None);
         };
         if nonce.peer != peer
             || nonce.expires <= now
             || nonce.call_id != request.call_id_header()?.value()
-            || authorization.uri != request.uri
-            || authorization.algorithm.unwrap_or(Algorithm::Md5) != Algorithm::Md5
+            || Uri::try_from(authorization.uri())? != request.uri
+            || authorization.algorithm() != digest::Algorithm::Md5
+            || matches!(authorization.protection(), digest::Protection::Integrity(_))
         {
             return Ok(None);
         }
-        let count = match authorization.qop {
-            Some(AuthQop::Auth { nc, .. }) => nc,
-            Some(AuthQop::AuthInt { .. }) => return Ok(None),
-            None => 1,
-        };
+        let count = authorization.count();
         if count == 0 || count <= nonce.count {
             return Ok(None);
         }
@@ -516,42 +512,19 @@ impl Engine {
                         .iter()
                         .find(|auth| {
                             auth.name == endpoint.auth
-                                && auth.username == authorization.username
-                                && auth.realm == authorization.realm
+                                && auth.username == authorization.username()
+                                && auth.realm == authorization.realm()
                         })
                         .map(|auth| (index, auth))
                 })
         else {
             return Ok(None);
         };
-        let encoded_count = format!("{count:08x}");
-        let protection = match &authorization.qop {
-            Some(AuthQop::Auth { cnonce, .. }) => {
-                digest::Protection::parse(Some("auth"), Some(cnonce), Some(&encoded_count))
-            }
-            Some(AuthQop::AuthInt { .. }) => return Ok(None),
-            None => digest::Protection::parse(None, None, None),
-        };
-        let credentials = digest::Credentials::new(
-            &authorization.username,
-            auth.password.expose(),
-            &authorization.realm,
-        );
         let method = request.method.to_string();
-        let uri = authorization.uri.to_string();
-        let digest_request =
-            digest::DigestRequest::new(&method, &uri, &authorization.nonce, &request.body);
-        let (Ok(protection), Ok(credentials), Ok(digest_request)) =
-            (protection, credentials, digest_request)
-        else {
-            return Ok(None);
-        };
-        let response = digest::Algorithm::parse(None)
-            .and_then(|algorithm| algorithm.calculate(&credentials, &digest_request, &protection));
-        let Ok(response) = response else {
-            return Ok(None);
-        };
-        if !response.matches(&authorization.response) {
+        if !matches!(
+            authorization.verify(&method, &request.body, auth.password.expose()),
+            Ok(true)
+        ) {
             return Ok(None);
         }
         let endpoint = &self.config.endpoints[endpoint_index];
@@ -570,7 +543,7 @@ impl Engine {
         }
         let nonce = self
             .nonces
-            .get_mut(&authorization.nonce)
+            .get_mut(authorization.nonce())
             .ok_or(SipError::InvalidPacket)?;
         nonce.count = count;
         Ok(Some(endpoint_index))

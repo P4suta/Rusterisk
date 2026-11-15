@@ -3,6 +3,8 @@ use rsipstack::sip::{uri::Scheme, Method, Uri};
 use sha2::{Digest, Sha256};
 use std::num::NonZeroU32;
 use subtle::ConstantTimeEq;
+mod header;
+pub(crate) use header::Header;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DigestError {
