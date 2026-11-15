@@ -1,5 +1,7 @@
 use rusterisk_client::{
-    api::{ApiError, Bridge, BridgeVideoMode, ChannelId, EventFilter, EventFilterRequest},
+    api::{
+        ApiError, Bridge, BridgeVideoMode, ChannelId, EventFilter, EventFilterRequest, EventSource,
+    },
     Client, Error,
 };
 use std::{future::IntoFuture, time::Duration};
@@ -61,6 +63,99 @@ fn rejection<T>(result: Result<T, Error>) -> Result<(u16, ApiError), Error> {
         Err(error) => Err(error),
         Ok(_) => Err(Error::Invalid("expected a rejected resource query")),
     }
+}
+
+async fn compare_subscriptions(
+    actual: &Client,
+    reference: &Client,
+    app: &str,
+) -> Result<(), Error> {
+    let id = ChannelId::try_from("observed".to_owned())?;
+    actual.create_bridge(&id, "Observed").await?;
+    reference.create_bridge(&id, "Observed").await?;
+    let source = EventSource::Bridge(id.clone());
+    for _ in 0..2 {
+        assert_eq!(
+            actual
+                .subscribe_resources(app, std::slice::from_ref(&source))
+                .await?,
+            reference
+                .subscribe_resources(app, std::slice::from_ref(&source))
+                .await?
+        );
+    }
+    for _ in 0..2 {
+        assert_eq!(
+            actual
+                .unsubscribe_resources(app, std::slice::from_ref(&source))
+                .await?,
+            reference
+                .unsubscribe_resources(app, std::slice::from_ref(&source))
+                .await?
+        );
+    }
+    assert_eq!(
+        rejection(
+            actual
+                .unsubscribe_resources(app, std::slice::from_ref(&source))
+                .await
+        )?,
+        rejection(
+            reference
+                .unsubscribe_resources(app, std::slice::from_ref(&source))
+                .await
+        )?
+    );
+    let missing = EventSource::Bridge(ChannelId::try_from("missing".to_owned())?);
+    let batch = [source.clone(), missing];
+    assert_eq!(
+        rejection(actual.subscribe_resources(app, &batch).await)?,
+        rejection(reference.subscribe_resources(app, &batch).await)?
+    );
+    assert_eq!(
+        actual.application(app).await?,
+        reference.application(app).await?
+    );
+    actual.destroy_bridge(&id).await?;
+    reference.destroy_bridge(&id).await?;
+    assert_eq!(
+        actual.application(app).await?,
+        reference.application(app).await?
+    );
+    assert_eq!(
+        rejection(
+            actual
+                .unsubscribe_resources(app, std::slice::from_ref(&source))
+                .await
+        )?,
+        rejection(reference.unsubscribe_resources(app, &[source]).await)?
+    );
+    assert_eq!(
+        actual
+            .subscribe_resources(app, &[EventSource::AllBridges])
+            .await?,
+        reference
+            .subscribe_resources(app, &[EventSource::AllBridges])
+            .await?
+    );
+    let cleared = actual
+        .unsubscribe_resources(app, &[EventSource::AllBridges])
+        .await?;
+    assert!(cleared.bridge_ids.is_empty());
+    assert_eq!(
+        rejection(
+            reference
+                .unsubscribe_resources(app, &[EventSource::AllBridges])
+                .await
+        )?,
+        (
+            501,
+            ApiError {
+                message: "Method not implemented".into()
+            }
+        )
+    );
+    Ok(())
 }
 
 async fn compare_existing_client(actual: &str, reference: &str) -> Result<(), Error> {
@@ -236,6 +331,7 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
             rejection(actual.application("missing").await)?,
             rejection(reference.application("missing").await)?
         );
+        compare_subscriptions(&actual, &reference, app.as_str()).await?;
         reference_session.shutdown().await?;
         actual_session.shutdown().await?;
         compare_existing_client(&format!("http://{address}"), &reference_address).await?;
