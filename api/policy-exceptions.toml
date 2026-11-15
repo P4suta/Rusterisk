@@ -18,3 +18,10 @@ item = "BufferItem"
 lint = "clippy::large_enum_variant"
 adr = "docs/adr/bound-websocket-media-queues-by-message-admission.md"
 rationale = "Keep bounded frames inline with ordered markers."
+
+[[exceptions]]
+path = "crates/server/src/encryption/client.rs"
+item = "client_connector"
+lint = "clippy::disallowed_types"
+adr = "docs/adr/confine-client-tls-sharing-to-immutable-library-config.md"
+rationale = "Construct only immutable external TLS client configuration."

@@ -5,26 +5,25 @@ use crate::{
     CallKey, ControlError, Controller, Effect, IncomingCall, MediaOwner, Milestone, Signal,
 };
 use rusterisk_api::{ChannelId, MediaUri};
-use rusterisk_config::{Codec, Config, Dtmf, Protocol};
+use rusterisk_config::{Codec, Config, Dtmf};
 use rusterisk_core::{AudioGate, DtmfCommand, MediaTaskToken, PeerMediaDirection};
 use rusterisk_media::{AudioFormat, AudioTarget, Gate, TelephoneFormat};
-use rusterisk_sip::{Datagram, Engine, Outbound, Output, RejectReason, SipEvent, MAX_MESSAGE};
+use rusterisk_sip::{Datagram, Engine, Outbound, Output, RejectReason, SipEvent};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
-use std::task::Poll;
 use std::time::{Duration, Instant};
-use tokio::io::ReadBuf;
-use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 mod external_media;
 #[cfg(test)]
 mod negotiation_tests;
 mod recording;
+#[cfg(test)]
+mod stream_tests;
+mod transport;
 
 struct Listener {
     name: String,
-    socket: UdpSocket,
     engine: Engine,
 }
 struct Active {
@@ -72,6 +71,7 @@ pub struct Signaling {
     media: MediaPort,
     notices: mpsc::Receiver<MediaNotice>,
     listeners: Vec<Listener>,
+    network: transport::Network,
     calls: BTreeMap<CallKey, Active>,
     external_media: BTreeSet<CallKey>,
     stream_admissions: BTreeMap<CallKey, external_media::PendingStream>,
@@ -100,28 +100,6 @@ fn peer_direction(direction: rusterisk_sip::Direction) -> PeerMediaDirection {
     }
 }
 
-async fn receive(listeners: &[Listener]) -> Result<Received, ControlError> {
-    std::future::poll_fn(|context| {
-        let mut bytes = [0; MAX_MESSAGE + 1];
-        for (index, listener) in listeners.iter().enumerate() {
-            let mut buffer = ReadBuf::new(&mut bytes);
-            match listener.socket.poll_recv_from(context, &mut buffer) {
-                Poll::Ready(Ok(peer)) => {
-                    return Poll::Ready(Ok(Received {
-                        listener: index,
-                        peer,
-                        bytes: buffer.filled().to_vec(),
-                    }))
-                }
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(failure(error))),
-                Poll::Pending => {}
-            }
-        }
-        Poll::Pending
-    })
-    .await
-}
-
 impl Signaling {
     pub fn with_storage(mut self, storage: StoragePort) -> Self {
         self.storage = Some(storage);
@@ -138,21 +116,9 @@ impl Signaling {
         if config.transports.len() > 16 {
             return Err(ControlError::Capacity);
         }
-        let mut sockets = Vec::with_capacity(config.transports.len());
-        for transport in &mut config.transports {
-            match transport.protocol {
-                Protocol::Udp => {
-                    let socket = UdpSocket::bind(transport.bind).await.map_err(failure)?;
-                    transport.bind = socket.local_addr().map_err(failure)?;
-                    sockets.push(socket);
-                }
-                Protocol::Tcp | Protocol::Tls | Protocol::Ws | Protocol::Wss => {
-                    return Err(ControlError::Unsupported)
-                }
-            }
-        }
-        let mut listeners = Vec::with_capacity(sockets.len());
-        for (socket, transport) in sockets.into_iter().zip(&config.transports) {
+        let network = transport::Network::bind(&mut config).await?;
+        let mut listeners = Vec::with_capacity(config.transports.len());
+        for transport in &config.transports {
             let mut scoped = config.clone();
             scoped
                 .endpoints
@@ -161,8 +127,7 @@ impl Signaling {
             getrandom::fill(&mut seed).map_err(failure)?;
             listeners.push(Listener {
                 name: transport.name.clone(),
-                socket,
-                engine: Engine::new(scoped, seed),
+                engine: Engine::new(scoped, seed).with_transport(transport.protocol),
             });
         }
         Ok(Self {
@@ -172,6 +137,7 @@ impl Signaling {
             media,
             notices,
             listeners,
+            network,
             calls: BTreeMap::new(),
             external_media: BTreeSet::new(),
             stream_admissions: BTreeMap::new(),
@@ -185,38 +151,18 @@ impl Signaling {
     pub fn listeners(&self) -> Result<Vec<(String, SocketAddr)>, ControlError> {
         self.listeners
             .iter()
-            .map(|listener| {
-                Ok((
-                    listener.name.clone(),
-                    listener.socket.local_addr().map_err(failure)?,
-                ))
-            })
+            .enumerate()
+            .map(|(index, listener)| Ok((listener.name.clone(), self.network.local_addr(index)?)))
             .collect()
     }
 
     async fn transmit(
-        &self,
+        &mut self,
         listener: usize,
         datagrams: Vec<Datagram>,
     ) -> Result<(), ControlError> {
-        let socket = &self
-            .listeners
-            .get(listener)
-            .ok_or(ControlError::Invalid("Unknown listener"))?
-            .socket;
         for packet in datagrams {
-            let size = tokio::time::timeout(
-                Duration::from_millis(100),
-                socket.send_to(&packet.bytes, packet.peer),
-            )
-            .await
-            .map_err(failure)?
-            .map_err(failure)?;
-            if size != packet.bytes.len() {
-                return Err(ControlError::Adapter(
-                    "Incomplete signaling datagram".into(),
-                ));
-            }
+            self.network.send(listener, packet).await?;
         }
         Ok(())
     }
@@ -991,12 +937,21 @@ impl Signaling {
                     }
                     None => break,
                 },
-                packet = receive(&self.listeners) => {
-                    let packet = packet?;
+                packet = self.network.next() => {
                     let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
-                    match self.listeners[packet.listener].engine.receive(&packet.bytes, packet.peer, now) {
-                        Ok(output) => self.output(packet.listener, output, now).await?,
-                        Err(error) => tracing::debug!(transport = %self.listeners[packet.listener].name, %error, "signaling input refused"),
+                    match packet? {
+                        transport::Input::Packet(packet) => match self.listeners[packet.listener].engine.receive(&packet.bytes, packet.peer, now) {
+                            Ok(output) => self.output(packet.listener, output, now).await?,
+                            Err(error) => {
+                                self.network.refuse(packet.listener, packet.peer);
+                                tracing::debug!(transport = %self.listeners[packet.listener].name, %error, "signaling input refused");
+                            }
+                        },
+                        transport::Input::Closed { key, result } => {
+                            if let Err(error) = result { tracing::debug!(transport = %self.listeners[key.listener].name, %error, "signaling stream closed"); }
+                            let output = self.listeners[key.listener].engine.disconnected(key.peer);
+                            self.output(key.listener, output, now).await?;
+                        }
                     }
                 }
                 notice = self.notices.recv() => match notice {
@@ -1090,6 +1045,10 @@ impl Signaling {
         }
         if let Err(error) = self.finish_recordings().await {
             tracing::error!(%error, "recording shutdown failed");
+            cleanup = Err(error);
+        }
+        if let Err(error) = self.network.close().await {
+            tracing::error!(%error, "signaling stream shutdown failed");
             cleanup = Err(error);
         }
         match (result, cleanup) {

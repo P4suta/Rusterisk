@@ -1,0 +1,562 @@
+use super::{failure, Received};
+use crate::{
+    encryption::{TlsClientContext, TlsContext},
+    ControlError,
+};
+use rusterisk_config::{Config, Protocol};
+use rusterisk_sip::{Datagram, SipStreamDecoder, StreamItem, MAX_MESSAGE};
+use std::{collections::BTreeMap, net::SocketAddr, task::Poll, time::Duration};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
+    net::{TcpListener, TcpSocket, TcpStream, UdpSocket},
+    sync::{mpsc, watch},
+    task::JoinSet,
+};
+#[cfg(test)]
+mod tests;
+
+enum ListenerSocket {
+    Datagram(UdpSocket),
+    Stream(TcpListener),
+    Encrypted {
+        listener: TcpListener,
+        context: TlsContext,
+        client: TlsClientContext,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct ConnectionKey {
+    pub listener: usize,
+    pub peer: SocketAddr,
+    generation: u64,
+}
+
+enum ConnectionState {
+    Open,
+    Closing(ControlError),
+}
+
+struct Port {
+    key: ConnectionKey,
+    packets: mpsc::Sender<Vec<u8>>,
+    stop: watch::Sender<bool>,
+    state: ConnectionState,
+}
+
+struct StreamPacket {
+    key: ConnectionKey,
+    item: StreamEvent,
+}
+
+enum StreamEvent {
+    Message(Vec<u8>),
+    Finished(Result<(), ControlError>),
+}
+
+enum FrameDeadline {
+    FirstMessage(tokio::time::Instant),
+    Message(tokio::time::Instant),
+    Idle,
+}
+
+struct Reserved {
+    key: ConnectionKey,
+    packets: mpsc::Receiver<Vec<u8>>,
+    stop: watch::Receiver<bool>,
+}
+
+enum ListenerInput {
+    Datagram(Received),
+    Accepted {
+        listener: usize,
+        peer: SocketAddr,
+        stream: TcpStream,
+    },
+}
+
+pub(super) enum Input {
+    Packet(Received),
+    Closed {
+        key: ConnectionKey,
+        result: Result<(), ControlError>,
+    },
+}
+
+pub(super) struct Network {
+    listeners: Vec<ListenerSocket>,
+    ports: BTreeMap<(usize, SocketAddr), Port>,
+    jobs: JoinSet<(ConnectionKey, Result<(), ControlError>)>,
+    sender: mpsc::Sender<StreamPacket>,
+    received: mpsc::Receiver<StreamPacket>,
+    generation: u64,
+}
+
+async fn listen(listeners: &[ListenerSocket]) -> Result<ListenerInput, ControlError> {
+    std::future::poll_fn(|context| {
+        let mut bytes = [0; MAX_MESSAGE + 1];
+        for (index, listener) in listeners.iter().enumerate() {
+            let result = match listener {
+                ListenerSocket::Datagram(socket) => {
+                    let mut buffer = ReadBuf::new(&mut bytes);
+                    match socket.poll_recv_from(context, &mut buffer) {
+                        Poll::Ready(Ok(peer)) => {
+                            return Poll::Ready(Ok(ListenerInput::Datagram(Received {
+                                listener: index,
+                                peer,
+                                bytes: buffer.filled().to_vec(),
+                            })));
+                        }
+                        Poll::Ready(Err(error)) => return Poll::Ready(Err(failure(error))),
+                        Poll::Pending => continue,
+                    }
+                }
+                ListenerSocket::Stream(listener) | ListenerSocket::Encrypted { listener, .. } => {
+                    listener.poll_accept(context)
+                }
+            };
+            match result {
+                Poll::Ready(Ok((stream, peer))) => {
+                    return Poll::Ready(Ok(ListenerInput::Accepted {
+                        listener: index,
+                        peer,
+                        stream,
+                    }));
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(failure(error))),
+                Poll::Pending => {}
+            }
+        }
+        Poll::Pending
+    })
+    .await
+}
+
+impl Network {
+    pub(super) async fn bind(config: &mut Config) -> Result<Self, ControlError> {
+        let mut listeners = Vec::with_capacity(config.transports.len());
+        for transport in &mut config.transports {
+            let listener = match transport.protocol {
+                Protocol::Udp => ListenerSocket::Datagram(
+                    UdpSocket::bind(transport.bind).await.map_err(failure)?,
+                ),
+                Protocol::Tcp => ListenerSocket::Stream(
+                    TcpListener::bind(transport.bind).await.map_err(failure)?,
+                ),
+                Protocol::Tls => ListenerSocket::Encrypted {
+                    listener: TcpListener::bind(transport.bind).await.map_err(failure)?,
+                    context: TlsContext::load(
+                        transport
+                            .tls
+                            .as_ref()
+                            .ok_or(ControlError::Invalid("Encryption configuration missing"))?,
+                    )
+                    .await?,
+                    client: TlsClientContext::load(transport.ca_list_file.as_deref())?,
+                },
+                Protocol::Ws | Protocol::Wss => return Err(ControlError::Unsupported),
+            };
+            transport.bind = match &listener {
+                ListenerSocket::Datagram(socket) => socket.local_addr(),
+                ListenerSocket::Stream(socket)
+                | ListenerSocket::Encrypted {
+                    listener: socket, ..
+                } => socket.local_addr(),
+            }
+            .map_err(failure)?;
+            listeners.push(listener);
+        }
+        let (sender, received) = mpsc::channel(128);
+        Ok(Self {
+            listeners,
+            ports: BTreeMap::new(),
+            jobs: JoinSet::new(),
+            sender,
+            received,
+            generation: 0,
+        })
+    }
+
+    pub(super) fn local_addr(&self, listener: usize) -> Result<SocketAddr, ControlError> {
+        match self
+            .listeners
+            .get(listener)
+            .ok_or(ControlError::Invalid("Unknown listener"))?
+        {
+            ListenerSocket::Datagram(socket) => socket.local_addr(),
+            ListenerSocket::Stream(socket)
+            | ListenerSocket::Encrypted {
+                listener: socket, ..
+            } => socket.local_addr(),
+        }
+        .map_err(failure)
+    }
+
+    fn reserve(&mut self, listener: usize, peer: SocketAddr) -> Result<Reserved, ControlError> {
+        if self.ports.len() >= 64
+            || self.jobs.len() >= 64
+            || self.ports.contains_key(&(listener, peer))
+        {
+            return Err(ControlError::Capacity);
+        }
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(ControlError::Capacity)?;
+        let key = ConnectionKey {
+            listener,
+            peer,
+            generation: self.generation,
+        };
+        let (packets, input) = mpsc::channel(8);
+        let (stop, stopped) = watch::channel(false);
+        self.ports.insert(
+            (listener, peer),
+            Port {
+                key,
+                packets,
+                stop,
+                state: ConnectionState::Open,
+            },
+        );
+        Ok(Reserved {
+            key,
+            packets: input,
+            stop: stopped,
+        })
+    }
+
+    fn accepted(
+        &mut self,
+        listener: usize,
+        peer: SocketAddr,
+        stream: TcpStream,
+    ) -> Result<(), ControlError> {
+        let encryption = match &self.listeners[listener] {
+            ListenerSocket::Stream(_) => None,
+            ListenerSocket::Encrypted { context, .. } => Some(context.clone()),
+            ListenerSocket::Datagram(_) => {
+                return Err(ControlError::Invalid(
+                    "Stream accepted on datagram listener",
+                ));
+            }
+        };
+        stream.set_nodelay(true).map_err(failure)?;
+        let Reserved {
+            key,
+            packets,
+            mut stop,
+        } = self.reserve(listener, peer)?;
+        let sender = self.sender.clone();
+        self.jobs.spawn(async move {
+            let result = match encryption {
+                None => connection(stream, key, packets, sender, stop).await,
+                Some(context) => {
+                    tokio::select! {
+                        changed = stop.changed() => match changed { Ok(()) | Err(_) => finished(&sender, key, Ok(()), &stop).await },
+                        accepted = context.accept(stream) => match accepted { Ok(stream) => connection(stream, key, packets, sender, stop).await, Err(error) => finished(&sender, key, Err(error), &stop).await },
+                    }
+                }
+            };
+            (key, result)
+        });
+        Ok(())
+    }
+
+    fn connect(&mut self, listener: usize, peer: SocketAddr) -> Result<(), ControlError> {
+        let encryption = match &self.listeners[listener] {
+            ListenerSocket::Stream(_) => None,
+            ListenerSocket::Encrypted { client, .. } => Some(client.clone()),
+            ListenerSocket::Datagram(_) => return Err(ControlError::Unsupported),
+        };
+        let local = SocketAddr::new(self.local_addr(listener)?.ip(), 0);
+        let socket = if peer.is_ipv4() {
+            TcpSocket::new_v4()
+        } else {
+            TcpSocket::new_v6()
+        }
+        .map_err(failure)?;
+        socket.bind(local).map_err(failure)?;
+        let Reserved {
+            key,
+            packets,
+            mut stop,
+        } = self.reserve(listener, peer)?;
+        let sender = self.sender.clone();
+        self.jobs.spawn(async move {
+            let result = tokio::select! {
+                changed = stop.changed() => match changed { Ok(()) | Err(_) => finished(&sender, key, Ok(()), &stop).await },
+                connected = tokio::time::timeout(Duration::from_secs(4), socket.connect(peer)) => match connected {
+                    Ok(Ok(stream)) => {
+                        match encryption {
+                            None => connection(stream, key, packets, sender, stop).await,
+                            Some(context) => {
+                                tokio::select! {
+                                    changed = stop.changed() => match changed { Ok(()) | Err(_) => finished(&sender, key, Ok(()), &stop).await },
+                                    connected = context.connect(stream, tokio_rustls::rustls::pki_types::ServerName::IpAddress(peer.ip().into())) => match connected {
+                                        Ok(stream) => connection(stream, key, packets, sender, stop).await,
+                                        Err(error) => finished(&sender, key, Err(error), &stop).await,
+                                    },
+                                }
+                            }
+                        }
+                    },
+                    Ok(Err(error)) => finished(&sender, key, Err(failure(error)), &stop).await,
+                    Err(error) => finished(&sender, key, Err(failure(error)), &stop).await,
+                },
+            };
+            (key, result)
+        });
+        Ok(())
+    }
+
+    pub(super) async fn send(
+        &mut self,
+        listener: usize,
+        packet: Datagram,
+    ) -> Result<(), ControlError> {
+        if packet.bytes.len() > MAX_MESSAGE {
+            return Err(ControlError::Capacity);
+        }
+        if let ListenerSocket::Datagram(socket) = &self.listeners[listener] {
+            let size = tokio::time::timeout(
+                Duration::from_millis(100),
+                socket.send_to(&packet.bytes, packet.peer),
+            )
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
+            return if size == packet.bytes.len() {
+                Ok(())
+            } else {
+                Err(ControlError::Adapter(
+                    "Incomplete signaling datagram".into(),
+                ))
+            };
+        }
+        if !self.ports.contains_key(&(listener, packet.peer)) {
+            self.connect(listener, packet.peer)?;
+        }
+        let port = self
+            .ports
+            .get_mut(&(listener, packet.peer))
+            .ok_or(ControlError::Capacity)?;
+        match &port.state {
+            ConnectionState::Open => {
+                if let Err(error) = port.packets.try_send(packet.bytes) {
+                    port.state = ConnectionState::Closing(failure(error));
+                    port.stop.send_replace(true);
+                }
+            }
+            ConnectionState::Closing(_) => {}
+        }
+        Ok(())
+    }
+
+    pub(super) async fn next(&mut self) -> Result<Input, ControlError> {
+        loop {
+            tokio::select! {
+                received = listen(&self.listeners) => match received? {
+                    ListenerInput::Datagram(packet) => return Ok(Input::Packet(packet)),
+                    ListenerInput::Accepted { listener, peer, stream } => {
+                        if let Err(error) = self.accepted(listener, peer, stream) { tracing::debug!(%error, "signaling connection refused"); }
+                    },
+                },
+                packet = self.received.recv() => {
+                    let packet = packet.ok_or(ControlError::Capacity)?;
+                    if !self.ports.get(&(packet.key.listener, packet.key.peer)).is_some_and(|port| port.key == packet.key) { continue; }
+                    match packet.item {
+                        StreamEvent::Message(bytes) => {
+                            if self.ports.get(&(packet.key.listener, packet.key.peer)).is_some_and(|port| matches!(port.state, ConnectionState::Open)) {
+                                return Ok(Input::Packet(Received { listener: packet.key.listener, peer: packet.key.peer, bytes }));
+                            }
+                        },
+                        StreamEvent::Finished(mut result) => {
+                            if let Some(port) = self.ports.remove(&(packet.key.listener, packet.key.peer)) {
+                                if let ConnectionState::Closing(error) = port.state { result = Err(error); }
+                            }
+                            return Ok(Input::Closed { key: packet.key, result });
+                        },
+                    }
+                },
+                result = self.jobs.join_next(), if !self.jobs.is_empty() => {
+                    let (_key, result) = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
+                    if let Err(error) = result { tracing::debug!(%error, "signaling stream cleanup failed"); }
+                },
+            }
+        }
+    }
+
+    pub(super) fn refuse(&mut self, listener: usize, peer: SocketAddr) {
+        if let Some(port) = self.ports.get_mut(&(listener, peer)) {
+            port.state =
+                ConnectionState::Closing(ControlError::Invalid("Invalid signaling packet"));
+            port.stop.send_replace(true);
+        }
+    }
+
+    pub(super) async fn close(&mut self) -> Result<(), ControlError> {
+        for port in self.ports.values() {
+            port.stop.send_replace(true);
+        }
+        self.received.close();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut failure = None;
+        while !self.jobs.is_empty() {
+            match tokio::time::timeout_at(deadline, self.jobs.join_next()).await {
+                Ok(Some(Ok((_, Ok(()))))) | Ok(None) => {}
+                Ok(Some(Ok((_, Err(error))))) => {
+                    if failure.is_none() {
+                        failure = Some(error);
+                    }
+                }
+                Ok(Some(Err(error))) => {
+                    if failure.is_none() {
+                        failure = Some(super::failure(error));
+                    }
+                }
+                Err(error) => {
+                    self.jobs.abort_all();
+                    while let Some(result) = self.jobs.join_next().await {
+                        if let Err(error) = result {
+                            tracing::debug!(%error, "signaling connection task cancelled");
+                        }
+                    }
+                    return Err(super::failure(error));
+                }
+            }
+        }
+        self.ports.clear();
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+async fn emit(
+    sender: &mpsc::Sender<StreamPacket>,
+    packet: StreamPacket,
+    stop: &mut watch::Receiver<bool>,
+) -> Result<bool, ControlError> {
+    if *stop.borrow() {
+        return Ok(false);
+    }
+    tokio::select! {
+        changed = stop.changed() => match changed { Ok(()) | Err(_) => Ok(false) },
+        sent = tokio::time::timeout(Duration::from_millis(100), sender.send(packet)) => { sent.map_err(failure)?.map_err(failure)?; Ok(true) },
+    }
+}
+
+async fn finished(
+    sender: &mpsc::Sender<StreamPacket>,
+    key: ConnectionKey,
+    result: Result<(), ControlError>,
+    stop: &watch::Receiver<bool>,
+) -> Result<(), ControlError> {
+    match sender
+        .send(StreamPacket {
+            key,
+            item: StreamEvent::Finished(result),
+        })
+        .await
+    {
+        Ok(()) => Ok(()),
+        Err(_) if *stop.borrow() => Ok(()),
+        Err(error) => Err(failure(error)),
+    }
+}
+
+async fn drain<S: AsyncWrite + Unpin>(
+    socket: &mut S,
+    packets: &mut mpsc::Receiver<Vec<u8>>,
+    stop: &mut watch::Receiver<bool>,
+) -> Result<(), ControlError> {
+    let mut watching = true;
+    loop {
+        if *stop.borrow() {
+            return Ok(());
+        }
+        tokio::select! {
+            changed = stop.changed(), if watching => match changed {
+                Ok(()) => { if *stop.borrow() { return Ok(()); } },
+                Err(_) => watching = false,
+            },
+            packet = packets.recv() => match packet {
+                Some(packet) => write(socket, &packet).await?,
+                None => return Ok(()),
+            },
+        }
+    }
+}
+
+async fn write<S: AsyncWrite + Unpin>(socket: &mut S, bytes: &[u8]) -> Result<(), ControlError> {
+    tokio::time::timeout(Duration::from_millis(100), async {
+        socket.write_all(bytes).await?;
+        socket.flush().await
+    })
+    .await
+    .map_err(failure)?
+    .map_err(failure)
+}
+
+async fn connection<S: AsyncRead + AsyncWrite + Unpin>(
+    mut socket: S,
+    key: ConnectionKey,
+    mut packets: mpsc::Receiver<Vec<u8>>,
+    sender: mpsc::Sender<StreamPacket>,
+    mut stop: watch::Receiver<bool>,
+) -> Result<(), ControlError> {
+    let result = async {
+        let mut decoder = SipStreamDecoder::new();
+        let mut bytes = [0; 4096];
+        let mut crlf = false;
+        let mut deadline = FrameDeadline::FirstMessage(tokio::time::Instant::now() + Duration::from_secs(5));
+        loop {
+            if *stop.borrow() { break; }
+            let timer = async { match deadline { FrameDeadline::FirstMessage(deadline) | FrameDeadline::Message(deadline) => tokio::time::sleep_until(deadline).await, FrameDeadline::Idle => std::future::pending().await } };
+            tokio::select! {
+                changed = stop.changed() => if changed.is_err() || *stop.borrow() { break; },
+                () = timer => return Err(ControlError::Invalid("Signaling frame timed out")),
+                packet = packets.recv() => match packet { Some(packet) => write(&mut socket, &packet).await?, None => break },
+                received = socket.read(&mut bytes) => {
+                    let count = received.map_err(failure)?;
+                    if count == 0 { decoder.finish().map_err(failure)?; break; }
+                    if decoder.is_empty() && matches!(deadline, FrameDeadline::Idle) { deadline = FrameDeadline::Message(tokio::time::Instant::now() + Duration::from_secs(5)); }
+                    let mut offset = 0;
+                    let mut keepalives = 0;
+                    while offset < count {
+                        let (consumed, item) = decoder.push(&bytes[offset..count]).map_err(failure)?;
+                        offset += consumed;
+                        match item {
+                            Some(StreamItem::Message(bytes)) => { crlf = false; deadline = FrameDeadline::Idle; if !emit(&sender, StreamPacket { key, item: StreamEvent::Message(bytes) }, &mut stop).await? { return Ok(()); } },
+                            Some(StreamItem::Crlf) => { if crlf { keepalives += 1; if keepalives > 16 { return Err(ControlError::Capacity); } write(&mut socket, b"\r\n").await?; crlf = false; } else { crlf = true; } },
+                            None => {},
+                        }
+                    }
+                    if decoder.is_empty() {
+                        if matches!(deadline, FrameDeadline::Message(_)) { deadline = FrameDeadline::Idle; }
+                    } else if matches!(deadline, FrameDeadline::Idle) {
+                        deadline = FrameDeadline::Message(tokio::time::Instant::now() + Duration::from_secs(5));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }.await;
+    let result = match finished(&sender, key, result, &stop).await {
+        Ok(()) => drain(&mut socket, &mut packets, &mut stop).await,
+        Err(error) => Err(error),
+    };
+    let cleanup = tokio::time::timeout(Duration::from_millis(100), socket.shutdown())
+        .await
+        .map_err(failure)
+        .and_then(|result| result.map_err(failure));
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(primary), Err(cleanup)) => Err(ControlError::Adapter(format!(
+            "{primary}; stream cleanup failed: {cleanup}"
+        ))),
+    }
+}

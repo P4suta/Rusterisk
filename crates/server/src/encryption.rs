@@ -7,6 +7,10 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio_rustls::server::TlsStream;
+mod client;
+pub(crate) use client::TlsClientContext;
+#[cfg(test)]
+mod client_tests;
 
 #[derive(Clone)]
 pub(crate) struct TlsContext(RustlsAcceptor);
