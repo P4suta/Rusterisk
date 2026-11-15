@@ -24,3 +24,31 @@ async fn configuration_validation_loads_and_bounds_outbound_signaling_trust_root
     std::fs::write(&roots, identity.cert.pem()).map_err(failure)?;
     Server::validate(&config).await
 }
+
+#[tokio::test]
+async fn configuration_validation_loads_configured_media_client_trust_roots(
+) -> Result<(), ControlError> {
+    let directory = tempfile::tempdir().map_err(failure)?;
+    let roots = directory.path().join("roots.pem");
+    let config = Config::parse(
+        "[general]\nbindaddr=127.0.0.1\n",
+        "[app]\ntype=user\npassword=test\n",
+        "",
+        "",
+        "",
+    )
+    .map_err(failure)?
+    .with_websocket_configuration(
+        "",
+        &format!("[client]\ntype=websocket_client\nconnection_type=per_call_config\nuri=WSS://localhost/media\nprotocols=media\ntls_enabled=yes\nca_list_file={}\n", roots.display()),
+    )
+    .map_err(failure)?;
+    assert!(Server::validate(&config).await.is_err());
+    for bytes in [Vec::new(), b"invalid roots".to_vec(), vec![b'x'; 65537]] {
+        std::fs::write(&roots, bytes).map_err(failure)?;
+        assert!(Server::validate(&config).await.is_err());
+    }
+    let identity = rcgen::generate_simple_self_signed(["localhost".into()]).map_err(failure)?;
+    std::fs::write(&roots, identity.cert.pem()).map_err(failure)?;
+    Server::validate(&config).await
+}

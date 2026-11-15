@@ -40,8 +40,23 @@ impl Server {
             if let Some(files) = &transport.tls {
                 TlsContext::load(files).await?;
             }
-            if transport.protocol == rusterisk_config::Protocol::Tls {
-                TlsClientContext::load(transport.ca_list_file.as_deref())?;
+        }
+        let mut native_roots_loaded = false;
+        let signaling_roots = config
+            .transports
+            .iter()
+            .filter(|transport| transport.protocol == rusterisk_config::Protocol::Tls)
+            .map(|transport| transport.ca_list_file.as_deref());
+        let media_roots = config
+            .websocket
+            .clients
+            .iter()
+            .filter(|client| client.requires_tls())
+            .map(|client| client.ca_list_file.as_deref());
+        for roots in signaling_roots.chain(media_roots) {
+            if roots.is_some() || !native_roots_loaded {
+                TlsClientContext::load(roots)?;
+                native_roots_loaded |= roots.is_none();
             }
         }
         Ok(())
