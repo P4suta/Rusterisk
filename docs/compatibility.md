@@ -61,6 +61,7 @@ Incoming external WebSocket channels publish an ephemeral connection identifier 
 Media connections use the `media` subprotocol and the connection identifier as a bearer credential.
 Origin validation and exclusive connection claims protect channel generations.
 The service supports JSON and plain text controls, G.711 and signed linear audio, buffering, queue markers, pause, resume, and direction changes.
+Direction changes require JSON controls.
 Disconnecting releases the channel and its owned media.
 Outgoing WebSocket clients and Opus passthrough remain pending.
 
