@@ -63,6 +63,11 @@ enum Command {
         token: MediaTaskToken,
         mode: RecordingEnd,
     },
+    ControlRecording {
+        token: MediaTaskToken,
+        operation: rusterisk_core::RecordingControl,
+        reply: oneshot::Sender<Result<(), MediaError>>,
+    },
     Digits {
         key: CallKey,
         command: RtpDigitCommand,
@@ -203,6 +208,25 @@ impl MediaPort {
         let (reply, response) = oneshot::channel();
         self.commands
             .try_send(Command::AttachRecording { token, sink, reply })
+            .map_err(|_| MediaError::Capacity)?;
+        tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+    }
+
+    pub async fn control_recording(
+        &self,
+        token: MediaTaskToken,
+        operation: rusterisk_core::RecordingControl,
+    ) -> Result<(), MediaError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .try_send(Command::ControlRecording {
+                token,
+                operation,
+                reply,
+            })
             .map_err(|_| MediaError::Capacity)?;
         tokio::time::timeout(Duration::from_secs(5), response)
             .await
@@ -481,6 +505,18 @@ impl MediaHub {
                 }
             }
             Command::EndRecording { token, mode } => self.recordings.end(token, mode),
+            Command::ControlRecording {
+                token,
+                operation,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let result = self.recordings.control(token, operation);
+                    if reply.send(result).is_err() {
+                        tracing::debug!(?token, "recording control receiver disconnected");
+                    }
+                }
+            }
             Command::Digits {
                 key,
                 command,
