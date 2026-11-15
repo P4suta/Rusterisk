@@ -5,7 +5,7 @@ mod event_filter;
 mod event_source;
 mod external_rtp;
 mod external_stream;
-pub use external_stream::{AudioSocketTarget, InvalidAudioSocketTarget};
+pub use external_stream::{AudioSocketTarget, InvalidAudioSocketSession, InvalidAudioSocketTarget};
 mod media_commands;
 mod media_event_parse;
 mod media_events;
