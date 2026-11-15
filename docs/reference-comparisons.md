@@ -41,11 +41,17 @@ The runner collects reference logs after a test failure and removes its containe
 The same Rust client queries both servers.
 An owned Node.js process also uses `ari-client` 2.2.0 to discover operations, subscribe over WebSocket, and compare endpoint and app resources.
 The process has a 30-second deadline and a 128 MiB JavaScript heap limit.
+Each client operation has a five-second deadline that names the unfinished stage.
+The scenario repeats discovery and resource queries five times in one process.
 The fast gate checks the TypeScript fixture with its compiler, ESLint, Biome, and rejecting tests.
 The [historical dependency boundary](legacy-client-dependency-scope.md) scopes the legacy client's advisory and license checks.
 The scenario compares empty channel lists, configured endpoints, static and dynamic routing availability, technology-name case handling, app subscriptions, and missing-resource errors.
 The test normalizes endpoint list order by resource name.
 The test compares endpoint detail queries and error messages without normalization.
+Bridge comparisons cover creation, retrieval, listing, duplicate errors, and deletion.
+The test normalizes creation timestamps.
+The test checks `video_mode=none` for Rusterisk and `video_mode=talker` for the reference before comparing the remaining fields.
+The [audio bridge decision](adr/report-bridge-video-mode-within-supported-media.md) records the media scope difference.
 
 The resource scenario doesn't certify call or audio compatibility.
 SIPp scenarios, calls, received audio, and browser comparisons still require integration work.

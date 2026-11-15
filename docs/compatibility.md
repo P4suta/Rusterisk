@@ -12,6 +12,8 @@ The server provides authenticated channel creation, origination, answering, ring
 Channels can enter a subscribed Stasis app, move between subscribed apps, or continue in a configured dialplan.
 Leaving Stasis releases the Rust client's control handle without ending the server's channel.
 Bridge creation, membership changes, deletion, channel playback, bridge playback, and recording use the current resource generation.
+Audio bridges report `video_mode=none` because the approved initial scope defers video.
+The reference reports `talker` for a default mixing bridge.
 Stored recordings support listing, metadata, copying, deletion, and streamed `audio/wav` downloads.
 The ping endpoint returns a `pong` response.
 App queries report subscribed apps and their channel and bridge resources.
@@ -63,7 +65,7 @@ The local `just check` gate covers formatting, source policy, Rust 1.89 core tes
 The local `just security` gate checks advisories, dependency policy, licenses, sources, and secrets.
 The private historical JavaScript fixture uses a [scoped dependency assessment](legacy-client-dependency-scope.md) that reports its known advisories and rejects unreviewed changes.
 Datagram tests compare received audio through actual sockets and bridges, including peer hold, resume, and mixed packet durations.
-The local `just interop` gate compares endpoint resources, routing availability, app subscriptions, and resource errors with Asterisk 22.9.0.
+The local `just interop` gate compares bridge lifecycle, endpoint resources, routing availability, app subscriptions, and resource errors with Asterisk 22.9.0.
 The reference distinguishes case-sensitive technology lists from case-insensitive endpoint detail queries.
 See [reference comparisons](reference-comparisons.md) for scope and resource limits.
 Reference calls, browser audio, supported-platform distributions, and physical `HT813` observations remain unverified.
