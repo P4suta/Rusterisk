@@ -10,16 +10,42 @@ fn id(value: &str) -> Result<ChannelId, ControlError> {
 }
 
 fn create(connection: &str) -> Result<Action, ControlError> {
+    create_format(connection, MediaFormat::Pcmu)
+}
+
+fn create_format(connection: &str, format: MediaFormat) -> Result<Action, ControlError> {
     Ok(Action::ExternalWebSocket {
         id: id("external")?,
         app: "calls".into(),
         connection_id: id(connection)?,
-        format: MediaFormat::Pcmu,
+        format,
         control_format: Some(MediaControlFormat::Json),
         direction: MediaDirection::Both,
         auto_answer: true,
         data: "session".into(),
     })
+}
+
+#[test]
+fn incoming_opus_admission_publishes_packet_mode_and_preserves_the_format(
+) -> Result<(), ControlError> {
+    let mut control = Control::new(4);
+    control.subscribe("calls")?;
+    let outcome = control.apply(create_format("packet", MediaFormat::Opus)?, "created", 0)?;
+    let channel: Channel = serde_json::from_value(outcome.body.ok_or(ControlError::Capacity)?)?;
+    assert_eq!(
+        channel
+            .channelvars
+            .ok_or(ControlError::Capacity)?
+            .get("MEDIA_WEBSOCKET_OPTIMAL_FRAME_SIZE")
+            .map(String::as_str),
+        Some("0")
+    );
+    let (key, options) = control.claim_media_connection(&id("packet")?)?;
+    assert_eq!(options.format, MediaFormat::Opus);
+    control.apply(Action::Hangup(key.id), "ended", 1)?;
+    assert!(control.claim_media_connection(&id("packet")?).is_err());
+    Ok(())
 }
 
 #[test]

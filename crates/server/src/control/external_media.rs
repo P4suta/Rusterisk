@@ -53,14 +53,7 @@ impl Control {
             data,
             initial,
         } = creation;
-        if matches!(&target, Target::WebSocketClient { options, .. } if options.format == rusterisk_api::MediaFormat::Opus)
-        {
-            return Err(ControlError::Unsupported);
-        }
         if let Target::WebSocket(options) = &target {
-            if options.format == rusterisk_api::MediaFormat::Opus {
-                return Err(ControlError::Unsupported);
-            }
             if self.media_connections.contains_key(&options.connection_id) {
                 return Err(ControlError::Conflict("Media connection already exists"));
             }

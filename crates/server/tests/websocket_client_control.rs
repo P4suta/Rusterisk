@@ -8,11 +8,15 @@ fn id(value: &str) -> Result<ChannelId, ControlError> {
     Ok(ChannelId::try_from(value.to_owned())?)
 }
 fn create(client: &str) -> Result<Action, ControlError> {
+    create_format(client, MediaFormat::Pcmu)
+}
+
+fn create_format(client: &str, format: MediaFormat) -> Result<Action, ControlError> {
     Ok(Action::ExternalWebSocketClient {
         id: id("external")?,
         app: "calls".into(),
         client: client.into(),
-        format: MediaFormat::Pcmu,
+        format,
         control_format: None,
         direction: MediaDirection::Both,
         auto_answer: true,
@@ -20,9 +24,7 @@ fn create(client: &str) -> Result<Action, ControlError> {
     })
 }
 
-#[test]
-fn client_admission_captures_configuration_and_keeps_call_milestones_independent(
-) -> Result<(), ControlError> {
+fn admission(format: MediaFormat) -> Result<(), ControlError> {
     let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "", "", "").map_err(|error| ControlError::Adapter(error.to_string()))?
         .with_websocket_configuration("[global]\ncontrol_message_format=json\n", "[agent]\ntype=websocket_client\nconnection_type=per_call_config\nuri=ws://127.0.0.1:18080/media\nprotocols=media\nreconnect_attempts=1\n").map_err(|error| ControlError::Adapter(error.to_string()))?;
     let mut control = Control::with_configuration(4, &config);
@@ -34,7 +36,7 @@ fn client_admission_captures_configuration_and_keeps_call_milestones_independent
         ))
     ));
     let accepted = control.apply_with_variables(
-        create("agent")?,
+        create_format("agent", format)?,
         std::collections::BTreeMap::from([("INITIAL_TAG".into(), "outgoing value".into())]),
         "created",
         0,
@@ -52,7 +54,7 @@ fn client_admission_captures_configuration_and_keeps_call_milestones_independent
     );
     let key = control.key(&channel.id)?;
     assert!(
-        matches!(&accepted.effects[..], [Effect::ConnectWebSocket { key: current, client, options, channel_variables }] if current == &key && client.uri.expose() == "ws://127.0.0.1:18080/media" && options.control_format == MediaControlFormat::Json && channel_variables.get("INITIAL_TAG").map(String::as_str) == Some("outgoing value"))
+        matches!(&accepted.effects[..], [Effect::ConnectWebSocket { key: current, client, options, channel_variables }] if current == &key && client.uri.expose() == "ws://127.0.0.1:18080/media" && options.format == format && options.control_format == MediaControlFormat::Json && channel_variables.get("INITIAL_TAG").map(String::as_str) == Some("outgoing value"))
     );
     control.signal(
         Signal::Milestone {
@@ -103,4 +105,16 @@ fn client_admission_captures_configuration_and_keeps_call_milestones_independent
         Err(ControlError::NotFound(_))
     ));
     Ok(())
+}
+
+#[test]
+fn client_admission_captures_configuration_and_keeps_call_milestones_independent(
+) -> Result<(), ControlError> {
+    admission(MediaFormat::Pcmu)
+}
+
+#[test]
+fn opus_client_admission_preserves_packet_mode_and_independent_milestones(
+) -> Result<(), ControlError> {
+    admission(MediaFormat::Opus)
 }
