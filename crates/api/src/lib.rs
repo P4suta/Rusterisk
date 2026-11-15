@@ -1096,10 +1096,45 @@ pub struct AsteriskPing {
     pub asterisk_id: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct AsteriskInfo {
-    pub system: SystemInfo,
-    pub status: StatusInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<SystemInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<ConfigInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<StatusInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BuildInfo {
+    pub os: String,
+    pub kernel: String,
+    pub options: String,
+    pub machine: String,
+    pub date: String,
+    pub user: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SetId {
+    pub user: String,
+    pub group: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct ConfigInfo {
+    pub name: String,
+    pub default_language: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_channels: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_open_files: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_load: Option<f64>,
+    pub setid: SetId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
