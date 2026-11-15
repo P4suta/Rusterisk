@@ -255,6 +255,10 @@ fn cancellation_releases_every_media_slot() {
 #[kani::unwind(12)]
 fn media_tokens_do_not_cross_generations() {
     let generation: u64 = kani::any();
+    let other_generation: u64 = kani::any();
+    if generation == other_generation {
+        return;
+    }
     let recording: bool = kani::any();
     let kind = if recording {
         MediaTaskKind::Recording
@@ -262,7 +266,7 @@ fn media_tokens_do_not_cross_generations() {
         MediaTaskKind::Playback
     };
     let mut prior = MediaTasks::new(generation);
-    let mut current = MediaTasks::new(generation ^ 1);
+    let mut current = MediaTasks::new(other_generation);
     let Ok(old) = prior.reserve(kind) else {
         assert!(false, "prior media reservation failed");
         return;
