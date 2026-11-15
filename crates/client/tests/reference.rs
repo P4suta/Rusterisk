@@ -14,6 +14,8 @@ mod external_streams;
 mod external_websocket_clients;
 #[path = "reference/external_websockets.rs"]
 mod external_websockets;
+#[path = "reference/request_bodies.rs"]
+mod request_bodies;
 
 async fn compare_external_admission(
     client: &Client,
@@ -343,6 +345,13 @@ async fn compare_resources(
             reference.applications().await?
         );
         compare_bridges(&actual, &reference).await?;
+        request_bodies::compare(
+            &actual,
+            &format!("http://{address}"),
+            &reference,
+            &reference_address,
+        )
+        .await?;
         let mut expected = reference.endpoints().await?;
         expected.sort_by(|left, right| left.resource.cmp(&right.resource));
         assert_eq!(actual.endpoints().await?, expected);

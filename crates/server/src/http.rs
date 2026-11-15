@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 mod external_media;
 mod recording;
+mod request_body;
 
 pub fn router(controller: Controller) -> Router {
     router_for_scheme(controller, HttpScheme::Http)
@@ -372,23 +373,16 @@ async fn dispatch(
                 .await?,
         );
     }
-    if !body.is_empty() {
-        let value: Value =
-            serde_json::from_slice(body).map_err(|_| ControlError::Invalid("Invalid JSON body"))?;
-        if !value.is_object() {
-            return Err(ControlError::Invalid("Expected a JSON object"));
-        }
-        return Err(
-            if path
-                .strip_prefix("/ari")
-                .is_some_and(|path| rusterisk_api::is_known_operation(method.as_str(), path))
-            {
-                ControlError::Unsupported
-            } else {
-                ControlError::NotFound("Resource not found")
-            },
-        );
+    let operation = path.strip_prefix("/ari").and_then(|path| {
+        rusterisk_api::OPERATIONS
+            .iter()
+            .find(|operation| operation.matches(method.as_str(), path))
+    });
+    let fields = request_body::decode(parameters, operation, body)?;
+    if !fields.variables.is_empty() {
+        return Err(ControlError::Unsupported);
     }
+    let parameters = fields.parameters.as_ref();
     let stored = match (method.as_str(), segments.as_slice()) {
         ("GET", ["ari", "recordings", "stored"]) => Some(crate::StoredRecordingOperation::List),
         ("GET", ["ari", "recordings", "stored", name]) => {
@@ -583,7 +577,11 @@ async fn dispatch(
         },
         ("GET", ["ari", "channels", channel, "variable"]) => Action::GetVariable {
             channel: id(channel)?,
-            variable: required(parameters, "variable")?.into(),
+            variable: parameters
+                .get("variable")
+                .filter(|value| !value.is_empty())
+                .ok_or(ControlError::Invalid("Variable name is required"))?
+                .clone(),
         },
         ("POST", ["ari", "channels", channel, "variable"]) => Action::SetVariable {
             channel: id(channel)?,

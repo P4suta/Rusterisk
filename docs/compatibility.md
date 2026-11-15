@@ -30,7 +30,9 @@ Registration expiry changes routing availability without ending active calls.
 
 Known operations without working adapters return `501`.
 Sound queries, server information, and channel redirection still use that response.
-Requests with JSON bodies other than event filter updates return `501` after body validation.
+Registered JSON body parameters override query values while path identifiers remain authoritative.
+Body values follow the public operation's declared types and bounded conversion rules.
+Initial channel variables in request bodies remain unsupported.
 Playback supports start, pause, resume, and stop.
 Seeking and media lists remain unsupported.
 Live recording duration statistics remain absent.
