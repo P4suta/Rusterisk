@@ -114,6 +114,67 @@ fn drain_received_audio(peer: &SocketPair) -> Result<(), ControlError> {
     Err(ControlError::Capacity)
 }
 
+async fn send_voice(
+    peer: &SocketPair,
+    target: SocketAddr,
+    sender: &mut RtpSender,
+    value: i16,
+) -> Result<(), ControlError> {
+    let mut clock = tokio::time::interval(Duration::from_millis(20));
+    clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    for _ in 0..5 {
+        clock.tick().await;
+        let packet = sender
+            .packet(Frame::new(&[value; 160], 8000).map_err(failure)?)
+            .map_err(failure)?
+            .encode()
+            .map_err(failure)?;
+        peer.data()
+            .send_to(&packet, target)
+            .await
+            .map_err(failure)?;
+    }
+    Ok(())
+}
+
+async fn update_direction(
+    signal: &UdpSocket,
+    target: SocketAddr,
+    ack: &str,
+    audio: &SocketPair,
+    sequence: u32,
+    version: u64,
+    direction: &str,
+) -> Result<(), ControlError> {
+    let body = Session {
+        remote: audio.local_addr().map_err(failure)?,
+        codec: Codec::Pcmu,
+        payload_type: 0,
+        telephone: Some(DtmfFormat::new(101, 8000).map_err(failure)?),
+        direction: Direction::SendRecv,
+    }
+    .answer(audio.local_addr().map_err(failure)?, 1)
+    .replace("o=rusterisk 1 1 IN", &format!("o=rusterisk 1 {version} IN"))
+    .replace("a=sendrecv", &format!("a={direction}"));
+    let offer = ack.replace("ACK sip:", "INVITE sip:")
+        .replace("z9hG4bK-ack", &format!("z9hG4bK-update-{sequence}"))
+        .replace("CSeq: 2 ACK", &format!("CSeq: {sequence} INVITE"))
+        .replace("Content-Length: 0\r\n\r\n", &format!("Contact: <sip:phone@{}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", signal.local_addr().map_err(failure)?, body.len()));
+    signal
+        .send_to(offer.as_bytes(), target)
+        .await
+        .map_err(failure)?;
+    assert_eq!(response(signal).await?.status_code.code(), 200);
+    let ack = ack
+        .replace("z9hG4bK-ack", &format!("z9hG4bK-update-ack-{sequence}"))
+        .replace("CSeq: 2 ACK", &format!("CSeq: {sequence} ACK"));
+    signal
+        .send_to(ack.as_bytes(), target)
+        .await
+        .map_err(failure)?;
+    Ok(())
+}
+
 async fn receive_digit(
     events: &mut tokio::sync::mpsc::Receiver<rusterisk_api::Event>,
     channel: &ChannelId,
@@ -650,12 +711,35 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
         receive_digit(&mut events.events, &incoming, "5").await?;
         controller.execute(credentials()?, None, Action::CreateBridge { id: id("mix")?, name: "Conversation".into() }).await?;
         controller.execute(credentials()?, None, Action::AddChannels { bridge: id("mix")?, channels: [incoming.clone(), id("bob")?].into_iter().collect() }).await?;
-        for (phone, target, value, seed) in [(&alice_audio, alice_target, 4000, 7), (&bob_audio, bob_target, -7000, 8)] {
-            let mut sender = RtpSender::new(AudioFormat::Pcmu, 0, [seed; 10]).map_err(failure)?;
-            let bytes = sender.packet(Frame::new(&[value; 160], 8000).map_err(failure)?).map_err(failure)?.encode().map_err(failure)?;
-            phone.data().send_to(&bytes, target).await.map_err(failure)?;
-        }
+        let mut alice_sender = RtpSender::new(AudioFormat::Pcmu, 0, [7; 10]).map_err(failure)?;
+        let mut bob_sender = RtpSender::new(AudioFormat::Pcmu, 0, [8; 10]).map_err(failure)?;
+        tokio::try_join!(send_voice(&alice_audio, alice_target, &mut alice_sender, 4000), send_voice(&bob_audio, bob_target, &mut bob_sender, -7000))?;
         tokio::try_join!(receive_audio(&alice_audio, -7000), receive_audio(&bob_audio, 4000))?;
+        for (sequence, version, direction, received_by_bob) in [(4, 2, "sendonly", 4000), (5, 3, "inactive", 0), (6, 4, "sendrecv", 0)] {
+            if direction == "sendrecv" {
+                controller.execute(credentials()?, None, Action::Mute { channel: incoming.clone(), direction: MuteDirection::Incoming }).await?;
+            }
+            update_direction(&alice, target, &ack, &alice_audio, sequence, version, direction).await?;
+            if direction == "sendonly" {
+                matching_event(&mut events.events, |event| matches!(event, EventKind::ChannelHold { channel, musicclass: Some(class) } if channel.id == incoming && class == "default")).await?;
+            } else if direction == "sendrecv" {
+                matching_event(&mut events.events, |event| matches!(event, EventKind::ChannelUnhold { channel } if channel.id == incoming)).await?;
+            }
+            drain_received_audio(&alice_audio)?;
+            drain_received_audio(&bob_audio)?;
+            tokio::try_join!(send_voice(&alice_audio, alice_target, &mut alice_sender, 4000), send_voice(&bob_audio, bob_target, &mut bob_sender, -7000))?;
+            receive_audio(&bob_audio, received_by_bob).await?;
+            if direction == "sendrecv" {
+                receive_audio(&alice_audio, -7000).await?;
+            } else {
+                let mut bytes = [0; 1501];
+                assert!(tokio::time::timeout(Duration::from_millis(150), alice_audio.data().recv_from(&mut bytes)).await.is_err());
+            }
+        }
+        controller.execute(credentials()?, None, Action::Unmute { channel: incoming.clone(), direction: MuteDirection::Incoming }).await?;
+        drain_received_audio(&bob_audio)?;
+        send_voice(&alice_audio, alice_target, &mut alice_sender, 4000).await?;
+        receive_audio(&bob_audio, 4000).await?;
         for _ in 0..2 {
             send_digits(&controller, &incoming, "11111111111111111111111111111111", 0, 1).await?;
         }
