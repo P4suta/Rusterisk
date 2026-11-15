@@ -1,4 +1,4 @@
-use super::AssuranceError;
+use super::{AssuranceError, FieldMutation};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -221,6 +221,14 @@ pub fn validate_mutation_outcomes(
     bytes: &[u8],
     inventory: &MutationInventory,
 ) -> Result<(), AssuranceError> {
+    validate_mutation_campaign(bytes, inventory, &[])
+}
+
+pub(super) fn validate_mutation_campaign(
+    bytes: &[u8],
+    inventory: &MutationInventory,
+    assignments: &[FieldMutation],
+) -> Result<(), AssuranceError> {
     let lab: Lab = json(bytes)?;
     println!("mutation summary: {} total; {} caught; {} unviable; {} missed; {} timed out; {} success; {} outcomes; end={}", lab.total_mutants, lab.caught, lab.unviable, lab.missed, lab.timeout, lab.success, lab.outcomes.len(), lab.end_time.as_deref().unwrap_or("missing"));
     if lab.cargo_mutants_version != "27.1.0"
@@ -240,6 +248,12 @@ pub fn validate_mutation_outcomes(
     let mut caught = 0;
     let mut unviable = 0;
     let mut covered = BTreeSet::new();
+    for assignment in assignments {
+        covered.insert(match assignment {
+            FieldMutation::TerminalState => Invariant::Terminal,
+            FieldMutation::ConnectionClaim => Invariant::Connection,
+        });
+    }
     for outcome in lab.outcomes {
         let (build, test) = phases(&outcome)?;
         match &outcome.scenario {

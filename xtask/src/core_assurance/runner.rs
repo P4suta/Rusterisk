@@ -1,7 +1,7 @@
 use super::{
     snapshot::{read_bounded, Snapshot},
-    validate_miri_discovery, validate_miri_execution, validate_mutation_inventory,
-    validate_mutation_outcomes, AssuranceError, CoreAssurancePlan, Execution, Phase,
+    validate_miri_discovery, validate_miri_execution, validate_mutation_inventory, AssuranceError,
+    CoreAssurancePlan, Execution, FieldMutation, Phase,
 };
 use crate::process::{run, ProcessError};
 use std::{path::Path, process::Command};
@@ -27,7 +27,7 @@ fn combine<T>(
     }
 }
 
-fn write_new(path: &Path, bytes: &[u8]) -> Result<(), AssuranceError> {
+pub(super) fn write_new(path: &Path, bytes: &[u8]) -> Result<(), AssuranceError> {
     std::fs::create_dir_all(path.parent().ok_or(AssuranceError::Plan)?)?;
     let mut output = std::fs::OpenOptions::new()
         .write(true)
@@ -79,6 +79,9 @@ pub fn execute(task: Task, execution: Execution, image: &str) -> Result<(), Assu
             cleanup.budget.as_secs(),
             cleanup.arguments.join(" ")
         );
+    }
+    if matches!(task, Task::Mutation) {
+        super::field_runner::preview(&plan, &directory, &state)?;
     }
     if matches!(execution, Execution::DryRun) {
         return Ok(());
@@ -153,9 +156,11 @@ pub fn execute(task: Task, execution: Execution, image: &str) -> Result<(), Assu
                         &state.join("results/mutants.out/outcomes.json"),
                         4 * 1024 * 1024,
                     )?;
-                    let result = validate_mutation_outcomes(
+                    super::field_runner::execute(&snapshot, &plan, &directory, &state)?;
+                    let result = super::mutation::validate_mutation_campaign(
                         &bytes,
                         mutations.as_ref().ok_or(AssuranceError::Inventory)?,
+                        &FieldMutation::ALL,
                     );
                     if result.is_err() {
                         let capture = read_bounded(&state.join("mutations.txt"), 4 * 1024 * 1024)?;
@@ -163,6 +168,7 @@ pub fn execute(task: Task, execution: Execution, image: &str) -> Result<(), Assu
                     }
                     result?;
                 }
+                Phase::FieldBuild(_) | Phase::FieldTests(_) => return Err(AssuranceError::Plan),
             }
         }
         if Snapshot::read(&core)?.files != snapshot.files {

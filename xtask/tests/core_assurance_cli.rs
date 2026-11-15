@@ -30,6 +30,16 @@ fn assurance_dry_runs_bind_actual_tests_and_require_no_daemon() -> Result<(), st
         ] {
             assert!(stdout.contains(expected), "{expected}");
         }
+        if task == "core-mutation" {
+            for expected in [
+                "2 source-bound field mutations",
+                "terminal-state-build",
+                "connection-claim-tests",
+                "budget=60s",
+            ] {
+                assert!(stdout.contains(expected), "{expected}");
+            }
+        }
         let rejected = Command::new(env!("CARGO_BIN_EXE_xtask"))
             .args([task, "--dry-run", "--image", "latest"])
             .current_dir(project)

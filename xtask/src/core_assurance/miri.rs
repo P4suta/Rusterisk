@@ -106,10 +106,37 @@ pub fn validate_miri_execution(
     bytes: &[u8],
     inventory: &MiriInventory,
 ) -> Result<(), AssuranceError> {
+    execution(bytes, inventory, false)
+}
+
+pub fn validate_field_execution(
+    bytes: &[u8],
+    expected: &BTreeSet<String>,
+    suites: usize,
+) -> Result<(), AssuranceError> {
+    if expected.is_empty() || suites == 0 || suites > 64 {
+        return Err(AssuranceError::Inventory);
+    }
+    execution(
+        bytes,
+        &MiriInventory {
+            names: expected.clone(),
+            suites,
+        },
+        true,
+    )
+}
+
+fn execution(
+    bytes: &[u8],
+    inventory: &MiriInventory,
+    require_failure: bool,
+) -> Result<(), AssuranceError> {
     let mut seen = BTreeSet::new();
     let mut active = None;
     let mut running = None;
     let mut suites = 0;
+    let mut failures = 0;
     for record in records(bytes)? {
         match (record.kind, record.event) {
             (Kind::Suite, Event::Started) if active.is_none() => {
@@ -117,7 +144,7 @@ pub fn validate_miri_execution(
                     .test_count
                     .filter(|count| *count > 0)
                     .ok_or(AssuranceError::Results)?;
-                active = Some((count, 0usize));
+                active = Some((count, 0usize, 0usize));
             }
             (Kind::Test, Event::Started) if active.is_some() && running.is_none() => {
                 let name = record.name.ok_or(AssuranceError::Results)?;
@@ -126,18 +153,27 @@ pub fn validate_miri_execution(
                 }
                 running = Some(name);
             }
-            (Kind::Test, Event::Ok) => {
+            (Kind::Test, event @ (Event::Ok | Event::Failed))
+                if event == Event::Ok || require_failure =>
+            {
                 let name = running.take().ok_or(AssuranceError::Results)?;
                 if record.name.as_ref() != Some(&name) {
                     return Err(AssuranceError::Results);
                 }
                 active.as_mut().ok_or(AssuranceError::Results)?.1 += 1;
+                if event == Event::Failed {
+                    active.as_mut().ok_or(AssuranceError::Results)?.2 += 1;
+                    failures += 1;
+                }
             }
-            (Kind::Suite, Event::Ok) if running.is_none() => {
-                let (declared, completed) = active.take().ok_or(AssuranceError::Results)?;
+            (Kind::Suite, event @ (Event::Ok | Event::Failed))
+                if running.is_none() && (event == Event::Ok || require_failure) =>
+            {
+                let (declared, completed, failed) = active.take().ok_or(AssuranceError::Results)?;
                 if declared != completed
-                    || record.passed != Some(completed)
-                    || record.failed != Some(0)
+                    || record.passed != Some(completed - failed)
+                    || record.failed != Some(failed)
+                    || (event == Event::Failed) != (failed > 0)
                     || record.ignored != Some(0)
                     || record.measured != Some(0)
                     || record.filtered_out != Some(0)
@@ -153,6 +189,7 @@ pub fn validate_miri_execution(
         || running.is_some()
         || suites != inventory.suites
         || seen != inventory.names
+        || require_failure && failures == 0
     {
         return Err(AssuranceError::Results);
     }

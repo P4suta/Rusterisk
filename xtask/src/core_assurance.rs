@@ -1,13 +1,18 @@
 use crate::{process::ProcessError, reference::Step};
 use std::time::Duration;
+mod field_mutations;
+mod field_runner;
 mod manifest;
+pub use field_mutations::FieldMutation;
 mod miri;
 mod mutation;
 mod runner;
 mod snapshot;
 pub use crate::core_proofs::Execution;
 pub use manifest::normalize_manifest;
-pub use miri::{validate_miri_discovery, validate_miri_execution, MiriInventory};
+pub use miri::{
+    validate_field_execution, validate_miri_discovery, validate_miri_execution, MiriInventory,
+};
 pub use mutation::{validate_mutation_inventory, validate_mutation_outcomes, MutationInventory};
 pub use runner::{execute, Task};
 
@@ -78,6 +83,8 @@ pub enum Phase {
     MiriTests,
     MutationInventory,
     Mutations,
+    FieldBuild(FieldMutation),
+    FieldTests(FieldMutation),
 }
 
 impl Phase {
@@ -88,6 +95,10 @@ impl Phase {
             Self::MiriTests => "miri-tests",
             Self::MutationInventory => "mutation-inventory",
             Self::Mutations => "mutations",
+            Self::FieldBuild(FieldMutation::TerminalState) => "terminal-state-build",
+            Self::FieldTests(FieldMutation::TerminalState) => "terminal-state-tests",
+            Self::FieldBuild(FieldMutation::ConnectionClaim) => "connection-claim-build",
+            Self::FieldTests(FieldMutation::ConnectionClaim) => "connection-claim-tests",
         }
     }
 }
@@ -145,6 +156,14 @@ impl CoreAssurancePlan {
     }
 
     pub fn step(&self, phase: Phase) -> Step {
+        let budget = match phase {
+            Phase::FieldBuild(_) | Phase::FieldTests(_) => 60,
+            Phase::MiriSetup
+            | Phase::MiriInventory
+            | Phase::MiriTests
+            | Phase::MutationInventory
+            | Phase::Mutations => 900,
+        };
         let network = if phase == Phase::MiriSetup {
             "--network=bridge"
         } else {
@@ -190,7 +209,7 @@ impl CoreAssurancePlan {
             &self.image,
             "--signal=TERM",
             "--kill-after=10s",
-            "880s",
+            &format!("{}s", budget - 20),
             "cargo",
             &format!("+{NIGHTLY}"),
         ]
@@ -198,6 +217,24 @@ impl CoreAssurancePlan {
         .map(str::to_owned)
         .collect();
         match phase {
+            Phase::FieldBuild(_) => arguments.extend(
+                ["test", "--locked", "--offline", "--tests", "--no-run"].map(str::to_owned),
+            ),
+            Phase::FieldTests(_) => arguments.extend(
+                [
+                    "test",
+                    "--locked",
+                    "--offline",
+                    "--tests",
+                    "--no-fail-fast",
+                    "--",
+                    "--test-threads=1",
+                    "--format=json",
+                    "-Z",
+                    "unstable-options",
+                ]
+                .map(str::to_owned),
+            ),
             Phase::MiriSetup => arguments.extend(["miri", "setup"].map(str::to_owned)),
             Phase::MiriInventory | Phase::MiriTests => {
                 arguments.extend(
@@ -258,7 +295,7 @@ impl CoreAssurancePlan {
         }
         Step {
             arguments,
-            budget: Duration::from_secs(900),
+            budget: Duration::from_secs(budget),
         }
     }
 
