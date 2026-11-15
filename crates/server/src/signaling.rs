@@ -467,9 +467,9 @@ impl Signaling {
                 owner,
                 token,
                 name,
-                policy,
+                options,
             } => {
-                self.start_recording(owner, token, name, policy, now)
+                self.start_recording(owner, token, name, options, now)
                     .await?;
             }
             Effect::ControlRecording { token, operation } => {

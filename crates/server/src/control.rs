@@ -1,7 +1,7 @@
 use crate::media::{PlaybackControl, RecordingEnd};
 use rusterisk_api::{
     Bridge, Caller, Channel, ChannelId, ChannelState, Dialplan, Event, EventKind, MediaUri,
-    RecordingIfExists,
+    RecordingOptions,
 };
 use rusterisk_core::{
     AudioGate, Call, CallEvent, CallState, DtmfCommand, DtmfDigit, DtmfError, DtmfOutbox,
@@ -143,12 +143,12 @@ pub enum Action {
     RecordChannel {
         channel: ChannelId,
         name: ChannelId,
-        policy: RecordingIfExists,
+        options: RecordingOptions,
     },
     RecordBridge {
         bridge: ChannelId,
         name: ChannelId,
-        policy: RecordingIfExists,
+        options: RecordingOptions,
     },
     GetRecording(ChannelId),
     ControlRecording {
@@ -315,7 +315,7 @@ pub enum Effect {
         owner: MediaOwner,
         token: MediaTaskToken,
         name: ChannelId,
-        policy: RecordingIfExists,
+        options: RecordingOptions,
     },
     ControlRecording {
         token: MediaTaskToken,
@@ -839,13 +839,13 @@ impl Control {
             Action::RecordChannel {
                 channel,
                 name,
-                policy,
-            } => self.record_channel(channel, name, policy),
+                options,
+            } => self.record_channel(channel, name, options),
             Action::RecordBridge {
                 bridge,
                 name,
-                policy,
-            } => self.record_bridge(bridge, name, policy),
+                options,
+            } => self.record_bridge(bridge, name, options),
             Action::GetRecording(name) => self.get_recording(&name),
             Action::ControlRecording { name, operation } => {
                 self.control_recording(&name, operation)

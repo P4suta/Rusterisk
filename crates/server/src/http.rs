@@ -336,7 +336,7 @@ async fn dispatch(
             Action::RecordChannel {
                 channel: id(channel)?,
                 name: arguments.name,
-                policy: arguments.policy,
+                options: arguments.options,
             }
         }
         ("POST", ["ari", "bridges", bridge, "record"]) => {
@@ -344,7 +344,7 @@ async fn dispatch(
             Action::RecordBridge {
                 bridge: id(bridge)?,
                 name: arguments.name,
-                policy: arguments.policy,
+                options: arguments.options,
             }
         }
         ("GET", ["ari", "recordings", "live", name]) => Action::GetRecording(id(name)?),

@@ -186,7 +186,7 @@ mod tests {
                 action: Action::RecordBridge {
                     bridge: id("mix")?,
                     name: id("saved")?,
-                    policy: Default::default(),
+                    options: Default::default(),
                 },
                 reply,
             },
@@ -259,7 +259,7 @@ mod tests {
                     action: Action::RecordBridge {
                         bridge,
                         name: id(&format!("recording-{index}"))?,
-                        policy: Default::default(),
+                        options: Default::default(),
                     },
                     reply,
                 },

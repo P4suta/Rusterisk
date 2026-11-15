@@ -1,6 +1,8 @@
 use super::{application_name, CallKey, Control, ControlError, Effect, MediaOwner, Outcome};
 use crate::media::RecordingEnd;
-use rusterisk_api::{ChannelId, EventKind, LiveRecording, RecordingIfExists, RecordingState};
+use rusterisk_api::{
+    ChannelId, EventKind, LiveRecording, RecordingOptions, RecordingState, RecordingTermination,
+};
 use rusterisk_core::{
     MediaTaskKind, MediaTaskToken, RecordingControl, RecordingGate, StasisApplication,
     StasisMembership,
@@ -105,7 +107,7 @@ impl Control {
         &mut self,
         channel: ChannelId,
         name: ChannelId,
-        policy: RecordingIfExists,
+        options: RecordingOptions,
     ) -> Result<Outcome, ControlError> {
         let entry = self
             .channels
@@ -118,14 +120,14 @@ impl Control {
             id: channel,
             generation: entry.call.generation(),
         });
-        self.enqueue_recording(owner, name, policy, Some(application))
+        self.enqueue_recording(owner, name, options, Some(application))
     }
 
     pub(super) fn record_bridge(
         &mut self,
         bridge: ChannelId,
         name: ChannelId,
-        policy: RecordingIfExists,
+        options: RecordingOptions,
     ) -> Result<Outcome, ControlError> {
         let entry = self
             .bridges
@@ -137,7 +139,7 @@ impl Control {
                 generation: entry.token,
             },
             name,
-            policy,
+            options,
             None,
         )
     }
@@ -146,9 +148,15 @@ impl Control {
         &mut self,
         owner: MediaOwner,
         name: ChannelId,
-        policy: RecordingIfExists,
+        options: RecordingOptions,
         application: Option<StasisApplication>,
     ) -> Result<Outcome, ControlError> {
+        if options.beep
+            || options.max_silence_seconds.seconds() != 0
+            || options.terminate_on != RecordingTermination::None
+        {
+            return Err(ControlError::Unsupported);
+        }
         if self.recordings.contains_key(&name) {
             return Err(ControlError::Conflict("Recording already exists"));
         }
@@ -173,7 +181,7 @@ impl Control {
             owner,
             token,
             name: name.clone(),
-            policy,
+            options,
         });
         self.recordings.insert(name, entry);
         Ok(outcome)

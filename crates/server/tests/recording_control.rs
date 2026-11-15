@@ -30,7 +30,7 @@ fn completion_after_app_disconnection_cannot_route_to_a_replacement_subscription
         Action::RecordChannel {
             channel: id("phone")?,
             name: id("saved")?,
-            policy: Default::default(),
+            options: Default::default(),
         },
         "now",
         0,
@@ -77,7 +77,7 @@ fn recording_admission_controls_and_publication_are_separate_owned_transitions(
         Action::RecordBridge {
             bridge: id("mix")?,
             name: id("saved")?,
-            policy: Default::default(),
+            options: Default::default(),
         },
         "now",
         0,
@@ -118,7 +118,7 @@ fn recording_admission_controls_and_publication_are_separate_owned_transitions(
             Action::RecordBridge {
                 bridge: id("mix")?,
                 name: id("other")?,
-                policy: Default::default(),
+                options: Default::default(),
             },
             "now",
             0
@@ -213,7 +213,7 @@ fn failed_admission_releases_ownership_and_deletion_waits_for_file_completion(
             Action::RecordBridge {
                 bridge: id("mix")?,
                 name: id("failed")?,
-                policy: Default::default(),
+                options: Default::default(),
             },
             "now",
             0,
@@ -236,7 +236,7 @@ fn failed_admission_releases_ownership_and_deletion_waits_for_file_completion(
             Action::RecordBridge {
                 bridge: id("mix")?,
                 name: id("current")?,
-                policy: Default::default(),
+                options: Default::default(),
             },
             "now",
             0,

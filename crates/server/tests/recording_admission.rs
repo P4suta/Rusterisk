@@ -32,7 +32,7 @@ async fn recording_replies_wait_for_admission_while_calls_and_cancellation_keep_
         controller.execute(credentials()?, None, Action::CreateBridge { id: id("mix")?, name: String::new() }).await?;
         subscription.events.recv().await.ok_or(ControlError::Capacity)?;
         let client = controller.clone();
-        let rejected = tokio::spawn(async move { client.execute(credentials()?, None, Action::RecordBridge { bridge: id("mix")?, name: id("taken")?, policy: Default::default() }).await });
+        let rejected = tokio::spawn(async move { client.execute(credentials()?, None, Action::RecordBridge { bridge: id("mix")?, name: id("taken")?, options: Default::default() }).await });
         let Effect::RecordMedia { owner, token, .. } = effects.recv().await.ok_or(ControlError::Capacity)? else { return Err(ControlError::Unsupported); };
         let fetched = controller.execute(credentials()?, None, Action::GetBridge(id("mix")?)).await?;
         assert_eq!(fetched.status, 200);
@@ -41,7 +41,7 @@ async fn recording_replies_wait_for_admission_while_calls_and_cancellation_keep_
         assert!(matches!(rejected.await.map_err(failure)?, Err(ControlError::Conflict(_))));
         assert!(matches!(subscription.events.recv().await.ok_or(ControlError::Capacity)?.kind, EventKind::RecordingFailed { .. }));
         let client = controller.clone();
-        let admitted = tokio::spawn(async move { client.execute(credentials()?, None, Action::RecordBridge { bridge: id("mix")?, name: id("saved")?, policy: Default::default() }).await });
+        let admitted = tokio::spawn(async move { client.execute(credentials()?, None, Action::RecordBridge { bridge: id("mix")?, name: id("saved")?, options: Default::default() }).await });
         let Effect::RecordMedia { owner, token, .. } = effects.recv().await.ok_or(ControlError::Capacity)? else { return Err(ControlError::Unsupported); };
         controller.signal(Signal::RecordingAdmitted { owner: owner.clone(), token, result: Ok(()) }).await?;
         assert_eq!(admitted.await.map_err(failure)??.status, 201);
@@ -51,7 +51,7 @@ async fn recording_replies_wait_for_admission_while_calls_and_cancellation_keep_
         controller.signal(Signal::RecordingFinished { owner, token, result: Ok(()) }).await?;
         assert!(matches!(subscription.events.recv().await.ok_or(ControlError::Capacity)?.kind, EventKind::RecordingFinished { recording } if recording.state == RecordingState::Canceled));
         let client = controller.clone();
-        let abandoned = tokio::spawn(async move { client.execute(credentials()?, None, Action::RecordBridge { bridge: id("mix")?, name: id("abandoned")?, policy: Default::default() }).await });
+        let abandoned = tokio::spawn(async move { client.execute(credentials()?, None, Action::RecordBridge { bridge: id("mix")?, name: id("abandoned")?, options: Default::default() }).await });
         let Effect::RecordMedia { owner, token, .. } = effects.recv().await.ok_or(ControlError::Capacity)? else { return Err(ControlError::Unsupported); };
         abandoned.abort();
         assert!(abandoned.await.is_err());

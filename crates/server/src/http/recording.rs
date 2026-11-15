@@ -1,12 +1,27 @@
 use super::{id, required};
 use crate::ControlError;
-use rusterisk_api::{ChannelId, RecordingIfExists};
-use rusterisk_core::DtmfDigit;
+use rusterisk_api::{
+    ChannelId, RecordingIfExists, RecordingOptions, RecordingSeconds, RecordingTermination,
+};
 use std::collections::BTreeMap;
 
 pub(super) struct Arguments {
     pub name: ChannelId,
-    pub policy: RecordingIfExists,
+    pub options: RecordingOptions,
+}
+
+fn seconds(
+    parameters: &BTreeMap<String, String>,
+    name: &str,
+) -> Result<RecordingSeconds, ControlError> {
+    let seconds = parameters
+        .get(name)
+        .map(|value| value.parse::<u32>())
+        .transpose()
+        .map_err(|_| ControlError::Invalid("Invalid recording duration"))?
+        .unwrap_or(0);
+    RecordingSeconds::try_from(seconds)
+        .map_err(|_| ControlError::Invalid("Invalid recording duration"))
 }
 
 pub(super) fn arguments(parameters: &BTreeMap<String, String>) -> Result<Arguments, ControlError> {
@@ -17,52 +32,39 @@ pub(super) fn arguments(parameters: &BTreeMap<String, String>) -> Result<Argumen
             "Specified format is unknown on this system",
         ));
     }
-    for option in ["maxDurationSeconds", "maxSilenceSeconds"] {
-        let seconds = parameters
-            .get(option)
-            .map(|value| value.parse::<u32>())
-            .transpose()
-            .map_err(|_| ControlError::Invalid("Invalid recording duration"))?
-            .unwrap_or(0);
-        if seconds > i32::MAX as u32 {
-            return Err(ControlError::Invalid("Invalid recording duration"));
-        }
-        if seconds != 0 {
-            return Err(ControlError::Unsupported);
-        }
-    }
-    let policy = RecordingIfExists::try_from(
+    let max_duration_seconds = seconds(parameters, "maxDurationSeconds")?;
+    let max_silence_seconds = seconds(parameters, "maxSilenceSeconds")?;
+    let if_exists = RecordingIfExists::try_from(
         parameters
             .get("ifExists")
             .map(String::as_str)
             .unwrap_or("fail"),
     )
     .map_err(|_| ControlError::Invalid("Invalid recording conflict policy"))?;
-    match parameters
+    let beep = match parameters
         .get("beep")
         .map(String::as_str)
         .unwrap_or("false")
     {
-        "false" => {}
-        "true" => return Err(ControlError::Unsupported),
+        "false" => false,
+        "true" => true,
         _ => return Err(ControlError::Invalid("Invalid beep parameter")),
-    }
-    let termination = parameters
-        .get("terminateOn")
-        .map(String::as_str)
-        .unwrap_or("none");
-    if !matches!(termination, "" | "none") {
-        if termination == "any"
-            || (termination.len() == 1
-                && termination
-                    .chars()
-                    .next()
-                    .and_then(|symbol| DtmfDigit::from_symbol(symbol.to_ascii_uppercase()))
-                    .is_some())
-        {
-            return Err(ControlError::Unsupported);
-        }
-        return Err(ControlError::Invalid("Invalid recording termination"));
-    }
-    Ok(Arguments { name, policy })
+    };
+    let terminate_on = RecordingTermination::try_from(
+        parameters
+            .get("terminateOn")
+            .map(String::as_str)
+            .unwrap_or("none"),
+    )
+    .map_err(|_| ControlError::Invalid("Invalid recording termination"))?;
+    Ok(Arguments {
+        name,
+        options: RecordingOptions {
+            if_exists,
+            max_duration_seconds,
+            max_silence_seconds,
+            beep,
+            terminate_on,
+        },
+    })
 }

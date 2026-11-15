@@ -2,7 +2,7 @@ use super::{failure, Signaling};
 use crate::media::{RecordingEnd, RecordingTarget};
 use crate::storage::WorkerError;
 use crate::{ControlError, MediaOwner, Signal};
-use rusterisk_api::{ChannelId, RecordingIfExists};
+use rusterisk_api::{ChannelId, RecordingOptions};
 use rusterisk_core::MediaTaskToken;
 use rusterisk_storage::StorageError;
 use std::time::Duration;
@@ -39,7 +39,7 @@ impl Signaling {
         owner: MediaOwner,
         token: MediaTaskToken,
         name: ChannelId,
-        policy: RecordingIfExists,
+        options: RecordingOptions,
         now: u64,
     ) -> Result<(), ControlError> {
         let admitted = async {
@@ -78,8 +78,8 @@ impl Signaling {
         let controller = self.controller.clone();
         self.recordings.spawn(async move {
             let admission = async {
-                let sink = storage.record_with_policy(name, 8000, policy).await.map_err(storage_error)?;
-                media.attach_recording(token, sink).await.map_err(failure)?;
+                let sink = storage.record_with_policy(name, 8000, options.if_exists).await.map_err(storage_error)?;
+                media.attach_recording_with_options(token, sink, options).await.map_err(failure)?;
                 if !controller.is_stopping() { controller.signal(Signal::RecordingAdmitted { owner: owner.clone(), token, result: Ok(()) }).await?; }
                 Ok(())
             }.await;
