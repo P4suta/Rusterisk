@@ -7,14 +7,14 @@ status: proposed
 
 ## Context
 
-File operations can finish after a caller cancels playback.
+File operations can finish after a caller cancels playback or recording.
 A late source must not restart cancelled audio or attach to a replacement call.
 
 ## Decision
 
-Reserve a bounded playback slot before requesting file I/O.
+Reserve a bounded playback or recording slot before requesting file I/O.
 Bind the reservation to its call generation and media task token.
-Attach a source only while its reservation is waiting.
+Attach a playback source or recording sink only while its reservation is waiting.
 Cancellation and channel release remove the reservation.
 Reject late attachments and drop their storage leases.
 Expire a waiting reservation after five seconds.
