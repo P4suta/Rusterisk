@@ -8,7 +8,7 @@ use rsipstack::sip::{
 };
 use rusterisk_config::Config;
 use rusterisk_core::ContactPresence;
-use rusterisk_sip::{Engine, Outbound, Output, SipError, SipEvent};
+use rusterisk_sip::{Destination, Engine, Outbound, Output, SipError, SipEvent};
 
 fn config() -> Result<Config, SipError> {
     Ok(Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:5060\n[auth]\ntype=auth\nusername=phone\npassword=password\n[dynamic]\ntype=aor\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=dynamic\nallow=ulaw\n", "", "")?)
@@ -120,6 +120,9 @@ fn registered_contact_targets_preserve_browser_identity_and_physical_routing(
         assert_eq!(
             engine.registered_peer("phone", 3),
             Some("127.0.0.1:5061".parse()?)
+        );
+        assert!(
+            matches!(engine.destination("phone", 3)?, Destination::Registered(peer) if peer == "127.0.0.1:5061".parse()?)
         );
         let output = engine.originate(
             Outbound {
