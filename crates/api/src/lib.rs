@@ -2,9 +2,13 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 mod media_uri;
+mod recording_options;
 mod recording_policy;
 mod swagger;
 pub use media_uri::{InvalidMediaUri, MediaUri};
+pub use recording_options::{
+    InvalidRecordingOption, RecordingOptions, RecordingSeconds, RecordingTermination,
+};
 pub use recording_policy::{InvalidRecordingIfExists, RecordingIfExists};
 pub use swagger::SwaggerError;
 
