@@ -108,3 +108,42 @@ async fn listener_startup_failure_joins_storage_before_returning() -> Result<(),
     assert!(rusterisk_storage::Store::open(data.path()).is_ok());
     Ok(())
 }
+
+#[tokio::test]
+async fn server_shutdown_flushes_history_before_releasing_its_store() -> Result<(), ControlError> {
+    let mut config = Config::parse(
+        "[general]\nbindaddr=127.0.0.1\n",
+        "[app]\ntype=user\npassword=test-password\n",
+        "",
+        "",
+        "[internal]\nexten => 100,1,Hangup()\n",
+    )
+    .map_err(failure)?;
+    config.http.bind.set_port(0);
+    let directory = tempfile::tempdir().map_err(failure)?;
+    let server = Server::bind(config, 4, directory.path().to_owned()).await?;
+    let controller = server.controller();
+    let task = tokio::spawn(server.run());
+    let result = controller
+        .incoming(rusterisk_server::IncomingCall {
+            id: rusterisk_api::ChannelId::try_from("short".to_owned())?,
+            endpoint: "phone".into(),
+            caller: "100".into(),
+            context: "internal".into(),
+            extension: "100".into(),
+            target: rusterisk_server::IncomingTarget::Dialplan,
+        })
+        .await;
+    controller.shutdown();
+    task.await.map_err(failure)??;
+    result?;
+    let store = rusterisk_storage::Store::open(directory.path()).map_err(failure)?;
+    let records = store.call_records(10).map_err(failure)?;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].channel, "short");
+    assert_eq!(
+        records[0].outcome,
+        rusterisk_storage::CallOutcome::Completed
+    );
+    Ok(())
+}

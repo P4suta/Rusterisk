@@ -54,7 +54,8 @@ impl Server {
             .map_err(failure)?;
         let (controller, control, effects) = Controller::new(config.clone(), capacity);
         let (media_port, media, notices) = MediaHub::new(capacity);
-        let listeners: Result<(Signaling, HttpServer), ControlError> = async {
+        let listeners: Result<(Runner, Signaling, HttpServer), ControlError> = async {
+            let control = control.with_storage(storage_port.clone())?;
             let signaling = Signaling::bind(
                 config.clone(),
                 controller.clone(),
@@ -65,10 +66,10 @@ impl Server {
             .await?
             .with_storage(storage_port);
             let http = HttpServer::bind(&config.http, controller.clone()).await?;
-            Ok((signaling, http))
+            Ok((control, signaling, http))
         }
         .await;
-        let (signaling, http) = match listeners {
+        let (control, signaling, http) = match listeners {
             Ok(listeners) => listeners,
             Err(primary) => {
                 if let Err(error) = storage.close().await {
