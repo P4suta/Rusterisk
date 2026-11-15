@@ -7,6 +7,7 @@ use rusterisk_core::ContactPresence;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
+mod contact;
 mod destination;
 mod digest;
 mod incoming;
@@ -22,6 +23,10 @@ mod telephone;
 mod transactions;
 mod transport;
 mod websocket_framing;
+pub use contact::{
+    parse_registration_contacts, ContactBindings, ContactError, RegistrationContact,
+    RegistrationContacts,
+};
 pub use destination::{Destination, StaticTarget, TargetHost};
 pub use incoming::RejectReason;
 pub use outgoing::Outbound;
