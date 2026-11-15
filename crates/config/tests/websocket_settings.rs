@@ -71,3 +71,26 @@ fn media_configuration_rejects_unknown_options_and_inconsistent_security_at_the_
     );
     Ok(())
 }
+
+#[test]
+fn media_clients_accept_a_bounded_trust_file_only_for_verified_tls() -> Result<(), ConfigError> {
+    let prefix = "[agent]\ntype=websocket_client\nconnection_type=per_call_config\nuri=wss://localhost/media\nprotocols=media\ntls_enabled=yes\n";
+    let config = base()?
+        .with_websocket_configuration("", &format!("{prefix}ca_list_file=/tmp/media-ca.pem\n"))?;
+    assert_eq!(
+        config.websocket.clients[0].ca_list_file.as_deref(),
+        Some("/tmp/media-ca.pem")
+    );
+    for path in [String::new(), "x".repeat(4097)] {
+        assert!(
+            matches!(base()?.with_websocket_configuration("", &format!("{prefix}ca_list_file={path}\n")), Err(ConfigError { file, line: 7, .. }) if file == "websocket_client.conf")
+        );
+    }
+    let plaintext = prefix
+        .replace("wss://", "ws://")
+        .replace("tls_enabled=yes", "tls_enabled=no");
+    assert!(
+        matches!(base()?.with_websocket_configuration("", &format!("{plaintext}ca_list_file=/tmp/media-ca.pem\n")), Err(ConfigError { file, line: 7, .. }) if file == "websocket_client.conf")
+    );
+    Ok(())
+}

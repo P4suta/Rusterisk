@@ -19,6 +19,7 @@ pub struct WebSocketClient {
     pub uri: Secret,
     pub username: Option<Secret>,
     pub password: Option<Secret>,
+    pub ca_list_file: Option<String>,
     pub connection_timeout_ms: u16,
     pub reconnect_interval_ms: u16,
     pub reconnect_attempts: u16,
@@ -36,6 +37,7 @@ fn client(section: Section) -> Result<WebSocketClient, ConfigError> {
             "protocols",
             "username",
             "password",
+            "ca_list_file",
             "connection_timeout",
             "reconnect_interval",
             "reconnect_attempts",
@@ -77,6 +79,15 @@ fn client(section: Section) -> Result<WebSocketClient, ConfigError> {
         if !section.flag(file, key, true)? {
             return Err(error(key, "media clients require server verification"));
         }
+    }
+    let ca_list_file = section.value("ca_list_file");
+    if ca_list_file.is_some_and(|path| {
+        url.scheme() != "wss"
+            || path.is_empty()
+            || path.len() > 4096
+            || path.chars().any(char::is_control)
+    }) {
+        return Err(error("ca_list_file", "invalid TLS trust file"));
     }
     let username = section.value("username");
     let password = section.value("password");
@@ -137,6 +148,7 @@ fn client(section: Section) -> Result<WebSocketClient, ConfigError> {
         uri: Secret(uri.into()),
         username: username.map(|value| Secret(value.into())),
         password: password.map(|value| Secret(value.into())),
+        ca_list_file: ca_list_file.map(str::to_owned),
         connection_timeout_ms,
         reconnect_interval_ms,
         reconnect_attempts,
