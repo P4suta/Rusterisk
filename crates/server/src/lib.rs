@@ -8,6 +8,7 @@ pub mod rtp;
 mod runner;
 pub mod runtime;
 pub mod signaling;
+pub mod storage;
 mod websocket;
 pub use control::{
     Action, CallKey, Control, ControlError, Effect, IncomingCall, IncomingTarget, Milestone,

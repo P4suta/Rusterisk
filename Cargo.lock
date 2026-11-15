@@ -1886,6 +1886,7 @@ dependencies = [
  "rusterisk-core",
  "rusterisk-media",
  "rusterisk-sip",
+ "rusterisk-storage",
  "serde",
  "serde_json",
  "serde_urlencoded",
