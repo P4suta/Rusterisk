@@ -347,6 +347,7 @@ pub struct Operation {
     pub method: Method,
     pub path: &'static str,
     pub response: &'static str,
+    pub success_status: u16,
     pub parameters: &'static [&'static str],
 }
 
@@ -381,8 +382,14 @@ impl Operation {
 }
 
 macro_rules! operation {
+    ($id:literal, $name:literal, $method:ident, $path:literal, "void", [$($parameter:literal),*]) => {
+        operation!($id, $name, $method, $path, "void", [$($parameter),*], 204)
+    };
     ($id:literal, $name:literal, $method:ident, $path:literal, $response:literal, [$($parameter:literal),*]) => {
-        Operation { id: $id, nickname: $name, method: Method::$method, path: $path, response: $response, parameters: &[$($parameter),*] }
+        operation!($id, $name, $method, $path, $response, [$($parameter),*], 200)
+    };
+    ($id:literal, $name:literal, $method:ident, $path:literal, $response:literal, [$($parameter:literal),*], $status:literal) => {
+        Operation { id: $id, nickname: $name, method: Method::$method, path: $path, response: $response, parameters: &[$($parameter),*], success_status: $status }
     };
 }
 
@@ -593,7 +600,8 @@ pub const OPERATIONS: &[Operation] = &[
         Post,
         "/channels/{channelId}/play",
         "Playback",
-        ["media!", "lang", "playbackId"]
+        ["media!", "lang", "playbackId"],
+        201
     ),
     operation!(
         "channels.playWithId",
@@ -601,7 +609,8 @@ pub const OPERATIONS: &[Operation] = &[
         Post,
         "/channels/{channelId}/play/{playbackId}",
         "Playback",
-        ["media!", "lang"]
+        ["media!", "lang"],
+        201
     ),
     operation!(
         "channels.record",
@@ -617,7 +626,8 @@ pub const OPERATIONS: &[Operation] = &[
             "ifExists",
             "beep",
             "terminateOn"
-        ]
+        ],
+        201
     ),
     operation!(
         "channels.externalMedia",
@@ -692,7 +702,8 @@ pub const OPERATIONS: &[Operation] = &[
         Post,
         "/bridges/{bridgeId}/play",
         "Playback",
-        ["media!", "playbackId", "lang"]
+        ["media!", "playbackId", "lang"],
+        201
     ),
     operation!(
         "bridges.playWithId",
@@ -700,7 +711,8 @@ pub const OPERATIONS: &[Operation] = &[
         Post,
         "/bridges/{bridgeId}/play/{playbackId}",
         "Playback",
-        ["media!", "lang"]
+        ["media!", "lang"],
+        201
     ),
     operation!(
         "bridges.record",
@@ -708,7 +720,8 @@ pub const OPERATIONS: &[Operation] = &[
         Post,
         "/bridges/{bridgeId}/record",
         "LiveRecording",
-        ["name!", "format!", "maxDurationSeconds", "ifExists"]
+        ["name!", "format!", "maxDurationSeconds", "ifExists"],
+        201
     ),
     operation!(
         "applications.list",
@@ -998,11 +1011,13 @@ fn parameters(operation: &Operation, legacy: bool) -> Vec<Value> {
 pub fn openapi() -> Value {
     let mut paths = Map::new();
     for operation in OPERATIONS {
-        let responses = if operation.response == "void" {
-            json!({"204": {"description": "Completed"}})
+        let response = if operation.response == "void" {
+            json!({"description": "Completed"})
         } else {
-            json!({"200": {"description": "Accepted operation", "content": {"application/json": {"schema": response_schema(operation.response)}}}})
+            json!({"description": "Accepted operation", "content": {"application/json": {"schema": response_schema(operation.response)}}})
         };
+        let mut responses = Map::new();
+        responses.insert(operation.success_status.to_string(), response);
         let entry = paths.entry(operation.path).or_insert_with(|| json!({}));
         let security = json_array([json!({"basicAuth": []})]);
         entry[operation.method.as_str()] = json!({"operationId": operation.id, "parameters": parameters(operation, false), "responses": responses, "security": security});

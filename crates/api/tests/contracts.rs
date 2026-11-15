@@ -1,4 +1,24 @@
 use rusterisk_api::{openapi, swagger, ChannelId, Event, EventKind, OPERATIONS};
+
+#[test]
+fn playback_and_recording_descriptions_use_created_responses() {
+    let document = openapi();
+    for operation in OPERATIONS.iter().filter(|operation| {
+        matches!(
+            operation.id,
+            "channels.play"
+                | "channels.playWithId"
+                | "channels.record"
+                | "bridges.play"
+                | "bridges.playWithId"
+                | "bridges.record"
+        )
+    }) {
+        let responses = &document["paths"][operation.path][operation.method.as_str()]["responses"];
+        assert!(responses.get("201").is_some(), "{}", operation.id);
+        assert!(responses.get("200").is_none(), "{}", operation.id);
+    }
+}
 use rusterisk_api::{resources_for, swagger_for, DiscoveryFormat};
 
 #[test]
