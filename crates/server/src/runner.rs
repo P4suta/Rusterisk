@@ -125,6 +125,7 @@ pub struct Controller {
     requests: mpsc::Sender<Request>,
     signals: mpsc::Sender<Signal>,
     shutdown: watch::Sender<bool>,
+    info: crate::server_info::ServerInfo,
 }
 
 pub struct Runner {
@@ -199,6 +200,7 @@ impl Controller {
                 requests,
                 signals,
                 shutdown,
+                info: crate::server_info::ServerInfo::new(capacity),
             },
             Runner {
                 control: Control::with_configuration(capacity, &config),
@@ -225,6 +227,10 @@ impl Controller {
 
     pub fn shutdown(&self) {
         self.shutdown.send_replace(true);
+    }
+
+    pub(crate) fn server_info(&self, only: Option<&str>) -> rusterisk_api::AsteriskInfo {
+        self.info.selected(only)
     }
 
     pub fn shutdown_signal(&self) -> watch::Receiver<bool> {

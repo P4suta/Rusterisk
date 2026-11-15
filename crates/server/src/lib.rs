@@ -10,6 +10,7 @@ pub mod media_websocket;
 pub mod rtp;
 mod runner;
 pub mod runtime;
+mod server_info;
 pub mod signaling;
 pub mod storage;
 pub mod webrtc;
