@@ -3,12 +3,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 mod event_filter;
 mod event_source;
+mod external_rtp;
 mod media_uri;
 mod recording_options;
 mod recording_policy;
 mod swagger;
 pub use event_filter::EventFilterRequest;
 pub use event_source::{EventSource, InvalidEventSource};
+pub use external_rtp::{ExternalRtpTarget, InvalidExternalRtpTarget, StaticRtpCodec};
 pub use media_uri::{InvalidMediaUri, MediaUri};
 pub use recording_options::{
     InvalidRecordingOption, RecordingOptions, RecordingSeconds, RecordingTermination,
