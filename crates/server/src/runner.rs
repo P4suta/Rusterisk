@@ -8,6 +8,7 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 mod history;
+mod recording_admission;
 use history::HistoryRecorder;
 
 const MAX_PENDING_EFFECTS: usize = 64 * 2 + 1;
@@ -98,6 +99,7 @@ pub struct Runner {
     subscription_generation: u64,
     history: Option<HistoryRecorder>,
     history_jobs: JoinSet<Result<(), WorkerError>>,
+    recording_admissions: BTreeMap<rusterisk_core::MediaTaskToken, recording_admission::Pending>,
 }
 
 pub struct Subscription {
@@ -166,6 +168,7 @@ impl Controller {
                 subscription_generation: 0,
                 history: None,
                 history_jobs: JoinSet::new(),
+                recording_admissions: BTreeMap::new(),
             },
             effect_receiver,
         )
@@ -446,11 +449,18 @@ impl Runner {
                 if reply.is_closed() {
                     return Ok(());
                 }
+                let recording = matches!(
+                    &action,
+                    Action::RecordChannel { .. } | Action::RecordBridge { .. }
+                );
                 let result = self
                     .authorize(&credentials, origin.as_deref(), action.read_only())
                     .and_then(|()| {
                         if (!self.pending_effects.is_empty() && !action.read_only())
                             || self.effects.capacity() < self.control.effect_budget(&action)
+                            || (recording
+                                && (self.recording_admissions.len() >= 64
+                                    || now_ms.checked_add(5000).is_none()))
                         {
                             return Err(ControlError::Capacity);
                         }
@@ -458,11 +468,39 @@ impl Runner {
                     });
                 let result = match result {
                     Ok(mut outcome) => {
+                        let recording = outcome.effects.iter().find_map(|effect| match effect {
+                            Effect::RecordMedia { owner, token, .. } => {
+                                Some((owner.clone(), *token))
+                            }
+                            Effect::ControlRecording { .. }
+                            | Effect::EndRecording { .. }
+                            | Effect::PlayMedia { .. }
+                            | Effect::ControlPlayback { .. }
+                            | Effect::Playback { .. }
+                            | Effect::Dtmf { .. }
+                            | Effect::Gate { .. }
+                            | Effect::Answer { .. }
+                            | Effect::Ring { .. }
+                            | Effect::Start { .. }
+                            | Effect::Release { .. }
+                            | Effect::Bridge { .. }
+                            | Effect::ReleaseBridge { .. }
+                            | Effect::DialBridge { .. } => None,
+                        });
                         if let Err(error) = self.publish(&mut outcome) {
                             if reply.send(Err(error.clone())).is_err() {
                                 tracing::debug!("control requester disconnected during overload");
                             }
                             return Err(error);
+                        }
+                        if let Some((owner, token)) = recording {
+                            let deadline =
+                                now_ms.checked_add(5000).ok_or(ControlError::Capacity)?;
+                            self.recording_admissions.insert(
+                                token,
+                                recording_admission::Pending::new(owner, reply, outcome, deadline),
+                            );
+                            return Ok(());
                         }
                         Ok(outcome)
                     }
@@ -594,11 +632,12 @@ impl Runner {
                     }
                 }
                 changed = self.shutdown.changed() => { if changed.is_err() || *self.shutdown.borrow() { break; } }
-                signal = self.signals.recv(), if self.pending_effects.is_empty() => { if let Some(signal) = signal { let mut outcome = self.control.signal_at(signal, &timestamp(), u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?; self.publish(&mut outcome)?; } else { break; } }
+                signal = self.signals.recv(), if self.pending_effects.is_empty() => { if let Some(signal) = signal { self.apply_signal(signal, u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?; } else { break; } }
                 request = self.requests.recv() => {
                     if let Some(request) = request { self.request(request, u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?; } else { break; }
                 }
                 _instant = tick.tick() => {
+                    self.expire_recording_admissions(u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?;
                     self.sessions.retain(|_, session| !session.lifetime.is_closed());
                     let mut outcome = self.control.expire(u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?, &timestamp())?; self.publish(&mut outcome)?;
                     if self.pending_effects.is_empty() {
@@ -636,6 +675,7 @@ impl Runner {
     }
 
     async fn close(&mut self) -> Result<(), ControlError> {
+        self.close_recording_admissions();
         let result = self
             .control
             .shutdown(&timestamp())

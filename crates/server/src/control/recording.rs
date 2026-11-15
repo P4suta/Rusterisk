@@ -49,6 +49,25 @@ impl RecordingEntry {
 }
 
 impl Control {
+    pub(crate) fn cancel_recording_admission(
+        &mut self,
+        owner: &MediaOwner,
+        token: MediaTaskToken,
+    ) -> Result<Outcome, ControlError> {
+        let Some(entry) = self
+            .recordings
+            .values()
+            .find(|entry| entry.owner == *owner && entry.token == token)
+        else {
+            return Ok(Outcome::empty());
+        };
+        if matches!(entry.phase, Phase::Ending(_)) {
+            return Ok(Outcome::empty());
+        }
+        let name = entry.name.clone();
+        self.end_recording(&name, RecordingEnd::Cancel)
+    }
+
     fn recording_event(
         &self,
         entry: &RecordingEntry,

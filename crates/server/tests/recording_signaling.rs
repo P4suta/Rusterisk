@@ -56,7 +56,7 @@ async fn recording_jobs_report_file_conflicts_and_finish_active_files_before_shu
         let mut subscription = controller.subscribe(credentials()?, None, "app".into()).await?;
         controller.execute(credentials()?, None, Action::CreateBridge { id: id("mix")?, name: String::new() }).await?;
         assert!(matches!(event(&mut subscription.events).await?, EventKind::BridgeCreated { .. }));
-        controller.execute(credentials()?, None, Action::RecordBridge { bridge: id("mix")?, name: id("taken")? }).await?;
+        assert!(matches!(controller.execute(credentials()?, None, Action::RecordBridge { bridge: id("mix")?, name: id("taken")? }).await, Err(ControlError::Conflict(_))));
         assert!(matches!(event(&mut subscription.events).await?, EventKind::RecordingFailed { recording } if recording.cause.as_deref() == Some("Recording already exists")));
         for name in ["saved", "shutdown"] {
             controller.execute(credentials()?, None, Action::RecordBridge { bridge: id("mix")?, name: id(name)? }).await?;
