@@ -20,6 +20,8 @@ mod external_websockets;
 mod request_bodies;
 #[path = "reference/server_info.rs"]
 mod server_info;
+#[path = "reference/sounds.rs"]
+mod sounds;
 
 async fn compare_external_admission(
     client: &Client,
@@ -316,6 +318,9 @@ async fn compare_resources(
     .map_err(|_| Error::Invalid("reference configuration"))?
     .with_websocket_configuration("", &outgoing.configuration("127.0.0.1"))
     .map_err(|_| Error::Invalid("native WebSocket configuration"))?;
+    let fixture_root = std::env::var("RUSTERISK_REFERENCE_CONFIGURATION")
+        .map_err(|_| Error::Invalid("reference configuration directory is required"))?;
+    let (storage, storage_worker) = sounds::prepare(std::path::Path::new(&fixture_root)).await?;
     let (controller, runner, effects) = rusterisk_server::Controller::new(configuration.clone(), 4);
     let (media, hub, notices) = rusterisk_server::media::MediaHub::new(4);
     let signaling = rusterisk_server::signaling::Signaling::bind(
@@ -326,10 +331,16 @@ async fn compare_resources(
         notices,
     )
     .await
-    .map_err(|_| Error::Invalid("native signaling"))?;
+    .map_err(|_| Error::Invalid("native signaling"))?
+    .with_storage(storage.clone());
     let signal_stop = controller.shutdown_signal();
     let media_stop = controller.shutdown_signal();
-    let runner = tokio::spawn(runner.run());
+    let runner = tokio::spawn(
+        runner
+            .with_storage(storage)
+            .map_err(|_| Error::Invalid("reference storage"))?
+            .run(),
+    );
     let hub = tokio::spawn(hub.run(media_stop));
     let signaling = tokio::spawn(signaling.run(signal_stop));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -350,6 +361,7 @@ async fn compare_resources(
             &reference_address,
         )
         .await?;
+        sounds::compare(&actual, &reference).await?;
         assert_eq!(actual.channels().await?, reference.channels().await?);
         assert_eq!(
             actual.applications().await?,
@@ -572,5 +584,15 @@ async fn compare_resources(
         .map_err(|_| Error::Closed)?;
     server.abort();
     assert!(server.await.is_err());
-    result
+    let cleanup = storage_worker
+        .close()
+        .await
+        .map_err(|error| Error::Io(std::io::Error::other(error.to_string())));
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(primary), Err(cleanup)) => Err(Error::Cleanup(format!(
+            "{primary}; reference storage cleanup failed: {cleanup}"
+        ))),
+    }
 }
