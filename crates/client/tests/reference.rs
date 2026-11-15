@@ -71,6 +71,36 @@ async fn compare_subscriptions(
     app: &str,
 ) -> Result<(), Error> {
     let id = ChannelId::try_from("observed".to_owned())?;
+    for text in ["endpoint:PJSIP/phone", "endpoint:PJSIP"] {
+        let endpoint =
+            EventSource::try_from(text).map_err(|_| Error::Invalid("endpoint source"))?;
+        assert_eq!(
+            actual
+                .subscribe_resources(app, std::slice::from_ref(&endpoint))
+                .await?,
+            reference
+                .subscribe_resources(app, std::slice::from_ref(&endpoint))
+                .await?
+        );
+        assert_eq!(
+            actual
+                .unsubscribe_resources(app, std::slice::from_ref(&endpoint))
+                .await?,
+            reference
+                .unsubscribe_resources(app, std::slice::from_ref(&endpoint))
+                .await?
+        );
+    }
+    let unknown = EventSource::try_from("endpoint:pjsip/phone")
+        .map_err(|_| Error::Invalid("endpoint source"))?;
+    assert_eq!(
+        rejection(
+            actual
+                .subscribe_resources(app, std::slice::from_ref(&unknown))
+                .await
+        )?,
+        rejection(reference.subscribe_resources(app, &[unknown]).await)?
+    );
     actual.create_bridge(&id, "Observed").await?;
     reference.create_bridge(&id, "Observed").await?;
     let source = EventSource::Bridge(id.clone());

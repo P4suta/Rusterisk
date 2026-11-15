@@ -9,6 +9,8 @@ type Snapshot = {
 	readonly application: ApplicationSnapshot;
 	readonly filtered: ApplicationSnapshot;
 	readonly cleared: ApplicationSnapshot;
+	readonly subscribed: ApplicationSnapshot;
+	readonly unsubscribed: ApplicationSnapshot;
 };
 
 async function snapshot(address: string): Promise<Snapshot> {
@@ -67,7 +69,34 @@ async function snapshot(address: string): Promise<Snapshot> {
 				5000,
 			),
 		);
-		return { endpoints, application: app, filtered, cleared };
+		const subscribed = application(
+			await deadline(
+				"resource subscription",
+				client.applications.subscribe({
+					applicationName: "compat-node",
+					eventSource: "endpoint:PJSIP/phone",
+				}),
+				5000,
+			),
+		);
+		const unsubscribed = application(
+			await deadline(
+				"resource removal",
+				client.applications.unsubscribe({
+					applicationName: "compat-node",
+					eventSource: "endpoint:PJSIP/phone",
+				}),
+				5000,
+			),
+		);
+		return {
+			endpoints,
+			application: app,
+			filtered,
+			cleared,
+			subscribed,
+			unsubscribed,
+		};
 	} finally {
 		client.stop();
 	}
