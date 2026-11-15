@@ -45,6 +45,17 @@ fn rejects_sip_verifier_aliases_wrappers_added_state_and_scope_escape_routes(
         .unwrap_or("");
     assert!(!attribute.is_empty());
     let fixtures = [
+        format!(
+            "{}\n#[cfg(not(feature = \"foreign\"))] type SipDomainVerifier = OwnCallState;",
+            source.replace(
+                "pub(crate) struct SipDomainVerifier",
+                "#[cfg(feature = \"foreign\")] pub(crate) struct SipDomainVerifier"
+            )
+        ),
+        source.replace(
+            "pub(crate) struct SipDomainVerifier",
+            "#[cfg(any())] pub(crate) struct SipDomainVerifier",
+        ),
         source.replace(
             constructor,
             "let config = ::std::sync::Arc::<::tokio_rustls::rustls::ClientConfig>::new(config);",

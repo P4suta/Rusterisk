@@ -19,6 +19,15 @@ pub(super) fn registration(exception: &Exception) -> bool {
 }
 
 pub(super) fn verifier(file: &syn::File) -> bool {
+    if file.items.iter().any(|item| {
+        if let Item::Type(item) = item {
+            item.ident == "SipDomainVerifier"
+        } else {
+            false
+        }
+    }) {
+        return false;
+    }
     let mut declarations = file
         .items
         .iter()
@@ -36,6 +45,12 @@ pub(super) fn verifier(file: &syn::File) -> bool {
     if declarations.next().is_some()
         || !item.generics.params.is_empty()
         || item.generics.where_clause.is_some()
+        || item.attrs.iter().any(|attribute| {
+            !attribute.path().is_ident("derive")
+                || !attribute
+                    .parse_args::<Path>()
+                    .is_ok_and(|path| path.is_ident("Debug"))
+        })
     {
         return false;
     }
