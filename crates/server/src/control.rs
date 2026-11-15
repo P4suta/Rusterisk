@@ -1191,13 +1191,13 @@ impl Control {
                 resource,
             } => Outcome::json(self.endpoint(&technology, &resource)?),
             Action::GetVariable { channel, variable } => {
+                if variable.is_empty() {
+                    return Err(ControlError::Invalid("Variable name is required"));
+                }
                 let entry = self
                     .channels
                     .get(&channel)
-                    .ok_or(ControlError::NotFound("Channel not found"))?;
-                if !matches!(entry.call.stasis(), StasisMembership::Entered(_)) {
-                    return Err(ControlError::Conflict("Channel not in Stasis application"));
-                }
+                    .ok_or(ControlError::NotFound("Provided channel was not found"))?;
                 Outcome::json(rusterisk_api::Variable {
                     value: entry.variable(&variable)?,
                 })

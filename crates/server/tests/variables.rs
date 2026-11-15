@@ -32,6 +32,58 @@ fn get(variable: &str) -> Result<Action, ControlError> {
     })
 }
 
+#[test]
+fn reading_variables_before_stasis_preserves_write_authorization() -> Result<(), ControlError> {
+    let mut control = Control::new(2);
+    control.subscribe("app")?;
+    control.apply(
+        Action::Originate {
+            id: id()?,
+            endpoint: "PJSIP/phone".into(),
+            app: "app".into(),
+            args: Vec::new(),
+            caller: "100".into(),
+            timeout: 30,
+        },
+        "created",
+        0,
+    )?;
+    assert_eq!(
+        control.apply(get("CALLERID(num)")?, "read", 0)?.body,
+        Some(serde_json::json!({"value": "100"}))
+    );
+    assert_eq!(
+        control
+            .apply(get("RUSTERISK_MEDIA_CONNECTED")?, "read", 0)?
+            .body,
+        Some(serde_json::json!({"value": "0"}))
+    );
+    assert!(matches!(
+        control.apply(get("missing")?, "read", 0),
+        Err(ControlError::NotFound("Provided variable was not found"))
+    ));
+    assert!(matches!(
+        control.apply(set("X", Some("refused"))?, "write", 0),
+        Err(ControlError::Conflict("Channel not in Stasis application"))
+    ));
+    Ok(())
+}
+
+#[test]
+fn variable_reads_validate_missing_names_before_looking_up_the_channel() -> Result<(), ControlError>
+{
+    let mut control = Control::new(2);
+    assert!(matches!(
+        control.apply(get("")?, "read", 0),
+        Err(ControlError::Invalid("Variable name is required"))
+    ));
+    assert!(matches!(
+        control.apply(get("X")?, "read", 0),
+        Err(ControlError::NotFound("Provided channel was not found"))
+    ));
+    Ok(())
+}
+
 fn set(variable: &str, value: Option<&str>) -> Result<Action, ControlError> {
     Ok(Action::SetVariable {
         channel: id()?,
