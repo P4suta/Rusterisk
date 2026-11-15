@@ -17,6 +17,7 @@ mod endpoints;
 mod playback;
 mod recording;
 mod stasis;
+mod subscriptions;
 use dialplan::DialplanFrame;
 pub use endpoints::EndpointKey;
 use endpoints::Endpoints;
@@ -197,6 +198,14 @@ pub enum Action {
         application: String,
         update: Option<rusterisk_api::EventFilterRequest>,
     },
+    SubscribeResources {
+        application: String,
+        sources: Vec<String>,
+    },
+    UnsubscribeResources {
+        application: String,
+        sources: Vec<String>,
+    },
     ListEndpoints {
         technology: Option<String>,
     },
@@ -269,6 +278,8 @@ impl Action {
             | Self::ListApplications
             | Self::GetApplication(_)
             | Self::FilterApplication { .. }
+            | Self::SubscribeResources { .. }
+            | Self::UnsubscribeResources { .. }
             | Self::ListEndpoints { .. }
             | Self::GetEndpoint { .. }
             | Self::GetRecording(_)
@@ -316,6 +327,8 @@ impl Action {
             | Self::GetBridge(_) => true,
             Self::Originate { .. }
             | Self::FilterApplication { .. }
+            | Self::SubscribeResources { .. }
+            | Self::UnsubscribeResources { .. }
             | Self::RecordChannel { .. }
             | Self::RecordBridge { .. }
             | Self::ControlRecording { .. }
@@ -504,6 +517,8 @@ pub struct Outcome {
     pub effects: Vec<Effect>,
     pub events: Vec<Event>,
     pub history: Vec<CallHistoryEvent>,
+    notices: Vec<subscriptions::Notice>,
+    ended_sources: Vec<subscriptions::EndedSource>,
 }
 
 impl Outcome {
@@ -515,6 +530,8 @@ impl Outcome {
             effects: Vec::new(),
             events: Vec::new(),
             history: Vec::new(),
+            notices: Vec::new(),
+            ended_sources: Vec::new(),
         }
     }
     pub(crate) fn json(value: impl serde::Serialize) -> Result<Self, ControlError> {
@@ -525,9 +542,12 @@ impl Outcome {
             effects: Vec::new(),
             events: Vec::new(),
             history: Vec::new(),
+            notices: Vec::new(),
+            ended_sources: Vec::new(),
         })
     }
     fn event(&mut self, application: &str, timestamp: &str, kind: EventKind) {
+        self.notice(timestamp, &kind);
         self.events.push(Event {
             application: application.into(),
             timestamp: timestamp.into(),
@@ -537,6 +557,8 @@ impl Outcome {
     fn optional_event(&mut self, application: Option<&str>, timestamp: &str, kind: EventKind) {
         if let Some(application) = application {
             self.event(application, timestamp, kind);
+        } else {
+            self.notice(timestamp, &kind);
         }
     }
 
@@ -544,6 +566,8 @@ impl Outcome {
         self.effects.append(&mut other.effects);
         self.events.append(&mut other.events);
         self.history.append(&mut other.history);
+        self.notices.append(&mut other.notices);
+        self.ended_sources.append(&mut other.ended_sources);
     }
 }
 
@@ -664,6 +688,7 @@ pub struct Control {
     bridges: BTreeMap<ChannelId, BridgeEntry>,
     applications: BTreeMap<String, StasisApplication>,
     event_filters: BTreeMap<StasisApplication, stasis::EventFilters>,
+    resource_subscriptions: BTreeMap<StasisApplication, rusterisk_core::ResourceSubscriptions<128>>,
     playbacks: BTreeMap<ChannelId, playback::PlaybackEntry>,
     recordings: BTreeMap<ChannelId, recording::RecordingEntry>,
     dialplan_program: rusterisk_config::Dialplan,
@@ -821,6 +846,7 @@ impl Control {
             bridges: BTreeMap::new(),
             applications: BTreeMap::new(),
             event_filters: BTreeMap::new(),
+            resource_subscriptions: BTreeMap::new(),
             playbacks: BTreeMap::new(),
             recordings: BTreeMap::new(),
             dialplan_program: program,
@@ -862,6 +888,7 @@ impl Control {
         }
         self.applications.remove(name);
         self.event_filters.remove(&application);
+        self.resource_subscriptions.remove(&application);
         Ok(outcome)
     }
 
@@ -969,6 +996,16 @@ impl Control {
                 application,
                 update,
             } => self.filter_application(&application, update),
+            Action::SubscribeResources {
+                application,
+                sources,
+            } => self.change_subscriptions(&application, sources, subscriptions::Change::Subscribe),
+            Action::UnsubscribeResources {
+                application,
+                sources,
+            } => {
+                self.change_subscriptions(&application, sources, subscriptions::Change::Unsubscribe)
+            }
             Action::ListEndpoints { technology } => {
                 Outcome::json(self.endpoint_list(technology.as_deref())?)
             }
@@ -1199,6 +1236,12 @@ impl Control {
                     .bridges
                     .remove(&id)
                     .ok_or(ControlError::NotFound("Bridge not found"))?;
+                outcome
+                    .ended_sources
+                    .push(subscriptions::EndedSource::Bridge {
+                        id: id.clone(),
+                        generation: bridge.token,
+                    });
                 self.end_bridge_playbacks(&id, bridge.token, timestamp, &mut outcome);
                 self.finish_owner_recordings(&MediaOwner::Bridge {
                     id: id.clone(),
@@ -1468,6 +1511,14 @@ impl Control {
             timestamp,
             &mut outcome,
         );
+        outcome
+            .ended_sources
+            .push(subscriptions::EndedSource::Channel {
+                key: CallKey {
+                    id: id.clone(),
+                    generation: entry.call.generation(),
+                },
+            });
         self.finish_owner_recordings(&MediaOwner::Channel(CallKey {
             id: id.clone(),
             generation: entry.call.generation(),

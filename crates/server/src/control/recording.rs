@@ -75,6 +75,7 @@ impl Control {
         kind: EventKind,
         outcome: &mut Outcome,
     ) -> Result<(), ControlError> {
+        outcome.media_notice(&entry.owner, timestamp, &kind);
         match &entry.owner {
             MediaOwner::Channel(key) => {
                 let live = self

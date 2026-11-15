@@ -403,6 +403,30 @@ async fn dispatch(
         ("GET", ["ari", "applications", application]) => {
             Action::GetApplication(id(application)?.to_string())
         }
+        ("POST", ["ari", "applications", application, "subscription"]) => {
+            Action::SubscribeResources {
+                application: id(application)?.to_string(),
+                sources: parameters
+                    .get("eventSource")
+                    .filter(|value| !value.is_empty())
+                    .ok_or(ControlError::Invalid("Missing parameter eventSource"))?
+                    .split(',')
+                    .map(str::to_owned)
+                    .collect(),
+            }
+        }
+        ("DELETE", ["ari", "applications", application, "subscription"]) => {
+            Action::UnsubscribeResources {
+                application: id(application)?.to_string(),
+                sources: parameters
+                    .get("eventSource")
+                    .filter(|value| !value.is_empty())
+                    .ok_or(ControlError::Invalid("Missing parameter eventSource"))?
+                    .split(',')
+                    .map(str::to_owned)
+                    .collect(),
+            }
+        }
         ("GET", ["ari", "endpoints"]) => Action::ListEndpoints { technology: None },
         ("GET", ["ari", "endpoints", technology]) => Action::ListEndpoints {
             technology: Some(id(technology)?.to_string()),

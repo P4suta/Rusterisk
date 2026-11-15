@@ -381,6 +381,7 @@ impl Runner {
     }
 
     fn publish(&mut self, outcome: &mut Outcome) -> Result<(), ControlError> {
+        self.control.route_resource_events(outcome);
         self.publish_history(outcome)?;
         for effect in outcome.effects.drain(..) {
             self.emit_effect(effect)?;

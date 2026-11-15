@@ -72,8 +72,8 @@ impl Control {
             .get(name)
             .copied()
             .ok_or(ControlError::NotFound("Application not found"))?;
-        let channel_ids: Vec<ChannelId> = self.channels.iter().filter(|(_, entry)| matches!(entry.call.stasis(), StasisMembership::Pending(current) | StasisMembership::Entered(current) if current == application)).map(|(id, _)| id.clone()).collect();
-        let bridge_ids = self
+        let mut channel_ids: Vec<ChannelId> = self.channels.iter().filter(|(_, entry)| matches!(entry.call.stasis(), StasisMembership::Pending(current) | StasisMembership::Entered(current) if current == application)).map(|(id, _)| id.clone()).collect();
+        let mut bridge_ids: Vec<ChannelId> = self
             .bridges
             .iter()
             .filter(|(_, bridge)| {
@@ -85,6 +85,11 @@ impl Control {
             })
             .map(|(id, _)| id.clone())
             .collect();
+        self.append_subscribed_resources(application, &mut channel_ids, &mut bridge_ids)?;
+        channel_ids.sort();
+        channel_ids.dedup();
+        bridge_ids.sort();
+        bridge_ids.dedup();
         let filters = self.event_filters.get(&application);
         Ok(Application {
             name: name.into(),

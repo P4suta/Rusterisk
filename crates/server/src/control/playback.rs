@@ -72,6 +72,7 @@ impl Control {
         kind: EventKind,
         outcome: &mut Outcome,
     ) -> Result<(), ControlError> {
+        outcome.media_notice(owner, timestamp, &kind);
         match owner {
             MediaOwner::Channel(key) => {
                 let entry = self
@@ -359,6 +360,13 @@ impl Control {
         outcome: &mut Outcome,
     ) {
         for playback in self.remove_playbacks(&MediaOwner::Channel(key.clone())) {
+            outcome.media_notice(
+                &MediaOwner::Channel(key.clone()),
+                timestamp,
+                &EventKind::PlaybackFinished {
+                    playback: playback.clone(),
+                },
+            );
             outcome.optional_event(
                 application,
                 timestamp,
@@ -379,6 +387,13 @@ impl Control {
             generation,
         };
         for playback in self.remove_playbacks(&owner) {
+            outcome.media_notice(
+                &owner,
+                timestamp,
+                &EventKind::PlaybackFinished {
+                    playback: playback.clone(),
+                },
+            );
             for application in self.applications.keys() {
                 outcome.event(
                     application,
