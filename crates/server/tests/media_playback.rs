@@ -81,6 +81,7 @@ async fn bridge_playback_reaches_every_peer_and_is_included_in_its_recording(
                         payload_type: 0,
                         telephone: None,
                     },
+                    rusterisk_core::PeerMediaDirection::SendReceive,
                 )
                 .await?;
         }

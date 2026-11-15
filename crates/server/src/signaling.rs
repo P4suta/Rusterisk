@@ -6,7 +6,7 @@ use crate::{
 };
 use rusterisk_api::{ChannelId, MediaUri};
 use rusterisk_config::{Codec, Config, Dtmf, Protocol};
-use rusterisk_core::{AudioGate, DtmfCommand, MediaTaskToken};
+use rusterisk_core::{AudioGate, DtmfCommand, MediaTaskToken, PeerMediaDirection};
 use rusterisk_media::{AudioFormat, AudioTarget, Gate, TelephoneFormat};
 use rusterisk_sip::{Datagram, Engine, Outbound, Output, RejectReason, SipEvent, MAX_MESSAGE};
 use std::collections::{BTreeMap, VecDeque};
@@ -254,6 +254,12 @@ impl Signaling {
                             Codec::Pcma => AudioFormat::Pcma,
                             Codec::Opus => AudioFormat::Opus,
                         };
+                        let direction = match session.direction {
+                            rusterisk_sip::Direction::SendRecv => PeerMediaDirection::SendReceive,
+                            rusterisk_sip::Direction::SendOnly => PeerMediaDirection::SendOnly,
+                            rusterisk_sip::Direction::RecvOnly => PeerMediaDirection::ReceiveOnly,
+                            rusterisk_sip::Direction::Inactive => PeerMediaDirection::Inactive,
+                        };
                         match self
                             .media
                             .attach(
@@ -275,10 +281,16 @@ impl Signaling {
                                         .transpose()
                                         .map_err(failure)?,
                                 },
+                                direction,
                             )
                             .await
                         {
                             Ok(()) => {
+                                self.notify(Signal::PeerDirection {
+                                    key: key.clone(),
+                                    direction,
+                                })
+                                .await?;
                                 let events = match &self
                                     .calls
                                     .get(&key)

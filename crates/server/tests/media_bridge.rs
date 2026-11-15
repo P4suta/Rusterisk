@@ -1,5 +1,5 @@
 use rusterisk_api::ChannelId;
-use rusterisk_core::{DtmfDigit, DtmfTone};
+use rusterisk_core::{DtmfDigit, DtmfTone, PeerMediaDirection};
 use rusterisk_media::{
     mulaw_decode, AudioFormat, Frame, MediaError, RtpPacket, RtpSender, TelephoneEvent,
     TelephoneFormat,
@@ -42,6 +42,41 @@ async fn receives(peer: &SocketPair, expected: i32) -> Result<(), MediaError> {
 }
 
 #[tokio::test]
+async fn initial_inactive_direction_prevents_audio_and_stale_updates_cannot_disable_resume(
+) -> Result<(), MediaError> {
+    let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let peer = SocketPair::bind(ip, 0, 0).map_err(failure)?;
+    let sockets = SocketPair::bind(ip, 0, 0).map_err(failure)?;
+    let address = sockets.local_addr().map_err(failure)?;
+    let (media, hub, mut notices) = MediaHub::new(1);
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(hub.run(stopped));
+    let result = async {
+        let key = key("alice")?;
+        media.attach(key.clone(), sockets, RtpSession {
+            remote: peer.local_addr().map_err(failure)?, format: AudioFormat::Pcmu,
+            payload_type: 0, telephone: None,
+        }, PeerMediaDirection::Inactive).await?;
+        let mut sender = RtpSender::new(AudioFormat::Pcmu, 0, [8; 10])?;
+        let packet = sender.packet(Frame::new(&[4000; 160], 8000)?)?.encode()?;
+        peer.data().send_to(&packet, address).await.map_err(failure)?;
+        let mut bytes = [0; 1501];
+        assert!(tokio::time::timeout(Duration::from_millis(150), peer.data().recv_from(&mut bytes)).await.is_err());
+        assert!(notices.try_recv().is_err());
+        media.peer_direction(key.clone(), PeerMediaDirection::SendReceive, rusterisk_media::Gate::Open)?;
+        media.peer_direction(CallKey { generation: key.generation + 1, ..key.clone() }, PeerMediaDirection::Inactive, rusterisk_media::Gate::Closed)?;
+        tokio::time::timeout(Duration::from_secs(2), peer.data().recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
+        let packet = sender.packet(Frame::new(&[4000; 160], 8000)?)?.encode()?;
+        peer.data().send_to(&packet, address).await.map_err(failure)?;
+        assert!(matches!(tokio::time::timeout(Duration::from_secs(2), notices.recv()).await.map_err(failure)?, Some(MediaNotice::Connected { key: connected }) if connected == key));
+        Ok(())
+    }.await;
+    stop.send_replace(true);
+    task.await.map_err(failure)??;
+    result
+}
+
+#[tokio::test]
 async fn owned_workers_bridge_real_received_audio_and_stop_together() -> Result<(), MediaError> {
     let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let alice = SocketPair::bind(ip, 0, 0).map_err(failure)?;
@@ -65,6 +100,7 @@ async fn owned_workers_bridge_real_received_audio_and_stop_together() -> Result<
                         payload_type: 0,
                         telephone: None,
                     },
+                    PeerMediaDirection::SendReceive,
                 )
                 .await?;
         }
@@ -123,6 +159,7 @@ async fn telephone_datagrams_emit_one_digit_without_claiming_an_audio_connection
                     payload_type: 0,
                     telephone: Some(TelephoneFormat::new(101, 8000)?),
                 },
+                PeerMediaDirection::SendReceive,
             )
             .await?;
         for sequence in 1..=3 {

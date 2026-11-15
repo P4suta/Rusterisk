@@ -119,6 +119,7 @@ async fn channel_and_bridge_recordings_contain_their_actual_received_audio(
                         payload_type: 0,
                         telephone: None,
                     },
+                    rusterisk_core::PeerMediaDirection::SendReceive,
                 )
                 .await?;
         }

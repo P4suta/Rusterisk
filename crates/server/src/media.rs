@@ -83,6 +83,7 @@ enum Command {
         key: CallKey,
         sockets: SocketPair,
         session: RtpSession,
+        direction: PeerMediaDirection,
         reply: oneshot::Sender<Result<(), MediaError>>,
     },
     Release {
@@ -321,6 +322,7 @@ impl MediaPort {
         key: CallKey,
         sockets: SocketPair,
         session: RtpSession,
+        direction: PeerMediaDirection,
     ) -> Result<(), MediaError> {
         let (reply, response) = oneshot::channel();
         self.commands
@@ -328,6 +330,7 @@ impl MediaPort {
                 key,
                 sockets,
                 session,
+                direction,
                 reply,
             })
             .map_err(|_| MediaError::Capacity)?;
@@ -447,6 +450,7 @@ impl MediaHub {
         key: CallKey,
         sockets: SocketPair,
         session: RtpSession,
+        initial_direction: PeerMediaDirection,
     ) -> Result<(), MediaError> {
         if self.ports.len() >= self.capacity || self.workers.len() >= self.capacity {
             return Err(MediaError::Capacity);
@@ -460,7 +464,7 @@ impl MediaHub {
         let (commands, command_input) = mpsc::channel(8);
         let (completed, completions) = mpsc::channel(8);
         let (stop, stopped) = watch::channel(false);
-        let (direction, directed) = watch::channel(PeerMediaDirection::SendReceive);
+        let (direction, directed) = watch::channel(initial_direction);
         let link = RtpLink::new(
             sockets,
             session,
@@ -475,6 +479,15 @@ impl MediaHub {
             },
         )?;
         self.mixer.insert(key.clone())?;
+        self.mixer.gate(
+            &key,
+            match initial_direction {
+                PeerMediaDirection::SendReceive => Gate::Open,
+                PeerMediaDirection::SendOnly => Gate::OutgoingMuted,
+                PeerMediaDirection::ReceiveOnly => Gate::IncomingMuted,
+                PeerMediaDirection::Inactive => Gate::Closed,
+            },
+        )?;
         self.ports.insert(
             key.clone(),
             Port {
@@ -623,10 +636,11 @@ impl MediaHub {
                 key,
                 sockets,
                 session,
+                direction,
                 reply,
             } => {
                 if !reply.is_closed() {
-                    let result = self.attach(key.clone(), sockets, session);
+                    let result = self.attach(key.clone(), sockets, session, direction);
                     if reply.send(result).is_err() {
                         self.remove(&key)?;
                     }
