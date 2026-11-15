@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(transparent)]
-pub struct RecordingSeconds(#[schemars(range(min = 0, max = 2147483647))] u32);
+pub struct RecordingSeconds(#[schemars(with = "i32", range(min = 0, max = 2147483647))] u32);
 
 impl RecordingSeconds {
     pub const fn seconds(self) -> u32 {

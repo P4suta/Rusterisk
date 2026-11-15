@@ -1008,9 +1008,20 @@ fn parameters(operation: &Operation, format: Option<DiscoveryFormat>) -> Vec<Val
         .map(|name| (name.trim_end_matches('!'), name.ends_with('!'), "query"));
     paths.chain(queries).filter(|(name, _, _)| format.is_some() || *name != "variables").map(|(name, required, location)| {
         let location = if name == "variables" { "body" } else { location };
-        let schema = if name == "ifExists" { schemars::schema_for!(RecordingIfExists).to_value() } else { json!({"type": "string"}) };
+        let schema = match name {
+            "ifExists" => schemars::schema_for!(RecordingIfExists).to_value(),
+            "maxDurationSeconds" | "maxSilenceSeconds" => schemars::schema_for!(RecordingSeconds).to_value(),
+            "terminateOn" => schemars::schema_for!(RecordingTermination).to_value(),
+            "beep" => schemars::schema_for!(bool).to_value(),
+            _ => json!({"type": "string"}),
+        };
         if let Some(format) = format {
-            let mut parameter = json!({"name": name, "paramType": location, "required": required, "allowMultiple": false, "dataType": if name == "variables" { "containers" } else { "string" }, "type": "string", "description": name});
+            let kind = schema["type"].as_str().unwrap_or("string");
+            let data_type = if name == "variables" { "containers" } else if kind == "integer" && format == DiscoveryFormat::Asterisk { "int" } else { kind };
+            let mut parameter = json!({"name": name, "paramType": location, "required": required, "allowMultiple": false, "dataType": data_type, "type": kind, "description": name});
+            for field in ["format", "minimum", "maximum"] {
+                if let Some(value) = schema.get(field) { parameter[field] = value.clone(); }
+            }
             if let Some(values) = schema.get("enum") {
                 match format {
                     DiscoveryFormat::Asterisk => parameter["allowableValues"] = json!({"valueType": "LIST", "values": values}),
