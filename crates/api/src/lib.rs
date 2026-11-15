@@ -1,7 +1,9 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+mod media_uri;
 mod swagger;
+pub use media_uri::{InvalidMediaUri, MediaUri};
 pub use swagger::SwaggerError;
 
 pub const REFERENCE_VERSION: &str = "22.9.0";
