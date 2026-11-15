@@ -600,6 +600,7 @@ impl Engine {
         }
         if request.method == Method::Ack {
             self.incoming_ack(&request, peer)?;
+            self.outgoing_ack(&request, peer)?;
             return Ok(Output {
                 datagrams: Vec::new(),
                 events: Vec::new(),

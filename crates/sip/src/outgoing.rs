@@ -31,7 +31,7 @@ enum State {
         expires: u64,
     },
     Proceeding,
-    Established(Session),
+    Established(DialogMedia),
     Cancelling {
         expires: u64,
     },
@@ -56,6 +56,34 @@ pub(crate) struct Outgoing {
     remote_cseq: Option<u32>,
     credentials: Vec<Auth>,
     challenges: Vec<Challenge>,
+    local_media: SocketAddr,
+    session_id: u64,
+}
+
+struct DialogMedia {
+    session: Session,
+    peer_description: Vec<u8>,
+    answer_version: u64,
+    pending: Option<InviteAnswer>,
+}
+
+struct InviteAnswer {
+    sequence: u32,
+    bytes: Vec<u8>,
+    retry: u64,
+    interval: u64,
+    deadline: u64,
+}
+
+impl Outgoing {
+    fn matches(&self, request: &Request, peer: SocketAddr) -> Result<bool, SipError> {
+        let remote = rsipstack::sip::headers::typed::To::parse(&self.remote_to)?;
+        Ok(self.peer == peer
+            && remote.tag().is_some()
+            && request.call_id_header()?.value() == self.invite.call_id_header()?.value()
+            && request.from_header()?.typed()?.tag() == remote.tag()
+            && request.to_header()?.typed()?.tag() == self.invite.from_header()?.typed()?.tag())
+    }
 }
 
 struct Challenge {
@@ -422,6 +450,8 @@ impl Engine {
                 .cloned()
                 .collect(),
             challenges: Vec::new(),
+            local_media: outbound.local_rtp,
+            session_id: self.serial,
         };
         self.outgoing.insert(call_id, dialog);
         Ok(Output::response(peer, bytes.into_bytes()))
@@ -504,6 +534,38 @@ impl Engine {
             dialog
                 .challenges
                 .retain(|challenge| challenge.expires > now);
+            if let State::Established(media) = &mut dialog.state {
+                if media
+                    .pending
+                    .as_ref()
+                    .is_some_and(|answer| answer.deadline <= now)
+                {
+                    dialog.cseq = dialog.cseq.checked_add(1).ok_or(SipError::Capacity)?;
+                    output.datagrams.push(Datagram {
+                        peer: dialog.peer,
+                        bytes: related(dialog, Method::Bye, &dialog.remote_to, dialog.cseq, true)?,
+                    });
+                    output.events.push(SipEvent::Ended {
+                        id: dialog.id.clone(),
+                        generation: dialog.generation,
+                        cause: 102,
+                    });
+                    dialog.state = State::Terminated {
+                        expires: now.saturating_add(32_000),
+                    };
+                    continue;
+                }
+                if let Some(answer) = &mut media.pending {
+                    if answer.retry <= now {
+                        output.datagrams.push(Datagram {
+                            peer: dialog.peer,
+                            bytes: answer.bytes.clone(),
+                        });
+                        answer.interval = (answer.interval * 2).min(4000);
+                        answer.retry = now.saturating_add(answer.interval);
+                    }
+                }
+            }
             match &mut dialog.state {
                 State::Calling { retry, interval }
                     if dialog
@@ -683,7 +745,12 @@ impl Engine {
                         generation: dialog.generation,
                         session: session.clone(),
                     });
-                    dialog.state = State::Established(session);
+                    dialog.state = State::Established(DialogMedia {
+                        session,
+                        peer_description: response.body,
+                        answer_version: dialog.session_id,
+                        pending: None,
+                    });
                 }
                 State::CancelPending { .. } | State::Cancelling { .. } => {
                     dialog.cseq = dialog.cseq.checked_add(1).ok_or(SipError::Capacity)?;
@@ -718,8 +785,8 @@ impl Engine {
         }
         self.outgoing.values().find_map(|dialog| {
             if dialog.id == id && dialog.generation == generation {
-                if let State::Established(session) = &dialog.state {
-                    return Some(session);
+                if let State::Established(media) = &dialog.state {
+                    return Some(&media.session);
                 }
             }
             None
@@ -738,12 +805,7 @@ impl Engine {
         let Some(dialog) = self.outgoing.get_mut(request.call_id_header()?.value()) else {
             return Ok(None);
         };
-        let remote = rsipstack::sip::headers::typed::To::parse(&dialog.remote_to)?;
-        if dialog.peer != peer
-            || remote.tag().is_none()
-            || request.from_header()?.typed()?.tag() != remote.tag()
-            || request.to_header()?.typed()?.tag() != dialog.invite.from_header()?.typed()?.tag()
-        {
+        if !dialog.matches(request, peer)? {
             return Ok(None);
         }
         let sequence = request.cseq_header()?.typed()?.seq;
@@ -760,14 +822,85 @@ impl Engine {
             )?)));
         }
         if request.method == Method::Invite {
-            let (code, phrase) = if matches!(dialog.state, State::Established(_)) {
-                (501, "Not Implemented")
-            } else {
-                (481, "Call/Transaction Does Not Exist")
+            let State::Established(media) = &mut dialog.state else {
+                return Ok(Some(DialogReply::response(crate::response(
+                    request,
+                    481,
+                    "Call/Transaction Does Not Exist",
+                    "",
+                    "",
+                )?)));
             };
-            return Ok(Some(DialogReply::Rejected(crate::response(
-                request, code, phrase, "", "",
-            )?)));
+            if media.pending.is_some() {
+                return Ok(Some(DialogReply::response(crate::response(
+                    request,
+                    500,
+                    "Server Internal Error",
+                    &format!("Retry-After: {}\r\n", self.seed[0] % 11),
+                    "",
+                )?)));
+            }
+            let updated =
+                match crate::incoming::direction_update(
+                    &media.peer_description,
+                    &request.body,
+                    &media.session,
+                ) {
+                    Ok(updated) => updated,
+                    Err(_) => return Ok(Some(DialogReply::response(crate::response(
+                        request,
+                        488,
+                        "Not Acceptable Here",
+                        "Warning: 399 rusterisk \"Only media direction changes are supported\"\r\n",
+                        "",
+                    )?))),
+                };
+            let target = request
+                .headers
+                .iter()
+                .find(|header| header.name().eq_ignore_ascii_case("Contact"))
+                .map(|header| rsipstack::sip::headers::typed::Contact::parse(header.value()))
+                .transpose()?
+                .map(|contact| contact.uri);
+            let version = media
+                .answer_version
+                .checked_add(1)
+                .filter(|version| *version <= i64::MAX as u64)
+                .ok_or(SipError::Capacity)?;
+            let extra = format!("Contact: {}\r\n", dialog.invite.contact_header()?.value());
+            let bytes = crate::response(
+                request,
+                200,
+                "OK",
+                &extra,
+                &updated.answer_with_version(dialog.local_media, dialog.session_id, version),
+            )?;
+            let events = if updated.direction != media.session.direction {
+                [SipEvent::PeerDirection {
+                    id: dialog.id.clone(),
+                    generation: dialog.generation,
+                    direction: updated.direction,
+                }]
+                .into_iter()
+                .collect()
+            } else {
+                Vec::new()
+            };
+            media.session = updated;
+            media.peer_description = request.body.clone();
+            media.answer_version = version;
+            media.pending = Some(InviteAnswer {
+                sequence,
+                bytes: bytes.clone(),
+                retry: now.saturating_add(500),
+                interval: 500,
+                deadline: now.saturating_add(32_000),
+            });
+            dialog.remote_cseq = Some(sequence);
+            if let Some(target) = target {
+                dialog.remote_contact = target;
+            }
+            return Ok(Some(DialogReply::Accepted { bytes, events }));
         }
         dialog.remote_cseq = Some(sequence);
         if request.method == Method::Info {
@@ -802,5 +935,27 @@ impl Engine {
             bytes: crate::response(request, 200, "OK", "", "")?,
             events,
         }))
+    }
+
+    pub(crate) fn outgoing_ack(
+        &mut self,
+        request: &Request,
+        peer: SocketAddr,
+    ) -> Result<(), SipError> {
+        let sequence = request.cseq_header()?.typed()?.seq;
+        if let Some(dialog) = self.outgoing.get_mut(request.call_id_header()?.value()) {
+            if dialog.matches(request, peer)? {
+                if let State::Established(media) = &mut dialog.state {
+                    if media
+                        .pending
+                        .as_ref()
+                        .is_some_and(|answer| sequence == answer.sequence)
+                    {
+                        media.pending = None;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }

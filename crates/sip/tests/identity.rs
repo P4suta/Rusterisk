@@ -743,6 +743,75 @@ fn remote_hangup_requires_the_negotiated_peer_and_dialog_tags() -> Result<(), Si
 }
 
 #[test]
+fn an_outgoing_call_accepts_peer_direction_updates_and_closes_an_unacknowledged_update(
+) -> Result<(), SipError> {
+    let mut config = config()?;
+    config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+    let mut engine = Engine::new(config, [9; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let wire = engine.originate(outbound(), 0)?.datagrams.remove(0).bytes;
+    let invite = request(&wire)?;
+    let answer = answered(&wire)?;
+    engine.receive(&answer, peer, 1)?;
+    let SipMessage::Response(answer) = SipMessage::try_from(answer.as_slice())? else {
+        return Err(SipError::InvalidPacket);
+    };
+    for (sequence, version, direction, expected) in [
+        (1, 2, "sendonly", rusterisk_sip::Direction::SendOnly),
+        (2, 3, "sendrecv", rusterisk_sip::Direction::SendRecv),
+    ] {
+        let body = std::str::from_utf8(&answer.body)?
+            .replace("o=- 1 1 IN", &format!("o=- 1 {version} IN"))
+            .replace("a=sendrecv", &format!("a={direction}"));
+        let offer = format!("INVITE sip:rusterisk@127.0.0.1:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-remote-update-{sequence};rport\r\nFrom: {};tag=callee\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {sequence} INVITE\r\nContact: <sip:phone@127.0.0.1:5061>\r\nMax-Forwards: 70\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", invite.to_header()?.value(), invite.from_header()?.value(), invite.call_id_header()?.value(), body.len());
+        let now = u64::from(sequence) * 1000;
+        let updated = engine.receive(offer.as_bytes(), peer, now)?;
+        assert!(updated.datagrams[0].bytes.starts_with(b"SIP/2.0 200"));
+        assert!(
+            matches!(&updated.events[..], [SipEvent::PeerDirection { id, generation: 7, direction }] if id == "outgoing" && *direction == expected)
+        );
+        assert_eq!(
+            engine
+                .active_session("outgoing", 7)
+                .ok_or(SipError::InvalidPacket)?
+                .direction,
+            expected
+        );
+        let repeated = engine.receive(offer.as_bytes(), peer, now + 1)?;
+        assert!(repeated.events.is_empty());
+        assert_eq!(repeated.datagrams[0].bytes, updated.datagrams[0].bytes);
+        assert_eq!(
+            engine.tick(now + 500)?.datagrams[0].bytes,
+            updated.datagrams[0].bytes
+        );
+        if sequence == 1 {
+            engine.receive(
+                &incoming_request(&updated.datagrams[0].bytes, "ACK", sequence)?,
+                peer,
+                now + 501,
+            )?;
+            assert!(engine.tick(now + 999)?.datagrams.is_empty());
+        }
+    }
+    let expired = engine.tick(34_000)?;
+    assert!(matches!(
+        &expired.events[..],
+        [SipEvent::Ended {
+            generation: 7,
+            cause: 102,
+            ..
+        }]
+    ));
+    assert!(expired
+        .datagrams
+        .iter()
+        .any(|packet| packet.bytes.starts_with(b"BYE ")));
+    assert!(engine.active_session("outgoing", 7).is_none());
+    assert!(engine.tick(34_001)?.events.is_empty());
+    Ok(())
+}
+
+#[test]
 fn acknowledgements_never_receive_a_response() -> Result<(), SipError> {
     let mut engine = Engine::new(config()?, [9; 32]);
     let ack = invite("", 1).replace("INVITE", "ACK");

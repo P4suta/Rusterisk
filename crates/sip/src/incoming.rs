@@ -134,7 +134,7 @@ fn unchanged_field(line: &&str) -> bool {
         )
 }
 
-fn direction_update(
+pub(super) fn direction_update(
     previous: &[u8],
     offered: &[u8],
     session: &Session,
