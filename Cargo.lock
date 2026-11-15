@@ -1913,6 +1913,7 @@ dependencies = [
  "rusterisk-media",
  "rusterisk-sip",
  "rusterisk-storage",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "serde_urlencoded",

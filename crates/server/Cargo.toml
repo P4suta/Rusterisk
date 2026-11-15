@@ -45,6 +45,7 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = [
   "aws_lc_rs",
   "tls12",
 ] }
+rustls-native-certs = "0.8.5"
 tower-http = { version = "0.6.8", default-features = false, features = [
   "timeout",
 ] }
