@@ -249,7 +249,8 @@ pub struct StoredRecording {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct Sound {
     pub id: String,
-    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
     pub formats: Vec<SoundFormat>,
 }
 
