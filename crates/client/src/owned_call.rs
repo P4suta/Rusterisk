@@ -327,7 +327,7 @@ mod tests {
                 let (reply, mut response) = oneshot::channel();
                 calls.submit(Command {
                     id: api::ChannelId::try_from(format!("setup-{index}"))?,
-                    options: Originate::new("PJSIP/phone".into())?,
+                    options: Start::Originate(Originate::new("PJSIP/phone".into())?),
                     progress,
                     lifetime: dropped,
                     reply,
@@ -481,9 +481,17 @@ mod tests {
     }
 }
 
+enum Start {
+    Originate(Originate),
+    WebSocket {
+        options: api::WebSocketMediaOptions,
+        data: String,
+    },
+}
+
 pub(crate) struct Command {
     id: api::ChannelId,
-    options: Originate,
+    options: Start,
     progress: watch::Sender<CallSnapshot>,
     lifetime: oneshot::Receiver<()>,
     reply: oneshot::Sender<Result<(), Error>>,
@@ -494,6 +502,28 @@ pub(crate) async fn originate(
     options: Originate,
 ) -> Result<OwnedCall, Error> {
     options.validate()?;
+    start(commands, Start::Originate(options)).await
+}
+
+pub(crate) async fn external_websocket(
+    commands: &mpsc::Sender<Command>,
+    options: api::WebSocketMediaOptions,
+    data: &str,
+) -> Result<OwnedCall, Error> {
+    if data.len() > 4096 || data.chars().any(char::is_control) {
+        return Err(Error::Invalid("invalid media app data"));
+    }
+    start(
+        commands,
+        Start::WebSocket {
+            options,
+            data: data.into(),
+        },
+    )
+    .await
+}
+
+async fn start(commands: &mpsc::Sender<Command>, options: Start) -> Result<OwnedCall, Error> {
     let id = api::ChannelId::try_from(uuid::Uuid::new_v4().to_string())?;
     let (progress, received) = watch::channel(CallSnapshot {
         progress: OwnedCallProgress::new(),
@@ -601,23 +631,32 @@ impl Calls {
         let client = self.client.clone();
         let application = self.application.clone();
         self.originates.spawn(async move {
-            let timeout = options.timeout.as_secs().to_string();
-            let arguments = options.arguments.join(",");
-            let mut query: Vec<(&str, &str)> = [
-                ("channelId", id.as_str()),
-                ("endpoint", options.endpoint.as_str()),
-                ("app", application.as_str()),
-                ("timeout", timeout.as_str()),
-            ]
-            .into_iter()
-            .collect();
-            if !options.caller_id.is_empty() {
-                query.push(("callerId", &options.caller_id));
-            }
-            if !options.arguments.is_empty() {
-                query.push(("appArgs", &arguments));
-            }
-            let result = client.request("channels.originate", &[], &query).await;
+            let result = match options {
+                Start::Originate(options) => {
+                    let timeout = options.timeout.as_secs().to_string();
+                    let arguments = options.arguments.join(",");
+                    let mut query: Vec<(&str, &str)> = [
+                        ("channelId", id.as_str()),
+                        ("endpoint", options.endpoint.as_str()),
+                        ("app", application.as_str()),
+                        ("timeout", timeout.as_str()),
+                    ]
+                    .into_iter()
+                    .collect();
+                    if !options.caller_id.is_empty() {
+                        query.push(("callerId", &options.caller_id));
+                    }
+                    if !options.arguments.is_empty() {
+                        query.push(("appArgs", &arguments));
+                    }
+                    client.request("channels.originate", &[], &query).await
+                }
+                Start::WebSocket { options, data } => {
+                    client
+                        .external_websocket(&id, application.as_str(), options, &data)
+                        .await
+                }
+            };
             (id, result)
         });
         let _delivered = reply.send(Ok(()));

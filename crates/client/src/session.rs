@@ -24,6 +24,13 @@ impl Session {
     pub async fn originate(&self, options: Originate) -> Result<OwnedCall, Error> {
         owned_call::originate(&self.commands, options).await
     }
+    pub async fn external_websocket(
+        &self,
+        options: api::WebSocketMediaOptions,
+        data: &str,
+    ) -> Result<OwnedCall, Error> {
+        owned_call::external_websocket(&self.commands, options, data).await
+    }
     pub async fn next_event(&mut self) -> Result<api::Event, Error> {
         match self.events.recv().await {
             Ok(event) => Ok(event),
