@@ -133,6 +133,25 @@ fn independent_dialogs_with_the_same_call_identifier_preserve_their_invitations_
 }
 
 #[test]
+fn merged_invitation_branches_do_not_create_or_replace_an_owned_call() -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (original, wire, _) = authenticated_invite(&mut engine)?;
+    let id = incoming_id(&original)?;
+    let merged = reauthenticate(&wire.replace("z9hG4bK-2", "z9hG4bK-merged"), 2)?;
+    let rejected = engine.receive(merged.as_bytes(), peer, 2)?;
+    assert!(rejected.datagrams[0].bytes.starts_with(b"SIP/2.0 482"));
+    assert!(rejected.events.is_empty());
+    assert!(engine.pending(&id).is_some());
+    assert_eq!(
+        engine.receive(merged.as_bytes(), peer, 3)?.datagrams[0].bytes,
+        rejected.datagrams[0].bytes
+    );
+    engine.answer(&id, 7, "127.0.0.1:10000".parse()?, 4)?;
+    Ok(())
+}
+
+#[test]
 fn authenticated_identity_is_distinct_from_caller_id_and_retransmission_is_idempotent(
 ) -> Result<(), SipError> {
     let mut engine = Engine::new(config()?, [7; 32]);

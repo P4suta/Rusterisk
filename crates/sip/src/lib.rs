@@ -607,6 +607,10 @@ impl Engine {
                 response(&request, 503, "Service Unavailable", "", "")?,
             ));
         }
+        if self.merged_request(&request)? {
+            let reply = response(&request, 482, "Loop Detected", "", "")?;
+            return self.cache_reply(key, request, peer, now, reply, Vec::new());
+        }
         if request.method == Method::Cancel {
             return self.incoming_cancel(key, request, peer, now);
         }
@@ -760,6 +764,22 @@ impl Engine {
             | Method::Other(_) => response(&request, 501, "Not Implemented", "", "")?,
         };
         self.cache_reply(key, request, peer, now, reply, events)
+    }
+
+    fn merged_request(&self, request: &Request) -> Result<bool, SipError> {
+        if request.to_header()?.typed()?.tag().is_some() {
+            return Ok(false);
+        }
+        for cached in self.cache.values() {
+            if cached.request.call_id_header()?.value() == request.call_id_header()?.value()
+                && cached.request.from_header()?.typed()?.tag()
+                    == request.from_header()?.typed()?.tag()
+                && cached.request.cseq_header()?.typed()? == request.cseq_header()?.typed()?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn cache_reply(
