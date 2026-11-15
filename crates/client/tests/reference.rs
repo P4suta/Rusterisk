@@ -18,6 +18,8 @@ mod external_websocket_clients;
 mod external_websockets;
 #[path = "reference/request_bodies.rs"]
 mod request_bodies;
+#[path = "reference/server_info.rs"]
+mod server_info;
 
 async fn compare_external_admission(
     client: &Client,
@@ -341,6 +343,13 @@ async fn compare_resources(
     );
     let result = async {
         let actual = Client::new(&format!("http://{address}"), "app", "test-password")?;
+        server_info::compare(
+            &actual,
+            &format!("http://{address}"),
+            &reference,
+            &reference_address,
+        )
+        .await?;
         assert_eq!(actual.channels().await?, reference.channels().await?);
         assert_eq!(
             actual.applications().await?,
