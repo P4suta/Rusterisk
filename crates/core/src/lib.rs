@@ -10,6 +10,8 @@ mod digits;
 mod media_tasks;
 mod owned_progress;
 mod peer_media;
+#[cfg(kani)]
+mod proofs;
 mod recording_clock;
 mod recording_gate;
 mod recording_silence;
