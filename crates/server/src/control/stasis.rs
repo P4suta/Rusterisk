@@ -28,6 +28,8 @@ impl Control {
             bridge_ids,
             endpoint_ids: Vec::new(),
             device_names: Vec::new(),
+            events_allowed: Vec::new(),
+            events_disallowed: Vec::new(),
         })
     }
 

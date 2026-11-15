@@ -1,6 +1,21 @@
 use rusterisk_api::{openapi, swagger, ChannelId, Event, EventKind, OPERATIONS};
 
 #[test]
+fn app_snapshots_preserve_required_event_filters() -> Result<(), serde_json::Error> {
+    let value = serde_json::from_str::<serde_json::Value>(
+        r#"{"name":"calls","channel_ids":[],"bridge_ids":[],"endpoint_ids":[],"device_names":[],"events_allowed":[{"type":"StasisStart"}],"events_disallowed":[{"type":"ChannelVarset"}]}"#,
+    )?;
+    let app: rusterisk_api::Application = serde_json::from_value(value.clone())?;
+    assert_eq!(serde_json::to_value(app)?, value);
+    let mut incomplete = value;
+    assert!(incomplete
+        .as_object_mut()
+        .is_some_and(|object| object.remove("events_allowed").is_some()));
+    assert!(serde_json::from_value::<rusterisk_api::Application>(incomplete).is_err());
+    Ok(())
+}
+
+#[test]
 fn bridge_video_fields_are_optional_and_keep_the_reference_modes() -> Result<(), serde_json::Error>
 {
     let minimal = serde_json::json!({"id":"bridge", "technology":"simple_bridge", "bridge_type":"mixing", "bridge_class":"stasis", "creator":"Stasis", "name":"Conversation", "channels":[], "creationtime":"now"});

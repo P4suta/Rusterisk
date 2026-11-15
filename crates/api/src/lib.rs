@@ -145,6 +145,14 @@ pub struct Application {
     pub bridge_ids: Vec<ChannelId>,
     pub endpoint_ids: Vec<String>,
     pub device_names: Vec<String>,
+    pub events_allowed: Vec<EventFilter>,
+    pub events_disallowed: Vec<EventFilter>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct EventFilter {
+    #[serde(rename = "type")]
+    pub event_type: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
