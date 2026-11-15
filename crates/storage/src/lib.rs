@@ -1,3 +1,4 @@
+use rusterisk_api::RecordingIfExists;
 use rusterisk_media::Frame;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -20,6 +21,7 @@ pub enum StorageError {
     UnknownSchema,
     InUse,
     Exists,
+    Unsupported,
 }
 
 impl std::fmt::Display for StorageError {
@@ -35,6 +37,7 @@ impl std::fmt::Display for StorageError {
             Self::UnknownSchema => f.write_str("unsupported database schema"),
             Self::InUse => f.write_str("storage directory is already in use"),
             Self::Exists => f.write_str("recording already exists"),
+            Self::Unsupported => f.write_str("unsupported recording operation"),
         }
     }
 }
@@ -142,7 +145,7 @@ impl Store {
             if entry
                 .path()
                 .extension()
-                .is_some_and(|value| value == "partial")
+                .is_some_and(|value| value == "partial" || value == "replacement")
             {
                 interrupted.push(entry.path());
             }
@@ -290,14 +293,35 @@ pub struct Recorder {
     path: PathBuf,
     rate: u32,
     bytes: u32,
+    publication: Publication,
+}
+
+#[derive(Clone, Copy)]
+enum Publication {
+    Create,
+    Replace,
 }
 
 impl Recorder {
     pub fn create(root: &Path, name: &str, rate: u32) -> Result<Self, StorageError> {
+        Self::create_with_policy(root, name, rate, RecordingIfExists::Fail)
+    }
+
+    pub fn create_with_policy(
+        root: &Path,
+        name: &str,
+        rate: u32,
+        policy: RecordingIfExists,
+    ) -> Result<Self, StorageError> {
         validate_name(name)?;
         if !matches!(rate, 8000 | 12000 | 16000 | 24000 | 32000 | 44100 | 48000) {
             return Err(StorageError::InvalidWave);
         }
+        let publication = match policy {
+            RecordingIfExists::Fail => Publication::Create,
+            RecordingIfExists::Overwrite => Publication::Replace,
+            RecordingIfExists::Append => return Err(StorageError::Unsupported),
+        };
         let directory = root.join("recordings");
         std::fs::create_dir_all(&directory)?;
         if std::fs::symlink_metadata(&directory)?
@@ -306,11 +330,20 @@ impl Recorder {
         {
             return Err(StorageError::InvalidName);
         }
-        if directory.join(format!("{name}.wav")).exists() {
+        if matches!(publication, Publication::Create)
+            && directory.join(format!("{name}.wav")).exists()
+        {
             return Err(StorageError::Exists);
         }
-        reserve_directory_entries(&directory, 2)?;
-        let path = directory.join(format!("{name}.partial"));
+        let (extension, other, additional) = match publication {
+            Publication::Create => ("partial", "replacement", 2),
+            Publication::Replace => ("replacement", "partial", 1),
+        };
+        if directory.join(format!("{name}.{other}")).try_exists()? {
+            return Err(StorageError::Exists);
+        }
+        reserve_directory_entries(&directory, additional)?;
+        let path = directory.join(format!("{name}.{extension}"));
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -330,6 +363,7 @@ impl Recorder {
             path,
             rate,
             bytes: 0,
+            publication,
         })
     }
 
@@ -353,9 +387,14 @@ impl Recorder {
         self.file.write_all(&header(self.rate, self.bytes))?;
         self.file.sync_all()?;
         let destination = self.path.with_extension("wav");
-        std::fs::hard_link(&self.path, &destination)?;
         drop(self.file);
-        std::fs::remove_file(&self.path)?;
+        match self.publication {
+            Publication::Create => {
+                std::fs::hard_link(&self.path, &destination)?;
+                std::fs::remove_file(&self.path)?;
+            }
+            Publication::Replace => std::fs::rename(&self.path, &destination)?,
+        }
         Ok(destination)
     }
 
@@ -379,6 +418,11 @@ fn recover(path: &Path) -> Result<(), StorageError> {
     file.write_all(&header(rate, bytes as u32))?;
     file.sync_all()?;
     let destination = path.with_extension("wav");
+    if path.extension().is_some_and(|value| value == "replacement") {
+        drop(file);
+        std::fs::rename(path, destination)?;
+        return Ok(());
+    }
     match std::fs::hard_link(path, &destination) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
