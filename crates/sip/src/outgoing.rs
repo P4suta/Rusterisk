@@ -744,13 +744,7 @@ impl Engine {
             || request.from_header()?.typed()?.tag() != remote.tag()
             || request.to_header()?.typed()?.tag() != dialog.invite.from_header()?.typed()?.tag()
         {
-            return Ok(Some(DialogReply::Rejected(crate::response(
-                request,
-                481,
-                "Call/Transaction Does Not Exist",
-                "",
-                "",
-            )?)));
+            return Ok(None);
         }
         let sequence = request.cseq_header()?.typed()?.seq;
         if dialog

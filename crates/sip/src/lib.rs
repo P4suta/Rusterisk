@@ -394,7 +394,7 @@ impl Engine {
         }
     }
     pub fn pending(&self, id: &str) -> Option<&PendingInvite> {
-        self.pending.values().find(|invite| invite.id == id)
+        self.pending.get(id)
     }
 
     fn token(&mut self) -> Result<String, SipError> {
@@ -727,7 +727,7 @@ impl Engine {
                             session: session.clone(),
                         });
                         self.pending.insert(
-                            request.call_id_header()?.value().into(),
+                            id.clone(),
                             PendingInvite {
                                 id,
                                 peer,
@@ -743,11 +743,13 @@ impl Engine {
                     self.challenge(&request, peer, now)?
                 }
             }
-            Method::Bye | Method::Cancel => {
-                response(&request, 481, "Call/Transaction Does Not Exist", "", "")?
+            Method::Bye | Method::Cancel | Method::Info => {
+                return Ok(Output::response(
+                    peer,
+                    response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
+                ));
             }
             Method::Ack
-            | Method::Info
             | Method::Message
             | Method::Notify
             | Method::PRack
@@ -773,8 +775,8 @@ impl Engine {
         let expires = if request.method == Method::Invite
             && self
                 .pending
-                .get(request.call_id_header()?.value())
-                .is_some_and(|invite| invite.request == request)
+                .values()
+                .any(|invite| invite.request == request)
         {
             None
         } else {

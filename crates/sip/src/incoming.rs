@@ -28,6 +28,7 @@ pub(crate) struct Incoming {
 impl Incoming {
     fn matches(&self, request: &Request, peer: SocketAddr) -> Result<bool, SipError> {
         Ok(self.invite.peer == peer
+            && request.call_id_header()?.value() == self.invite.request.call_id_header()?.value()
             && request.from_header()?.typed()?.tag()
                 == self.invite.request.from_header()?.typed()?.tag()
             && request.to_header()?.typed()?.tag().map(|tag| tag.value())
@@ -90,6 +91,7 @@ fn same_invite(
     peer: SocketAddr,
 ) -> Result<bool, SipError> {
     Ok(invite.peer == peer
+        && invite.request.call_id_header()?.value() == request.call_id_header()?.value()
         && invite.request.uri == request.uri
         && invite.request.cseq_header()?.typed()?.seq == request.cseq_header()?.typed()?.seq
         && invite.request.top_via_header()?.typed()? == request.top_via_header()?.typed()?
@@ -130,26 +132,27 @@ impl Engine {
         peer: SocketAddr,
         now: u64,
     ) -> Result<Output, SipError> {
-        let call_id = request.call_id_header()?.value().to_owned();
-        let invite = self
+        let mut invite = None;
+        for candidate in self
             .pending
-            .get(&call_id)
-            .or_else(|| self.incoming.get(&call_id).map(|dialog| &dialog.invite));
+            .values()
+            .chain(self.incoming.values().map(|dialog| &dialog.invite))
+        {
+            if same_invite(candidate, &request, peer)? {
+                invite = Some(candidate);
+                break;
+            }
+        }
         let Some(invite) = invite else {
             return Ok(Output::response(
                 peer,
                 response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
             ));
         };
-        if !same_invite(invite, &request, peer)? {
-            return Ok(Output::response(
-                peer,
-                response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
-            ));
-        }
+        let id = invite.id.clone();
         let bytes = response(&tagged(&request, &invite.local_tag)?, 200, "OK", "", "")?;
         let mut output = self.cache_reply(key, request, peer, now, bytes, Vec::new())?;
-        if let Some(invite) = self.pending.remove(&call_id) {
+        if let Some(invite) = self.pending.remove(&id) {
             let bytes = response(
                 &tagged(&invite.request, &invite.local_tag)?,
                 487,
@@ -282,7 +285,7 @@ impl Engine {
                 }
             }
         }
-        if let Some(dialog) = self.incoming.get_mut(request.call_id_header()?.value()) {
+        for dialog in self.incoming.values_mut() {
             if dialog.matches(request, peer)?
                 && request.cseq_header()?.typed()?.seq
                     == dialog.invite.request.cseq_header()?.typed()?.seq
@@ -303,18 +306,16 @@ impl Engine {
         if !matches!(request.method, Method::Bye | Method::Info) {
             return Ok(None);
         }
-        let Some(dialog) = self.incoming.get_mut(request.call_id_header()?.value()) else {
+        let mut matched = None;
+        for dialog in self.incoming.values_mut() {
+            if dialog.matches(request, peer)? {
+                matched = Some(dialog);
+                break;
+            }
+        }
+        let Some(dialog) = matched else {
             return Ok(None);
         };
-        if !dialog.matches(request, peer)? {
-            return Ok(Some(DialogReply::Rejected(response(
-                request,
-                481,
-                "Call/Transaction Does Not Exist",
-                "",
-                "",
-            )?)));
-        }
         let sequence = request.cseq_header()?.typed()?.seq;
         if sequence <= dialog.remote_cseq {
             return Ok(Some(DialogReply::Rejected(response(

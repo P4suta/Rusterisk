@@ -1,7 +1,7 @@
 use rsipstack::sip::{
     headers::{
         auth::{Algorithm, AuthQop},
-        typed::WwwAuthenticate,
+        typed::{Authorization, WwwAuthenticate},
         untyped::ToTypedHeader,
     },
     services::DigestGenerator,
@@ -56,6 +56,80 @@ fn authenticated_invite(
     let wire = invite(&auth, 2);
     let accepted = engine.receive(wire.as_bytes(), peer, 1)?;
     Ok((accepted, wire, auth))
+}
+
+fn reauthenticate(wire: &str, count: u32) -> Result<String, SipError> {
+    let mut request = request(wire.as_bytes())?;
+    let mut authorization = Authorization::parse(
+        request
+            .authorization_header()
+            .ok_or(SipError::InvalidPacket)?
+            .value(),
+    )?;
+    authorization.qop = Some(AuthQop::Auth {
+        cnonce: "test-client".into(),
+        nc: count,
+    });
+    authorization.response =
+        DigestGenerator::from(&authorization, "password", &Method::Invite).compute();
+    request
+        .headers
+        .unique_push(rsipstack::sip::Header::Authorization(
+            authorization.to_string().into(),
+        ));
+    Ok(request.to_string())
+}
+
+#[test]
+fn independent_dialogs_with_the_same_call_identifier_preserve_their_invitations_and_cleanup(
+) -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (original, wire, _) = authenticated_invite(&mut engine)?;
+    let SipEvent::Incoming {
+        id: original_id, ..
+    } = &original.events[0]
+    else {
+        return Err(SipError::InvalidPacket);
+    };
+    let another = reauthenticate(
+        &wire
+            .replace("tag=caller", "tag=another")
+            .replace("z9hG4bK-2", "z9hG4bK-another"),
+        2,
+    )?;
+    let admitted = engine.receive(another.as_bytes(), peer, 2)?;
+    let SipEvent::Incoming { id: another_id, .. } = &admitted.events[0] else {
+        return Err(SipError::InvalidPacket);
+    };
+    assert_ne!(original_id, another_id);
+    assert!(engine.pending(original_id).is_some());
+    assert!(engine.pending(another_id).is_some());
+    let original = engine.answer(original_id, 7, "127.0.0.1:10000".parse()?, 3)?;
+    let another = engine.answer(another_id, 8, "127.0.0.1:10004".parse()?, 4)?;
+    for answer in [&original, &another] {
+        engine.receive(
+            &incoming_request(&answer.datagrams[0].bytes, "ACK", 2)?,
+            peer,
+            5,
+        )?;
+    }
+    assert!(engine.tick(510)?.datagrams.is_empty());
+    let ended = engine.receive(
+        &incoming_request(&original.datagrams[0].bytes, "BYE", 3)?,
+        peer,
+        511,
+    )?;
+    assert!(
+        matches!(&ended.events[..], [SipEvent::Ended { id, generation: 7, .. }] if id == original_id)
+    );
+    let bye = incoming_request(&another.datagrams[0].bytes, "BYE", 3)?;
+    let bye = std::str::from_utf8(&bye)?.replace("z9hG4bK-BYE-3", "z9hG4bK-another-BYE-3");
+    let ended = engine.receive(bye.as_bytes(), peer, 512)?;
+    assert!(
+        matches!(&ended.events[..], [SipEvent::Ended { id, generation: 8, .. }] if id == another_id)
+    );
+    Ok(())
 }
 
 #[test]
