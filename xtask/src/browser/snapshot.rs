@@ -60,6 +60,7 @@ pub struct SourceSnapshot {
 enum FileBounds {
     Project,
     Vendor,
+    Archive,
 }
 
 fn directory(path: &Path) -> Result<(), SourceError> {
@@ -127,7 +128,7 @@ fn add_file(
     }
     let limit = match bounds {
         FileBounds::Project => 1024 * 1024,
-        FileBounds::Vendor => 8 * 1024 * 1024,
+        FileBounds::Vendor | FileBounds::Archive => 8 * 1024 * 1024,
     };
     let bytes = read(path, limit)?;
     let total: usize = files.iter().map(|file| file.bytes.len()).sum();
@@ -189,6 +190,9 @@ fn vendor(root: &Path, manifest: &toml::Value, files: &mut Vec<File>) -> Result<
     if path.as_str() != Some("vendor/str0m") {
         return Err(SourceError::Invalid);
     }
+    let archive = Path::new("vendor/archives/str0m-0.25.0.crate");
+    parents(root, archive)?;
+    add_file(&root.join(archive), archive, files, FileBounds::Archive)?;
     for path in ["vendor/str0m-source.toml", "vendor/str0m.patch"] {
         parents(root, Path::new(path))?;
         add(&root.join(path), Path::new(path), files)?;

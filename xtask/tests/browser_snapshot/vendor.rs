@@ -40,6 +40,7 @@ fn vendor(root: &Path) -> Result<(), std::io::Error> {
         "vendor/str0m/Cargo.toml",
         "vendor/str0m-source.toml",
         "vendor/str0m.patch",
+        "vendor/archives/str0m-0.25.0.crate",
     ] {
         write(root, file, b"fixture")?;
     }
@@ -84,6 +85,7 @@ fn vendored_dependency_is_copied_only_for_the_exact_patch_and_remains_source_bou
             "vendor/str0m/Cargo.toml",
             "vendor/str0m-source.toml",
             "vendor/str0m.patch",
+            "vendor/archives/str0m-0.25.0.crate",
         ] {
             assert_eq!(std::fs::read(source.join(file))?, b"fixture");
             write(&source, file, b"changed")?;
@@ -153,6 +155,8 @@ fn vendor_symlinks_are_refused_for_ancestors_tree_files_and_records() -> Result<
         ("vendor-file", "vendor/str0m/Cargo.toml"),
         ("vendor-record", "vendor/str0m-source.toml"),
         ("vendor-patch", "vendor/str0m.patch"),
+        ("archive-parent", "vendor/archives"),
+        ("archive-file", "vendor/archives/str0m-0.25.0.crate"),
     ] {
         fixture(name, |root, directory| {
             vendor(root)?;
@@ -164,4 +168,30 @@ fn vendor_symlinks_are_refused_for_ancestors_tree_files_and_records() -> Result<
         })?;
     }
     Ok(())
+}
+
+#[test]
+fn published_archive_has_an_independent_file_limit_and_stays_outside_the_vendor_tree_budget(
+) -> Result<(), std::io::Error> {
+    fixture("archive-bounds", |root, directory| {
+        vendor(root)?;
+        let name = "vendor/archives/str0m-0.25.0.crate";
+        sparse(root, name, 8 * 1024 * 1024)?;
+        sparse(root, "vendor/str0m/left", 6 * 1024 * 1024)?;
+        sparse(root, "vendor/str0m/right", 6 * 1024 * 1024 - 7)?;
+        let snapshot = SourceSnapshot::read(root).map_err(std::io::Error::other)?;
+        let source = directory.join("source");
+        snapshot
+            .write(&source, &directory.join("state"))
+            .map_err(std::io::Error::other)?;
+        assert_eq!(std::fs::metadata(source.join(name))?.len(), 8 * 1024 * 1024);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(root.join(name))?
+            .set_len(8 * 1024 * 1024 + 1)?;
+        assert!(SourceSnapshot::read(root).is_err());
+        std::fs::remove_file(root.join(name))?;
+        assert!(SourceSnapshot::read(root).is_err());
+        Ok(())
+    })
 }
