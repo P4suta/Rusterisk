@@ -573,8 +573,10 @@ impl Signaling {
                     AudioGate::OutgoingMuted => Gate::OutgoingMuted,
                     AudioGate::Closed => Gate::Closed,
                 };
-                self.media
+                let _applied = self
+                    .media
                     .peer_direction(key, direction, gate)
+                    .await
                     .map_err(failure)?;
             }
             Effect::Answer { key } => {

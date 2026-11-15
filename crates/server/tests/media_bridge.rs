@@ -63,8 +63,8 @@ async fn initial_inactive_direction_prevents_audio_and_stale_updates_cannot_disa
         let mut bytes = [0; 1501];
         assert!(tokio::time::timeout(Duration::from_millis(150), peer.data().recv_from(&mut bytes)).await.is_err());
         assert!(notices.try_recv().is_err());
-        media.peer_direction(key.clone(), PeerMediaDirection::SendReceive, rusterisk_media::Gate::Open)?;
-        media.peer_direction(CallKey { generation: key.generation + 1, ..key.clone() }, PeerMediaDirection::Inactive, rusterisk_media::Gate::Closed)?;
+        assert!(media.peer_direction(key.clone(), PeerMediaDirection::SendReceive, rusterisk_media::Gate::Open).await?);
+        assert!(!media.peer_direction(CallKey { generation: key.generation + 1, ..key.clone() }, PeerMediaDirection::Inactive, rusterisk_media::Gate::Closed).await?);
         tokio::time::timeout(Duration::from_secs(2), peer.data().recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
         let packet = sender.packet(Frame::new(&[4000; 160], 8000)?)?.encode()?;
         peer.data().send_to(&packet, address).await.map_err(failure)?;

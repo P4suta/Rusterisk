@@ -104,6 +104,7 @@ enum Command {
         key: CallKey,
         direction: PeerMediaDirection,
         gate: Gate,
+        reply: oneshot::Sender<Result<bool, MediaError>>,
     },
 }
 
@@ -362,19 +363,25 @@ impl MediaPort {
             .try_send(Command::Gate { key, gate })
             .map_err(|_| MediaError::Capacity)
     }
-    pub fn peer_direction(
+    pub async fn peer_direction(
         &self,
         key: CallKey,
         direction: PeerMediaDirection,
         gate: Gate,
-    ) -> Result<(), MediaError> {
+    ) -> Result<bool, MediaError> {
+        let (reply, response) = oneshot::channel();
         self.commands
             .try_send(Command::PeerDirection {
                 key,
                 direction,
                 gate,
+                reply,
             })
-            .map_err(|_| MediaError::Capacity)
+            .map_err(|_| MediaError::Capacity)?;
+        tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+            .map_err(|error| MediaError::Transport(error.to_string()))?
     }
 }
 
@@ -675,10 +682,20 @@ impl MediaHub {
                 key,
                 direction,
                 gate,
+                reply,
             } => {
-                if let Some(port) = self.ports.get(&key) {
-                    self.mixer.gate(&key, gate)?;
-                    port.direction.send_replace(direction);
+                if !reply.is_closed() {
+                    let result = if let Some(port) = self.ports.get(&key) {
+                        self.mixer.gate(&key, gate).map(|()| {
+                            port.direction.send_replace(direction);
+                            true
+                        })
+                    } else {
+                        Ok(false)
+                    };
+                    if reply.send(result).is_err() {
+                        tracing::debug!(channel = %key.id, generation = key.generation, "media direction receiver closed");
+                    }
                 }
             }
         }
