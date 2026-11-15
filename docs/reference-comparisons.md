@@ -1,0 +1,48 @@
+# Reference comparisons
+
+The comparison target is [Asterisk 22.9.0](https://github.com/asterisk/asterisk/tree/22.9.0).
+The reference image builds the official source archive after checking its published `SHA-256` digest.
+The base image, BuildKit image, and direct system packages use fixed versions.
+The image stays local.
+
+## Build the reference
+
+Preview the commands before building.
+
+```sh
+mise x -- just reference-build
+mise x -- just reference-build --run
+```
+
+The dedicated builder has two processors, 2 GiB of memory without swap, and a 256-process limit.
+The build deadline is 30 minutes, and compilation uses two jobs.
+After successful creation, the runner removes the builder after a completed build, failure, or timeout.
+The Dockerfile also checks that the installed binary reports `Asterisk 22.9.0`.
+The successful local rehearsal used Linux ARM64 through OrbStack on macOS.
+
+## Compare resources
+
+Preview and execute the comparison with the built reference image.
+
+```sh
+mise x -- just interop --dry-run
+mise x -- just interop
+```
+
+The reference container uses one processor, 512 MiB of memory without swap, and a 128-process limit.
+The runner mounts the root filesystem and configuration without write access.
+Temporary runtime directories have bounded memory filesystems.
+Docker assigns an unused HTTP port on `127.0.0.1`.
+The scenario uses synthetic credentials.
+The container stops after ten minutes even if the client runner disappears.
+The test command has a five-minute deadline.
+The runner collects reference logs after a test failure and removes its container after every result.
+
+The same Rust client queries both servers.
+The scenario compares empty channel lists, configured endpoints, static and dynamic routing availability, technology-name case handling, app subscriptions, and missing-resource errors.
+The test normalizes endpoint list order by resource name.
+The test compares endpoint detail queries and error messages without normalization.
+
+The resource scenario doesn't certify call or audio compatibility.
+SIPp scenarios, existing JavaScript clients, calls, received audio, and browser comparisons still require integration work.
+The capability response keeps `call_verified=false` until the required call and audio comparisons pass.

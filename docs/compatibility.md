@@ -4,7 +4,7 @@ Rusterisk targets the public contracts in [Asterisk 22.9.0](https://github.com/a
 The public Rust models and operation catalog generate the discovery documents and OpenAPI description.
 Declaring an operation in discovery doesn't certify its call behavior.
 The authenticated `/rusterisk/capabilities` endpoint reports the reference version and each operation's `call_verified` value.
-Every operation reports `false` because reference comparisons haven't run.
+Every operation reports `false` because reference call and received-audio comparisons haven't run.
 
 ## Control interface
 
@@ -62,4 +62,7 @@ Forced process termination and storage fault campaigns still require integration
 The local `just check` gate covers formatting, source policy, Rust 1.89 core tests, strict Clippy, type checking, workspace tests, and generated interface contracts.
 The local `just security` gate checks advisories, dependency policy, licenses, sources, and secrets.
 Datagram tests compare received audio through actual sockets and bridges, including peer hold, resume, and mixed packet durations.
-Browser audio, Asterisk reference comparisons, supported-platform distributions, and physical `HT813` observations remain unverified.
+The local `just interop` gate compares endpoint resources, routing availability, app subscriptions, and resource errors with Asterisk 22.9.0.
+The reference distinguishes case-sensitive technology lists from case-insensitive endpoint detail queries.
+See [reference comparisons](reference-comparisons.md) for scope and resource limits.
+Reference calls, browser audio, supported-platform distributions, and physical `HT813` observations remain unverified.
