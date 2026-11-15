@@ -91,6 +91,26 @@ async fn typed_client_authenticates_and_roundtrips_server_resources() -> Result<
         assert_eq!(application.name, "calls");
         assert!(application.channel_ids.is_empty());
         assert_eq!(client.applications().await?, [application]);
+        let request = rusterisk_client::api::EventFilterRequest {
+            allowed: Some(
+                [rusterisk_client::api::EventFilter {
+                    event_type: "StasisStart".into(),
+                }]
+                .into_iter()
+                .collect(),
+            ),
+            disallowed: None,
+        };
+        let filtered = client.filter_application("calls", &request).await?;
+        assert_eq!(
+            filtered.events_allowed,
+            request.allowed.clone().unwrap_or_default()
+        );
+        let reset = client
+            .filter_application("calls", &Default::default())
+            .await?;
+        assert!(reset.events_allowed.is_empty());
+        assert!(reset.events_disallowed.is_empty());
         assert!(matches!(
             client.application("missing").await,
             Err(Error::Api { status: 404, .. })

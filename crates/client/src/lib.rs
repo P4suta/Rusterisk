@@ -237,6 +237,21 @@ impl Client {
         self.request("applications.get", &[("applicationName", name)], &[])
             .await
     }
+    pub async fn filter_application(
+        &self,
+        name: &str,
+        update: &api::EventFilterRequest,
+    ) -> Result<api::Application, Error> {
+        let body = serde_json::to_vec(update)?;
+        if body.len() > 16384 {
+            return Err(Error::Capacity);
+        }
+        let request = self
+            .prepare_request("applications.filter", &[("applicationName", name)], &[])?
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
+        Self::decode_response(request.send().await?).await
+    }
     pub async fn endpoints(&self) -> Result<Vec<api::Endpoint>, Error> {
         self.request("endpoints.list", &[], &[]).await
     }
