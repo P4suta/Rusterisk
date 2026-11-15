@@ -469,30 +469,7 @@ pub enum ControlKind {
 }
 
 pub fn inspect_rtcp(bytes: &[u8]) -> Result<Vec<ControlKind>, MediaError> {
-    if bytes.len() > MAX_PACKET {
-        return Err(MediaError::Capacity);
-    }
-    let packets = rtcp_types::Compound::parse(bytes)
-        .map_err(|error| MediaError::Control(error.to_string()))?;
-    let mut kinds = Vec::new();
-    for packet in packets {
-        let kind = match packet.map_err(|error| MediaError::Control(error.to_string()))? {
-            rtcp_types::Packet::Sr(_) => ControlKind::Sender,
-            rtcp_types::Packet::Rr(_) => ControlKind::Receiver,
-            rtcp_types::Packet::Sdes(_) => ControlKind::Description,
-            rtcp_types::Packet::Bye(_) => ControlKind::Goodbye,
-            rtcp_types::Packet::App(_) => ControlKind::Application,
-            rtcp_types::Packet::TransportFeedback(_) => ControlKind::TransportFeedback,
-            rtcp_types::Packet::PayloadFeedback(_) => ControlKind::PayloadFeedback,
-            rtcp_types::Packet::Xr(_) => ControlKind::Extended,
-            rtcp_types::Packet::Unknown(_) => return Err(MediaError::Unsupported),
-        };
-        kinds.push(kind);
-    }
-    if kinds.is_empty() {
-        return Err(MediaError::InvalidPacket);
-    }
-    Ok(kinds)
+    rtcp::inspect_rtcp(bytes)
 }
 
 pub fn sender_report(
