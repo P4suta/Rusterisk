@@ -506,10 +506,7 @@ impl Engine {
             .iter()
             .find(|transport| transport.name == endpoint.transport)
             .ok_or(SipError::InvalidPacket)?;
-        let registered = self
-            .contacts
-            .get(&endpoint.name)
-            .filter(|contact| contact.expires > now);
+        let registered = self.contacts.best(&endpoint.aors, now);
         let contact = self
             .config
             .aors
@@ -518,7 +515,7 @@ impl Engine {
             .find_map(|aor| aor.contact.as_deref());
         let uri = match (resolved_peer, registered, contact) {
             (Some(_), _, Some(contact)) | (None, None, Some(contact)) => Uri::try_from(contact)?,
-            (None, Some(contact), _) => contact.uri.clone(),
+            (None, Some(contact), _) => contact.contact.uri().clone(),
             (Some(_), _, None) | (None, None, None) => return Err(SipError::InvalidPacket),
         };
         let peer = match resolved_peer.or(registered.map(|contact| contact.peer)) {

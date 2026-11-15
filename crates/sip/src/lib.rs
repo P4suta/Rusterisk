@@ -413,12 +413,6 @@ pub struct PendingInvite {
     protocol: Protocol,
 }
 
-struct RegisteredContact {
-    uri: Uri,
-    peer: SocketAddr,
-    expires: u64,
-}
-
 pub struct Engine {
     config: Config,
     protocol: Protocol,
@@ -428,7 +422,7 @@ pub struct Engine {
     nonces: BTreeMap<String, Nonce>,
     cache: BTreeMap<RequestIdentity, Cached>,
     pending: BTreeMap<String, PendingInvite>,
-    contacts: BTreeMap<String, RegisteredContact>,
+    contacts: registrar::Bindings,
     outgoing: BTreeMap<String, outgoing::Outgoing>,
     incoming: BTreeMap<String, incoming::Incoming>,
     transactions: transactions::Transactions,
@@ -436,9 +430,13 @@ pub struct Engine {
 
 impl Engine {
     pub fn registered_peer(&self, endpoint: &str, now: u64) -> Option<SocketAddr> {
+        let endpoint = self
+            .config
+            .endpoints
+            .iter()
+            .find(|entry| entry.name == endpoint)?;
         self.contacts
-            .get(endpoint)
-            .filter(|contact| contact.expires > now)
+            .best(&endpoint.aors, now)
             .map(|contact| contact.peer)
     }
 
@@ -452,7 +450,7 @@ impl Engine {
             nonces: BTreeMap::new(),
             cache: BTreeMap::new(),
             pending: BTreeMap::new(),
-            contacts: BTreeMap::new(),
+            contacts: registrar::Bindings::default(),
             outgoing: BTreeMap::new(),
             incoming: BTreeMap::new(),
             transactions: transactions::Transactions::default(),
@@ -716,52 +714,7 @@ impl Engine {
                 if let Some(index) = self.authorize(&request, peer, now)? {
                     let endpoint = self.config.endpoints[index].clone();
                     if request.method == Method::Register {
-                        let to = request.to_header()?.typed()?;
-                        if let Err(rejection) = registrar::address(&self.config, &endpoint, &to.uri)
-                        {
-                            let (status, reason) = rejection.response();
-                            self.render_response(&request, status, reason, "", "")?
-                        } else {
-                            let expires = request
-                                .expires_header()
-                                .map(|value| value.value().parse::<u32>())
-                                .transpose()
-                                .map_err(|_| SipError::InvalidPacket)?
-                                .unwrap_or(300)
-                                .min(3600);
-                            let contact = request.contact_header()?.typed()?;
-                            let extra = format!(
-                                "Contact: {}\r\nExpires: {expires}\r\n",
-                                request.contact_header()?.value()
-                            );
-                            let reply = self.render_response(&request, 200, "OK", &extra, "")?;
-                            let changed = if expires == 0 {
-                                self.contacts.remove(&endpoint.name).is_some()
-                            } else {
-                                self.contacts
-                                    .insert(
-                                        endpoint.name.clone(),
-                                        RegisteredContact {
-                                            uri: contact.uri,
-                                            peer,
-                                            expires: now.saturating_add(u64::from(expires) * 1000),
-                                        },
-                                    )
-                                    .is_none_or(|contact| contact.expires <= now)
-                            };
-                            if changed {
-                                events.push(SipEvent::EndpointContact {
-                                    endpoint: endpoint.name,
-                                    generation: self.configuration_generation,
-                                    presence: if expires == 0 {
-                                        ContactPresence::Absent
-                                    } else {
-                                        ContactPresence::Present
-                                    },
-                                });
-                            }
-                            reply
-                        }
+                        self.register(&request, &endpoint, peer, now, &mut events)?
                     } else if self.pending.len() + self.incoming.len() >= 64 {
                         self.render_response(&request, 486, "Busy Here", "", "")?
                     } else {
@@ -861,17 +814,9 @@ impl Engine {
     }
 
     fn expire_contacts(&mut self, now: u64, events: &mut Vec<SipEvent>) {
-        self.contacts.retain(|endpoint, contact| {
-            if contact.expires > now {
-                return true;
-            }
-            events.push(SipEvent::EndpointContact {
-                endpoint: endpoint.clone(),
-                generation: self.configuration_generation,
-                presence: ContactPresence::Absent,
-            });
-            false
-        });
+        let before = self.contact_snapshot();
+        self.contacts.expire(now);
+        self.contact_changes(&before, events);
     }
 
     fn render_response(

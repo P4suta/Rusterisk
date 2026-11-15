@@ -11,7 +11,7 @@ use rusterisk_core::ContactPresence;
 use rusterisk_sip::{Destination, Engine, Outbound, Output, SipError, SipEvent};
 
 fn config() -> Result<Config, SipError> {
-    Ok(Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:5060\n[auth]\ntype=auth\nusername=phone\npassword=password\n[phone]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=phone\nallow=ulaw\n", "", "")?)
+    Ok(Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:5060\n[auth]\ntype=auth\nusername=phone\npassword=password\n[phone]\ntype=aor\nmax_contacts=1\nminimum_expiration=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=phone\nallow=ulaw\n", "", "")?)
 }
 
 fn register(
@@ -116,13 +116,15 @@ fn registered_contact_targets_preserve_browser_identity_and_physical_routing(
         (1, "sip:random-user@browser.invalid;transport=ws"),
         (2, "sip:refreshed-user@replacement.invalid;transport=ws"),
     ] {
-        register_contact(&mut engine, serial, u64::from(serial), 1, contact)?;
+        let now = u64::from(serial - 1) * 2000;
+        engine.tick(now)?;
+        register_contact(&mut engine, serial, now, 1, contact)?;
         assert_eq!(
-            engine.registered_peer("phone", 3),
+            engine.registered_peer("phone", now + 2),
             Some("127.0.0.1:5061".parse()?)
         );
         assert!(
-            matches!(engine.destination("phone", 3)?, Destination::Registered(peer) if peer == "127.0.0.1:5061".parse()?)
+            matches!(engine.destination("phone", now + 2)?, Destination::Registered(peer) if peer == "127.0.0.1:5061".parse()?)
         );
         let output = engine.originate(
             Outbound {
@@ -133,7 +135,7 @@ fn registered_contact_targets_preserve_browser_identity_and_physical_routing(
                 local_rtp: "127.0.0.1:10000".parse()?,
                 timeout_ms: None,
             },
-            3,
+            now + 2,
         )?;
         let packet = &output.datagrams[0];
         assert_eq!(packet.peer, "127.0.0.1:5061".parse()?);
@@ -143,9 +145,9 @@ fn registered_contact_targets_preserve_browser_identity_and_physical_routing(
         };
         assert_eq!(request.uri, Uri::try_from(contact)?);
     }
-    assert_eq!(engine.registered_peer("phone", 1003), None);
-    register_contact(&mut engine, 3, 2000, 1, "sip:last@browser.invalid")?;
+    assert_eq!(engine.registered_peer("phone", 3001), None);
+    register_contact(&mut engine, 3, 4000, 1, "sip:last@browser.invalid")?;
     engine.disconnected("127.0.0.1:5061".parse()?);
-    assert_eq!(engine.registered_peer("phone", 2002), None);
+    assert_eq!(engine.registered_peer("phone", 4002), None);
     Ok(())
 }

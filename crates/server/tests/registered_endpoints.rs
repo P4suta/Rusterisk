@@ -11,6 +11,7 @@ use rusterisk_config::Config;
 use rusterisk_server::{
     media::MediaHub, signaling::Signaling, Action, ControlError, Controller, Credentials,
 };
+use rusterisk_sip::{parse_registration_contacts, RegistrationContacts};
 use std::{net::SocketAddr, time::Duration};
 use tokio::net::UdpSocket;
 
@@ -35,7 +36,7 @@ async fn register(
     target: SocketAddr,
     serial: u32,
     expires: u32,
-) -> Result<(), ControlError> {
+) -> Result<usize, ControlError> {
     let local = socket.local_addr().map_err(failure)?;
     let uri = Uri::try_from(format!("sip:{target}")).map_err(failure)?;
     let packet = |sequence: u32, authorization: &str| {
@@ -74,8 +75,24 @@ async fn register(
         .send_to(packet(2, &authorization).as_bytes(), target)
         .await
         .map_err(failure)?;
-    assert_eq!(response(socket).await?.status_code.code(), 200);
-    Ok(())
+    let registered = response(socket).await?;
+    assert_eq!(registered.status_code.code(), 200);
+    let contacts = parse_registration_contacts(
+        registered
+            .headers
+            .iter()
+            .filter(|header| header.name().eq_ignore_ascii_case("Contact"))
+            .map(|header| header.value()),
+        None,
+    )
+    .map_err(failure)?;
+    match contacts {
+        RegistrationContacts::Query => Ok(0),
+        RegistrationContacts::Bindings(contacts) => Ok(contacts.as_slice().len()),
+        RegistrationContacts::RemoveAll => {
+            Err(ControlError::Invalid("Unexpected wildcard response"))
+        }
+    }
 }
 
 async fn wait_state(controller: &Controller, expected: EndpointState) -> Result<(), ControlError> {
@@ -106,7 +123,7 @@ async fn wait_state(controller: &Controller, expected: EndpointState) -> Result<
 #[tokio::test]
 async fn actual_registration_removal_and_expiration_reach_endpoint_queries(
 ) -> Result<(), ControlError> {
-    let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[phone]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=phone\nallow=ulaw\n", "", "").map_err(failure)?;
+    let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[phone]\ntype=aor\nmax_contacts=2\nminimum_expiration=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=phone\nallow=ulaw\n", "", "").map_err(failure)?;
     let (controller, runner, effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
     let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
@@ -122,12 +139,17 @@ async fn actual_registration_removal_and_expiration_reach_endpoint_queries(
     let signaling = tokio::spawn(signaling.run(signal_stop));
     let result = async {
         let phone = UdpSocket::bind("127.0.0.1:0").await.map_err(failure)?;
+        let second = UdpSocket::bind("127.0.0.1:0").await.map_err(failure)?;
         wait_state(&controller, EndpointState::Offline).await?;
-        register(&phone, target, 1, 20).await?;
+        assert_eq!(register(&phone, target, 1, 20).await?, 1);
         wait_state(&controller, EndpointState::Online).await?;
-        register(&phone, target, 2, 0).await?;
+        assert_eq!(register(&second, target, 2, 20).await?, 2);
+        wait_state(&controller, EndpointState::Online).await?;
+        assert_eq!(register(&phone, target, 3, 0).await?, 1);
+        wait_state(&controller, EndpointState::Online).await?;
+        assert_eq!(register(&second, target, 4, 0).await?, 0);
         wait_state(&controller, EndpointState::Offline).await?;
-        register(&phone, target, 3, 1).await?;
+        assert_eq!(register(&phone, target, 5, 1).await?, 1);
         wait_state(&controller, EndpointState::Online).await?;
         wait_state(&controller, EndpointState::Offline).await?;
         Ok(())
