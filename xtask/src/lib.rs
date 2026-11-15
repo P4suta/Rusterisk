@@ -3,6 +3,7 @@ use syn::visit::{self, Visit};
 pub mod legacy_audit;
 pub mod process;
 pub mod reference;
+mod tls_client_policy;
 
 #[derive(Debug)]
 pub enum SecurityConfigError {
@@ -74,6 +75,9 @@ pub fn inspect_with_exceptions(
         findings: Vec::new(),
         exceptions,
         used: std::collections::BTreeSet::new(),
+        function: None,
+        scope_depth: 0,
+        block_depth: 0,
     };
     policy.visit_file(&file);
     for (index, exception) in exceptions.iter().enumerate() {
@@ -91,6 +95,9 @@ struct Policy<'a> {
     findings: Vec<Finding>,
     exceptions: &'a [Exception],
     used: std::collections::BTreeSet<usize>,
+    function: Option<String>,
+    scope_depth: usize,
+    block_depth: usize,
 }
 
 impl Policy<'_> {
@@ -144,6 +151,7 @@ impl Policy<'_> {
             if exception.item == item
                 && exception.lint == lint
                 && reason == format!("{}: {}", exception.adr, exception.rationale)
+                && !self.used.contains(&index)
             {
                 self.used.insert(index);
                 return true;
@@ -154,6 +162,79 @@ impl Policy<'_> {
 }
 
 impl<'ast> Visit<'ast> for Policy<'_> {
+    fn visit_item_extern_crate(&mut self, node: &'ast syn::ItemExternCrate) {
+        if node.rename.is_some() || node.ident == "self" {
+            self.reject(
+                "crate-alias",
+                "preserve dependency identities at checked API boundaries",
+            );
+        }
+        visit::visit_item_extern_crate(self, node);
+    }
+
+    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
+        let function = if self.scope_depth == 0 {
+            Some(node.sig.ident.to_string())
+        } else {
+            None
+        };
+        let previous = std::mem::replace(&mut self.function, function);
+        self.scope_depth += 1;
+        visit::visit_item_fn(self, node);
+        self.scope_depth -= 1;
+        self.function = previous;
+    }
+
+    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
+        self.scope_depth += 1;
+        visit::visit_item_mod(self, node);
+        self.scope_depth -= 1;
+    }
+
+    fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        self.scope_depth += 1;
+        visit::visit_item_impl(self, node);
+        self.scope_depth -= 1;
+    }
+
+    fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+        self.scope_depth += 1;
+        visit::visit_item_trait(self, node);
+        self.scope_depth -= 1;
+    }
+
+    fn visit_block(&mut self, node: &'ast syn::Block) {
+        self.block_depth += 1;
+        visit::visit_block(self, node);
+        self.block_depth -= 1;
+    }
+
+    fn visit_local(&mut self, node: &'ast syn::Local) {
+        if self.block_depth == 1 && tls_client_policy::constructor(node) {
+            if let (Some(function), [attribute]) = (self.function.clone(), node.attrs.as_slice()) {
+                let registered = self.exceptions.iter().any(|exception| {
+                    exception.item == function && exception.lint == "clippy::disallowed_types"
+                });
+                if registered && self.approved(attribute, &function) {
+                    visit::visit_attribute(self, attribute);
+                    self.visit_pat(&node.pat);
+                    if let Some(initializer) = &node.init {
+                        if let syn::Expr::Call(call) = initializer.expr.as_ref() {
+                            for attribute in &call.attrs {
+                                self.visit_attribute(attribute);
+                            }
+                            for argument in &call.args {
+                                self.visit_expr(argument);
+                            }
+                        }
+                    }
+                    return;
+                }
+            }
+        }
+        visit::visit_local(self, node);
+    }
+
     fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
         for attribute in &node.attrs {
             if self.approved(attribute, &node.ident.to_string()) {
