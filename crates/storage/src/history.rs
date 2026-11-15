@@ -16,7 +16,7 @@ pub enum CallHistoryChange {
 }
 
 impl CallHistoryChange {
-    fn validate(&self) -> Result<(), StorageError> {
+    pub fn validate(&self) -> Result<(), StorageError> {
         let (id, timestamp) = match self {
             Self::Started {
                 id,

@@ -1,11 +1,13 @@
 use rusterisk_api::{ChannelId, StoredRecording};
 pub use rusterisk_storage::CallOutcome;
-use rusterisk_storage::{StorageError, Store};
+use rusterisk_storage::{CallHistoryChange, CallRecord, StorageError, Store};
 use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
+mod history;
 mod playback;
+pub use history::HistoryReceipt;
 mod recording;
 use playback::PlaybackSet;
 pub use playback::{PlaybackMedia, PlaybackSource};
@@ -48,6 +50,14 @@ impl From<std::io::Error> for WorkerError {
 }
 
 enum Command {
+    History {
+        changes: Vec<CallHistoryChange>,
+        reply: oneshot::Sender<Result<(), StorageError>>,
+    },
+    Records {
+        limit: u16,
+        reply: oneshot::Sender<Result<Vec<CallRecord>, StorageError>>,
+    },
     Play {
         media: PlaybackMedia,
         output: mpsc::Sender<Frame>,
@@ -190,6 +200,16 @@ fn command(
     command: Command,
 ) {
     match command {
+        Command::History { changes, reply } => {
+            if !reply.is_closed() {
+                respond(reply, store.apply_history(&changes));
+            }
+        }
+        Command::Records { limit, reply } => {
+            if !reply.is_closed() {
+                respond(reply, store.call_records(limit));
+            }
+        }
         Command::Play {
             media,
             output,
