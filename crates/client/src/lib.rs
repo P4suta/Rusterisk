@@ -16,6 +16,7 @@ mod controls;
 mod external_media;
 mod media_session;
 pub use media_session::{MediaBytes, MediaMessage, MediaSession};
+mod playback;
 mod recordings;
 
 #[derive(Debug)]
