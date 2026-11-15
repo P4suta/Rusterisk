@@ -84,6 +84,9 @@ The server reads `http.conf`, `ari.conf`, `pjsip.conf`, `rtp.conf`, and `extensi
 Optional `chan_websocket.conf` and `websocket_client.conf` files configure media controls and outgoing media clients.
 Unsupported configuration options fail validation.
 Dialplan execution covers `NoOp`, `Set`, `Answer`, `Dial`, `Stasis`, `Playback`, `Wait`, `Goto`, and `Hangup`.
+`Wait` accepts nonnegative decimal durations, including fractions, exponents, and the `ms`, `s`, `m`, and `h` units in the [reference time parser](https://github.com/asterisk/asterisk/blob/22.9.0/main/app.c#L3106-L3172).
+Durations use integer milliseconds and discard fractional milliseconds.
+Values greater than 2,147,483,647 milliseconds fail configuration validation.
 Parallel `PJSIP` destinations use a bounded set of branches and select the first answered peer.
 Reload comparison validates replacement settings.
 The running server doesn't apply replacement settings.
