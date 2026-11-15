@@ -101,3 +101,33 @@ fn configuration_validation_does_not_bind_ports_or_start_the_server() -> Result<
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("http.conf:4"));
     Ok(())
 }
+
+#[test]
+fn configuration_validation_reads_optional_media_settings() -> Result<(), io::Error> {
+    let directory = tempfile::tempdir()?;
+    for (file, text) in [
+        ("http.conf", "[general]\nbindaddr=127.0.0.1\n"),
+        ("ari.conf", "[app]\ntype=user\npassword=test-password\n"),
+        ("pjsip.conf", ""), ("rtp.conf", ""), ("extensions.conf", ""),
+        ("chan_websocket.conf", "[global]\ncontrol_message_format=json\n"),
+        ("websocket_client.conf", "[agent]\ntype=websocket_client\nconnection_type=per_call_config\nuri=ws://127.0.0.1:8765/media\nprotocols=media\nreconnect_attempts=0\n"),
+    ] { std::fs::write(directory.path().join(file), text)?; }
+    let arguments = [
+        OsStr::new("--check-config"),
+        OsStr::new("--config-dir"),
+        directory.path().as_os_str(),
+    ];
+    let invalid = run(directory.path(), &arguments)?;
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("websocket_client.conf:6"));
+    std::fs::write(directory.path().join("websocket_client.conf"), "")?;
+    assert!(run(directory.path(), &arguments)?.status.success());
+    std::fs::write(
+        directory.path().join("chan_websocket.conf"),
+        "[global]\ncontrol_message_format=invalid\n",
+    )?;
+    let invalid = run(directory.path(), &arguments)?;
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("chan_websocket.conf:2"));
+    Ok(())
+}

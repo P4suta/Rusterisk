@@ -328,22 +328,42 @@ pub enum Reload {
 
 impl Config {
     pub fn load(directory: &Path) -> Result<Self, ConfigError> {
-        fn read(directory: &Path, file: &str) -> Result<String, ConfigError> {
-            let path = directory.join(file);
-            let metadata = std::fs::metadata(&path)
+        enum Missing {
+            Reject,
+            Empty,
+        }
+        fn read(directory: &Path, file: &str, missing: Missing) -> Result<String, ConfigError> {
+            use std::io::Read;
+            let input = match std::fs::File::open(directory.join(file)) {
+                Ok(input) => input,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && matches!(missing, Missing::Empty) =>
+                {
+                    return Ok(String::new())
+                }
+                Err(error) => return Err(ConfigError::at(file, 0, error.to_string())),
+            };
+            let mut source = String::new();
+            input
+                .take(MAX_FILE as u64 + 1)
+                .read_to_string(&mut source)
                 .map_err(|error| ConfigError::at(file, 0, error.to_string()))?;
-            if metadata.len() > MAX_FILE as u64 {
+            if source.len() > MAX_FILE {
                 return Err(ConfigError::at(file, 0, "file exceeds 1 MiB"));
             }
-            std::fs::read_to_string(&path)
-                .map_err(|error| ConfigError::at(file, 0, error.to_string()))
+            Ok(source)
         }
         Self::parse(
-            &read(directory, "http.conf")?,
-            &read(directory, "ari.conf")?,
-            &read(directory, "pjsip.conf")?,
-            &read(directory, "rtp.conf")?,
-            &read(directory, "extensions.conf")?,
+            &read(directory, "http.conf", Missing::Reject)?,
+            &read(directory, "ari.conf", Missing::Reject)?,
+            &read(directory, "pjsip.conf", Missing::Reject)?,
+            &read(directory, "rtp.conf", Missing::Reject)?,
+            &read(directory, "extensions.conf", Missing::Reject)?,
+        )?
+        .with_websocket_configuration(
+            &read(directory, "chan_websocket.conf", Missing::Empty)?,
+            &read(directory, "websocket_client.conf", Missing::Empty)?,
         )
     }
 
