@@ -1447,6 +1447,9 @@ impl Control {
                         return Err(ControlError::Conflict("Terminal event was already handled"))
                     }
                 }
+                if milestone == Milestone::Ringing {
+                    outcome.append(self.ring_dial_branch(&key)?);
+                }
                 if milestone == Milestone::Answered {
                     if let Some(branch) = self.dial_branch(&key) {
                         outcome.append(self.answered_dial_branch(branch, now, timestamp)?);

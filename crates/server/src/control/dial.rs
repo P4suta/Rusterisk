@@ -50,6 +50,37 @@ fn fork_error(error: DialForkError) -> ControlError {
 }
 
 impl Control {
+    pub(super) fn ring_dial_branch(&mut self, child: &CallKey) -> Result<Outcome, ControlError> {
+        let mut outcome = Outcome::empty();
+        let Some(branch) = self.dial_branch(child) else {
+            return Ok(outcome);
+        };
+        let entry = self
+            .channels
+            .get_mut(&branch.parent.id)
+            .filter(|entry| entry.call.generation() == branch.parent.generation)
+            .ok_or(ControlError::NotFound("Channel not found"))?;
+        let dialing = entry
+            .dialplan
+            .as_ref()
+            .and_then(|frame| frame.dial.as_ref())
+            .is_some_and(|dial| {
+                dial.token == branch.token
+                    && matches!(dial.fork.state(), DialForkState::Dialing { .. })
+            });
+        if dialing
+            && matches!(
+                entry.snapshot.state,
+                ChannelState::Down | ChannelState::Ring
+            )
+        {
+            entry.call = entry.call.apply(rusterisk_core::CallEvent::Ring).call();
+            entry.snapshot.state = ChannelState::Ringing;
+            outcome.effects.push(Effect::Ring { key: branch.parent });
+        }
+        Ok(outcome)
+    }
+
     pub(super) fn termination_budget(&self, id: &ChannelId) -> usize {
         let Ok(key) = self.key(id) else {
             return 2;

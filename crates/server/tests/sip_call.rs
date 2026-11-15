@@ -813,6 +813,7 @@ async fn parallel_dial_bridges_received_audio_to_the_first_peer_and_cancels_the_
             Ok(format!("SIP/2.0 {code}\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=charlie\r\nCall-ID: {}\r\nCSeq: {cseq}\r\nContent-Length: 0\r\n\r\n", invitation.top_via_header().map_err(failure)?.value(), invitation.from_header().map_err(failure)?.value(), invitation.to_header().map_err(failure)?.value(), invitation.call_id_header().map_err(failure)?.value()))
         };
         charlie.send_to(declined("180 Ringing", invitation.cseq_header().map_err(failure)?.value())?.as_bytes(), charlie_target).await.map_err(failure)?;
+        assert_eq!(response(&alice).await?.status_code.code(), 180);
         let bob_target = answer(&bob, &bob_audio).await?;
         let answered = response(&alice).await?;
         assert_eq!(answered.status_code.code(), 200);
