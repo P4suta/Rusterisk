@@ -1,13 +1,13 @@
 use crate::media::{MediaNotice, MediaPort};
-use crate::rtp::{RtpSession, SocketPair};
+use crate::rtp::SocketPair;
 use crate::storage::{PlaybackMedia, StoragePort};
 use crate::{
     CallKey, ControlError, Controller, Effect, IncomingCall, MediaOwner, Milestone, Signal,
 };
 use rusterisk_api::{ChannelId, MediaUri};
-use rusterisk_config::{Codec, Config, Dtmf};
+use rusterisk_config::{Config, Dtmf};
 use rusterisk_core::{AudioGate, DtmfCommand, MediaTaskToken, PeerMediaDirection};
-use rusterisk_media::{AudioFormat, AudioTarget, Gate, TelephoneFormat};
+use rusterisk_media::{AudioTarget, Gate};
 use rusterisk_sip::{Datagram, Engine, Outbound, Output, RejectReason, SipEvent};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 mod external_media;
+mod media;
+use media::{PendingMedia, PendingWebRtc};
 #[cfg(test)]
 mod negotiation_tests;
 mod outbound;
@@ -35,7 +37,7 @@ struct Listener {
 }
 struct Active {
     listener: usize,
-    pending: Option<SocketPair>,
+    pending: Option<PendingMedia>,
     digits: DigitDelivery,
     direction_reply: Option<DirectionReply>,
 }
@@ -297,42 +299,13 @@ impl Signaling {
                     session,
                 } => {
                     let key = key(id, generation)?;
-                    let sockets = self
+                    let pending = self
                         .calls
                         .get_mut(&key)
                         .and_then(|call| call.pending.take());
-                    if let Some(sockets) = sockets {
-                        let format = match session.codec {
-                            Codec::Pcmu => AudioFormat::Pcmu,
-                            Codec::Pcma => AudioFormat::Pcma,
-                            Codec::Opus => AudioFormat::Opus,
-                        };
+                    if let Some(pending) = pending {
                         let direction = peer_direction(session.direction);
-                        match self
-                            .media
-                            .attach(
-                                key.clone(),
-                                sockets,
-                                RtpSession {
-                                    remote: session.remote,
-                                    format,
-                                    payload_type: session.payload_type,
-                                    telephone: session
-                                        .telephone
-                                        .map(|format| {
-                                            TelephoneFormat::new(
-                                                format.payload_type(),
-                                                format.rate(),
-                                            )?
-                                            .with_events(format.events())
-                                        })
-                                        .transpose()
-                                        .map_err(failure)?,
-                                },
-                                direction,
-                            )
-                            .await
-                        {
+                        match pending.attach(&self.media, key.clone(), &session).await {
                             Ok(()) => {
                                 self.notify(Signal::PeerDirection {
                                     key: key.clone(),
@@ -515,12 +488,19 @@ impl Signaling {
             .iter()
             .find(|transport| transport.name == endpoint.transport)
             .ok_or(ControlError::NotFound("Transport not found"))?;
-        let sockets = SocketPair::bind(
-            transport.bind.ip(),
-            self.config.rtp.start,
-            self.config.rtp.end,
-        )
-        .map_err(failure)?;
+        let bind = if endpoint.webrtc && transport.bind.ip().is_unspecified() {
+            let peer = media::destination_peer(
+                &self.listeners[listener].engine,
+                &endpoint.name,
+                resolved_peer,
+                now,
+            )?;
+            media::local_ip(peer)?
+        } else {
+            transport.bind.ip()
+        };
+        let sockets =
+            SocketPair::bind(bind, self.config.rtp.start, self.config.rtp.end).map_err(failure)?;
         let local = sockets.local_addr().map_err(failure)?;
         let local_rtp = SocketAddr::new(
             transport.external_media_address.unwrap_or(local.ip()),
@@ -536,16 +516,35 @@ impl Signaling {
             timeout_ms: timeout.map(|timeout| u64::from(timeout) * 1000),
         };
         let engine = &mut self.listeners[listener].engine;
-        let output = match resolved_peer {
-            Some(peer) => engine.originate_to(outbound, peer, now),
-            None => engine.originate(outbound, now),
-        }
-        .map_err(failure)?;
+        let (pending, output) = if endpoint.webrtc {
+            let offer = crate::webrtc::WebRtcOffer::new(
+                sockets,
+                local_rtp,
+                &endpoint.codecs,
+                Instant::now(),
+            )
+            .map_err(failure)?;
+            let description =
+                rusterisk_sip::WebRtcDescription::parse(offer.description()).map_err(failure)?;
+            let output = match resolved_peer {
+                Some(peer) => engine.originate_to_with_sdp(outbound, peer, &description, now),
+                None => engine.originate_with_sdp(outbound, &description, now),
+            }
+            .map_err(failure)?;
+            (PendingMedia::WebRtc(PendingWebRtc::Offer(offer)), output)
+        } else {
+            let output = match resolved_peer {
+                Some(peer) => engine.originate_to(outbound, peer, now),
+                None => engine.originate(outbound, now),
+            }
+            .map_err(failure)?;
+            (PendingMedia::Rtp(sockets), output)
+        };
         self.calls.insert(
             key,
             Active {
                 listener,
-                pending: Some(sockets),
+                pending: Some(pending),
                 digits: DigitDelivery::new(dtmf),
                 direction_reply: None,
             },
@@ -906,25 +905,57 @@ impl Signaling {
             .iter()
             .find(|transport| transport.name == self.listeners[listener].name)
             .ok_or(ControlError::NotFound("Transport not found"))?;
-        let sockets = SocketPair::bind(
-            transport.bind.ip(),
-            self.config.rtp.start,
-            self.config.rtp.end,
-        )
-        .map_err(failure)?;
+        let incoming = self.listeners[listener]
+            .engine
+            .pending(key.id.as_str())
+            .ok_or(ControlError::NotFound("Incoming offer not found"))?;
+        let offered = incoming.session.clone();
+        let bind = if matches!(&offered.security, rusterisk_sip::SessionSecurity::WebRtc(_))
+            && transport.bind.ip().is_unspecified()
+        {
+            media::local_ip(incoming.peer)?
+        } else {
+            transport.bind.ip()
+        };
+        let sockets =
+            SocketPair::bind(bind, self.config.rtp.start, self.config.rtp.end).map_err(failure)?;
         let local = sockets.local_addr().map_err(failure)?;
         let advertised = SocketAddr::new(
             transport.external_media_address.unwrap_or(local.ip()),
             local.port(),
         );
-        let output = self.listeners[listener]
-            .engine
-            .answer(key.id.as_str(), key.generation, advertised, now)
-            .map_err(failure)?;
+        let (pending, output) = match &offered.security {
+            rusterisk_sip::SessionSecurity::Rtp => {
+                let output = self.listeners[listener]
+                    .engine
+                    .answer(key.id.as_str(), key.generation, advertised, now)
+                    .map_err(failure)?;
+                (PendingMedia::Rtp(sockets), output)
+            }
+            rusterisk_sip::SessionSecurity::WebRtc(description) => {
+                let (session, answer) = crate::webrtc::WebRtcSession::answer(
+                    sockets,
+                    advertised,
+                    description.as_str(),
+                    &[offered.codec],
+                    Instant::now(),
+                )
+                .map_err(failure)?;
+                let answer = rusterisk_sip::WebRtcDescription::parse(&answer).map_err(failure)?;
+                let output = self.listeners[listener]
+                    .engine
+                    .answer_with_sdp(key.id.as_str(), key.generation, advertised, &answer, now)
+                    .map_err(failure)?;
+                (
+                    PendingMedia::WebRtc(PendingWebRtc::Session(session)),
+                    output,
+                )
+            }
+        };
         self.calls
             .get_mut(key)
             .ok_or(ControlError::NotFound("Channel not found"))?
-            .pending = Some(sockets);
+            .pending = Some(pending);
         self.output(listener, output, now).await
     }
 

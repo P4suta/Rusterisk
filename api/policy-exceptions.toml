@@ -25,3 +25,10 @@ item = "client_connector"
 lint = "clippy::disallowed_types"
 adr = "docs/adr/confine-client-tls-sharing-to-immutable-library-config.md"
 rationale = "Construct only immutable external TLS client configuration."
+
+[[exceptions]]
+path = "crates/server/src/signaling/media.rs"
+item = "PendingMedia"
+lint = "clippy::large_enum_variant"
+adr = "docs/adr/own-webrtc-media-by-call-generation.md"
+rationale = "Keep pending media inline and owned by the call generation."

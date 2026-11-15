@@ -80,6 +80,39 @@ fn accepts_concrete_owned_values_and_ignores_literal_fixture_text() -> Result<()
     Ok(())
 }
 
+#[test]
+fn pending_media_size_exception_does_not_admit_erasure_or_wider_suppression(
+) -> Result<(), syn::Error> {
+    let exception = xtask::Exception {
+        path: "crates/server/src/signaling/media.rs".into(),
+        item: "PendingMedia".into(),
+        lint: "clippy::large_enum_variant".into(),
+        adr: "docs/adr/own-webrtc-media-by-call-generation.md".into(),
+        rationale: "Keep pending media inline and owned by the call generation.".into(),
+    };
+    let source = include_str!("../../crates/server/src/signaling/media.rs");
+    assert!(xtask::inspect_with_exceptions(source, std::slice::from_ref(&exception))?.is_empty());
+    for refused in [
+        source.replace("enum PendingMedia", "enum OtherMedia"),
+        source.replace(
+            "Keep pending media inline and owned by the call generation.",
+            "Unregistered reason.",
+        ),
+        source.replace("#[expect", "#[allow"),
+        source.replace(
+            "clippy::large_enum_variant,",
+            "clippy::large_enum_variant, clippy::unwrap_used,",
+        ),
+        source.replace("Rtp(SocketPair)", "Rtp(std::boxed::Box<SocketPair>)"),
+        source.replace("Rtp(SocketPair)", "Rtp(std::sync::Arc<SocketPair>)"),
+    ] {
+        assert!(
+            !xtask::inspect_with_exceptions(&refused, std::slice::from_ref(&exception))?.is_empty()
+        );
+    }
+    Ok(())
+}
+
 fn client_config_exception() -> xtask::Exception {
     xtask::Exception {
         path: "crates/server/src/encryption/client.rs".into(),
