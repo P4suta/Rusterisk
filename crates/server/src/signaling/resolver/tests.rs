@@ -17,6 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{net::UdpSocket, sync::watch, task::JoinHandle};
+mod wire;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
