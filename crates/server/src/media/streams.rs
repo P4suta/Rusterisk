@@ -10,6 +10,7 @@ pub(super) struct WebSocketAttachment {
     key: CallKey,
     socket: axum::extract::ws::WebSocket,
     options: MediaLinkOptions,
+    lease: Option<crate::MediaConnectionLease>,
     reply: tokio::sync::oneshot::Sender<Result<(), MediaError>>,
 }
 
@@ -27,6 +28,7 @@ impl Port {
         let (direction, directed) = watch::channel(initial_direction);
         (
             Self {
+                _connection_lease: None,
                 answers: None,
                 incoming: input,
                 digits: digit_input,
@@ -60,10 +62,11 @@ impl MediaHub {
             key,
             socket,
             options,
+            lease,
             reply,
         } = attachment;
         if !reply.is_closed() {
-            let result = self.attach_websocket(key.clone(), socket, options);
+            let result = self.attach_websocket(key.clone(), socket, options, lease);
             let admitted = result.is_ok();
             if reply.send(result).is_err() && admitted {
                 self.remove(&key)?;
@@ -121,6 +124,7 @@ impl MediaHub {
         key: CallKey,
         socket: axum::extract::ws::WebSocket,
         options: MediaLinkOptions,
+        lease: Option<crate::MediaConnectionLease>,
     ) -> Result<(), MediaError> {
         self.check_link(&key)?;
         if options.channel_id != key.id {
@@ -129,6 +133,7 @@ impl MediaHub {
         let (mut port, channels) = Port::new(PeerMediaDirection::SendReceive, DigitSupport::Stream);
         let (answer, answers) = mpsc::channel(8);
         port.answers = Some(answers);
+        port._connection_lease = lease;
         let link = WebSocketMediaLink::new(socket, channels, options, answer)?;
         self.install_link(key.clone(), port, PeerMediaDirection::SendReceive)?;
         self.workers.spawn(async move { (key, link.run().await) });
@@ -143,12 +148,32 @@ impl super::MediaPort {
         socket: axum::extract::ws::WebSocket,
         options: MediaLinkOptions,
     ) -> Result<(), MediaError> {
+        self.attach_media_socket(key, socket, options, None).await
+    }
+
+    pub async fn attach_claimed_websocket(
+        &self,
+        claimed: crate::ClaimedMediaConnection,
+        socket: axum::extract::ws::WebSocket,
+    ) -> Result<(), MediaError> {
+        self.attach_media_socket(claimed.key, socket, claimed.options, Some(claimed.lease))
+            .await
+    }
+
+    async fn attach_media_socket(
+        &self,
+        key: CallKey,
+        socket: axum::extract::ws::WebSocket,
+        options: MediaLinkOptions,
+        lease: Option<crate::MediaConnectionLease>,
+    ) -> Result<(), MediaError> {
         let (reply, response) = tokio::sync::oneshot::channel();
         self.websocket
             .try_send(WebSocketAttachment {
                 key,
                 socket,
                 options,
+                lease,
                 reply,
             })
             .map_err(|_| MediaError::Capacity)?;

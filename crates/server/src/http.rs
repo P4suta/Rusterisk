@@ -20,6 +20,31 @@ pub fn router(controller: Controller) -> Router {
     router_for_scheme(controller, HttpScheme::Http)
 }
 
+pub fn router_with_media(controller: Controller, media: crate::media::MediaPort) -> Router {
+    router_with_media_for_scheme(controller, media, HttpScheme::Http)
+}
+
+pub(crate) fn router_with_media_for_scheme(
+    controller: Controller,
+    media: crate::media::MediaPort,
+    scheme: HttpScheme,
+) -> Router {
+    let state = controller.clone();
+    router_for_scheme(controller, scheme).route(
+        "/media/{connection_id}",
+        get(
+            move |uri: Uri,
+                  headers: HeaderMap,
+                  upgrade: Result<
+                axum::extract::ws::WebSocketUpgrade,
+                axum::extract::ws::rejection::WebSocketUpgradeRejection,
+            >| {
+                crate::media_websocket::upgrade(state.clone(), media.clone(), uri, headers, upgrade)
+            },
+        ),
+    )
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum HttpScheme {
     Http,

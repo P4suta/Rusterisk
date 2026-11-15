@@ -53,6 +53,60 @@ pub(super) fn action(parameters: &BTreeMap<String, String>) -> Result<Action, Co
     if !matches!(direction, "both" | "in" | "out") {
         return Err(ControlError::Invalid("Invalid direction specified"));
     }
+    if transport == "websocket" && encapsulation == "none" && connection == "server" {
+        if !host.is_empty() && host != "INCOMING" {
+            return Err(ControlError::Unsupported);
+        }
+        let format = match format {
+            "ulaw" => rusterisk_api::MediaFormat::Pcmu,
+            "alaw" => rusterisk_api::MediaFormat::Pcma,
+            "slin" => rusterisk_api::MediaFormat::Pcm8,
+            "slin12" => rusterisk_api::MediaFormat::Pcm12,
+            "slin16" => rusterisk_api::MediaFormat::Pcm16,
+            "slin24" => rusterisk_api::MediaFormat::Pcm24,
+            "slin32" => rusterisk_api::MediaFormat::Pcm32,
+            "slin44" => rusterisk_api::MediaFormat::Pcm44,
+            "slin48" => rusterisk_api::MediaFormat::Pcm48,
+            _ => return Err(ControlError::Unsupported),
+        };
+        let mut control_format = rusterisk_api::MediaControlFormat::PlainText;
+        let mut auto_answer = true;
+        let mut options = value(parameters, "transport_data", "");
+        while !options.is_empty() {
+            if let Some(tail) = options.strip_prefix('n') {
+                auto_answer = false;
+                options = tail;
+            } else if let Some(tail) = options.strip_prefix("f(") {
+                let (format, tail) = tail
+                    .split_once(')')
+                    .ok_or(ControlError::Invalid("Invalid media options"))?;
+                control_format = match format {
+                    "json" => rusterisk_api::MediaControlFormat::Json,
+                    "plain-text" => rusterisk_api::MediaControlFormat::PlainText,
+                    _ => return Err(ControlError::Invalid("Invalid media control format")),
+                };
+                options = tail;
+            } else {
+                return Err(ControlError::Unsupported);
+            }
+        }
+        let direction = match direction {
+            "in" => rusterisk_api::MediaDirection::In,
+            "out" => rusterisk_api::MediaDirection::Out,
+            "both" => rusterisk_api::MediaDirection::Both,
+            _ => return Err(ControlError::Invalid("Invalid direction specified")),
+        };
+        return Ok(Action::ExternalWebSocket {
+            id: optional_id(parameters, "channelId")?,
+            app: app.into(),
+            connection_id: rusterisk_api::ChannelId::try_from(uuid::Uuid::new_v4().to_string())?,
+            format,
+            control_format,
+            direction,
+            auto_answer,
+            data: value(parameters, "data", "").into(),
+        });
+    }
     if !matches!(
         (transport, encapsulation),
         ("udp", "rtp") | ("tcp", "audiosocket")

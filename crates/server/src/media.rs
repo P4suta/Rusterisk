@@ -427,6 +427,7 @@ enum DigitSupport {
     Stream,
 }
 struct Port {
+    _connection_lease: Option<crate::MediaConnectionLease>,
     answers: Option<mpsc::Receiver<()>>,
     incoming: mpsc::Receiver<Frame>,
     digits: mpsc::Receiver<DtmfTone>,
