@@ -40,6 +40,12 @@ pub struct MixedAudio<K> {
     pub bridges: Vec<(u64, Frame)>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AudioTarget<K> {
+    Channel(K),
+    Bridge(u64),
+}
+
 impl<K: Ord + Clone> Mixer<K> {
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -125,6 +131,27 @@ impl<K: Ord + Clone> Mixer<K> {
     }
 
     pub fn tick_with_recordings(&mut self) -> Result<MixedAudio<K>, MediaError> {
+        self.tick_with_playback(&[])
+    }
+
+    pub fn tick_with_playback(
+        &mut self,
+        playback: &[(AudioTarget<K>, Frame)],
+    ) -> Result<MixedAudio<K>, MediaError> {
+        if playback.len() > 64 {
+            return Err(MediaError::Capacity);
+        }
+        for (target, frame) in playback {
+            if frame.rate() != 48000 || frame.samples().len() != MAX_SAMPLES {
+                return Err(MediaError::InvalidFrame);
+            }
+            match target {
+                AudioTarget::Channel(key) if !self.inputs.contains_key(key) => {
+                    return Err(MediaError::UnknownStream)
+                }
+                AudioTarget::Channel(_) | AudioTarget::Bridge(_) => {}
+            }
+        }
         let frames: Vec<_> = self
             .inputs
             .iter_mut()
@@ -152,12 +179,29 @@ impl<K: Ord + Clone> Mixer<K> {
                     }
                 }
             }
+            if gate.sends() {
+                for (target, frame) in playback {
+                    let matches = match target {
+                        AudioTarget::Channel(destination) => destination == key,
+                        AudioTarget::Bridge(destination) => Some(*destination) == *bridge,
+                    };
+                    if matches {
+                        for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
+                            *sum += i32::from(*sample);
+                        }
+                    }
+                }
+            }
             let samples = sum.map(|sample| sample.clamp(i16::MIN.into(), i16::MAX.into()) as i16);
             output.push((key.clone(), Frame::new(&samples, 48000)?));
         }
         let bridge_ids = frames
             .iter()
             .filter_map(|(_, bridge, _, _)| *bridge)
+            .chain(playback.iter().filter_map(|(target, _)| match target {
+                AudioTarget::Bridge(bridge) => Some(*bridge),
+                AudioTarget::Channel(_) => None,
+            }))
             .collect::<BTreeSet<_>>();
         let mut bridges = Vec::with_capacity(bridge_ids.len());
         for bridge in bridge_ids {
@@ -168,6 +212,13 @@ impl<K: Ord + Clone> Mixer<K> {
                         for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
                             *sum += i32::from(*sample);
                         }
+                    }
+                }
+            }
+            for (target, frame) in playback {
+                if *target == AudioTarget::Bridge(bridge) {
+                    for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
+                        *sum += i32::from(*sample);
                     }
                 }
             }
