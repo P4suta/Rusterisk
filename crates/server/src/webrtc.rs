@@ -18,6 +18,7 @@ struct Engine {
     mid: Option<Mid>,
     transmits: Vec<Transmit>,
     timeout: Instant,
+    tls_id: String,
 }
 
 pub struct WebRtcOffer {
@@ -37,21 +38,19 @@ fn negotiation_error(_error: impl fmt::Display) -> MediaError {
     MediaError::Transport("WebRTC negotiation failed".into())
 }
 
-fn description(source: &str) -> Result<(), MediaError> {
-    rusterisk_sip::WebRtcDescription::parse(source)
-        .map(|_checked| ())
-        .map_err(|error| match error {
-            rusterisk_sip::SipError::Capacity => MediaError::Capacity,
-            rusterisk_sip::SipError::Unsupported => MediaError::Unsupported,
-            rusterisk_sip::SipError::InvalidPacket
-            | rusterisk_sip::SipError::Entropy
-            | rusterisk_sip::SipError::Tag
-            | rusterisk_sip::SipError::Config(_)
-            | rusterisk_sip::SipError::Parse(_)
-            | rusterisk_sip::SipError::Address(_)
-            | rusterisk_sip::SipError::Utf8(_)
-            | rusterisk_sip::SipError::Io(_) => MediaError::InvalidPacket,
-        })
+fn description(source: &str) -> Result<rusterisk_sip::WebRtcDescription, MediaError> {
+    rusterisk_sip::WebRtcDescription::parse(source).map_err(|error| match error {
+        rusterisk_sip::SipError::Capacity => MediaError::Capacity,
+        rusterisk_sip::SipError::Unsupported => MediaError::Unsupported,
+        rusterisk_sip::SipError::InvalidPacket
+        | rusterisk_sip::SipError::Entropy
+        | rusterisk_sip::SipError::Tag
+        | rusterisk_sip::SipError::Config(_)
+        | rusterisk_sip::SipError::Parse(_)
+        | rusterisk_sip::SipError::Address(_)
+        | rusterisk_sip::SipError::Utf8(_)
+        | rusterisk_sip::SipError::Io(_) => MediaError::InvalidPacket,
+    })
 }
 
 fn matches(codec: Codec, actual: str0m::format::Codec) -> bool {
@@ -81,12 +80,12 @@ impl Engine {
             .dtls_provider
             .generate_certificate()
             .ok_or_else(|| MediaError::Transport("WebRTC certificate generation failed".into()))?;
-        let mut entropy = [0; 40];
+        let mut entropy = [0; 56];
         getrandom::fill(&mut entropy)
             .map_err(|_| MediaError::Transport("WebRTC entropy unavailable".into()))?;
         let credentials = IceCreds {
             ufrag: base64::engine::general_purpose::STANDARD_NO_PAD.encode(&entropy[..8]),
-            pass: base64::engine::general_purpose::STANDARD_NO_PAD.encode(&entropy[8..]),
+            pass: base64::engine::general_purpose::STANDARD_NO_PAD.encode(&entropy[8..40]),
         };
         let mut config = RtcConfig::new()
             .clear_codecs()
@@ -109,6 +108,7 @@ impl Engine {
             mid: None,
             transmits: Vec::with_capacity(32),
             timeout: now,
+            tls_id: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&entropy[40..]),
         };
         engine.drain()?;
         if engine
@@ -120,6 +120,20 @@ impl Engine {
         }
         engine.drain()?;
         Ok(engine)
+    }
+
+    fn local_description(
+        &self,
+        mut source: String,
+        identify_tls: bool,
+    ) -> Result<String, MediaError> {
+        if identify_tls {
+            source.push_str("a=tls-id:");
+            source.push_str(&self.tls_id);
+            source.push_str("\r\n");
+        }
+        description(&source)?;
+        Ok(source)
     }
 
     fn drain(&mut self) -> Result<(), MediaError> {
@@ -215,8 +229,7 @@ impl WebRtcOffer {
         let (offer, pending) = change.apply().ok_or(MediaError::InvalidRoute)?;
         engine.mid = Some(mid);
         engine.drain()?;
-        let description = offer.to_sdp_string();
-        self::description(&description)?;
+        let description = engine.local_description(offer.to_sdp_string(), true)?;
         Ok(Self {
             engine,
             pending,
@@ -250,7 +263,7 @@ impl WebRtcSession {
         allowed: &[Codec],
         now: Instant,
     ) -> Result<(Self, String), MediaError> {
-        description(offer)?;
+        let identify_tls = description(offer)?.tls_id().is_some();
         let offer = SdpOffer::from_sdp_string(offer).map_err(negotiation_error)?;
         let mut engine = Engine::new(sockets, advertised, allowed, now)?;
         let answer = engine
@@ -259,7 +272,7 @@ impl WebRtcSession {
             .accept_offer(offer)
             .map_err(negotiation_error)?
             .to_sdp_string();
-        description(&answer)?;
+        let answer = engine.local_description(answer, identify_tls)?;
         let mut mids = answer
             .lines()
             .filter_map(|line| line.strip_prefix("a=mid:"));

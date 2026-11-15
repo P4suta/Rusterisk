@@ -18,6 +18,7 @@ pub enum DtlsSetup {
 pub struct WebRtcDescription {
     source: String,
     setup: DtlsSetup,
+    tls_id: Option<String>,
 }
 
 fn attribute<'a>(source: &'a str, prefix: &str) -> Result<&'a str, SipError> {
@@ -50,6 +51,7 @@ impl WebRtcDescription {
             return Err(SipError::Capacity);
         }
         let (mut media, mut candidates, mut lines) = (0, 0, 0);
+        let mut tls_id = None;
         for line in source.lines() {
             lines += 1;
             if lines > 256 || line.len() > 2048 {
@@ -67,6 +69,17 @@ impl WebRtcDescription {
             }
             if line.starts_with("a=candidate:") {
                 candidates += 1;
+            }
+            if let Some(identifier) = line.strip_prefix("a=tls-id:") {
+                if media != 1
+                    || !(20..=255).contains(&identifier.len())
+                    || !identifier
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"+/-_".contains(&byte))
+                    || tls_id.replace(identifier).is_some()
+                {
+                    return Err(SipError::InvalidPacket);
+                }
             }
         }
         if media != 1 {
@@ -106,6 +119,7 @@ impl WebRtcDescription {
         Ok(Self {
             source: source.into(),
             setup,
+            tls_id: tls_id.map(str::to_owned),
         })
     }
 
@@ -115,6 +129,10 @@ impl WebRtcDescription {
 
     pub const fn setup(&self) -> DtlsSetup {
         self.setup
+    }
+
+    pub fn tls_id(&self) -> Option<&str> {
+        self.tls_id.as_deref()
     }
 }
 

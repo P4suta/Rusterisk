@@ -58,3 +58,25 @@ fn missing_or_malformed_media_security_is_rejected_at_the_description_boundary()
         Err(SipError::Capacity)
     ));
 }
+
+#[test]
+fn tls_identifiers_preserve_legacy_peers_and_reject_invalid_media_attributes(
+) -> Result<(), SipError> {
+    assert_eq!(WebRtcDescription::parse(&offer())?.tls_id(), None);
+    let identifier = "PrivateDtlsIdentifier0123456789";
+    let source = format!("{}a=tls-id:{identifier}\r\n", offer());
+    assert_eq!(
+        WebRtcDescription::parse(&source)?.tls_id(),
+        Some(identifier)
+    );
+    for invalid in [
+        format!("{}a=tls-id:short\r\n", offer()),
+        format!("{}a=tls-id:{}\r\n", offer(), "a".repeat(256)),
+        format!("{}a=tls-id:invalid+identifier=01234\r\n", offer()),
+        format!("{source}a=tls-id:{identifier}\r\n"),
+        offer().replacen("m=audio", &format!("a=tls-id:{identifier}\r\nm=audio"), 1),
+    ] {
+        assert!(WebRtcDescription::parse(&invalid).is_err());
+    }
+    Ok(())
+}

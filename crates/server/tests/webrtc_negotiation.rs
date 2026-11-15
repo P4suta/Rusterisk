@@ -88,3 +88,45 @@ async fn a_malformed_mux_attribute_cannot_enable_unnegotiated_multiplexing(
     ));
     Ok(())
 }
+
+#[tokio::test]
+async fn dtls_identifiers_are_fresh_and_are_omitted_when_answering_legacy_peers(
+) -> Result<(), MediaError> {
+    let left = sockets()?;
+    let address = left.local_addr().map_err(failure)?;
+    let offer = WebRtcOffer::new(left, address, &[Codec::Pcmu], Instant::now())?;
+    let identifier = offer
+        .description()
+        .lines()
+        .find_map(|line| line.strip_prefix("a=tls-id:"))
+        .ok_or(MediaError::InvalidPacket)?;
+    assert!((20..=255).contains(&identifier.len()));
+    assert!(!format!("{offer:?}").contains(identifier));
+    let right = sockets()?;
+    let address = right.local_addr().map_err(failure)?;
+    let (_session, answer) = WebRtcSession::answer(
+        right,
+        address,
+        offer.description(),
+        &[Codec::Pcmu],
+        Instant::now(),
+    )?;
+    let answered = answer
+        .lines()
+        .find_map(|line| line.strip_prefix("a=tls-id:"))
+        .ok_or(MediaError::InvalidPacket)?;
+    assert_ne!(answered, identifier);
+    let legacy = offer
+        .description()
+        .lines()
+        .filter(|line| !line.starts_with("a=tls-id:"))
+        .collect::<Vec<_>>()
+        .join("\r\n")
+        + "\r\n";
+    let right = sockets()?;
+    let address = right.local_addr().map_err(failure)?;
+    let (_session, answer) =
+        WebRtcSession::answer(right, address, &legacy, &[Codec::Pcmu], Instant::now())?;
+    assert!(!answer.contains("a=tls-id:"));
+    Ok(())
+}
