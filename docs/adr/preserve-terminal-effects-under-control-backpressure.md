@@ -15,9 +15,11 @@ Check each request's effect budget before changing state.
 Keep ordered, owned pending effects.
 Suspend admission, writes, and signaling input until pending effects drain.
 Continue authorization, reads, subscription cleanup, and terminal timers.
+Spend remaining capacity on expired recording admissions after call cleanup.
+Cancel late recording admission before publishing its start event.
 
-Limit pending effects to 129.
-Each of 64 admitted channels reserves two effects across pending protocol work and cleanup.
+Limit channels to 64 and pending effects to 129.
+Reserve two pending effects per live channel before recording cleanup.
 A released branch spends its reservation.
 A connected pair covers a bridge update, bridge removal, and two channel releases.
 One extra effect covers the triggering signal.

@@ -27,7 +27,15 @@ impl Pending {
 
 impl Runner {
     pub(super) fn apply_signal(&mut self, signal: Signal, now: u64) -> Result<(), ControlError> {
-        self.expire_recording_admissions(now)?;
+        if let Signal::RecordingAdmitted { token, .. } = &signal {
+            if self
+                .recording_admissions
+                .get(token)
+                .is_some_and(|pending| pending.reply.is_closed() || now >= pending.deadline)
+            {
+                self.expire_recording_admission(*token)?;
+            }
+        }
         let completion = match &signal {
             Signal::RecordingAdmitted {
                 owner,
@@ -78,6 +86,25 @@ impl Runner {
                 }
             }
         }
+        self.expire_recording_admissions(now)?;
+        Ok(())
+    }
+
+    fn expire_recording_admission(
+        &mut self,
+        token: rusterisk_core::MediaTaskToken,
+    ) -> Result<(), ControlError> {
+        let pending = self
+            .recording_admissions
+            .remove(&token)
+            .ok_or(ControlError::Capacity)?;
+        let mut outcome = self
+            .control
+            .cancel_recording_admission(&pending.owner, token)?;
+        self.publish(&mut outcome)?;
+        if pending.reply.send(Err(ControlError::Capacity)).is_err() {
+            tracing::debug!(?token, "recording requester disconnected before admission");
+        }
         Ok(())
     }
 
@@ -90,20 +117,13 @@ impl Runner {
             })
             .collect::<Vec<_>>();
         for token in expired {
-            if self.pending_effects.len() >= MAX_PENDING_EFFECTS {
+            let pending_budget =
+                MAX_PENDING_EFFECTS.saturating_sub(self.control.terminal_effect_reserve());
+            let direct = self.pending_effects.is_empty() && self.effects.capacity() > 0;
+            if !direct && self.pending_effects.len() >= pending_budget {
                 break;
             }
-            let pending = self
-                .recording_admissions
-                .remove(&token)
-                .ok_or(ControlError::Capacity)?;
-            let mut outcome = self
-                .control
-                .cancel_recording_admission(&pending.owner, token)?;
-            self.publish(&mut outcome)?;
-            if pending.reply.send(Err(ControlError::Capacity)).is_err() {
-                tracing::debug!(?token, "recording requester disconnected before admission");
-            }
+            self.expire_recording_admission(token)?;
         }
         Ok(())
     }
@@ -123,7 +143,7 @@ impl Runner {
 
 #[cfg(test)]
 mod tests {
-    use super::super::Request;
+    use super::super::{Request, Subscriber};
     use super::Runner;
     use crate::{Action, ControlError, Controller, Credentials, Effect, Outcome, Signal};
     use rusterisk_api::ChannelId;
@@ -172,6 +192,168 @@ mod tests {
             now,
         )?;
         Ok(response)
+    }
+
+    #[tokio::test]
+    async fn disconnected_calls_keep_release_capacity_when_recording_admissions_expire_together(
+    ) -> Result<(), ControlError> {
+        let config = Config::parse(
+            "[general]\nbindaddr=127.0.0.1\n",
+            "[app]\ntype=user\npassword=password\n",
+            "",
+            "",
+            "",
+        )
+        .map_err(|error| ControlError::Adapter(error.to_string()))?;
+        let (_controller, mut runner, mut effects) = Controller::new(config, 64);
+        runner.control.subscribe("calls")?;
+        let mut replies = Vec::new();
+        let mut keys = Vec::new();
+        for index in 0..64 {
+            let channel = id(&format!("call-{index}"))?;
+            let bridge = id(&format!("bridge-{index}"))?;
+            runner.control.incoming(
+                crate::IncomingCall {
+                    id: channel.clone(),
+                    endpoint: "phone".into(),
+                    caller: "100".into(),
+                    context: "internal".into(),
+                    extension: "100".into(),
+                    target: crate::IncomingTarget::Stasis {
+                        application: "calls".into(),
+                        arguments: Vec::new(),
+                    },
+                },
+                "now",
+            )?;
+            let key = runner.control.key(&channel)?;
+            runner.control.signal(
+                Signal::Milestone {
+                    key: key.clone(),
+                    milestone: crate::Milestone::Answered,
+                },
+                "now",
+            )?;
+            runner.control.apply(
+                Action::CreateBridge {
+                    id: bridge.clone(),
+                    name: String::new(),
+                },
+                "now",
+                0,
+            )?;
+            runner.control.apply(
+                Action::AddChannels {
+                    bridge: bridge.clone(),
+                    channels: [channel].into_iter().collect(),
+                },
+                "now",
+                0,
+            )?;
+            let (reply, response) = oneshot::channel();
+            runner.request(
+                Request::Apply {
+                    credentials: Credentials::new("app".into(), "password".into())?,
+                    origin: None,
+                    action: Action::RecordBridge {
+                        bridge,
+                        name: id(&format!("recording-{index}"))?,
+                    },
+                    reply,
+                },
+                1000,
+            )?;
+            replies.push(response);
+            keys.push(key);
+        }
+        for key in keys {
+            runner
+                .effects
+                .try_send(Effect::Ring { key })
+                .map_err(|_| ControlError::Capacity)?;
+        }
+        runner.expire_recording_admissions(6000)?;
+        let (events, receiver) = mpsc::channel(64);
+        drop(receiver);
+        runner
+            .subscribers
+            .insert("calls".into(), Subscriber { token: 1, events });
+        runner.tick(6000)?;
+        assert!(runner.pending_effects.len() <= super::super::MAX_PENDING_EFFECTS);
+        assert!(runner.recording_admissions.len() < 64);
+        assert_eq!(
+            runner
+                .control
+                .apply(Action::ListChannels, "now", 6000)?
+                .body,
+            Some(serde_json::json!([]))
+        );
+        let drain = tokio::spawn(async move {
+            let mut releases = 0;
+            let mut bridges = 0;
+            let mut cancellations = 0;
+            let mut recordings = Vec::new();
+            for _ in 0..320 {
+                match effects.recv().await.ok_or(ControlError::Capacity)? {
+                    Effect::Release { .. } => releases += 1,
+                    Effect::Bridge { channels, .. } => {
+                        assert!(channels.is_empty());
+                        bridges += 1;
+                    }
+                    Effect::EndRecording {
+                        mode: crate::media::RecordingEnd::Cancel,
+                        ..
+                    } => cancellations += 1,
+                    Effect::RecordMedia { owner, token, .. } => recordings.push((owner, token)),
+                    Effect::Ring { .. } => {}
+                    Effect::ControlRecording { .. }
+                    | Effect::EndRecording {
+                        mode: crate::media::RecordingEnd::Finish,
+                        ..
+                    }
+                    | Effect::PlayMedia { .. }
+                    | Effect::ControlPlayback { .. }
+                    | Effect::Playback { .. }
+                    | Effect::Dtmf { .. }
+                    | Effect::Gate { .. }
+                    | Effect::Answer { .. }
+                    | Effect::Start { .. }
+                    | Effect::ReleaseBridge { .. }
+                    | Effect::DialBridge { .. } => return Err(ControlError::Unsupported),
+                }
+            }
+            Ok((releases, bridges, cancellations, recordings))
+        });
+        runner
+            .drain_effects(tokio::time::Instant::now() + std::time::Duration::from_secs(2))
+            .await?;
+        runner.expire_recording_admissions(6000)?;
+        runner
+            .drain_effects(tokio::time::Instant::now() + std::time::Duration::from_secs(2))
+            .await?;
+        let (releases, bridges, cancellations, recordings) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), drain)
+                .await
+                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .map_err(|error| ControlError::Adapter(error.to_string()))??;
+        assert_eq!((releases, bridges, cancellations), (64, 64, 64));
+        for mut reply in replies {
+            assert!(matches!(
+                reply.try_recv().map_err(|_| ControlError::Capacity)?,
+                Err(ControlError::Capacity)
+            ));
+        }
+        for (owner, token) in recordings {
+            runner.apply_signal(
+                Signal::RecordingFinished {
+                    owner,
+                    token,
+                    result: Ok(()),
+                },
+                6000,
+            )?;
+        }
+        Ok(())
     }
 
     #[test]

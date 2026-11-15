@@ -618,6 +618,10 @@ pub struct Control {
 }
 
 impl Control {
+    pub(crate) fn terminal_effect_reserve(&self) -> usize {
+        self.channels.len() * 2
+    }
+
     pub(crate) fn effect_budget(&self, action: &Action) -> usize {
         if let Action::Hangup(id) = action {
             self.termination_budget(id)

@@ -612,6 +612,30 @@ impl Runner {
         Ok((key, outcome))
     }
 
+    fn tick(&mut self, now: u64) -> Result<(), ControlError> {
+        self.sessions
+            .retain(|_, session| !session.lifetime.is_closed());
+        let mut outcome = self.control.expire(now, &timestamp())?;
+        self.publish(&mut outcome)?;
+        if self.pending_effects.is_empty() {
+            let mut outcome = self.control.tick_dialplans(now, &timestamp())?;
+            self.publish(&mut outcome)?;
+        }
+        let disconnected = self
+            .subscribers
+            .iter()
+            .filter(|(_, subscriber)| subscriber.events.is_closed())
+            .map(|(application, _)| application.clone())
+            .collect::<Vec<_>>();
+        for application in disconnected {
+            self.subscribers.remove(&application);
+            let mut outcome = self.control.unsubscribe(&application, &timestamp())?;
+            self.publish(&mut outcome)?;
+        }
+        self.expire_recording_admissions(now)?;
+        Ok(())
+    }
+
     async fn serve(&mut self) -> Result<(), ControlError> {
         let effect_sender = self.effects.clone();
         let started = Instant::now();
@@ -637,15 +661,7 @@ impl Runner {
                     if let Some(request) = request { self.request(request, u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?; } else { break; }
                 }
                 _instant = tick.tick() => {
-                    self.expire_recording_admissions(u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?;
-                    self.sessions.retain(|_, session| !session.lifetime.is_closed());
-                    let mut outcome = self.control.expire(u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?, &timestamp())?; self.publish(&mut outcome)?;
-                    if self.pending_effects.is_empty() {
-                        let mut outcome = self.control.tick_dialplans(u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?, &timestamp())?;
-                        self.publish(&mut outcome)?;
-                    }
-                    let disconnected: Vec<String> = self.subscribers.iter().filter(|(_, subscriber)| subscriber.events.is_closed()).map(|(application, _)| application.clone()).collect();
-                    for application in disconnected { self.subscribers.remove(&application); let mut outcome = self.control.unsubscribe(&application, &timestamp())?; self.publish(&mut outcome)?; }
+                    self.tick(u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?;
                 }
             }
         }
