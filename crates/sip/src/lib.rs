@@ -5,7 +5,6 @@ use rsipstack::sip::{
         typed::Authorization,
         untyped::ToTypedHeader,
     },
-    services::DigestGenerator,
     HeadersExt, Method, Request, SipMessage, Uri,
 };
 use rusterisk_config::{Codec, Config, Protocol};
@@ -13,8 +12,8 @@ use rusterisk_core::ContactPresence;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
-use subtle::ConstantTimeEq;
 mod destination;
+mod digest;
 mod incoming;
 mod info;
 mod media_direction;
@@ -525,9 +524,34 @@ impl Engine {
         else {
             return Ok(None);
         };
-        let digest = DigestGenerator::from(&authorization, auth.password.expose(), &request.method)
-            .compute();
-        if !bool::from(digest.as_bytes().ct_eq(authorization.response.as_bytes())) {
+        let encoded_count = format!("{count:08x}");
+        let protection = match &authorization.qop {
+            Some(AuthQop::Auth { cnonce, .. }) => {
+                digest::Protection::parse(Some("auth"), Some(cnonce), Some(&encoded_count))
+            }
+            Some(AuthQop::AuthInt { .. }) => return Ok(None),
+            None => digest::Protection::parse(None, None, None),
+        };
+        let credentials = digest::Credentials::new(
+            &authorization.username,
+            auth.password.expose(),
+            &authorization.realm,
+        );
+        let method = request.method.to_string();
+        let uri = authorization.uri.to_string();
+        let digest_request =
+            digest::DigestRequest::new(&method, &uri, &authorization.nonce, &request.body);
+        let (Ok(protection), Ok(credentials), Ok(digest_request)) =
+            (protection, credentials, digest_request)
+        else {
+            return Ok(None);
+        };
+        let response = digest::Algorithm::parse(None)
+            .and_then(|algorithm| algorithm.calculate(&credentials, &digest_request, &protection));
+        let Ok(response) = response else {
+            return Ok(None);
+        };
+        if !response.matches(&authorization.response) {
             return Ok(None);
         }
         let endpoint = &self.config.endpoints[endpoint_index];
