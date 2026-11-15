@@ -17,12 +17,13 @@ The reference reports `talker` for a default mixing bridge.
 Stored recordings support listing, metadata, copying, deletion, and streamed `audio/wav` downloads.
 The ping endpoint returns a `pong` response.
 App queries report subscribed apps and their channel and bridge resources.
+Event filters support partial updates, rejection precedence, and reset through an empty request.
 Endpoint queries report configured resources, routing availability, and exact channel membership.
 Registration expiry changes routing availability without ending active calls.
 
 Known operations without working adapters return `501`.
 Explicit resource subscriptions, sound queries, server information, external media, and channel redirection still use that response.
-Requests with JSON bodies also return `501` after body validation.
+Requests with JSON bodies other than event filter updates return `501` after body validation.
 Playback supports start, pause, resume, and stop.
 Seeking and media lists remain unsupported.
 Live recording duration statistics remain absent.

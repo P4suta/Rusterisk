@@ -48,6 +48,8 @@ The [historical dependency boundary](legacy-client-dependency-scope.md) scopes t
 The scenario compares empty channel lists, configured endpoints, static and dynamic routing availability, technology-name case handling, app subscriptions, and missing-resource errors.
 The test normalizes endpoint list order by resource name.
 The test compares endpoint detail queries and error messages without normalization.
+Both clients compare event filter updates and reset.
+The Rust comparison also checks invalid filters and missing apps.
 Bridge comparisons cover creation, retrieval, listing, duplicate errors, and deletion.
 The test normalizes creation timestamps.
 The test checks `video_mode=none` for Rusterisk and `video_mode=talker` for the reference before comparing the remaining fields.
