@@ -51,6 +51,10 @@ impl RecordingPreparation {
         self.into_recorder()?.finish()
     }
 
+    pub fn finish_with_tail_trim(self, milliseconds: u64) -> Result<PathBuf, StorageError> {
+        self.into_recorder()?.finish_with_tail_trim(milliseconds)
+    }
+
     pub fn cancel(self) -> Result<(), StorageError> {
         drop(self.source);
         self.recorder.cancel()

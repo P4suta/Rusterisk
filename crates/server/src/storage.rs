@@ -93,6 +93,7 @@ enum Command {
     },
     FinishRecording {
         key: RecordingKey,
+        trim_milliseconds: u64,
         reply: oneshot::Sender<Result<(), StorageError>>,
     },
     CancelRecording {
@@ -266,9 +267,13 @@ fn command(
                 }
             }
         }
-        Command::FinishRecording { key, reply } => {
+        Command::FinishRecording {
+            key,
+            trim_milliseconds,
+            reply,
+        } => {
             if !reply.is_closed() {
-                respond(reply, recordings.finish(&key, store));
+                respond(reply, recordings.finish(&key, store, trim_milliseconds));
             }
         }
         Command::CancelRecording { key, reply } => {

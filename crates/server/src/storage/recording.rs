@@ -69,13 +69,21 @@ impl RecordingSink {
         }
     }
 
-    pub async fn finish(mut self) -> Result<(), WorkerError> {
+    pub async fn finish(self) -> Result<(), WorkerError> {
+        self.finish_with_tail_trim(0).await
+    }
+
+    pub async fn finish_with_tail_trim(
+        mut self,
+        trim_milliseconds: u64,
+    ) -> Result<(), WorkerError> {
         if matches!(self.lease.state, SinkState::Failed(SinkFailure::Capacity)) {
             return Err(WorkerError::Capacity);
         }
         let (reply, response) = oneshot::channel();
         self.lease.port.send(Command::FinishRecording {
             key: self.key.clone(),
+            trim_milliseconds,
             reply,
         })?;
         let result = receive(response).await;
@@ -277,12 +285,17 @@ impl RecordingSet {
         }
     }
 
-    pub fn finish(&mut self, key: &RecordingKey, store: &mut Store) -> Result<(), StorageError> {
+    pub fn finish(
+        &mut self,
+        key: &RecordingKey,
+        store: &mut Store,
+        trim_milliseconds: u64,
+    ) -> Result<(), StorageError> {
         let entry = self.entries.remove(key).ok_or(StorageError::InvalidState)?;
         if let Some(error) = entry.failure {
             return Err(error);
         }
-        entry.recorder.finish()?;
+        entry.recorder.finish_with_tail_trim(trim_milliseconds)?;
         store.recording_finished(key.name.as_str())
     }
 
@@ -351,7 +364,7 @@ mod tests {
             .try_send(Frame::new(&[5678; 160], 8000).map_err(StorageError::from)?)
             .map_err(|_| WorkerError::Capacity)?;
         recordings.pump();
-        recordings.finish(&other, &mut store)?;
+        recordings.finish(&other, &mut store, 0)?;
         assert_eq!(
             rusterisk_storage::WaveReader::open(&directory.path().join("recordings/other.wav"))?
                 .read_frame()?
@@ -363,7 +376,7 @@ mod tests {
         recordings.pump();
         recordings.pump();
         assert!(response.try_recv().map_err(|_| WorkerError::Invalid)?? == append);
-        recordings.finish(&append, &mut store)?;
+        recordings.finish(&append, &mut store, 0)?;
         assert_eq!(
             std::fs::metadata(directory.path().join("recordings/bounded.wav"))?.len(),
             32044
@@ -474,14 +487,14 @@ mod tests {
             Err(StorageError::InvalidState)
         ));
         assert!(matches!(
-            recordings.finish(&stale, &mut store),
+            recordings.finish(&stale, &mut store, 0),
             Err(StorageError::InvalidState)
         ));
         frames
             .try_send(Frame::new(&[2; 160], 8000).map_err(StorageError::from)?)
             .map_err(|_| WorkerError::Capacity)?;
         recordings.pump();
-        recordings.finish(&fresh, &mut store)?;
+        recordings.finish(&fresh, &mut store, 0)?;
         assert_eq!(store.recordings()?.len(), 1);
         Ok(())
     }

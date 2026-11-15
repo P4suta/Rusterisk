@@ -56,6 +56,22 @@ async fn recording_replacements_keep_existing_playback_until_finish_and_cancel_w
             );
         }
         assert!(current.read().await?.is_none());
+        let mut trimmed = storage.record(id("trimmed")?, 8000).await?;
+        trimmed.try_write(frame(1234)?)?;
+        trimmed.try_write(frame(0)?)?;
+        trimmed.finish_with_tail_trim(10).await?;
+        let mut current = storage
+            .play(PlaybackMedia::Recording(id("trimmed")?))
+            .await?;
+        assert_eq!(
+            current.read().await?.ok_or(WorkerError::Invalid)?.samples(),
+            [1234; 160]
+        );
+        assert_eq!(
+            current.read().await?.ok_or(WorkerError::Invalid)?.samples(),
+            [0; 80]
+        );
+        assert!(current.read().await?.is_none());
         Ok(())
     }
     .await;
