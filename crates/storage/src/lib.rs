@@ -23,6 +23,7 @@ pub enum StorageError {
     UnknownSchema,
     InUse,
     Exists,
+    NotFound,
     Unsupported,
 }
 
@@ -39,6 +40,7 @@ impl std::fmt::Display for StorageError {
             Self::UnknownSchema => f.write_str("unsupported database schema"),
             Self::InUse => f.write_str("storage directory is already in use"),
             Self::Exists => f.write_str("recording already exists"),
+            Self::NotFound => f.write_str("recording not found"),
             Self::Unsupported => f.write_str("unsupported recording operation"),
         }
     }
@@ -213,6 +215,35 @@ impl Store {
         Ok(())
     }
 
+    fn recording_path(&self, name: &str) -> Result<PathBuf, StorageError> {
+        validate_name(name)?;
+        let path = self.recordings.join(format!("{name}.wav"));
+        let metadata = std::fs::symlink_metadata(&path).map_err(recording_io_error)?;
+        if metadata.file_type().is_symlink() {
+            return Err(StorageError::InvalidName);
+        }
+        if !metadata.is_file() {
+            return Err(StorageError::NotFound);
+        }
+        Ok(path)
+    }
+
+    pub fn recording(&self, name: &str) -> Result<rusterisk_api::StoredRecording, StorageError> {
+        self.recording_path(name)?;
+        Ok(rusterisk_api::StoredRecording {
+            name: name.to_owned(),
+            format: "wav".into(),
+        })
+    }
+
+    pub fn delete_recording(&mut self, name: &str) -> Result<(), StorageError> {
+        let path = self.recording_path(name)?;
+        std::fs::remove_file(path).map_err(recording_io_error)?;
+        self.connection
+            .execute("DELETE FROM recordings WHERE name=?1", [name])?;
+        Ok(())
+    }
+
     pub fn recordings(&self) -> Result<Vec<rusterisk_api::StoredRecording>, StorageError> {
         let mut output = Vec::new();
         for (index, entry) in std::fs::read_dir(&self.recordings)?.enumerate() {
@@ -244,6 +275,14 @@ impl Store {
 fn validate_name(name: &str) -> Result<(), StorageError> {
     rusterisk_api::ChannelId::try_from(name.to_owned()).map_err(|_| StorageError::InvalidName)?;
     Ok(())
+}
+
+fn recording_io_error(error: std::io::Error) -> StorageError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        StorageError::NotFound
+    } else {
+        StorageError::Io(error)
+    }
 }
 
 fn reserve_directory_entries(directory: &Path, additional: usize) -> Result<(), StorageError> {
