@@ -44,10 +44,18 @@ impl TlsClientContext {
             }
             None => {
                 let certificates = rustls_native_certs::load_native_certs();
-                if !certificates.errors.is_empty() {
-                    return Err(ControlError::Invalid(
-                        "Native certificate authority loading failed",
-                    ));
+                if let Some(error) = certificates.errors.first() {
+                    let detail = match &error.kind {
+                        rustls_native_certs::ErrorKind::Io { inner, .. } => {
+                            format!("I/O {:?} ({:?})", inner.kind(), inner.raw_os_error())
+                        }
+                        rustls_native_certs::ErrorKind::Os(error) => {
+                            format!("Operating system: {error}")
+                        }
+                        rustls_native_certs::ErrorKind::Pem(error) => format!("PEM: {error}"),
+                        _ => "Unknown native trust error".into(),
+                    };
+                    return Err(ControlError::Adapter(format!("Native certificate authority loading failed ({} certificates, {} errors): {}: {detail}", certificates.certs.len(), certificates.errors.len(), error.context)));
                 }
                 if certificates.certs.len() > 1024
                     || certificates

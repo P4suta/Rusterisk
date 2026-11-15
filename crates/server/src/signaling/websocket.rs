@@ -36,8 +36,10 @@ impl PreparedClients {
         for client in clients {
             let tls = if client.requires_tls() {
                 Some(
-                    TlsClientContext::load(client.ca_list_file.as_deref()).map_err(|_| {
-                        ControlError::Adapter("WebSocket TLS configuration failed".into())
+                    TlsClientContext::load(client.ca_list_file.as_deref()).map_err(|error| {
+                        ControlError::Adapter(format!(
+                            "WebSocket TLS configuration failed: {error}"
+                        ))
                     })?,
                 )
             } else {
