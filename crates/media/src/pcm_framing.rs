@@ -24,7 +24,7 @@ impl PcmFramer {
             return Err(MediaError::InvalidFrame);
         }
         let frame_len = self.rate as usize / 50;
-        if self.ready.len() + (self.filled + frame.samples().len()) / frame_len > 10 {
+        if !self.can_push(frame.samples().len()) {
             return Err(MediaError::Capacity);
         }
         for sample in frame.samples() {
@@ -37,6 +37,17 @@ impl PcmFramer {
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn can_push(&self, samples: usize) -> bool {
+        self.filled
+            .checked_add(samples)
+            .and_then(|total| {
+                self.ready
+                    .len()
+                    .checked_add(total / (self.rate as usize / 50))
+            })
+            .is_some_and(|frames| frames <= 10)
     }
 
     pub fn pop(&mut self) -> Option<Frame> {

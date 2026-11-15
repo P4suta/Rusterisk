@@ -1,6 +1,6 @@
 use crate::{
-    alaw_decode, alaw_encode, mulaw_decode, mulaw_encode, Frame, MediaError, OpusCodec, RtpPacket,
-    MAX_DECODED_SAMPLES, MAX_PACKET, MAX_SAMPLES,
+    alaw_decode, alaw_encode, mulaw_decode, mulaw_encode, Frame, MediaError, OpusCodec, PcmFramer,
+    RtpPacket, MAX_DECODED_SAMPLES, MAX_PACKET, MAX_SAMPLES,
 };
 use std::collections::VecDeque;
 
@@ -58,6 +58,28 @@ impl Codec {
         }
     }
 
+    fn decoded_samples(&self, bytes: &[u8]) -> Result<usize, MediaError> {
+        if bytes.is_empty() || bytes.len() > MAX_PACKET - 12 {
+            return Err(MediaError::InvalidPacket);
+        }
+        let count = match self {
+            Self::Pcmu | Self::Pcma => {
+                if bytes.len() > 1600 {
+                    return Err(MediaError::Capacity);
+                }
+                bytes.len()
+            }
+            Self::Opus(codec) => codec
+                .decoder
+                .get_nb_samples(bytes)
+                .map_err(|error| MediaError::Codec(error.to_string()))?,
+        };
+        if count == 0 || count > MAX_DECODED_SAMPLES {
+            return Err(MediaError::Capacity);
+        }
+        Ok(count)
+    }
+
     fn decode<'a>(
         &mut self,
         bytes: &[u8],
@@ -91,6 +113,46 @@ impl Codec {
                 })
             }
         }
+    }
+}
+
+pub struct AudioDecoder {
+    codec: Codec,
+    frames: PcmFramer,
+}
+
+impl AudioDecoder {
+    pub fn new(format: AudioFormat) -> Result<Self, MediaError> {
+        Ok(Self {
+            codec: Codec::new(format)?,
+            frames: PcmFramer::new(format.rate())?,
+        })
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) -> Result<(), MediaError> {
+        let count = self.codec.decoded_samples(bytes)?;
+        if !self.frames.can_push(count) {
+            return Err(MediaError::Capacity);
+        }
+        let mut samples = [0; MAX_DECODED_SAMPLES];
+        let decoded = self.codec.decode(bytes, &mut samples)?;
+        for chunk in decoded.samples.chunks(MAX_SAMPLES) {
+            self.frames.push(Frame::new(chunk, decoded.rate)?)?;
+        }
+        Ok(())
+    }
+
+    pub fn pop(&mut self) -> Option<Frame> {
+        self.frames.pop()
+    }
+
+    pub fn clear(&mut self) {
+        self.frames.clear();
+    }
+
+    pub fn reset(&mut self, format: AudioFormat) -> Result<(), MediaError> {
+        *self = Self::new(format)?;
+        Ok(())
     }
 }
 
