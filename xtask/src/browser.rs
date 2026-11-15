@@ -3,6 +3,8 @@ mod build;
 pub use build::Build;
 mod run;
 pub use run::{Phase, RunPlan};
+mod snapshot;
+pub use snapshot::{SourceError, SourceSnapshot};
 use std::{
     io::{Read, Write},
     path::Path,
