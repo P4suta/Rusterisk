@@ -64,6 +64,23 @@ async fn typed_client_authenticates_and_roundtrips_server_resources() -> Result<
         let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
         assert_eq!(client.ping().await?.ping, "pong");
         assert!(client.channels().await?.is_empty());
+        assert!(client.applications().await?.is_empty());
+        let session = client
+            .subscribe(&ChannelId::try_from("calls".to_owned())?)
+            .await?;
+        let application = client.application("calls").await?;
+        assert_eq!(application.name, "calls");
+        assert!(application.channel_ids.is_empty());
+        assert_eq!(client.applications().await?, [application]);
+        assert!(matches!(
+            client.application("missing").await,
+            Err(Error::Api { status: 404, .. })
+        ));
+        assert!(matches!(
+            client.application("../calls").await,
+            Err(Error::Id(_))
+        ));
+        session.shutdown().await?;
         let id = ChannelId::try_from("conversation".to_owned())?;
         let bridge = client.create_bridge(&id, "Conversation").await?;
         assert_eq!(bridge.id, id);

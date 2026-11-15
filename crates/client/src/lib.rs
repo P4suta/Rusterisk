@@ -230,6 +230,13 @@ impl Client {
     pub async fn channels(&self) -> Result<Vec<api::Channel>, Error> {
         self.request("channels.list", &[], &[]).await
     }
+    pub async fn applications(&self) -> Result<Vec<api::Application>, Error> {
+        self.request("applications.list", &[], &[]).await
+    }
+    pub async fn application(&self, name: &str) -> Result<api::Application, Error> {
+        self.request("applications.get", &[("applicationName", name)], &[])
+            .await
+    }
     pub async fn channel(&self, id: &api::ChannelId) -> Result<api::Channel, Error> {
         self.request("channels.get", &[("channelId", id.as_str())], &[])
             .await

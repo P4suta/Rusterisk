@@ -3,6 +3,7 @@
 The `rusterisk-client` crate shares its resource and event types with `rusterisk-api`.
 Requests use the authoritative operation paths and methods.
 HTTP errors preserve their status and the server's message.
+`applications` and `application` read subscribed apps and their channel and bridge resources.
 
 ## Run the call example
 
