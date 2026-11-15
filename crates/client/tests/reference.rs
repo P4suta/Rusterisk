@@ -1,10 +1,52 @@
 use rusterisk_client::{
     api::{
-        ApiError, Bridge, BridgeVideoMode, ChannelId, EventFilter, EventFilterRequest, EventSource,
+        ApiError, Bridge, BridgeVideoMode, ChannelId, EventFilter, EventFilterRequest, EventKind,
+        EventSource, ExternalRtpTarget, StaticRtpCodec,
     },
     Client, Error,
 };
-use std::{future::IntoFuture, time::Duration};
+use std::{future::IntoFuture, net::Ipv4Addr, time::Duration};
+
+async fn compare_external_admission(
+    client: &Client,
+    session: &mut rusterisk_client::Session,
+    app: &str,
+) -> Result<(), Error> {
+    let peer = rusterisk_server::rtp::SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0)?;
+    let id = ChannelId::try_from("external-compat".to_owned())?;
+    let target = ExternalRtpTarget::new(peer.local_addr()?, StaticRtpCodec::Pcmu)
+        .map_err(|_| Error::Invalid("external peer"))?;
+    let channel = client.external_rtp(&id, app, target, "media,agent").await?;
+    assert_eq!(channel.id, id);
+    assert!(channel.name.starts_with("UnicastRTP/"));
+    let variables = channel
+        .channelvars
+        .ok_or(Error::Invalid("transport variables"))?;
+    assert!(variables
+        .get("UNICASTRTP_LOCAL_ADDRESS")
+        .is_some_and(|value| value
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| !ip.is_unspecified())));
+    assert!(variables
+        .get("UNICASTRTP_LOCAL_PORT")
+        .is_some_and(|value| value
+            .parse::<u16>()
+            .is_ok_and(|port| port > 0 && port < u16::MAX)));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        for _ in 0..32 {
+            if let EventKind::StasisStart { channel, args } = session.next_event().await?.kind {
+                if channel.id == id {
+                    assert_eq!(args, ["media", "agent"]);
+                    return Ok(());
+                }
+            }
+        }
+        Err(Error::Capacity)
+    })
+    .await
+    .map_err(|_| Error::Timeout)??;
+    client.hangup(&id).await
+}
 
 fn audio_bridge(mut bridge: Bridge, expected_mode: BridgeVideoMode) -> Bridge {
     assert_eq!(bridge.video_mode, Some(expected_mode));
@@ -239,8 +281,22 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
         "",
     )
     .map_err(|_| Error::Invalid("reference configuration"))?;
-    let (controller, runner, _effects) = rusterisk_server::Controller::new(configuration, 4);
+    let (controller, runner, effects) = rusterisk_server::Controller::new(configuration.clone(), 4);
+    let (media, hub, notices) = rusterisk_server::media::MediaHub::new(4);
+    let signaling = rusterisk_server::signaling::Signaling::bind(
+        configuration,
+        controller.clone(),
+        effects,
+        media,
+        notices,
+    )
+    .await
+    .map_err(|_| Error::Invalid("native signaling"))?;
+    let signal_stop = controller.shutdown_signal();
+    let media_stop = controller.shutdown_signal();
     let runner = tokio::spawn(runner.run());
+    let hub = tokio::spawn(hub.run(media_stop));
+    let signaling = tokio::spawn(signaling.run(signal_stop));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let server = tokio::spawn(
@@ -297,8 +353,8 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
             rejection(reference.endpoints_by_technology("unknown").await)?
         );
         let app = ChannelId::try_from("compat-app".to_owned())?;
-        let actual_session = actual.subscribe(&app).await?;
-        let reference_session = reference.subscribe(&app).await?;
+        let mut actual_session = actual.subscribe(&app).await?;
+        let mut reference_session = reference.subscribe(&app).await?;
         assert_eq!(
             actual.application(app.as_str()).await?,
             reference.application(app.as_str()).await?
@@ -361,6 +417,8 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
             rejection(actual.application("missing").await)?,
             rejection(reference.application("missing").await)?
         );
+        compare_external_admission(&actual, &mut actual_session, app.as_str()).await?;
+        compare_external_admission(&reference, &mut reference_session, app.as_str()).await?;
         compare_subscriptions(&actual, &reference, app.as_str()).await?;
         reference_session.shutdown().await?;
         actual_session.shutdown().await?;
@@ -371,6 +429,13 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
     controller.shutdown();
     runner
         .await
+        .map_err(|_| Error::Closed)?
+        .map_err(|_| Error::Closed)?;
+    signaling
+        .await
+        .map_err(|_| Error::Closed)?
+        .map_err(|_| Error::Closed)?;
+    hub.await
         .map_err(|_| Error::Closed)?
         .map_err(|_| Error::Closed)?;
     server.abort();
