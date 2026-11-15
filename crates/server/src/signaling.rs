@@ -618,10 +618,11 @@ impl Signaling {
                 self.media.stop_recording(token, mode).map_err(failure)?
             }
             Effect::Dtmf { key, command } => {
-                if self
-                    .calls
-                    .get(&key)
-                    .is_some_and(|call| matches!(call.digits, DigitDelivery::Media))
+                if self.external_media.contains(&key)
+                    || self
+                        .calls
+                        .get(&key)
+                        .is_some_and(|call| matches!(call.digits, DigitDelivery::Media))
                 {
                     match self.media.send_sequence(key.clone(), command).await {
                         Ok(()) => return Ok(()),

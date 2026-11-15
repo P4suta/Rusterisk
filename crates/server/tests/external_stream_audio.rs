@@ -64,6 +64,24 @@ async fn external_streams_send_session_identity_receive_audio_and_release_the_co
             }
             Err(ControlError::Capacity)
         }).await.map_err(failure)??;
+        controller.execute(credentials()?, None, Action::SendDtmf {
+            channel: id.clone(), digits: "#A".into(), timing: rusterisk_core::DtmfTiming::new(0, 20, 100, 0)?,
+        }).await?;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            let mut bytes = [0; 1923];
+            let mut digits = String::new();
+            for _ in 0..100 {
+                peer.read_exact(&mut bytes[..3]).await.map_err(failure)?;
+                let length = usize::from(u16::from_be_bytes([bytes[1], bytes[2]]));
+                if length > 1920 { return Err(ControlError::Capacity); }
+                peer.read_exact(&mut bytes[3..length + 3]).await.map_err(failure)?;
+                if let AudioSocket::Dtmf(digit) = AudioSocket::parse(&bytes[..length + 3]).map_err(failure)? {
+                    digits.push(char::from(digit));
+                    if digits.len() == 2 { assert_eq!(digits, "#A"); return Ok::<(), ControlError>(()); }
+                }
+            }
+            Err(ControlError::Capacity)
+        }).await.map_err(failure)??;
         controller.execute(credentials()?, None, Action::Hangup(id)).await?;
         tokio::time::timeout(Duration::from_secs(1), async {
             let mut bytes = [0; 1923];
