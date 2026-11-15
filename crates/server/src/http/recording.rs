@@ -38,9 +38,6 @@ pub(super) fn arguments(parameters: &BTreeMap<String, String>) -> Result<Argumen
             .unwrap_or("fail"),
     )
     .map_err(|_| ControlError::Invalid("Invalid recording conflict policy"))?;
-    if policy == RecordingIfExists::Append {
-        return Err(ControlError::Unsupported);
-    }
     match parameters
         .get("beep")
         .map(String::as_str)

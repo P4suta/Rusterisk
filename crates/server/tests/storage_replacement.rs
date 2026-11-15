@@ -43,6 +43,19 @@ async fn recording_replacements_keep_existing_playback_until_finish_and_cancel_w
             [7777; 160]
         );
         assert_eq!(storage.recordings().await?.len(), 1);
+        let mut appended = storage
+            .record_with_policy(id("call")?, 8000, RecordingIfExists::Append)
+            .await?;
+        appended.try_write(frame(8888)?)?;
+        appended.finish().await?;
+        let mut current = storage.play(PlaybackMedia::Recording(id("call")?)).await?;
+        for expected in [7777, 8888] {
+            assert_eq!(
+                current.read().await?.ok_or(WorkerError::Invalid)?.samples(),
+                [expected; 160]
+            );
+        }
+        assert!(current.read().await?.is_none());
         Ok(())
     }
     .await;

@@ -108,6 +108,19 @@ async fn http_recording_admission_reports_conflicts_and_preserves_pause_stop_and
         assert!(matches!(event(&mut subscription.events).await?, EventKind::RecordingFinished { recording } if recording.state == RecordingState::Canceled));
         assert!(!storage.recordings().await.map_err(failure)?.iter().any(|recording| recording.name == "discarded"));
         for (method, suffix, state) in [("DELETE", "", RecordingState::Canceled), ("POST", "/stop", RecordingState::Done)] {
+            let response = app.clone().oneshot(request("POST", "/ari/bridges/mix/record?name=taken&format=wav&ifExists=append", "app")?).await.map_err(failure)?;
+            assert_eq!(response.status(), StatusCode::CREATED);
+            assert!(matches!(event(&mut subscription.events).await?, EventKind::RecordingStarted { .. }));
+            assert_eq!(std::fs::read(directory.path().join("recordings/taken.wav")).map_err(failure)?, original_audio);
+            assert_eq!(app.clone().oneshot(request(method, &format!("/ari/recordings/live/taken{suffix}"), "app")?).await.map_err(failure)?.status(), StatusCode::NO_CONTENT);
+            assert!(matches!(event(&mut subscription.events).await?, EventKind::RecordingFinished { recording } if recording.state == state));
+            let audio = std::fs::read(directory.path().join("recordings/taken.wav")).map_err(failure)?;
+            assert_eq!(&audio[44..original_audio.len()], &original_audio[44..]);
+            if state == RecordingState::Canceled { assert_eq!(audio, original_audio); }
+            assert!(!directory.path().join("recordings/taken.append").exists());
+        }
+        let original_audio = std::fs::read(directory.path().join("recordings/taken.wav")).map_err(failure)?;
+        for (method, suffix, state) in [("DELETE", "", RecordingState::Canceled), ("POST", "/stop", RecordingState::Done)] {
             let response = app.clone().oneshot(request("POST", "/ari/bridges/mix/record?name=taken&format=wav&ifExists=OVERWRITE", "app")?).await.map_err(failure)?;
             assert_eq!(response.status(), StatusCode::CREATED);
             assert!(matches!(event(&mut subscription.events).await?, EventKind::RecordingStarted { .. }));
