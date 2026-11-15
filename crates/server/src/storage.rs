@@ -83,6 +83,14 @@ enum Command {
     Recordings {
         reply: oneshot::Sender<Result<Vec<StoredRecording>, StorageError>>,
     },
+    Recording {
+        name: ChannelId,
+        reply: oneshot::Sender<Result<StoredRecording, StorageError>>,
+    },
+    DeleteRecording {
+        name: ChannelId,
+        reply: oneshot::Sender<Result<(), StorageError>>,
+    },
     Record {
         name: ChannelId,
         rate: u32,
@@ -174,6 +182,18 @@ impl StoragePort {
         self.send(Command::Recordings { reply })?;
         receive(response).await
     }
+
+    pub async fn recording(&self, name: ChannelId) -> Result<StoredRecording, WorkerError> {
+        let (reply, response) = oneshot::channel();
+        self.send(Command::Recording { name, reply })?;
+        receive(response).await
+    }
+
+    pub async fn delete_recording(&self, name: ChannelId) -> Result<(), WorkerError> {
+        let (reply, response) = oneshot::channel();
+        self.send(Command::DeleteRecording { name, reply })?;
+        receive(response).await
+    }
 }
 
 async fn receive<T>(
@@ -250,6 +270,16 @@ fn command(
         Command::Recordings { reply } => {
             if !reply.is_closed() {
                 respond(reply, store.recordings());
+            }
+        }
+        Command::Recording { name, reply } => {
+            if !reply.is_closed() {
+                respond(reply, store.recording(name.as_str()));
+            }
+        }
+        Command::DeleteRecording { name, reply } => {
+            if !reply.is_closed() {
+                respond(reply, store.delete_recording(name.as_str()));
             }
         }
         Command::Record {
