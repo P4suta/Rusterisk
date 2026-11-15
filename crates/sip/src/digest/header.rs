@@ -1,10 +1,24 @@
 use super::{
-    text, Algorithm, Credentials, DigestError, DigestRequest, Nonce, Protection, RequestUri,
+    lower_hexadecimal, text, Algorithm, Credentials, DigestError, DigestRequest, Nonce, Protection,
+    RequestUri,
 };
+
+enum AttributeValue {
+    Quoted(String),
+    Literal(String),
+}
+
+impl AttributeValue {
+    fn text(&self) -> &str {
+        match self {
+            Self::Quoted(value) | Self::Literal(value) => value,
+        }
+    }
+}
 
 struct Attribute {
     name: String,
-    value: String,
+    value: AttributeValue,
 }
 
 pub(crate) struct Header {
@@ -66,40 +80,72 @@ impl Header {
             attribute
                 .name
                 .eq_ignore_ascii_case(name)
-                .then_some(attribute.value.as_str())
+                .then_some(attribute.value.text())
         })
     }
 
-    fn required(&self, name: &str) -> Result<&str, DigestError> {
-        self.get(name).ok_or(DigestError::Invalid)
+    fn attribute(&self, name: &str) -> Option<&AttributeValue> {
+        self.attributes.iter().flatten().find_map(|attribute| {
+            attribute
+                .name
+                .eq_ignore_ascii_case(name)
+                .then_some(&attribute.value)
+        })
+    }
+
+    fn quoted(&self, name: &str) -> Result<Option<&str>, DigestError> {
+        match self.attribute(name) {
+            Some(AttributeValue::Quoted(value)) => Ok(Some(value)),
+            Some(AttributeValue::Literal(_)) => Err(DigestError::Invalid),
+            None => Ok(None),
+        }
+    }
+
+    fn literal(&self, name: &str) -> Result<Option<&str>, DigestError> {
+        match self.attribute(name) {
+            Some(AttributeValue::Literal(value)) => Ok(Some(value)),
+            Some(AttributeValue::Quoted(_)) => Err(DigestError::Invalid),
+            None => Ok(None),
+        }
+    }
+
+    fn required_quoted(&self, name: &str) -> Result<&str, DigestError> {
+        self.quoted(name)?.ok_or(DigestError::Invalid)
     }
 
     pub(crate) fn authorization(&self) -> Result<Authorization<'_>, DigestError> {
         if self.get("username*").is_some()
             || self
-                .get("userhash")
+                .literal("userhash")?
                 .is_some_and(|value| !value.eq_ignore_ascii_case("false"))
         {
             return Err(DigestError::Unsupported);
         }
-        let username = self.required("username")?;
-        let realm = self.required("realm")?;
+        let username = self.required_quoted("username")?;
+        let realm = self.required_quoted("realm")?;
         Credentials::new(username, "", realm)?;
-        let nonce = Nonce::new(self.required("nonce")?)?;
-        let uri = RequestUri::new(self.required("uri")?)?;
-        let algorithm = Algorithm::parse(self.get("algorithm"))?;
-        let response = self.required("response")?;
+        let nonce = Nonce::new(self.required_quoted("nonce")?)?;
+        let uri = RequestUri::new(self.required_quoted("uri")?)?;
+        let algorithm = Algorithm::parse(self.literal("algorithm")?)?;
+        let response = self.required_quoted("response")?;
         let expected = match algorithm {
             Algorithm::Md5 | Algorithm::Md5Session => 32,
             Algorithm::Sha256 | Algorithm::Sha256Session => 64,
         };
-        if response.len() != expected || !response.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if response.len() != expected || !response.bytes().all(lower_hexadecimal) {
             return Err(DigestError::Invalid);
         }
-        if self.get("opaque").is_some_and(|value| !text(value, 256)) {
+        if self
+            .quoted("opaque")?
+            .is_some_and(|value| !text(value, 256))
+        {
             return Err(DigestError::Invalid);
         }
-        let protection = Protection::parse(self.get("qop"), self.get("cnonce"), self.get("nc"))?;
+        let protection = Protection::parse(
+            self.literal("qop")?,
+            self.quoted("cnonce")?,
+            self.literal("nc")?,
+        )?;
         Ok(Authorization {
             username,
             realm,
@@ -177,13 +223,16 @@ fn token(byte: u8) -> bool {
         )
 }
 
-fn value(source: &str) -> Result<(String, &str), DigestError> {
+fn value(source: &str) -> Result<(AttributeValue, &str), DigestError> {
     let Some(quoted) = source.strip_prefix('"') else {
         let end = source.bytes().take_while(|byte| token(*byte)).count();
         return if end == 0 || end > 2048 {
             Err(DigestError::Invalid)
         } else {
-            Ok((source[..end].into(), &source[end..]))
+            Ok((
+                AttributeValue::Literal(source[..end].into()),
+                &source[end..],
+            ))
         };
     };
     let mut decoded = String::new();
@@ -197,7 +246,7 @@ fn value(source: &str) -> Result<(String, &str), DigestError> {
             escaped = false;
         } else {
             match character {
-                '"' => return Ok((decoded, &quoted[offset + 1..])),
+                '"' => return Ok((AttributeValue::Quoted(decoded), &quoted[offset + 1..])),
                 '\\' => escaped = true,
                 character if character.is_control() => return Err(DigestError::Invalid),
                 character => decoded.push(character),

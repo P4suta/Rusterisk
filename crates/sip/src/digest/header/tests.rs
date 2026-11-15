@@ -101,3 +101,29 @@ fn attribute_storage_and_wire_text_have_finite_limits() -> Result<(), DigestErro
         .is_ok());
     Ok(())
 }
+
+#[test]
+fn authorization_quoting_and_nonce_counts_follow_the_wire_grammar() {
+    for (from, to) in [
+        ("nc=00000001", "nc=\"00000001\""),
+        ("nc=00000001", "nc=0000000A"),
+        ("qop=auth-int", "qop=\"auth-int\""),
+        ("algorithm=SHA-256", "algorithm=\"SHA-256\""),
+        (
+            "uri=\"sip:registrar.example.net\"",
+            "uri=sip:registrar.example.net",
+        ),
+        ("username=\"alice\"", "username=alice"),
+        ("realm=\"example.net\"", "realm=example.net"),
+        ("nonce=\"server-nonce\"", "nonce=server-nonce"),
+        ("cnonce=\"client-nonce\"", "cnonce=client-nonce"),
+    ] {
+        let source = authorization("").replace(from, to);
+        assert!(
+            Header::parse(&source)
+                .and_then(|header| header.authorization().map(|_| ()))
+                .is_err(),
+            "{source}"
+        );
+    }
+}

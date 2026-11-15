@@ -261,7 +261,7 @@ impl<'a> Protection<'a> {
         };
         let nonce = Nonce::new(nonce.ok_or(DigestError::Invalid)?)?;
         let count = count.ok_or(DigestError::Invalid)?;
-        if count.len() != 8 || !count.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        if count.len() != 8 || !count.bytes().all(lower_hexadecimal) {
             return Err(DigestError::Invalid);
         }
         let count =
@@ -325,6 +325,10 @@ fn hexadecimal(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
+}
+
+fn lower_hexadecimal(byte: u8) -> bool {
+    byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')
 }
 
 fn text(value: &str, maximum: usize) -> bool {
