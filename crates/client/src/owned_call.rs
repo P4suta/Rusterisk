@@ -190,6 +190,65 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn duplicate_events_and_late_admission_cannot_restore_released_client_control(
+    ) -> Result<(), Error> {
+        for work in [Work::Originating, Work::Idle] {
+            let client = Client::new("http://127.0.0.1:9", "app", "password")?;
+            let (_commands, mut calls) =
+                Calls::new(client, api::ChannelId::try_from("app".to_owned())?);
+            let channel: api::Channel = serde_json::from_value(serde_json::json!({
+                "id":"released", "name":"PJSIP/phone", "state":"Up", "accountcode":"",
+                "caller":{"name":"", "number":"100"}, "connected":{"name":"", "number":"200"},
+                "dialplan":{"context":"default", "exten":"s", "priority":1},
+                "creationtime":"now", "language":"en"
+            }))?;
+            let (progress, received) = watch::channel(CallSnapshot {
+                progress: OwnedCallProgress::new().observe(CallMilestone::Stasis),
+                channel: Some(channel.clone()),
+                failure: None,
+                cleanup: Cleanup::Pending,
+            });
+            let (lifetime, released) = oneshot::channel();
+            calls.entries.insert(
+                channel.id.clone(),
+                Entry {
+                    progress,
+                    lifetime: released,
+                    work,
+                },
+            );
+            let event = api::Event {
+                application: "app".into(),
+                timestamp: "now".into(),
+                kind: api::EventKind::StasisEnd {
+                    channel: channel.clone(),
+                },
+            };
+            calls.event(&event);
+            calls.event(&event);
+            calls.originated(channel.id.clone(), Ok(channel.clone()));
+            calls.event(&api::Event {
+                application: "app".into(),
+                timestamp: "later".into(),
+                kind: api::EventKind::StasisStart {
+                    channel,
+                    args: Vec::new(),
+                },
+            });
+            drop(lifetime);
+            calls.tick();
+            assert_eq!(
+                received.borrow().progress.completion(),
+                Some(CallCompletion::StasisExited)
+            );
+            assert_eq!(received.borrow().cleanup, Cleanup::Complete);
+            assert!(calls.cleanups.is_empty());
+            calls.close().await?;
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn cancelled_handles_keep_their_result_when_a_late_request_fails() -> Result<(), Error> {
         let (progress, received) = watch::channel(CallSnapshot {
             progress: OwnedCallProgress::new(),
@@ -393,8 +452,10 @@ impl Calls {
                 },
                 None,
             ),
-            api::EventKind::StasisEnd { channel }
-            | api::EventKind::ChannelDestroyed { channel, .. } => {
+            api::EventKind::StasisEnd { channel } => {
+                (channel, None, Some(CallCompletion::StasisExited))
+            }
+            api::EventKind::ChannelDestroyed { channel, .. } => {
                 (channel, None, Some(CallCompletion::Ended))
             }
             api::EventKind::ChannelCreated { channel }
@@ -419,6 +480,9 @@ impl Calls {
             | api::EventKind::Dial { .. } => return,
         };
         if let Some(entry) = self.entries.get_mut(&channel.id) {
+            if completion.is_some() && entry.progress.borrow().progress.completion().is_none() {
+                entry.work = Work::Done;
+            }
             entry.progress.send_modify(|snapshot| {
                 if snapshot.progress.completion().is_some() {
                     if snapshot.channel.is_none() {
@@ -435,6 +499,7 @@ impl Calls {
                 }
                 if let Some(completion) = completion {
                     snapshot.progress = snapshot.progress.finish(completion);
+                    snapshot.cleanup = Cleanup::Complete;
                 }
             });
         }

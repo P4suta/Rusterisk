@@ -40,6 +40,9 @@ Checking received audio remains necessary to verify the intended signal.
 The automatic notification is a Rusterisk extension.
 
 `wait_completion` returns the terminal snapshot after peer termination, cancellation, or failure.
+Leaving Stasis completes the handle with `CallCompletion::StasisExited` and releases remote cleanup responsibility.
+The result identifies released client control without asserting that the channel ended.
+Closing a released handle or its session preserves the channel in its destination app or dialplan.
 `cancel` makes the handle terminal at the caller and starts remote cleanup.
 Late answers and request responses can't reactivate a cancelled handle.
 `close().await` cancels the call and waits for cleanup.
