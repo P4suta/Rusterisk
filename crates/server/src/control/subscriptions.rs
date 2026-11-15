@@ -11,7 +11,7 @@ pub(super) struct Notice {
 
 #[derive(Debug)]
 pub(super) enum EndedSource {
-    Channel { key: CallKey },
+    Channel { key: CallKey, endpoint: String },
     Bridge { id: ChannelId, generation: u64 },
 }
 
@@ -83,9 +83,25 @@ impl Control {
                 .get(id)
                 .map(|entry| specific(ResourceKind::Bridge, entry.token))
                 .ok_or(ControlError::Unprocessable("Event source does not exist")),
-            EventSource::AllEndpoints
-            | EventSource::EndpointTechnology(_)
-            | EventSource::Endpoint { .. } => Err(ControlError::Unsupported),
+            EventSource::AllEndpoints => Ok(ResourceSource::All(ResourceKind::Endpoint)),
+            EventSource::EndpointTechnology(technology) => {
+                if self.endpoints.has_technology(technology.as_str()) {
+                    Ok(specific(ResourceKind::Endpoint, 0))
+                } else {
+                    Err(ControlError::Unprocessable("Event source does not exist"))
+                }
+            }
+            EventSource::Endpoint {
+                technology,
+                resource,
+            } => {
+                if technology.as_str() != "PJSIP" {
+                    return Err(ControlError::Unprocessable("Event source does not exist"));
+                }
+                self.endpoints
+                    .source(resource.as_str())
+                    .ok_or(ControlError::Unprocessable("Event source does not exist"))
+            }
         }
     }
 
@@ -143,6 +159,7 @@ impl Control {
         application: StasisApplication,
         channels: &mut Vec<ChannelId>,
         bridges: &mut Vec<ChannelId>,
+        endpoints: &mut Vec<String>,
     ) -> Result<(), ControlError> {
         if let Some(subscriptions) = self.resource_subscriptions.get(&application) {
             for source in subscriptions.sources() {
@@ -173,9 +190,11 @@ impl Control {
                     ),
                     ResourceSource::Specific {
                         kind: ResourceKind::Endpoint,
-                        ..
+                        generation,
+                    } => endpoints.extend(self.endpoints.source_names(generation)),
+                    ResourceSource::All(ResourceKind::Endpoint) => {
+                        endpoints.push("__AST_ENDPOINT_ALL_TOPIC".into())
                     }
-                    | ResourceSource::All(ResourceKind::Endpoint) => {}
                 }
             }
         }
@@ -240,6 +259,10 @@ impl Control {
             EventKind::BridgeCreated { bridge: value }
             | EventKind::BridgeDestroyed { bridge: value } => [bridge(&value.id), None],
             EventKind::Dial { caller, peer, .. } => [channel(&caller.id), channel(&peer.id)],
+            EventKind::EndpointStateChange { endpoint } => [
+                self.endpoints.source(&endpoint.resource),
+                Some(specific(ResourceKind::Endpoint, 0)),
+            ],
             EventKind::PlaybackStarted { .. }
             | EventKind::PlaybackContinuing { .. }
             | EventKind::PlaybackFinished { .. }
@@ -247,7 +270,6 @@ impl Control {
             | EventKind::RecordingFinished { .. }
             | EventKind::RecordingFailed { .. } => [None, None],
             EventKind::StasisStart { .. }
-            | EventKind::EndpointStateChange { .. }
             | EventKind::StasisEnd { .. }
             | EventKind::ApplicationMoveFailed { .. }
             | EventKind::ApplicationReplaced { .. } => [None, None],
@@ -257,6 +279,7 @@ impl Control {
     pub(crate) fn route_resource_events(&mut self, outcome: &mut Outcome) {
         for notice in std::mem::take(&mut outcome.notices) {
             let sources = self.event_sources(&notice.kind, &outcome.ended_sources, notice.source);
+            let endpoints = self.channel_endpoint_sources(&sources, &outcome.ended_sources);
             for (name, application) in &self.applications {
                 if self
                     .resource_subscriptions
@@ -266,6 +289,9 @@ impl Control {
                             .iter()
                             .flatten()
                             .any(|source| subscriptions.interested_in(*source))
+                            || subscriptions
+                                .sources()
+                                .any(|source| endpoints.contains(&Some(source)))
                     })
                     && !outcome.events.iter().any(|event| {
                         event.application == *name
@@ -286,5 +312,42 @@ impl Control {
                 subscriptions.expire(ended.source());
             }
         }
+    }
+
+    fn channel_endpoint_sources(
+        &self,
+        sources: &[Option<ResourceSource>; 2],
+        ended: &[EndedSource],
+    ) -> [Option<ResourceSource>; 4] {
+        let mut result = [None; 4];
+        for (index, source) in sources.iter().enumerate() {
+            if let Some(ResourceSource::Specific {
+                kind: ResourceKind::Channel,
+                generation,
+            }) = source
+            {
+                let endpoint = self
+                    .channels
+                    .values()
+                    .find(|entry| entry.call.generation() == *generation)
+                    .map(|entry| entry.endpoint.as_str())
+                    .or_else(|| {
+                        ended.iter().find_map(|source| match source {
+                            EndedSource::Channel { key, endpoint }
+                                if key.generation == *generation =>
+                            {
+                                Some(endpoint.as_str())
+                            }
+                            EndedSource::Channel { .. } | EndedSource::Bridge { .. } => None,
+                        })
+                    });
+                if let Some(source) = endpoint.and_then(|endpoint| self.endpoints.source(endpoint))
+                {
+                    result[index * 2] = Some(source);
+                    result[index * 2 + 1] = Some(specific(ResourceKind::Endpoint, 0));
+                }
+            }
+        }
+        result
     }
 }

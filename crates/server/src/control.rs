@@ -1518,6 +1518,7 @@ impl Control {
                     id: id.clone(),
                     generation: entry.call.generation(),
                 },
+                endpoint: entry.endpoint.clone(),
             });
         self.finish_owner_recordings(&MediaOwner::Channel(CallKey {
             id: id.clone(),
@@ -1682,8 +1683,16 @@ impl Control {
     ) -> Result<Outcome, ControlError> {
         match signal {
             Signal::EndpointContact { key, presence } => {
-                self.endpoints.observe(&key, presence);
-                Ok(Outcome::empty())
+                let mut outcome = Outcome::empty();
+                if self.endpoints.observe(&key, presence) {
+                    outcome.notice(
+                        timestamp,
+                        &EventKind::EndpointStateChange {
+                            endpoint: self.endpoint("PJSIP", &key.resource)?,
+                        },
+                    );
+                }
+                Ok(outcome)
             }
             Signal::PeerDirection { key, direction } => {
                 let mut outcome = Outcome::empty();

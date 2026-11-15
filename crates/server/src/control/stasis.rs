@@ -85,7 +85,13 @@ impl Control {
             })
             .map(|(id, _)| id.clone())
             .collect();
-        self.append_subscribed_resources(application, &mut channel_ids, &mut bridge_ids)?;
+        let mut endpoint_ids = Vec::new();
+        self.append_subscribed_resources(
+            application,
+            &mut channel_ids,
+            &mut bridge_ids,
+            &mut endpoint_ids,
+        )?;
         channel_ids.sort();
         channel_ids.dedup();
         bridge_ids.sort();
@@ -95,7 +101,7 @@ impl Control {
             name: name.into(),
             channel_ids,
             bridge_ids,
-            endpoint_ids: Vec::new(),
+            endpoint_ids,
             device_names: Vec::new(),
             events_allowed: filters
                 .map(|filters| filters.allowed.clone())

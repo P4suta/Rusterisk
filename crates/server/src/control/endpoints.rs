@@ -1,7 +1,7 @@
 use super::{Control, ControlError};
 use rusterisk_api::{Endpoint, EndpointState};
 use rusterisk_config::Config;
-use rusterisk_core::ContactPresence;
+use rusterisk_core::{ContactPresence, ResourceKind, ResourceSource};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -11,6 +11,7 @@ pub struct EndpointKey {
 }
 
 struct Route {
+    source: u64,
     static_contact: bool,
     contact: ContactPresence,
 }
@@ -34,7 +35,8 @@ impl Endpoints {
         let routes = config
             .endpoints
             .iter()
-            .map(|endpoint| {
+            .enumerate()
+            .map(|(index, endpoint)| {
                 let static_contact = endpoint.aors.iter().any(|name| {
                     config
                         .aors
@@ -44,6 +46,7 @@ impl Endpoints {
                 (
                     endpoint.name.clone(),
                     Route {
+                        source: (1_u64 << 32) + index as u64 + 1,
                         static_contact,
                         contact: ContactPresence::Absent,
                     },
@@ -56,12 +59,38 @@ impl Endpoints {
         }
     }
 
-    pub(super) fn observe(&mut self, key: &EndpointKey, contact: ContactPresence) {
+    pub(super) fn source(&self, resource: &str) -> Option<ResourceSource> {
+        self.routes
+            .get(resource)
+            .map(|route| ResourceSource::Specific {
+                kind: ResourceKind::Endpoint,
+                generation: route.source,
+            })
+    }
+
+    pub(super) fn source_names(&self, generation: u64) -> impl Iterator<Item = String> + '_ {
+        let technology = (generation == 0 && !self.routes.is_empty()).then(|| "PJSIP".to_owned());
+        technology.into_iter().chain(
+            self.routes
+                .iter()
+                .filter(move |(_, route)| route.source == generation)
+                .map(|(name, _)| format!("PJSIP/{name}")),
+        )
+    }
+
+    pub(super) fn has_technology(&self, technology: &str) -> bool {
+        technology == "PJSIP" && !self.routes.is_empty()
+    }
+
+    pub(super) fn observe(&mut self, key: &EndpointKey, contact: ContactPresence) -> bool {
         if key.generation == self.generation {
             if let Some(route) = self.routes.get_mut(&key.resource) {
+                let changed = !route.static_contact && route.contact != contact;
                 route.contact = contact;
+                return changed;
             }
         }
+        false
     }
 }
 
