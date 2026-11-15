@@ -123,9 +123,11 @@ fn execute() -> Result<(), TaskError> {
     let arguments: Vec<String> = std::env::args().skip(1).take(4).collect();
     match arguments.as_slice() {
         [task] if task == "policy" => policy(),
+        [task] if task == "core-msrv" => core_msrv(),
         [task] if task == "check" => {
             run("cargo", &["fmt", "--all", "--", "--check"])?;
             policy()?;
+            core_msrv()?;
             run(
                 "cargo",
                 &[
@@ -158,9 +160,26 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|security>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|security>".into(),
         )),
     }
+}
+
+fn core_msrv() -> Result<(), TaskError> {
+    run(
+        "rustup",
+        &[
+            "run",
+            "1.89.0",
+            "cargo",
+            "test",
+            "--package",
+            "rusterisk-core",
+            "--locked",
+            "--target-dir",
+            "target/core-msrv",
+        ],
+    )
 }
 
 fn main() -> ExitCode {
