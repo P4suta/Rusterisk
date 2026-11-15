@@ -2,6 +2,8 @@ use rusterisk_media::Frame;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+mod history;
+pub use history::{CallHistoryChange, CallRecord};
 
 const MAX_RECORDING: u64 = 1024 * 1024 * 1024;
 
@@ -111,10 +113,15 @@ impl Store {
         match version {
             0 => {
                 let transaction = connection.transaction()?;
-                transaction.execute_batch("CREATE TABLE calls (id TEXT PRIMARY KEY NOT NULL, started_at TEXT NOT NULL, ended_at TEXT, outcome TEXT NOT NULL CHECK (outcome IN ('active','completed','interrupted'))); CREATE TABLE recordings (name TEXT PRIMARY KEY NOT NULL, format TEXT NOT NULL, outcome TEXT NOT NULL); PRAGMA user_version=1;")?;
+                transaction.execute_batch("CREATE TABLE calls (id TEXT PRIMARY KEY NOT NULL, channel TEXT NOT NULL, generation TEXT NOT NULL, started_at TEXT NOT NULL, ended_at TEXT, outcome TEXT NOT NULL CHECK (outcome IN ('active','completed','interrupted'))); CREATE TABLE recordings (name TEXT PRIMARY KEY NOT NULL, format TEXT NOT NULL, outcome TEXT NOT NULL); PRAGMA user_version=2;")?;
                 transaction.commit()?;
             }
-            1 => {}
+            1 => {
+                let transaction = connection.transaction()?;
+                transaction.execute_batch("ALTER TABLE calls ADD COLUMN channel TEXT NOT NULL DEFAULT ''; ALTER TABLE calls ADD COLUMN generation TEXT NOT NULL DEFAULT '0'; UPDATE calls SET channel=id; PRAGMA user_version=2;")?;
+                transaction.commit()?;
+            }
+            2 => {}
             _ => return Err(StorageError::UnknownSchema),
         }
         connection.execute("UPDATE calls SET outcome='interrupted', ended_at=COALESCE(ended_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE outcome='active'", [])?;
@@ -155,7 +162,7 @@ impl Store {
             return Err(StorageError::Capacity);
         }
         self.connection.execute(
-            "INSERT INTO calls (id,started_at,outcome) VALUES (?1,?2,'active')",
+            "INSERT INTO calls (id,channel,generation,started_at,outcome) VALUES (?1,?1,'0',?2,'active')",
             (id, timestamp),
         )?;
         Ok(())
