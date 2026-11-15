@@ -171,12 +171,14 @@ fn execute() -> Result<(), TaskError> {
         [task] if task == "policy" => policy(),
         [task] if task == "core-msrv" => core_msrv(),
         [task] if task == "node-check" => node_check(),
+        [task] if task == "browser-check" => xtask::browser::check(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string())),
         [task] if task == "check" => {
             run("cargo", &["fmt", "--all", "--", "--check"])?;
             run("cargo", &["fmt", "--manifest-path", "xtask/fuzz/Cargo.toml", "--", "--check"])?;
             policy()?;
             core_msrv()?;
             node_check()?;
+            xtask::browser::check(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string()))?;
             run(
                 "cargo",
                 &[

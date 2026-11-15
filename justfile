@@ -15,6 +15,9 @@ core-msrv:
 node-check:
     cargo run --locked --target-dir target/xtask --package xtask -- node-check
 
+browser-check:
+    cargo run --locked --target-dir target/xtask --package xtask -- browser-check
+
 security:
     cargo run --locked --target-dir target/xtask --package xtask -- security
 

@@ -7,6 +7,7 @@ use std::{
 #[derive(Debug)]
 pub enum BrowserError {
     Io(std::io::Error),
+    Process(crate::process::ProcessError),
     Package,
     Declaration,
     Cleanup {
@@ -19,6 +20,7 @@ impl std::fmt::Display for BrowserError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io(error) => error.fmt(formatter),
+            Self::Process(error) => error.fmt(formatter),
             Self::Package => formatter.write_str(
                 "browser signaling package must be the locked sip.js 0.21.2 installation",
             ),
@@ -38,6 +40,48 @@ impl From<std::io::Error> for BrowserError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
     }
+}
+
+impl From<crate::process::ProcessError> for BrowserError {
+    fn from(error: crate::process::ProcessError) -> Self {
+        Self::Process(error)
+    }
+}
+
+pub fn check_with(
+    root: &Path,
+    mut execute: impl FnMut(
+        &mut std::process::Command,
+        std::time::Duration,
+    ) -> Result<(), crate::process::ProcessError>,
+) -> Result<(), BrowserError> {
+    let directory = root.join("examples/browser");
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let mut command = std::process::Command::new(npm);
+    command
+        .current_dir(&directory)
+        .args(["ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
+    println!("browser check: installing locked dependencies without scripts");
+    execute(&mut command, std::time::Duration::from_secs(120))?;
+    prepare_types(root)?;
+    for arguments in [
+        ["run", "check"].as_slice(),
+        ["test"].as_slice(),
+        ["run", "build"].as_slice(),
+    ] {
+        println!("browser check: npm {}", arguments.join(" "));
+        execute(
+            std::process::Command::new(npm)
+                .current_dir(&directory)
+                .args(arguments),
+            std::time::Duration::from_secs(120),
+        )?;
+    }
+    Ok(())
+}
+
+pub fn check(root: &Path) -> Result<(), BrowserError> {
+    check_with(root, crate::process::run)
 }
 
 #[derive(Clone, Copy)]
