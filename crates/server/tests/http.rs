@@ -4,8 +4,11 @@ use axum::{
 };
 use base64::Engine;
 use http_body_util::BodyExt;
+use rusterisk_api::{Application, ChannelId};
 use rusterisk_config::Config;
-use rusterisk_server::{http::router, ControlError, Controller};
+use rusterisk_server::{
+    http::router, ControlError, Controller, Credentials, IncomingCall, IncomingTarget,
+};
 use tower::ServiceExt;
 
 fn config() -> Result<Config, ControlError> {
@@ -26,6 +29,98 @@ fn request(method: &str, path: &str, user: Option<&str>) -> Result<Request<Body>
     request
         .body(Body::empty())
         .map_err(|error| ControlError::Adapter(error.to_string()))
+}
+
+#[tokio::test]
+async fn app_queries_require_authentication_and_follow_subscription_lifetimes(
+) -> Result<(), ControlError> {
+    let (controller, runner, _effects) = Controller::new(config()?, 4);
+    let task = tokio::spawn(runner.run());
+    let result = async {
+        let app = router(controller.clone());
+        assert_eq!(
+            app.clone()
+                .oneshot(request("GET", "/ari/applications", None)?)
+                .await
+                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let subscription = controller
+            .subscribe(
+                Credentials::new("test".into(), "password".into())?,
+                None,
+                "phones".into(),
+            )
+            .await?;
+        let listed = app
+            .clone()
+            .oneshot(request("GET", "/ari/applications", Some("reader"))?)
+            .await
+            .map_err(|error| ControlError::Adapter(error.to_string()))?;
+        assert_eq!(listed.status(), StatusCode::OK);
+        let listed: Vec<Application> = serde_json::from_slice(
+            &listed
+                .into_body()
+                .collect()
+                .await
+                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .to_bytes(),
+        )?;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "phones");
+        let id = ChannelId::try_from("incoming".to_owned())?;
+        controller
+            .incoming(IncomingCall {
+                id: id.clone(),
+                endpoint: "phone".into(),
+                caller: "100".into(),
+                context: "internal".into(),
+                extension: "100".into(),
+                target: IncomingTarget::Stasis {
+                    application: "phones".into(),
+                    arguments: Vec::new(),
+                },
+            })
+            .await?;
+        let detail = app
+            .clone()
+            .oneshot(request("GET", "/ari/applications/phones", Some("reader"))?)
+            .await
+            .map_err(|error| ControlError::Adapter(error.to_string()))?;
+        assert_eq!(detail.status(), StatusCode::OK);
+        let detail: Application = serde_json::from_slice(
+            &detail
+                .into_body()
+                .collect()
+                .await
+                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .to_bytes(),
+        )?;
+        assert_eq!(detail.channel_ids, [id]);
+        assert_eq!(
+            app.clone()
+                .oneshot(request("GET", "/ari/applications/missing", Some("reader"))?)
+                .await
+                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        drop(subscription);
+        assert_eq!(
+            app.oneshot(request("GET", "/ari/applications/phones", Some("reader"))?)
+                .await
+                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+        Ok(())
+    }
+    .await;
+    controller.shutdown();
+    task.await
+        .map_err(|error| ControlError::Adapter(error.to_string()))??;
+    result
 }
 
 #[tokio::test]

@@ -14,9 +14,10 @@ Leaving Stasis releases the Rust client's control handle without ending the serv
 Bridge creation, membership changes, deletion, channel playback, bridge playback, and recording use the current resource generation.
 Stored recordings support listing, metadata, copying, deletion, and streamed `audio/wav` downloads.
 The ping endpoint returns a `pong` response.
+App queries report subscribed apps and their channel and bridge resources.
 
 Known operations without working adapters return `501`.
-App resource queries and explicit subscriptions, endpoint queries, sound queries, server information, external media, and channel redirection still use that response.
+Explicit resource subscriptions, endpoint queries, sound queries, server information, external media, and channel redirection still use that response.
 Requests with JSON bodies also return `501` after body validation.
 Playback supports start, pause, resume, and stop.
 Seeking and media lists remain unsupported.

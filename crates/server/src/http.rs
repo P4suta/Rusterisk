@@ -366,6 +366,10 @@ async fn dispatch(
         };
     }
     let action = match (method.as_str(), segments.as_slice()) {
+        ("GET", ["ari", "applications"]) => Action::ListApplications,
+        ("GET", ["ari", "applications", application]) => {
+            Action::GetApplication(id(application)?.to_string())
+        }
         ("POST", ["ari", "channels", channel, "record"]) => {
             let arguments = recording::arguments(parameters)?;
             Action::RecordChannel {
