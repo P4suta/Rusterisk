@@ -8,6 +8,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
+#[cfg(test)]
+mod control_tests;
 
 pub struct SocketPair {
     data: UdpSocket,
@@ -98,6 +100,12 @@ pub struct RtpLink {
     receiver: RtpReceiver,
     sender: RtpSender,
     telephone: Option<TelephoneTransport>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ControlReception {
+    Accepted,
+    Rejected,
 }
 
 struct TelephoneTransport {
@@ -213,7 +221,14 @@ impl RtpLink {
         })
     }
 
-    pub async fn run(mut self) -> Result<LinkStats, MediaError> {
+    pub async fn run(self) -> Result<LinkStats, MediaError> {
+        self.serve(|_receipt| Ok(())).await
+    }
+
+    async fn serve(
+        mut self,
+        mut control_receipt: impl FnMut(ControlReception) -> Result<(), MediaError>,
+    ) -> Result<LinkStats, MediaError> {
         let period = Duration::from_millis(20);
         let mut playout =
             tokio::time::interval_at(tokio::time::Instant::now() + period * 2, period);
@@ -255,7 +270,13 @@ impl RtpLink {
                 }
                 packet = self.sockets.control.recv_from(&mut control) => {
                     let (size, peer) = packet.map_err(failure)?;
-                    if peer != control_peer || size > MAX_PACKET || rusterisk_media::inspect_rtcp(&control[..size]).is_err() { stats.dropped += 1; }
+                    let receipt = if peer != control_peer || size > MAX_PACKET || rusterisk_media::inspect_rtcp(&control[..size]).is_err() {
+                        stats.dropped += 1;
+                        ControlReception::Rejected
+                    } else {
+                        ControlReception::Accepted
+                    };
+                    control_receipt(receipt)?;
                 }
                 frame = self.channels.outgoing.recv() => {
                     let Some(frame) = frame else { break; };

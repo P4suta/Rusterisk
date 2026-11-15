@@ -1,7 +1,10 @@
+use super::{ControlReception, LinkStats, RtpChannels, RtpLink, RtpSession, SocketPair};
 use rusterisk_core::PeerMediaDirection;
 use rusterisk_media::{mulaw_decode, AudioFormat, Frame, MediaError, RtpPacket, RtpSender};
-use rusterisk_server::rtp::{LinkStats, RtpChannels, RtpLink, RtpSession, SocketPair};
-use std::{net::Ipv4Addr, time::Duration};
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    time::Duration,
+};
 use tokio::sync::{mpsc, watch};
 
 fn failure(error: impl std::fmt::Display) -> MediaError {
@@ -25,20 +28,27 @@ async fn finish(
     }
 }
 
-#[tokio::test]
-async fn malformed_compound_packets_from_the_peer_leave_known_audio_running(
-) -> Result<(), MediaError> {
-    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+struct Fixture {
+    local: SocketAddr,
+    control: SocketAddr,
+    link: RtpLink,
+    received: mpsc::Receiver<Frame>,
+    outgoing: mpsc::Sender<Frame>,
+    stop: watch::Sender<bool>,
+    _direction: watch::Sender<PeerMediaDirection>,
+}
+
+fn fixture(peer: &SocketPair) -> Result<Fixture, MediaError> {
     let sockets = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
     let local = sockets.local_addr().map_err(failure)?;
     let control = sockets.control_addr().map_err(failure)?;
-    let (incoming, mut received) = mpsc::channel(3);
+    let (incoming, received) = mpsc::channel(3);
     let (digits, _digits) = mpsc::channel(16);
     let (outgoing, output) = mpsc::channel(3);
     let (_commands, commands) = mpsc::channel(8);
     let (completed, _completed) = mpsc::channel(8);
     let (stop, stopped) = watch::channel(false);
-    let (_direction, direction) = watch::channel(PeerMediaDirection::SendReceive);
+    let (directed, direction) = watch::channel(PeerMediaDirection::SendReceive);
     let link = RtpLink::new(
         sockets,
         RtpSession {
@@ -57,7 +67,34 @@ async fn malformed_compound_packets_from_the_peer_leave_known_audio_running(
             direction,
         },
     )?;
-    let task = tokio::spawn(link.run());
+    Ok(Fixture {
+        local,
+        control,
+        link,
+        received,
+        outgoing,
+        stop,
+        _direction: directed,
+    })
+}
+
+#[tokio::test]
+async fn malformed_compound_packets_from_the_peer_leave_known_audio_running(
+) -> Result<(), MediaError> {
+    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let Fixture {
+        local,
+        control,
+        link,
+        mut received,
+        outgoing,
+        stop,
+        _direction,
+    } = fixture(&peer)?;
+    let (receipts, mut processed) = mpsc::channel(8);
+    let task = tokio::spawn(
+        link.serve(move |receipt| receipts.try_send(receipt).map_err(|_| MediaError::Capacity)),
+    );
     let malformed: &[&[u8]] = &[
         &[0x80, 201, 0, 2, 0, 0, 0, 7],
         &[0x80, 201, 0, 1, 0, 0, 0, 7, 0x80, 202, 0, 3],
@@ -72,6 +109,20 @@ async fn malformed_compound_packets_from_the_peer_leave_known_audio_running(
         let mut observed = Vec::with_capacity(4);
         for stage in 0..2 {
             if stage == 1 {
+                let valid = rusterisk_media::sender_report(7, 0, 0, 0, 0, "call")?;
+                let size = peer
+                    .control()
+                    .send_to(&valid, control)
+                    .await
+                    .map_err(failure)?;
+                if size != valid.len() {
+                    return Err(MediaError::InvalidPacket);
+                }
+                if processed.recv().await.ok_or(MediaError::UnknownStream)?
+                    != ControlReception::Accepted
+                {
+                    return Err(MediaError::InvalidPacket);
+                }
                 for packet in malformed {
                     let size = peer
                         .control()
@@ -79,6 +130,12 @@ async fn malformed_compound_packets_from_the_peer_leave_known_audio_running(
                         .await
                         .map_err(failure)?;
                     if size != packet.len() {
+                        return Err(MediaError::InvalidPacket);
+                    }
+                }
+                for _ in malformed {
+                    let receipt = processed.recv().await.ok_or(MediaError::UnknownStream)?;
+                    if receipt != ControlReception::Rejected {
                         return Err(MediaError::InvalidPacket);
                     }
                 }
@@ -133,5 +190,73 @@ async fn malformed_compound_packets_from_the_peer_leave_known_audio_running(
     let replacement =
         SocketPair::bind(local.ip(), local.port(), local.port() + 1).map_err(failure)?;
     assert_eq!(replacement.local_addr().map_err(failure)?, local);
+    Ok(())
+}
+
+enum ReceiptFailure {
+    Closed,
+    Full,
+}
+
+#[tokio::test]
+async fn receipt_failures_end_the_owned_worker_and_release_its_sockets() -> Result<(), MediaError> {
+    for failure_kind in [ReceiptFailure::Closed, ReceiptFailure::Full] {
+        let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+        let Fixture {
+            local,
+            control,
+            link,
+            received: _received,
+            outgoing: _outgoing,
+            stop,
+            _direction,
+        } = fixture(&peer)?;
+        let (receipts, processed) = mpsc::channel(8);
+        let _processed = match failure_kind {
+            ReceiptFailure::Closed => {
+                drop(processed);
+                None
+            }
+            ReceiptFailure::Full => {
+                for _ in 0..8 {
+                    receipts
+                        .try_send(ControlReception::Rejected)
+                        .map_err(failure)?;
+                }
+                Some(processed)
+            }
+        };
+        let task =
+            tokio::spawn(link.serve(move |receipt| {
+                receipts.try_send(receipt).map_err(|_| MediaError::Capacity)
+            }));
+        let packet = [0x80, 201, 0, 2, 0, 0, 0, 7];
+        let operation = peer
+            .control()
+            .send_to(&packet, control)
+            .await
+            .map_err(failure)
+            .and_then(|size| {
+                if size == packet.len() {
+                    Ok(())
+                } else {
+                    Err(MediaError::InvalidPacket)
+                }
+            });
+        if operation.is_err() {
+            stop.send_replace(true);
+        }
+        let outcome = finish(task).await;
+        if let Err(primary) = operation {
+            return match outcome {
+                Ok(_) => Err(primary),
+                Err(cleanup) => Err(failure(format!("{primary}; cleanup failed: {cleanup}"))),
+            };
+        }
+        let replacement =
+            SocketPair::bind(local.ip(), local.port(), local.port() + 1).map_err(failure)?;
+        assert_eq!(replacement.local_addr().map_err(failure)?, local);
+        assert_eq!(outcome.err(), Some(MediaError::Capacity));
+    }
     Ok(())
 }
