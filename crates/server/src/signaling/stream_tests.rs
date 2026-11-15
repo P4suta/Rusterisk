@@ -24,7 +24,7 @@ use tokio_rustls::rustls::pki_types::ServerName;
 mod domain_verification;
 
 fn configuration(protocol: &str, files: &str) -> Result<Config, ControlError> {
-    Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", &format!("[stream]\ntype=transport\nprotocol={protocol}\nbind=127.0.0.1:0\n{files}[auth]\ntype=auth\nusername=phone\npassword=test-password\n[aor]\ntype=aor\n[phone]\ntype=endpoint\ntransport=stream\nauth=auth\naors=aor\ncontext=internal\nallow=ulaw\n"), "", "[internal]\nexten => 100,1,Stasis(calls)\n").map_err(failure)
+    Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", &format!("[stream]\ntype=transport\nprotocol={protocol}\nbind=127.0.0.1:0\n{files}[auth]\ntype=auth\nusername=phone\npassword=test-password\n[phone]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=stream\nauth=auth\naors=phone\ncontext=internal\nallow=ulaw\n"), "", "[internal]\nexten => 100,1,Stasis(calls)\n").map_err(failure)
 }
 
 async fn receive<S: AsyncRead + Unpin>(

@@ -106,7 +106,7 @@ async fn wait_state(controller: &Controller, expected: EndpointState) -> Result<
 #[tokio::test]
 async fn actual_registration_removal_and_expiration_reach_endpoint_queries(
 ) -> Result<(), ControlError> {
-    let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[dynamic]\ntype=aor\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=dynamic\nallow=ulaw\n", "", "").map_err(failure)?;
+    let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[phone]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=phone\nallow=ulaw\n", "", "").map_err(failure)?;
     let (controller, runner, effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
     let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;

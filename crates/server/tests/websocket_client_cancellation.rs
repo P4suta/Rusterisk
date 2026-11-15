@@ -37,7 +37,7 @@ async fn cancelled_during(retry: bool) -> Result<(), ControlError> {
         .await
         .map_err(failure)?;
     let address = listener.local_addr().map_err(failure)?;
-    let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[dynamic]\ntype=aor\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=dynamic\nallow=ulaw\n", "", "").map_err(failure)?
+    let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[phone]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=phone\nallow=ulaw\n", "", "").map_err(failure)?
         .with_websocket_configuration("", &format!("[agent]\ntype=websocket_client\nconnection_type=per_call_config\nuri=ws://{address}/media?token=private-query\nprotocols=media\nconnection_timeout=1000\nreconnect_interval=1000\nreconnect_attempts=2\n")).map_err(failure)?;
     let (controller, runner, effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);

@@ -55,7 +55,7 @@ fn request(
 }
 
 fn configuration(protocol: &str, encryption: &str) -> Result<Config, ControlError> {
-    Config::parse(&format!("[general]\nbindaddr=127.0.0.1\n{encryption}"), "[general]\nallowed_origins=https://browser.example\n[app]\ntype=user\npassword=test-password\n", &format!("[browser]\ntype=transport\nprotocol={protocol}\nbind=0.0.0.0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[aor]\ntype=aor\n[phone]\ntype=endpoint\ntransport=browser\nauth=auth\naors=aor\nallow=ulaw\n"), "", "").map_err(failure)
+    Config::parse(&format!("[general]\nbindaddr=127.0.0.1\n{encryption}"), "[general]\nallowed_origins=https://browser.example\n[app]\ntype=user\npassword=test-password\n", &format!("[browser]\ntype=transport\nprotocol={protocol}\nbind=0.0.0.0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[phone]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=browser\nauth=auth\naors=phone\nallow=ulaw\n"), "", "").map_err(failure)
 }
 
 async fn receive<S: AsyncRead + AsyncWrite + Unpin>(

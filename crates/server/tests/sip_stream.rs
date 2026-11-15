@@ -23,7 +23,7 @@ fn failure(error: impl std::fmt::Display) -> ControlError {
 }
 
 fn configuration() -> Result<Config, ControlError> {
-    Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "[stream]\ntype=transport\nprotocol=tcp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[aor]\ntype=aor\n[phone]\ntype=endpoint\ntransport=stream\nauth=auth\naors=aor\ncontext=internal\nallow=ulaw\n", "", "[internal]\nexten => 100,1,Stasis(calls)\n").map_err(failure)
+    Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "[stream]\ntype=transport\nprotocol=tcp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[phone]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=stream\nauth=auth\naors=phone\ncontext=internal\nallow=ulaw\n", "", "[internal]\nexten => 100,1,Stasis(calls)\n").map_err(failure)
 }
 
 async fn receive(
