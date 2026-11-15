@@ -43,6 +43,8 @@ fn media_configuration_rejects_unknown_options_and_inconsistent_security_at_the_
         ("verify_server_hostname=no", 7),
         ("password=unpaired", 7),
         ("connection_timeout=0", 7),
+        ("connection_timeout=invalid", 7),
+        ("verify_server_cert=invalid", 7),
         ("reconnect_attempts=0", 7),
     ] {
         let result = base()?.with_websocket_configuration("", &format!("{prefix}{option}\n"));

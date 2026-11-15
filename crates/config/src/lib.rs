@@ -184,7 +184,7 @@ impl Section {
             Some("no" | "false" | "0") => Ok(false),
             Some(_) => Err(ConfigError::at(
                 file,
-                self.line,
+                self.position(key),
                 format!("{key} must be yes or no"),
             )),
         }
@@ -195,7 +195,7 @@ impl Section {
             None => Ok(default),
             Some(value) => value
                 .parse()
-                .map_err(|_| ConfigError::at(file, self.line, format!("invalid {key}"))),
+                .map_err(|_| ConfigError::at(file, self.position(key), format!("invalid {key}"))),
         }
     }
 }
