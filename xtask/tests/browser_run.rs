@@ -55,3 +55,26 @@ fn browser_execution_bounds_every_phase_and_restricts_network_to_dependency_fetc
     assert!(RunPlan::new("fixture", "/same", "/same", &image).is_err());
     Ok(())
 }
+
+#[test]
+fn browser_compile_admits_the_native_test_binary_without_expanding_other_file_limits(
+) -> Result<(), xtask::browser::BrowserError> {
+    let image = format!("sha256:{}", "a".repeat(64));
+    let plan = RunPlan::new("fixture", "/owned/source", "/owned/state", &image)?;
+    for phase in Phase::ALL {
+        let expected = if phase == Phase::Compile {
+            "fsize=536870912:536870912"
+        } else {
+            "fsize=134217728:134217728"
+        };
+        assert!(
+            plan.step(phase)
+                .arguments
+                .iter()
+                .any(|argument| argument == expected),
+            "{}",
+            phase.label()
+        );
+    }
+    Ok(())
+}

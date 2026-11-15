@@ -96,6 +96,11 @@ impl RunPlan {
     }
 
     pub fn step(&self, phase: Phase) -> Step {
+        let file_size = if phase == Phase::Compile {
+            "fsize=536870912:536870912"
+        } else {
+            "fsize=134217728:134217728"
+        };
         let budget = match phase {
             Phase::Fetch | Phase::Compile => 900,
             Phase::Install | Phase::Types | Phase::Run => 180,
@@ -128,7 +133,7 @@ impl RunPlan {
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges",
             "--ulimit",
-            "fsize=134217728:134217728",
+            file_size,
             "--tmpfs",
             "/tmp:mode=1777,size=128m",
             "--mount",
