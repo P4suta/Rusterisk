@@ -129,6 +129,7 @@ impl Store {
         }
         connection.execute("UPDATE calls SET outcome='interrupted', ended_at=COALESCE(ended_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE outcome='active'", [])?;
         let mut count = 0usize;
+        let mut interrupted = Vec::new();
         for entry in std::fs::read_dir(&recordings)? {
             let entry = entry?;
             count += 1;
@@ -143,14 +144,16 @@ impl Store {
                 .extension()
                 .is_some_and(|value| value == "partial")
             {
-                let path = entry.path();
-                recover(&path)?;
-                let name = path
-                    .file_stem()
-                    .and_then(|name| name.to_str())
-                    .ok_or(StorageError::InvalidName)?;
-                connection.execute("INSERT INTO recordings (name,format,outcome) VALUES (?1,'wav','interrupted') ON CONFLICT(name) DO UPDATE SET outcome='interrupted'", [name])?;
+                interrupted.push(entry.path());
             }
+        }
+        for path in interrupted {
+            recover(&path)?;
+            let name = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .ok_or(StorageError::InvalidName)?;
+            connection.execute("INSERT INTO recordings (name,format,outcome) VALUES (?1,'wav','interrupted') ON CONFLICT(name) DO UPDATE SET outcome='interrupted'", [name])?;
         }
         Ok(Self {
             connection,
