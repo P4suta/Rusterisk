@@ -261,6 +261,20 @@ impl Signaling {
         self.transmit(listener, datagrams).await?;
         for event in output.events {
             match event {
+                SipEvent::EndpointContact {
+                    endpoint,
+                    generation,
+                    presence,
+                } => {
+                    self.notify(Signal::EndpointContact {
+                        key: crate::EndpointKey {
+                            resource: endpoint,
+                            generation,
+                        },
+                        presence,
+                    })
+                    .await?;
+                }
                 SipEvent::PeerDirection {
                     id,
                     generation,

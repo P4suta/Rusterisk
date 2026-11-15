@@ -9,6 +9,7 @@ use rsipstack::sip::{
     HeadersExt, Method, Request, SipMessage,
 };
 use rusterisk_config::{Codec, Config};
+use rusterisk_core::ContactPresence;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
@@ -269,6 +270,11 @@ impl Session {
 }
 
 pub enum SipEvent {
+    EndpointContact {
+        endpoint: String,
+        generation: u64,
+        presence: ContactPresence,
+    },
     PeerDirection {
         id: String,
         generation: u64,
@@ -395,6 +401,7 @@ pub struct PendingInvite {
 
 pub struct Engine {
     config: Config,
+    configuration_generation: u64,
     seed: [u8; 32],
     serial: u64,
     nonces: BTreeMap<String, Nonce>,
@@ -410,6 +417,7 @@ impl Engine {
     pub fn new(config: Config, seed: [u8; 32]) -> Self {
         Self {
             config,
+            configuration_generation: 1,
             seed,
             serial: 0,
             nonces: BTreeMap::new(),
@@ -578,7 +586,6 @@ impl Engine {
         self.nonces.retain(|_, value| value.expires > now);
         self.cache
             .retain(|_, value| value.expires.is_none_or(|expires| expires > now));
-        self.contacts.retain(|_, (_, expires)| *expires > now);
         let mut request = match SipMessage::try_from(bytes)? {
             SipMessage::Request(request) => request,
             SipMessage::Response(response) => {
@@ -689,19 +696,33 @@ impl Engine {
                                 .map_err(|_| SipError::InvalidPacket)?
                                 .unwrap_or(300)
                                 .min(3600);
-                            if expires == 0 {
-                                self.contacts.remove(&endpoint.name);
-                            } else {
-                                self.contacts.insert(
-                                    endpoint.name.clone(),
-                                    (peer, now.saturating_add(u64::from(expires) * 1000)),
-                                );
-                            }
                             let extra = format!(
                                 "Contact: {}\r\nExpires: {expires}\r\n",
                                 request.contact_header()?.value()
                             );
-                            self.render_response(&request, 200, "OK", &extra, "")?
+                            let reply = self.render_response(&request, 200, "OK", &extra, "")?;
+                            let changed = if expires == 0 {
+                                self.contacts.remove(&endpoint.name).is_some()
+                            } else {
+                                self.contacts
+                                    .insert(
+                                        endpoint.name.clone(),
+                                        (peer, now.saturating_add(u64::from(expires) * 1000)),
+                                    )
+                                    .is_none_or(|(_, expires)| expires <= now)
+                            };
+                            if changed {
+                                events.push(SipEvent::EndpointContact {
+                                    endpoint: endpoint.name,
+                                    generation: self.configuration_generation,
+                                    presence: if expires == 0 {
+                                        ContactPresence::Absent
+                                    } else {
+                                        ContactPresence::Present
+                                    },
+                                });
+                            }
+                            reply
                         }
                     } else if self.pending.len() + self.incoming.len() >= 64 {
                         self.render_response(&request, 486, "Busy Here", "", "")?
@@ -793,6 +814,20 @@ impl Engine {
             | Method::Other(_) => self.render_response(&request, 501, "Not Implemented", "", "")?,
         };
         self.cache_reply(key, request, peer, now, reply, events)
+    }
+
+    fn expire_contacts(&mut self, now: u64, events: &mut Vec<SipEvent>) {
+        self.contacts.retain(|endpoint, (_, expires)| {
+            if *expires > now {
+                return true;
+            }
+            events.push(SipEvent::EndpointContact {
+                endpoint: endpoint.clone(),
+                generation: self.configuration_generation,
+                presence: ContactPresence::Absent,
+            });
+            false
+        });
     }
 
     fn render_response(

@@ -522,6 +522,7 @@ impl Engine {
 
     pub fn tick(&mut self, now: u64) -> Result<Output, SipError> {
         let mut output = self.tick_inner(now)?;
+        self.expire_contacts(now, &mut output.events);
         self.track_output(&output, now)?;
         output.datagrams.extend(self.transactions.tick(now));
         Ok(output)
