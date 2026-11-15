@@ -149,7 +149,7 @@ impl Control {
         options: RecordingOptions,
         application: Option<StasisApplication>,
     ) -> Result<Outcome, ControlError> {
-        if options.beep || options.max_silence_seconds.seconds() != 0 {
+        if options.beep {
             return Err(ControlError::Unsupported);
         }
         if self.recordings.contains_key(&name) {

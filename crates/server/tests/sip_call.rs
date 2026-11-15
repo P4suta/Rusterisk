@@ -100,6 +100,20 @@ async fn receive_audio(peer: &SocketPair, expected: i32) -> Result<(), ControlEr
     .map_err(failure)?
 }
 
+fn drain_received_audio(peer: &SocketPair) -> Result<(), ControlError> {
+    let mut bytes = [0; 1501];
+    for _ in 0..128 {
+        match peer.data().try_recv_from(&mut bytes) {
+            Ok((size, _)) => {
+                RtpPacket::parse(&bytes[..size]).map_err(failure)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) => return Err(failure(error)),
+        }
+    }
+    Err(ControlError::Capacity)
+}
+
 async fn receive_digit(
     events: &mut tokio::sync::mpsc::Receiver<rusterisk_api::Event>,
     channel: &ChannelId,
@@ -857,8 +871,9 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
         }
         let destination = Session::parse(std::str::from_utf8(&answered.body).map_err(failure)?, &[Codec::Pcmu]).map_err(failure)?.remote;
         let mut sender = RtpSender::new(AudioFormat::Pcmu, 0, [19; 10]).map_err(failure)?;
-        for (index, name) in ["received-info", "received-rtp"].into_iter().enumerate() {
-        let request = Request::builder().method("POST").uri(format!("/ari/channels/{channel}/record?name={name}&format=wav&terminateOn=%23"))
+        for (index, name) in ["received-info", "received-rtp", "received-silence"].into_iter().enumerate() {
+        let options = if index == 2 { "maxSilenceSeconds=1" } else { "terminateOn=%23" };
+        let request = Request::builder().method("POST").uri(format!("/ari/channels/{channel}/record?name={name}&format=wav&{options}"))
             .header("Authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("app:test-password"))).body(Body::empty()).map_err(failure)?;
         assert_eq!(app.clone().oneshot(request).await.map_err(failure)?.status(), StatusCode::CREATED);
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -876,6 +891,7 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
             period.tick().await;
             let packet = sender.packet(Frame::new(&[1234; 160], 8000).map_err(failure)?).map_err(failure)?.encode().map_err(failure)?;
             audio.data().send_to(&packet, destination).await.map_err(failure)?;
+            drain_received_audio(&audio)?;
         }
         if index == 0 {
             let body = "Signal=#\r\nDuration=120\r\n";
@@ -885,11 +901,18 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
                 .replace("Content-Length: 0\r\n\r\n", &format!("Content-Type: application/dtmf-relay\r\nContent-Length: {}\r\n\r\n{body}", body.len()));
             phone.send_to(info.as_bytes(), target).await.map_err(failure)?;
             assert_eq!(response(&phone).await?.status_code.code(), 200);
-        } else {
+        } else if index == 1 {
             for sequence in 1..=3 {
                 let event = TelephoneEvent::new(DtmfDigit::Hash, true, 10, 960).map_err(failure)?.encode();
                 let packet = RtpPacket::new(101, sequence, 1000, 0x19191919, &event).map_err(failure)?.encode().map_err(failure)?;
                 audio.data().send_to(&packet, destination).await.map_err(failure)?;
+            }
+        } else {
+            for _ in 0..60 {
+                period.tick().await;
+                let packet = sender.packet(Frame::new(&[0; 160], 8000).map_err(failure)?).map_err(failure)?.encode().map_err(failure)?;
+                audio.data().send_to(&packet, destination).await.map_err(failure)?;
+                drain_received_audio(&audio)?;
             }
         }
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -905,11 +928,14 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
         let mut saved = rusterisk_storage::WaveReader::open(&directory.path().join(format!("recordings/{name}.wav"))).map_err(failure)?;
         let mut consecutive = 0;
         let mut longest = 0;
+        let mut silent_tail = 0;
         while let Some(frame) = saved.read_frame().map_err(failure)? {
             consecutive = if frame.samples().iter().all(|sample| (i32::from(*sample) - 1234).abs() < 300) { consecutive + 1 } else { 0 };
             longest = longest.max(consecutive);
+            silent_tail = if frame.samples().iter().all(|sample| sample.unsigned_abs() < 128) { silent_tail + 1 } else { 0 };
         }
         assert!(longest >= 6);
+        if index == 2 { assert_eq!(silent_tail, 10); }
         }
         controller.execute(credentials()?, None, Action::CreateBridge { id: id("playback-mix")?, name: String::new() }).await?;
         controller.execute(credentials()?, None, Action::AddChannels { bridge: id("playback-mix")?, channels: [channel.clone()].into_iter().collect() }).await?;
