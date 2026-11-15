@@ -136,6 +136,14 @@ fn execute() -> Result<(), TaskError> {
     let arguments: Vec<String> = std::env::args().skip(1).take(6).collect();
     match arguments.as_slice() {
         [task] if task == "browser-types" => xtask::browser::prepare_types(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string())),
+        [task, mode, flag, image] if task == "browser" && flag == "--image" => {
+            let execution = match mode.as_str() {
+                "--dry-run" => xtask::browser::Execution::DryRun,
+                "--run" => xtask::browser::Execution::Run,
+                _ => return Err(TaskError::Contract("browser requires --dry-run or --run".into())),
+            };
+            xtask::browser::execute(execution, image).map_err(|error| TaskError::Contract(error.to_string()))
+        }
         [task, scope, mode, flag, image] if task == "input-fuzz" && flag == "--image" => {
             let scope = xtask::input_fuzz::Scope::parse(scope).map_err(|error| TaskError::Contract(error.to_string()))?;
             let execution = match mode.as_str() {
@@ -215,7 +223,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|security|(reference-build|verification-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|security|(reference-build|verification-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
         )),
     }
 }

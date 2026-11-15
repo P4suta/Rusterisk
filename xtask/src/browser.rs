@@ -7,6 +7,8 @@ mod snapshot;
 pub use snapshot::{SourceError, SourceSnapshot};
 mod native;
 pub use native::{validate_execution, validate_inventory, BrowserInventory, NativeError};
+mod executor;
+pub use executor::{execute, execute_with, Execution, RunError};
 use std::{
     io::{Read, Write},
     path::Path,
