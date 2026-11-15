@@ -57,6 +57,7 @@ enum Command {
     AttachRecording {
         token: MediaTaskToken,
         sink: RecordingSink,
+        options: rusterisk_api::RecordingOptions,
         reply: oneshot::Sender<Result<(), MediaError>>,
     },
     EndRecording {
@@ -205,9 +206,24 @@ impl MediaPort {
         token: MediaTaskToken,
         sink: RecordingSink,
     ) -> Result<(), MediaError> {
+        self.attach_recording_with_options(token, sink, Default::default())
+            .await
+    }
+
+    pub async fn attach_recording_with_options(
+        &self,
+        token: MediaTaskToken,
+        sink: RecordingSink,
+        options: rusterisk_api::RecordingOptions,
+    ) -> Result<(), MediaError> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .try_send(Command::AttachRecording { token, sink, reply })
+            .try_send(Command::AttachRecording {
+                token,
+                sink,
+                options,
+                reply,
+            })
             .map_err(|_| MediaError::Capacity)?;
         tokio::time::timeout(Duration::from_secs(5), response)
             .await
@@ -495,9 +511,14 @@ impl MediaHub {
                     }
                 }
             }
-            Command::AttachRecording { token, sink, reply } => {
+            Command::AttachRecording {
+                token,
+                sink,
+                options,
+                reply,
+            } => {
                 if !reply.is_closed() {
-                    let result = self.recordings.attach(token, sink);
+                    let result = self.recordings.attach(token, sink, options);
                     let admitted = result.is_ok();
                     if reply.send(result).is_err() && admitted {
                         self.recordings.end(token, RecordingEnd::Cancel);

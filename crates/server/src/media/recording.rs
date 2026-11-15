@@ -1,6 +1,7 @@
 use crate::storage::{RecordingSink, WorkerError};
 use crate::CallKey;
-use rusterisk_core::{MediaTaskToken, RecordingControl, RecordingGate};
+use rusterisk_api::{RecordingOptions, RecordingTermination};
+use rusterisk_core::{MediaTaskToken, RecordingClock, RecordingControl, RecordingGate};
 use rusterisk_media::{Frame, MediaError};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -29,6 +30,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn duration_limits_start_after_file_attachment_and_ignore_paused_time(
+    ) -> Result<(), MediaError> {
+        let directory = tempfile::tempdir().map_err(failure)?;
+        let (storage, worker) = StorageWorker::start(directory.path().to_owned())
+            .await
+            .map_err(failure)?;
+        let mut recordings = Recordings::new();
+        let mut tasks = MediaTasks::new(1);
+        let token = tasks
+            .reserve(MediaTaskKind::Recording)
+            .map_err(|_| MediaError::Capacity)?;
+        let (completed, mut completion) = oneshot::channel();
+        recordings.reserve(token, RecordingTarget::Bridge(1), completed)?;
+        let sink = storage
+            .record(
+                ChannelId::try_from("limited".to_owned()).map_err(failure)?,
+                8000,
+            )
+            .await
+            .map_err(failure)?;
+        let start = std::time::Instant::now();
+        let options = rusterisk_api::RecordingOptions {
+            max_duration_seconds: rusterisk_api::RecordingSeconds::try_from(1).map_err(failure)?,
+            ..Default::default()
+        };
+        recordings.attach_options_at(token, sink, options, start)?;
+        recordings.bridges_at(&[], start + Duration::from_millis(1999))?;
+        recordings.control_at(
+            token,
+            RecordingControl::Pause,
+            start + Duration::from_millis(1999),
+        )?;
+        recordings.bridges_at(&[], start + Duration::from_secs(10))?;
+        assert!(matches!(
+            completion.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        recordings.control_at(
+            token,
+            RecordingControl::Resume,
+            start + Duration::from_secs(10),
+        )?;
+        recordings.bridges_at(&[], start + Duration::from_millis(10001))?;
+        while let Some(result) = recordings.workers.join_next().await {
+            result.map_err(failure)?;
+        }
+        completion.await.map_err(failure)?.map_err(failure)?;
+        assert!(recordings.captures.is_empty());
+        assert!(directory.path().join("recordings/limited.wav").exists());
+        worker.close().await.map_err(failure)?;
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn paused_audio_is_absent_and_input_settings_survive_resumption() -> Result<(), MediaError>
     {
         let directory = tempfile::tempdir().map_err(failure)?;
@@ -47,7 +102,11 @@ mod tests {
             Err(MediaError::InvalidRoute)
         );
         let name = ChannelId::try_from("controlled".to_owned()).map_err(failure)?;
-        recordings.attach(token, storage.record(name, 8000).await.map_err(failure)?)?;
+        recordings.attach(
+            token,
+            storage.record(name, 8000).await.map_err(failure)?,
+            Default::default(),
+        )?;
         recordings.bridges(&[(1, Frame::new(&[1000; 960], 48000)?)])?;
         storage.recordings().await.map_err(failure)?;
         recordings.control(token, RecordingControl::Pause)?;
@@ -135,7 +194,7 @@ mod tests {
         let name = ChannelId::try_from("expired".to_owned()).map_err(failure)?;
         let sink = storage.record(name.clone(), 8000).await.map_err(failure)?;
         assert!(matches!(
-            recordings.attach_at(token, sink, deadline),
+            recordings.attach_options_at(token, sink, Default::default(), deadline),
             Err(MediaError::Transport(_))
         ));
         assert!(matches!(
@@ -167,14 +226,42 @@ enum Source {
     Attached {
         sink: RecordingSink,
         gate: RecordingGate,
+        clock: RecordingClock,
+        updated: Instant,
     },
 }
 
 impl Capture {
+    fn tick(&mut self, now: Instant) -> bool {
+        match &mut self.source {
+            Source::Waiting => false,
+            Source::Attached {
+                gate,
+                clock,
+                updated,
+                ..
+            } => {
+                let now = now.max(*updated);
+                match gate {
+                    RecordingGate::Paused | RecordingGate::PausedSilent => {
+                        *updated = now;
+                        clock.advance(0, *gate)
+                    }
+                    RecordingGate::Open | RecordingGate::Silent => {
+                        let elapsed = u64::try_from(now.duration_since(*updated).as_millis())
+                            .unwrap_or(u64::MAX);
+                        *updated += Duration::from_millis(elapsed);
+                        clock.advance(elapsed, *gate)
+                    }
+                }
+            }
+        }
+    }
+
     fn write(&mut self, frame: Frame) -> Result<(), WorkerError> {
         match &mut self.source {
             Source::Waiting => Ok(()),
-            Source::Attached { sink, gate } => match gate {
+            Source::Attached { sink, gate, .. } => match gate {
                 RecordingGate::Open => sink.try_write(frame),
                 RecordingGate::Silent => {
                     let silence = Frame::new(
@@ -235,16 +322,28 @@ impl Recordings {
         Ok(())
     }
 
-    pub fn attach(&mut self, token: MediaTaskToken, sink: RecordingSink) -> Result<(), MediaError> {
-        self.attach_at(token, sink, Instant::now())
-    }
-
-    fn attach_at(
+    pub fn attach(
         &mut self,
         token: MediaTaskToken,
         sink: RecordingSink,
+        options: RecordingOptions,
+    ) -> Result<(), MediaError> {
+        self.attach_options_at(token, sink, options, Instant::now())
+    }
+
+    fn attach_options_at(
+        &mut self,
+        token: MediaTaskToken,
+        sink: RecordingSink,
+        options: RecordingOptions,
         now: Instant,
     ) -> Result<(), MediaError> {
+        if options.beep
+            || options.max_silence_seconds.seconds() != 0
+            || options.terminate_on != RecordingTermination::None
+        {
+            return Err(MediaError::Unsupported);
+        }
         let capture = self.captures.get(&token).ok_or(MediaError::UnknownStream)?;
         if matches!(capture.source, Source::Waiting)
             && now.saturating_duration_since(capture.requested) >= Duration::from_secs(5)
@@ -261,6 +360,8 @@ impl Recordings {
                 capture.source = Source::Attached {
                     sink,
                     gate: RecordingGate::Open,
+                    clock: RecordingClock::new(options.max_duration_seconds.seconds()),
+                    updated: now,
                 };
                 Ok(())
             }
@@ -281,10 +382,23 @@ impl Recordings {
         token: MediaTaskToken,
         operation: RecordingControl,
     ) -> Result<(), MediaError> {
+        self.control_at(token, operation, Instant::now())
+    }
+
+    fn control_at(
+        &mut self,
+        token: MediaTaskToken,
+        operation: RecordingControl,
+        now: Instant,
+    ) -> Result<(), MediaError> {
         let capture = self
             .captures
             .get_mut(&token)
             .ok_or(MediaError::UnknownStream)?;
+        if capture.tick(now) {
+            self.end(token, RecordingEnd::Finish);
+            return Err(MediaError::UnknownStream);
+        }
         match &mut capture.source {
             Source::Waiting => Err(MediaError::InvalidRoute),
             Source::Attached { gate, .. } => {
@@ -369,6 +483,10 @@ impl Recordings {
         for (token, capture) in &mut self.captures {
             if capture.completed.is_closed() {
                 finished.push((*token, RecordingEnd::Cancel));
+                continue;
+            }
+            if capture.tick(now) {
+                finished.push((*token, RecordingEnd::Finish));
                 continue;
             }
             if let RecordingTarget::Bridge(id) = capture.target {
