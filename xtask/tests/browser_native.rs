@@ -19,8 +19,11 @@ fn report(executed: bool) -> Value {
         json!({ "file": file, "specs": specs })
     }).collect();
     let projects = array([json!({ "retries": 0, "repeatEach": 1, "timeout": 60000 })]);
+    let filtered_projects = array([
+        json!({ "use": { "browserName": "chromium", "channel": "chromium", "headless": true, "trace": "off", "video": "off", "screenshot": "off" } }),
+    ]);
     json!({
-        "config": { "version": "1.65.1", "workers": 1, "forbidOnly": true, "fullyParallel": false, "globalTimeout": 120000, "projects": projects },
+        "config": { "version": "1.65.1", "workers": 1, "forbidOnly": true, "fullyParallel": false, "globalTimeout": 120000, "projects": projects, "filteredProjects": filtered_projects },
         "suites": suites,
         "errors": [],
         "stats": { "duration": 1000, "expected": if executed { 4 } else { 0 }, "skipped": if executed { 0 } else { 4 }, "unexpected": 0, "flaky": 0 },
@@ -55,6 +58,20 @@ fn browser_native_reports_require_complete_single_attempt_execution_without_skip
     for (pointer, replacement) in [
         ("/config/version", json!("other")),
         ("/config/forbidOnly", json!(false)),
+        ("/config/filteredProjects", json!([])),
+        (
+            "/config/filteredProjects/0/use/browserName",
+            json!("firefox"),
+        ),
+        (
+            "/config/filteredProjects/0/use/channel",
+            json!("chrome-headless-shell"),
+        ),
+        ("/config/filteredProjects/0/use/channel", json!(null)),
+        ("/config/filteredProjects/0/use/headless", json!(false)),
+        ("/config/filteredProjects/0/use/trace", json!("on")),
+        ("/config/filteredProjects/0/use/video", json!("on")),
+        ("/config/filteredProjects/0/use/screenshot", json!("on")),
         ("/suites", json!([])),
         ("/suites/0/specs/0/tests/0/expectedStatus", json!("skipped")),
         (

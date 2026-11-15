@@ -33,6 +33,7 @@ struct Configuration {
     fully_parallel: bool,
     global_timeout: u64,
     projects: Vec<Project>,
+    filtered_projects: Vec<FilteredProject>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,6 +41,21 @@ struct Project {
     retries: usize,
     repeat_each: usize,
     timeout: u64,
+}
+#[derive(Deserialize)]
+struct FilteredProject {
+    #[serde(rename = "use")]
+    browser: BrowserUse,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserUse {
+    browser_name: String,
+    channel: String,
+    headless: bool,
+    trace: String,
+    video: String,
+    screenshot: String,
 }
 #[derive(Deserialize)]
 struct Suite {
@@ -172,12 +188,25 @@ fn parse(bytes: &[u8], executed: bool) -> Result<BrowserInventory, NativeError> 
         || report.config.fully_parallel
         || report.config.global_timeout != 120000
         || report.config.projects.len() != 1
+        || report.config.filtered_projects.len() != 1
         || !report.errors.is_empty()
     {
         return Err(NativeError);
     }
     for project in report.config.projects {
         if project.retries != 0 || project.repeat_each != 1 || project.timeout != 60000 {
+            return Err(NativeError);
+        }
+    }
+    for project in report.config.filtered_projects {
+        let browser = project.browser;
+        if browser.browser_name != "chromium"
+            || browser.channel != "chromium"
+            || !browser.headless
+            || browser.trace != "off"
+            || browser.video != "off"
+            || browser.screenshot != "off"
+        {
             return Err(NativeError);
         }
     }
