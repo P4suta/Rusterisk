@@ -14,6 +14,8 @@ pub use rusterisk_core::{DtmfDigit, DtmfTiming, MuteDirection};
 mod bridges;
 mod controls;
 mod external_media;
+mod media_session;
+pub use media_session::{MediaBytes, MediaMessage, MediaSession};
 mod recordings;
 
 #[derive(Debug)]
