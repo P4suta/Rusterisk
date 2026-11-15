@@ -130,3 +130,41 @@ async fn dtls_identifiers_are_fresh_and_are_omitted_when_answering_legacy_peers(
     assert!(!answer.contains("a=tls-id:"));
     Ok(())
 }
+
+#[tokio::test]
+async fn advertised_candidates_keep_the_bound_local_base() -> Result<(), MediaError> {
+    let sockets = sockets()?;
+    let local = sockets.local_addr().map_err(failure)?;
+    let advertised = std::net::SocketAddr::new(Ipv4Addr::new(203, 0, 113, 10).into(), local.port());
+    let offer = WebRtcOffer::new(sockets, advertised, &[Codec::Pcmu], Instant::now())?;
+    let candidates: Vec<_> = offer
+        .description()
+        .lines()
+        .filter_map(|line| line.strip_prefix("a=candidate:"))
+        .collect();
+    assert_eq!(candidates.len(), 2);
+    assert!(candidates.iter().any(|line| line.contains(&format!(
+        " {} {} typ host",
+        local.ip(),
+        local.port()
+    ))));
+    assert!(candidates.iter().any(|line| line.contains(&format!(
+        " {} {} typ srflx",
+        advertised.ip(),
+        advertised.port()
+    ))));
+    Ok(())
+}
+
+#[tokio::test]
+async fn wildcard_sockets_are_rejected_before_ice_can_use_an_unknown_destination(
+) -> Result<(), MediaError> {
+    let sockets = SocketPair::bind(Ipv4Addr::UNSPECIFIED.into(), 0, 0).map_err(failure)?;
+    let local = sockets.local_addr().map_err(failure)?;
+    let advertised = std::net::SocketAddr::new(Ipv4Addr::LOCALHOST.into(), local.port());
+    assert!(matches!(
+        WebRtcOffer::new(sockets, advertised, &[Codec::Pcmu], Instant::now()),
+        Err(MediaError::InvalidRoute)
+    ));
+    Ok(())
+}

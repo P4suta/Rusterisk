@@ -69,11 +69,14 @@ impl Engine {
         allowed: &[Codec],
         now: Instant,
     ) -> Result<Self, MediaError> {
+        let local = sockets.local_addr().map_err(negotiation_error)?;
         if allowed.is_empty()
             || allowed.len() > 3
             || advertised.port() == 0
             || advertised.ip().is_unspecified()
             || advertised.ip().is_multicast()
+            || local.ip().is_unspecified()
+            || local.ip().is_multicast()
         {
             return Err(MediaError::InvalidRoute);
         }
@@ -114,12 +117,20 @@ impl Engine {
         engine.drain()?;
         if engine
             .rtc
-            .add_local_candidate(Candidate::host(advertised, "udp").map_err(negotiation_error)?)
+            .add_local_candidate(Candidate::host(local, "udp").map_err(negotiation_error)?)
             .is_none()
         {
             return Err(MediaError::InvalidRoute);
         }
         engine.drain()?;
+        if advertised != local {
+            let candidate =
+                Candidate::server_reflexive(advertised, local, "udp").map_err(negotiation_error)?;
+            if engine.rtc.add_local_candidate(candidate).is_none() {
+                return Err(MediaError::InvalidRoute);
+            }
+            engine.drain()?;
+        }
         Ok(engine)
     }
 
