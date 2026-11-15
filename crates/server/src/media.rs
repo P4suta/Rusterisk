@@ -12,7 +12,7 @@ mod recording;
 pub use playback::PlaybackControl;
 use playback::Playbacks;
 use recording::Recordings;
-pub use recording::{RecordingEnd, RecordingTarget};
+pub use recording::{RecordingEnd, RecordingPrompt, RecordingTarget};
 
 pub enum MediaNotice {
     DtmfFinished {
@@ -62,6 +62,7 @@ enum Command {
         token: MediaTaskToken,
         sink: RecordingSink,
         options: rusterisk_api::RecordingOptions,
+        prompt: Option<RecordingPrompt>,
         reply: oneshot::Sender<Result<(), MediaError>>,
     },
     EndRecording {
@@ -224,7 +225,7 @@ impl MediaPort {
         token: MediaTaskToken,
         sink: RecordingSink,
     ) -> Result<(), MediaError> {
-        self.attach_recording_with_options(token, sink, Default::default())
+        self.attach_recording_with_options(token, sink, Default::default(), None)
             .await
     }
 
@@ -233,6 +234,7 @@ impl MediaPort {
         token: MediaTaskToken,
         sink: RecordingSink,
         options: rusterisk_api::RecordingOptions,
+        prompt: Option<RecordingPrompt>,
     ) -> Result<(), MediaError> {
         let (reply, response) = oneshot::channel();
         self.commands
@@ -240,6 +242,7 @@ impl MediaPort {
                 token,
                 sink,
                 options,
+                prompt,
                 reply,
             })
             .map_err(|_| MediaError::Capacity)?;
@@ -539,10 +542,11 @@ impl MediaHub {
                 token,
                 sink,
                 options,
+                prompt,
                 reply,
             } => {
                 if !reply.is_closed() {
-                    let result = self.recordings.attach(token, sink, options);
+                    let result = self.recordings.attach(token, sink, options, prompt);
                     let admitted = result.is_ok();
                     if reply.send(result).is_err() && admitted {
                         self.recordings.end(token, RecordingEnd::Cancel);
