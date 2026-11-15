@@ -1,7 +1,9 @@
 use crate::storage::{RecordingSink, WorkerError};
 use crate::CallKey;
 use rusterisk_api::{RecordingOptions, RecordingTermination};
-use rusterisk_core::{MediaTaskToken, RecordingClock, RecordingControl, RecordingGate};
+use rusterisk_core::{
+    DtmfDigit, MediaTaskToken, RecordingClock, RecordingControl, RecordingGate, RecordingStopKey,
+};
 use rusterisk_media::{Frame, MediaError};
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -27,6 +29,79 @@ mod tests {
 
     fn failure(error: impl std::fmt::Display) -> MediaError {
         MediaError::Transport(error.to_string())
+    }
+
+    #[tokio::test]
+    async fn stop_keys_finish_only_matching_channel_generations_and_bridge_members(
+    ) -> Result<(), MediaError> {
+        let directory = tempfile::tempdir().map_err(failure)?;
+        let (storage, worker) = StorageWorker::start(directory.path().to_owned())
+            .await
+            .map_err(failure)?;
+        let key = crate::CallKey {
+            id: ChannelId::try_from("phone".to_owned()).map_err(failure)?,
+            generation: 1,
+        };
+        let mut recordings = Recordings::new();
+        let mut completions = Vec::new();
+        for (generation, target, name, stop_key) in [
+            (
+                1,
+                RecordingTarget::Channel(key.clone()),
+                "channel",
+                rusterisk_api::RecordingTermination::Hash,
+            ),
+            (
+                2,
+                RecordingTarget::Bridge(2),
+                "bridge",
+                rusterisk_api::RecordingTermination::Any,
+            ),
+        ] {
+            let mut tasks = MediaTasks::new(generation);
+            let token = tasks
+                .reserve(MediaTaskKind::Recording)
+                .map_err(|_| MediaError::Capacity)?;
+            let (completed, completion) = oneshot::channel();
+            recordings.reserve(token, target, completed)?;
+            let sink = storage
+                .record(ChannelId::try_from(name.to_owned()).map_err(failure)?, 8000)
+                .await
+                .map_err(failure)?;
+            recordings.attach(
+                token,
+                sink,
+                rusterisk_api::RecordingOptions {
+                    terminate_on: stop_key,
+                    ..Default::default()
+                },
+            )?;
+            recordings.control(token, RecordingControl::Pause)?;
+            completions.push(completion);
+        }
+        recordings.received_digit(
+            &crate::CallKey {
+                generation: 3,
+                ..key.clone()
+            },
+            None,
+            rusterisk_core::DtmfDigit::Hash,
+        );
+        recordings.received_digit(&key, Some(3), rusterisk_core::DtmfDigit::One);
+        assert_eq!(recordings.captures.len(), 2);
+        recordings.received_digit(&key, Some(2), rusterisk_core::DtmfDigit::One);
+        assert_eq!(recordings.captures.len(), 1);
+        recordings.received_digit(&key, None, rusterisk_core::DtmfDigit::Hash);
+        assert!(recordings.captures.is_empty());
+        while let Some(result) = recordings.workers.join_next().await {
+            result.map_err(failure)?;
+        }
+        for completed in completions {
+            completed.await.map_err(failure)?.map_err(failure)?;
+        }
+        assert_eq!(storage.recordings().await.map_err(failure)?.len(), 2);
+        worker.close().await.map_err(failure)?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -228,6 +303,7 @@ enum Source {
         gate: RecordingGate,
         clock: RecordingClock,
         updated: Instant,
+        stop_key: RecordingStopKey,
     },
 }
 
@@ -338,10 +414,7 @@ impl Recordings {
         options: RecordingOptions,
         now: Instant,
     ) -> Result<(), MediaError> {
-        if options.beep
-            || options.max_silence_seconds.seconds() != 0
-            || options.terminate_on != RecordingTermination::None
-        {
+        if options.beep || options.max_silence_seconds.seconds() != 0 {
             return Err(MediaError::Unsupported);
         }
         let capture = self.captures.get(&token).ok_or(MediaError::UnknownStream)?;
@@ -362,6 +435,12 @@ impl Recordings {
                     gate: RecordingGate::Open,
                     clock: RecordingClock::new(options.max_duration_seconds.seconds()),
                     updated: now,
+                    stop_key: match options.terminate_on {
+                        RecordingTermination::None => RecordingStopKey::None,
+                        RecordingTermination::Any => RecordingStopKey::Any,
+                        RecordingTermination::Star => RecordingStopKey::Star,
+                        RecordingTermination::Hash => RecordingStopKey::Hash,
+                    },
                 };
                 Ok(())
             }
@@ -405,6 +484,27 @@ impl Recordings {
                 *gate = gate.apply(operation);
                 Ok(())
             }
+        }
+    }
+
+    pub fn received_digit(&mut self, key: &CallKey, bridge: Option<u64>, digit: DtmfDigit) {
+        let completed = self
+            .captures
+            .iter()
+            .filter_map(|(token, capture)| {
+                let accepts = match &capture.source {
+                    Source::Waiting => false,
+                    Source::Attached { stop_key, .. } => stop_key.accepts(digit),
+                };
+                let matches = match &capture.target {
+                    RecordingTarget::Channel(channel) => channel == key,
+                    RecordingTarget::Bridge(generation) => Some(*generation) == bridge,
+                };
+                (accepts && matches).then_some(*token)
+            })
+            .collect::<Vec<_>>();
+        for token in completed {
+            self.end(token, RecordingEnd::Finish);
         }
     }
 

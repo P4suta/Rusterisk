@@ -33,6 +33,10 @@ pub enum MediaNotice {
 }
 
 enum Command {
+    ReceivedDigit {
+        key: CallKey,
+        digit: rusterisk_core::DtmfDigit,
+    },
     ReservePlayback {
         token: MediaTaskToken,
         target: AudioTarget<CallKey>,
@@ -102,6 +106,20 @@ pub struct MediaPort {
 }
 
 impl MediaPort {
+    pub async fn received_digit(
+        &self,
+        key: CallKey,
+        digit: rusterisk_core::DtmfDigit,
+    ) -> Result<(), MediaError> {
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            self.commands.send(Command::ReceivedDigit { key, digit }),
+        )
+        .await
+        .map_err(|error| MediaError::Transport(error.to_string()))?
+        .map_err(|_| MediaError::Capacity)
+    }
+
     pub async fn play(
         &self,
         target: AudioTarget<CallKey>,
@@ -451,6 +469,12 @@ impl MediaHub {
 
     fn command(&mut self, command: Command) -> Result<(), MediaError> {
         match command {
+            Command::ReceivedDigit { key, digit } => {
+                if self.ports.contains_key(&key) {
+                    self.recordings
+                        .received_digit(&key, self.mixer.bridge_for(&key), digit);
+                }
+            }
             Command::ReservePlayback {
                 token,
                 target,
@@ -628,13 +652,16 @@ impl MediaHub {
             }
             for _ in 0..16 {
                 match port.digits.try_recv() {
-                    Ok(tone) => self
-                        .notices
-                        .try_send(MediaNotice::Dtmf {
-                            key: key.clone(),
-                            tone,
-                        })
-                        .map_err(|_| MediaError::Capacity)?,
+                    Ok(tone) => {
+                        self.recordings
+                            .received_digit(key, self.mixer.bridge_for(key), tone.digit);
+                        self.notices
+                            .try_send(MediaNotice::Dtmf {
+                                key: key.clone(),
+                                tone,
+                            })
+                            .map_err(|_| MediaError::Capacity)?;
+                    }
                     Err(
                         mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
                     ) => break,

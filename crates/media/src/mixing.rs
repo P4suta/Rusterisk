@@ -76,6 +76,10 @@ impl<K: Ord + Clone> Mixer<K> {
         self.inputs.remove(key).is_some()
     }
 
+    pub fn bridge_for(&self, key: &K) -> Option<u64> {
+        self.inputs.get(key).and_then(|input| input.bridge)
+    }
+
     pub fn bridge(&mut self, id: u64, members: &[K]) -> Result<(), MediaError> {
         if members.len() > self.capacity
             || members.iter().collect::<BTreeSet<_>>().len() != members.len()

@@ -219,8 +219,13 @@ impl Signaling {
                     digit,
                     duration_ms,
                 } => {
+                    let key = key(id, generation)?;
+                    self.media
+                        .received_digit(key.clone(), digit)
+                        .await
+                        .map_err(failure)?;
                     self.notify(Signal::DtmfReceived {
-                        key: key(id, generation)?,
+                        key,
                         digit,
                         duration_ms,
                     })
