@@ -8,7 +8,6 @@ status: proposed
 ## Context
 
 Database and audio file operations can block independently of call control and audio delivery.
-The store needs exclusive recovery ownership.
 
 ## Decision
 
@@ -16,7 +15,7 @@ Keep SQLite and file handles on one dedicated thread.
 Follow [Tokio's guidance for persistent blocking work](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html).
 Use bounded control messages and separate audio queues with three frames per stream.
 Drain audio after every control message.
-Coalesce wake messages when the control queue is full.
+Use one separate slot to coalesce wake notifications.
 An audio queue overflow fails its operation explicitly.
 Stop admission before draining accepted work and joining the thread.
 Keep the store's file lock until its connection and streams close.
@@ -25,6 +24,7 @@ Keep the store's file lock until its connection and streams close.
 
 Dedicated threads per stream isolate file delays but scale thread use with call count.
 Direct writes in media tasks block audio delivery.
+Wakes in the control queue can reject work during audio bursts.
 
 ## Consequences
 
