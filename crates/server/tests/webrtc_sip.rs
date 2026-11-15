@@ -20,12 +20,19 @@ use tokio::{
     net::UdpSocket,
     sync::{mpsc, watch},
 };
+#[path = "webrtc_sip/direction.rs"]
+mod direction;
 #[path = "webrtc_sip/incoming.rs"]
 mod incoming;
 
 enum CallOrigin {
     Device,
     Controller,
+}
+
+enum MediaCycle {
+    Duplex,
+    HoldResume,
 }
 
 fn failure(error: impl std::fmt::Display) -> MediaError {
@@ -66,7 +73,7 @@ fn channels() -> (Channels, Application) {
     )
 }
 
-async fn answer(signal: &UdpSocket) -> Result<WebRtcSession, MediaError> {
+async fn answer(signal: &UdpSocket) -> Result<(WebRtcSession, direction::Dialog), MediaError> {
     let mut bytes = [0; 16385];
     let (size, server) = tokio::time::timeout(Duration::from_secs(2), signal.recv_from(&mut bytes))
         .await
@@ -87,11 +94,12 @@ async fn answer(signal: &UdpSocket) -> Result<WebRtcSession, MediaError> {
         Instant::now(),
     )?;
     let response = format!("SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=phone\r\nCall-ID: {}\r\nCSeq: {}\r\nContact: <sip:phone@{}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", request.top_via_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.to_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value(), request.cseq_header().map_err(failure)?.value(), signal.local_addr().map_err(failure)?, body.len());
+    let dialog = direction::Dialog::outgoing(&request, &body, server)?;
     signal
         .send_to(response.as_bytes(), server)
         .await
         .map_err(failure)?;
-    Ok(session)
+    Ok((session, dialog))
 }
 
 async fn finished(
@@ -111,7 +119,11 @@ async fn finished(
     }
 }
 
-async fn bridge_calls(origin: CallOrigin, bind: Ipv4Addr) -> Result<(), MediaError> {
+async fn bridge_calls(
+    origin: CallOrigin,
+    bind: Ipv4Addr,
+    cycle: MediaCycle,
+) -> Result<(), MediaError> {
     let peers = [
         UdpSocket::bind("127.0.0.1:0").await.map_err(failure)?,
         UdpSocket::bind("127.0.0.1:0").await.map_err(failure)?,
@@ -151,18 +163,22 @@ async fn bridge_calls(origin: CallOrigin, bind: Ipv4Addr) -> Result<(), MediaErr
         let mut events = controller.subscribe(credentials.clone(), None, "calls".into()).await.map_err(failure)?;
         let mut ids = Vec::with_capacity(2);
         let mut sessions = Vec::with_capacity(2);
+        let mut dialogs = Vec::with_capacity(2);
         for (index, (name, peer)) in ["left", "right"].into_iter().zip(&peers).enumerate() {
             if index == 0 && matches!(origin, CallOrigin::Device) {
-                let (id, session) = incoming::answer_device(peer, target, &controller, &credentials, &mut events.events).await?;
+                let (id, session, dialog) = incoming::answer_device(peer, target, &controller, &credentials, &mut events.events).await?;
                 ids.push(id);
                 sessions.push(session);
+                dialogs.push(dialog);
                 continue;
             }
             let id = ChannelId::try_from(name.to_owned()).map_err(failure)?;
             let accepted = controller.execute(credentials.clone(), None, Action::Originate { id: id.clone(), endpoint: format!("PJSIP/{name}"), app: "calls".into(), args: Vec::new(), caller: "100".into(), timeout: 3 }).await.map_err(failure)?;
             let accepted: Channel = serde_json::from_value(accepted.body.ok_or(MediaError::InvalidRoute)?).map_err(failure)?;
             assert_eq!(accepted.state, ChannelState::Down);
-            sessions.push(answer(peer).await?);
+            let (session, dialog) = answer(peer).await?;
+            sessions.push(session);
+            dialogs.push(dialog);
             loop {
                 if let EventKind::StasisStart {channel, ..} = events.events.recv().await.ok_or(MediaError::UnknownStream)?.kind {
                     if channel.id == id { assert_eq!(channel.state, ChannelState::Up); break; }
@@ -207,6 +223,9 @@ async fn bridge_calls(origin: CallOrigin, bind: Ipv4Addr) -> Result<(), MediaErr
             }
         }
         assert!(ids.iter().all(|id| connected.contains(id)));
+        if matches!(cycle, MediaCycle::HoldResume) {
+            direction::cycle(&peers[0], &mut dialogs[0], left, right).await?;
+        }
         for id in ids { controller.execute(credentials.clone(), None, Action::Hangup(id)).await.map_err(failure)?; }
         controller.execute(credentials, None, Action::DestroyBridge(bridge)).await.map_err(failure)?;
         Ok::<(), MediaError>(())
@@ -245,16 +264,48 @@ async fn bridge_calls(origin: CallOrigin, bind: Ipv4Addr) -> Result<(), MediaErr
 #[tokio::test]
 async fn outgoing_sip_calls_answer_before_received_webrtc_audio_and_bridge_both_directions(
 ) -> Result<(), MediaError> {
-    bridge_calls(CallOrigin::Controller, Ipv4Addr::LOCALHOST).await
+    bridge_calls(
+        CallOrigin::Controller,
+        Ipv4Addr::LOCALHOST,
+        MediaCycle::Duplex,
+    )
+    .await
 }
 
 #[tokio::test]
 async fn authenticated_incoming_sip_offers_exchange_received_audio_after_answer(
 ) -> Result<(), MediaError> {
-    bridge_calls(CallOrigin::Device, Ipv4Addr::LOCALHOST).await
+    bridge_calls(CallOrigin::Device, Ipv4Addr::LOCALHOST, MediaCycle::Duplex).await
 }
 
 #[tokio::test]
 async fn wildcard_signaling_uses_a_routable_local_media_address() -> Result<(), MediaError> {
-    bridge_calls(CallOrigin::Controller, Ipv4Addr::UNSPECIFIED).await
+    bridge_calls(
+        CallOrigin::Controller,
+        Ipv4Addr::UNSPECIFIED,
+        MediaCycle::Duplex,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn outgoing_webrtc_direction_updates_stop_and_resume_received_bridge_audio(
+) -> Result<(), MediaError> {
+    bridge_calls(
+        CallOrigin::Controller,
+        Ipv4Addr::LOCALHOST,
+        MediaCycle::HoldResume,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn incoming_webrtc_direction_updates_stop_and_resume_received_bridge_audio(
+) -> Result<(), MediaError> {
+    bridge_calls(
+        CallOrigin::Device,
+        Ipv4Addr::LOCALHOST,
+        MediaCycle::HoldResume,
+    )
+    .await
 }

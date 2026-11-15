@@ -14,25 +14,25 @@ status: proposed
 
 Own one str0m 0.25 `Rtc`, User Datagram Protocol (UDP) socket, and bounded channels per call generation.
 Enable only AWS-LC cryptography.
-Separate plaintext Real-time Transport Protocol (RTP) from WebRTC with closed, inline enum variants.
-Keep bounded descriptions out of diagnostics.
-Verify [fingerprints](https://www.rfc-editor.org/rfc/rfc8122) and negotiate RTP Control Protocol (RTCP) multiplexing before accepting audio.
+Separate plaintext Real-time Transport Protocol (RTP) and WebRTC with closed, inline variants.
+Keep descriptions out of diagnostics.
+Verify [fingerprints](https://www.rfc-editor.org/rfc/rfc8122) and require RTP Control Protocol (RTCP) multiplexing.
 Resolve media-level security attributes before invoking str0m.
+Direction answers preserve local ICE credentials, fingerprints, `tls-id`, and DTLS role.
+Reject transport replacement during direction changes.
 
 ## Alternatives
 
 Plaintext passthrough omits authentication and encryption.
 Shared state weakens cancellation.
-A separate media service adds a deployment boundary.
+Separate services add deployment boundaries.
 
 ## Consequences
 
 Drain str0m output after each mutation.
-Handshake readiness and received audio remain separate observations.
-Reconsider shared transport when a call needs two media streams.
+Distinguish handshakes from received audio.
 
 ## Confirmation
 
-Tests must reject malformed descriptions and fingerprint mismatches, exercise cancellation, and compare received audio in both directions.
-`SIP.js` browser calls remain required.
-Status stays proposed pending integration and review.
+Test malformed descriptions, fingerprints, cancellation, direction security, and duplex audio resumption.
+`SIP.js` calls and review remain required.

@@ -72,7 +72,7 @@ pub(super) async fn answer_device(
     controller: &Controller,
     credentials: &Credentials,
     events: &mut mpsc::Receiver<Event>,
-) -> Result<(ChannelId, WebRtcSession), MediaError> {
+) -> Result<(ChannelId, WebRtcSession, super::direction::Dialog), MediaError> {
     let sockets = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
     let local = sockets.local_addr().map_err(failure)?;
     let offer = WebRtcOffer::new(sockets, local, &[Codec::Pcmu], Instant::now())?;
@@ -134,6 +134,7 @@ pub(super) async fn answer_device(
         }
     };
     assert_eq!(answered.status_code.code(), 200);
+    let dialog = super::direction::Dialog::incoming(&answered, offer.description(), target)?;
     let session = offer.accept_answer(std::str::from_utf8(&answered.body).map_err(failure)?)?;
     ack(signal, target, &answered, 2).await?;
     loop {
@@ -145,5 +146,5 @@ pub(super) async fn answer_device(
             }
         }
     }
-    Ok((id, session))
+    Ok((id, session, dialog))
 }
