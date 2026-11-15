@@ -150,7 +150,7 @@ impl RecordingSet {
             return Err(StorageError::Capacity);
         }
         if self.entries.keys().any(|key| key.name == name) {
-            return Err(StorageError::InvalidName);
+            return Err(StorageError::Exists);
         }
         let generation = self
             .generation

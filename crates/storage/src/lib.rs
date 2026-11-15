@@ -18,6 +18,7 @@ pub enum StorageError {
     Capacity,
     UnknownSchema,
     InUse,
+    Exists,
 }
 
 impl std::fmt::Display for StorageError {
@@ -32,6 +33,7 @@ impl std::fmt::Display for StorageError {
             Self::Capacity => f.write_str("recording capacity exceeded"),
             Self::UnknownSchema => f.write_str("unsupported database schema"),
             Self::InUse => f.write_str("storage directory is already in use"),
+            Self::Exists => f.write_str("recording already exists"),
         }
     }
 }
@@ -285,16 +287,25 @@ impl Recorder {
         if std::fs::symlink_metadata(&directory)?
             .file_type()
             .is_symlink()
-            || directory.join(format!("{name}.wav")).exists()
         {
             return Err(StorageError::InvalidName);
+        }
+        if directory.join(format!("{name}.wav")).exists() {
+            return Err(StorageError::Exists);
         }
         let path = directory.join(format!("{name}.partial"));
         let mut file = OpenOptions::new()
             .create_new(true)
             .write(true)
             .read(true)
-            .open(&path)?;
+            .open(&path)
+            .map_err(|error| {
+                if error.kind() == std::io::ErrorKind::AlreadyExists {
+                    StorageError::Exists
+                } else {
+                    StorageError::Io(error)
+                }
+            })?;
         file.write_all(&header(rate, 0))?;
         file.sync_all()?;
         Ok(Self {
