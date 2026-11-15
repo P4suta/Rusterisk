@@ -8,7 +8,7 @@
 		"node": "26.13.1"
 	},
 	"scripts": {
-		"build": "esbuild src/main.ts --bundle --format=esm --target=es2022 --outfile=dist/app.js",
+		"build": "esbuild src/main.ts --bundle --format=esm --target=es2022 --legal-comments=eof --outfile=dist/app.js",
 		"check": "tsc --noEmit && eslint . --max-warnings=0 && biome check .",
 		"test": "node --test --test-timeout=15000 tests/*.test.ts",
 		"browser": "playwright test"

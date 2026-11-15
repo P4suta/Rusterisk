@@ -4,6 +4,7 @@ mod assets;
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use std::io;
+use std::path::Path;
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -64,4 +65,31 @@ async fn localhost_browser_assets_serve_the_built_bundle_and_refuse_other_paths(
     std::fs::write(root.path().join("dist/app.js"), vec![b'x'; 1024 * 1024 + 1])?;
     assert!(assets::router(root.path()).is_err());
     root.close()
+}
+
+#[tokio::test]
+async fn public_browser_bundle_preserves_the_complete_publisher_license() -> Result<(), io::Error> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/browser");
+    let publisher = std::fs::read_to_string(root.join("node_modules/sip.js/LICENSE.md"))?;
+    let response = assets::router(&root)?
+        .oneshot(
+            Request::builder()
+                .uri("/app.js")
+                .body(Body::empty())
+                .map_err(io::Error::other)?,
+        )
+        .await
+        .map_err(io::Error::other)?;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["X-Content-Type-Options"], "nosniff");
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .map_err(io::Error::other)?
+        .to_bytes();
+    let body = std::str::from_utf8(&bytes).map_err(io::Error::other)?;
+    let normalized = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(normalized(body).contains(&normalized(&publisher)));
+    Ok(())
 }

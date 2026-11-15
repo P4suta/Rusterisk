@@ -1,3 +1,4 @@
+import "./sip-license.ts";
 import { type BrowserCapture, microphone } from "./capture.ts";
 import { connectionOptions, destination } from "./config.ts";
 import { Phone, type PhonePort, type PhoneState } from "./phone.ts";
