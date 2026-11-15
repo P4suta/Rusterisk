@@ -9,7 +9,14 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 mod history;
 mod recording_admission;
+mod stored_recordings;
 use history::HistoryRecorder;
+pub(crate) use stored_recordings::Operation as StoredRecordingOperation;
+
+struct StorageServices {
+    port: StoragePort,
+    history: HistoryRecorder,
+}
 
 const MAX_PENDING_EFFECTS: usize = 64 * 2 + 1;
 
@@ -33,6 +40,12 @@ impl Credentials {
 }
 
 enum Request {
+    StoredRecording {
+        credentials: Credentials,
+        origin: Option<String>,
+        operation: StoredRecordingOperation,
+        reply: oneshot::Sender<Result<Outcome, ControlError>>,
+    },
     Incoming {
         call: IncomingCall,
         reply: oneshot::Sender<Result<CallKey, ControlError>>,
@@ -97,8 +110,9 @@ pub struct Runner {
     subscribers: BTreeMap<String, Subscriber>,
     sessions: BTreeMap<u64, Session>,
     subscription_generation: u64,
-    history: Option<HistoryRecorder>,
+    storage: Option<StorageServices>,
     history_jobs: JoinSet<Result<(), WorkerError>>,
+    stored_jobs: JoinSet<()>,
     recording_admissions: BTreeMap<rusterisk_core::MediaTaskToken, recording_admission::Pending>,
 }
 
@@ -166,8 +180,9 @@ impl Controller {
                 subscribers: BTreeMap::new(),
                 sessions: BTreeMap::new(),
                 subscription_generation: 0,
-                history: None,
+                storage: None,
                 history_jobs: JoinSet::new(),
+                stored_jobs: JoinSet::new(),
                 recording_admissions: BTreeMap::new(),
             },
             effect_receiver,
@@ -286,7 +301,10 @@ fn timestamp() -> String {
 
 impl Runner {
     pub fn with_storage(mut self, storage: StoragePort) -> Result<Self, ControlError> {
-        self.history = Some(HistoryRecorder::new(storage)?);
+        self.storage = Some(StorageServices {
+            history: HistoryRecorder::new(storage.clone())?,
+            port: storage,
+        });
         Ok(self)
     }
 
@@ -294,12 +312,12 @@ impl Runner {
         if outcome.history.is_empty() {
             return Ok(());
         }
-        match &self.history {
-            Some(history) => {
+        match &self.storage {
+            Some(storage) => {
                 if self.history_jobs.len() >= 64 {
                     return Err(ControlError::Capacity);
                 }
-                let receipt = history.queue(&mut outcome.history)?;
+                let receipt = storage.history.queue(&mut outcome.history)?;
                 self.history_jobs.spawn(receipt.wait());
             }
             None => outcome.history.clear(),
@@ -390,6 +408,14 @@ impl Runner {
 
     fn request(&mut self, request: Request, now_ms: u64) -> Result<(), ControlError> {
         match request {
+            Request::StoredRecording {
+                credentials,
+                origin,
+                operation,
+                reply,
+            } => {
+                self.stored_request(credentials, origin, operation, reply);
+            }
             Request::Incoming { call, reply } => {
                 if reply.is_closed() {
                     return Ok(());
@@ -643,6 +669,9 @@ impl Runner {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                result = self.stored_jobs.join_next(), if !self.stored_jobs.is_empty() => {
+                    result.ok_or(ControlError::Capacity)?.map_err(|error| ControlError::Adapter(error.to_string()))?;
+                }
                 result = self.history_jobs.join_next(), if !self.history_jobs.is_empty() => {
                     result.ok_or(ControlError::Capacity)?
                         .map_err(|error| ControlError::Adapter(error.to_string()))?
@@ -715,6 +744,11 @@ impl Runner {
                         cleanup = Err(error);
                     }
                 }
+            }
+        }
+        if let Err(error) = self.close_stored_queries(deadline).await {
+            if cleanup.is_ok() {
+                cleanup = Err(error);
             }
         }
         while !self.history_jobs.is_empty() {

@@ -471,7 +471,7 @@ impl Outcome {
             history: Vec::new(),
         }
     }
-    fn json(value: impl serde::Serialize) -> Result<Self, ControlError> {
+    pub(crate) fn json(value: impl serde::Serialize) -> Result<Self, ControlError> {
         Ok(Self {
             status: 200,
             location: None,

@@ -330,6 +330,23 @@ async fn dispatch(
         );
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let stored = match (method.as_str(), segments.as_slice()) {
+        ("GET", ["ari", "recordings", "stored"]) => Some(crate::StoredRecordingOperation::List),
+        ("GET", ["ari", "recordings", "stored", name]) => {
+            Some(crate::StoredRecordingOperation::Get(id(name)?))
+        }
+        ("DELETE", ["ari", "recordings", "stored", name]) => {
+            Some(crate::StoredRecordingOperation::Delete(id(name)?))
+        }
+        _ => None,
+    };
+    if let Some(operation) = stored {
+        return response(
+            controller
+                .stored_recording(credentials, origin, operation)
+                .await?,
+        );
+    }
     let action = match (method.as_str(), segments.as_slice()) {
         ("POST", ["ari", "channels", channel, "record"]) => {
             let arguments = recording::arguments(parameters)?;

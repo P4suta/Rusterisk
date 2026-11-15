@@ -14,4 +14,5 @@ pub use control::{
     Action, CallHistoryEvent, CallKey, Control, ControlError, Effect, IncomingCall, IncomingTarget,
     MediaOwner, Milestone, Outcome, PlaybackCompletion, Signal,
 };
+pub(crate) use runner::StoredRecordingOperation;
 pub use runner::{Controller, Credentials, Runner, Subscription};
