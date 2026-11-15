@@ -1,5 +1,5 @@
 use rusterisk_client::{
-    api::{Bridge, BridgeVideoMode, Channel},
+    api::{Bridge, BridgeVideoMode, Channel, MediaControlFormat, MediaEvent},
     Client, Error,
 };
 use std::time::Duration;
@@ -98,4 +98,53 @@ pub async fn initial_variables(
         assert_eq!(client.variable(&channel.id, name).await?.value, expected);
     }
     client.hangup(&channel.id).await
+}
+
+pub async fn websocket_variables(
+    client: &Client,
+    address: &str,
+    application: &str,
+) -> Result<(), Error> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let mut url = reqwest::Url::parse(&format!("{address}/ari/channels/externalMedia"))
+        .map_err(|_| Error::Invalid("reference address"))?;
+    url.query_pairs_mut().extend_pairs([
+        ("channelId", "json-websocket-variables"),
+        ("app", application),
+        ("format", "ulaw"),
+        ("encapsulation", "none"),
+        ("transport", "websocket"),
+        ("connection_type", "server"),
+        ("transport_data", "f(json)"),
+    ]);
+    let response = http
+        .post(url)
+        .basic_auth("app", Some("test-password"))
+        .json(&serde_json::json!({"variables":{"INITIAL_TAG":"media value /&=test"}}))
+        .send()
+        .await?;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let channel: Channel = response.json().await?;
+    let media = client
+        .connect_media(&channel, MediaControlFormat::Json)
+        .await?;
+    let MediaEvent::MediaStart {
+        channel_variables, ..
+    } = media.start_event()
+    else {
+        return Err(Error::Invalid("media start event"));
+    };
+    assert_eq!(
+        channel_variables.get("INITIAL_TAG").map(String::as_str),
+        Some("media value /&=test")
+    );
+    assert!(channel_variables.contains_key("MEDIA_WEBSOCKET_CONNECTION_ID"));
+    media.close().await?;
+    match client.hangup(&channel.id).await {
+        Ok(()) | Err(Error::Api { status: 404, .. }) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
