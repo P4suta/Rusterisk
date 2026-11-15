@@ -65,6 +65,7 @@ The driver then aborts and joins any remaining workers.
 ## Download stored audio
 
 Use `stored_recordings` and `stored_recording` to inspect completed recordings.
+Use `copy_stored_recording` to copy completed audio to an unused recording name.
 Use `download_stored_recording` with an asynchronous output writer to stream the stored bytes.
 The method returns the number of bytes written and accepts at most one gibibyte plus the 44-byte wave header.
 Response headers and error responses have ten-second deadlines.

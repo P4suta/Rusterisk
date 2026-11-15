@@ -21,6 +21,26 @@ async fn stored_recording_methods_use_the_public_contract_and_typed_models() -> 
             "/ari/recordings/stored/saved",
             axum::routing::get(|| async { axum::Json(saved()) })
                 .delete(|| async { axum::http::StatusCode::NO_CONTENT }),
+        )
+        .route(
+            "/ari/recordings/stored/saved/copy",
+            axum::routing::post(
+                |axum::extract::Query(parameters): axum::extract::Query<
+                    std::collections::BTreeMap<String, String>,
+                >| async move {
+                    assert_eq!(
+                        parameters
+                            .get("destinationRecordingName")
+                            .map(String::as_str),
+                        Some("copied")
+                    );
+                    assert_eq!(parameters.len(), 1);
+                    axum::Json(api::StoredRecording {
+                        name: "copied".into(),
+                        format: "wav".into(),
+                    })
+                },
+            ),
         );
     let server = tokio::spawn(axum::serve(listener, app).into_future());
     let result = async {
@@ -28,6 +48,14 @@ async fn stored_recording_methods_use_the_public_contract_and_typed_models() -> 
         let name = api::ChannelId::try_from("saved".to_owned())?;
         assert_eq!(client.stored_recordings().await?, [saved()]);
         assert_eq!(client.stored_recording(&name).await?, saved());
+        let destination = api::ChannelId::try_from("copied".to_owned())?;
+        assert_eq!(
+            client.copy_stored_recording(&name, &destination).await?,
+            api::StoredRecording {
+                name: "copied".into(),
+                format: "wav".into()
+            }
+        );
         client.delete_stored_recording(&name).await?;
         Ok(())
     }

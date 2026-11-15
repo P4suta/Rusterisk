@@ -30,6 +30,19 @@ impl Client {
         .await
     }
 
+    pub async fn copy_stored_recording(
+        &self,
+        source: &api::ChannelId,
+        destination: &api::ChannelId,
+    ) -> Result<api::StoredRecording, Error> {
+        self.request(
+            "recordings.copyStored",
+            &[("recordingName", source.as_str())],
+            &[("destinationRecordingName", destination.as_str())],
+        )
+        .await
+    }
+
     pub async fn download_stored_recording<W: AsyncWrite + Unpin>(
         &self,
         name: &api::ChannelId,
