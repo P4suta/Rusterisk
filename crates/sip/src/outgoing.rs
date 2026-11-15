@@ -1,4 +1,4 @@
-use crate::{Datagram, DialogReply, Engine, Output, Session, SipError, SipEvent};
+use crate::{Datagram, DialogReply, Engine, Output, Session, SessionSecurity, SipError, SipEvent};
 use rsipstack::sip::{
     headers::{
         auth::{Algorithm, AuthQop, Qop, Scheme},
@@ -58,6 +58,7 @@ pub(crate) struct Outgoing {
     credentials: Vec<Auth>,
     challenges: Vec<Challenge>,
     local_media: SocketAddr,
+    local_security: SessionSecurity,
     session_id: u64,
 }
 
@@ -100,6 +101,23 @@ struct InviteAnswer {
 }
 
 impl Outgoing {
+    fn answer(&self, source: &[u8]) -> Result<Session, SipError> {
+        let session = Session::parse(std::str::from_utf8(source)?, &self.codecs)?;
+        match (&self.local_security, &session.security) {
+            (SessionSecurity::Rtp, SessionSecurity::Rtp) => {}
+            (SessionSecurity::WebRtc(_), SessionSecurity::WebRtc(description)) => {
+                if description.setup() == crate::DtlsSetup::ActPass {
+                    return Err(SipError::Unsupported);
+                }
+            }
+            (SessionSecurity::Rtp, SessionSecurity::WebRtc(_))
+            | (SessionSecurity::WebRtc(_), SessionSecurity::Rtp) => {
+                return Err(SipError::Unsupported)
+            }
+        }
+        Ok(session)
+    }
+
     fn matches(&self, request: &Request, peer: SocketAddr) -> Result<bool, SipError> {
         let remote = rsipstack::sip::headers::typed::To::parse(&self.remote_to)?;
         Ok(self.peer == peer
@@ -463,13 +481,16 @@ impl Engine {
         if endpoint.webrtc != sdp.is_some() {
             return Err(SipError::Unsupported);
         }
-        if let Some(sdp) = sdp {
+        let local_security = if let Some(sdp) = sdp {
             let description = crate::WebRtcDescription::parse(sdp)?;
             if description.setup() != crate::DtlsSetup::ActPass {
                 return Err(SipError::Unsupported);
             }
             Session::parse(description.as_str(), &endpoint.codecs)?;
-        }
+            SessionSecurity::WebRtc(description)
+        } else {
+            SessionSecurity::Rtp
+        };
         let transport = self
             .config
             .transports
@@ -545,6 +566,7 @@ impl Engine {
                 .collect(),
             challenges: Vec::new(),
             local_media: outbound.local_rtp,
+            local_security,
             session_id: self.serial,
         };
         self.outgoing.insert(call_id, dialog);
@@ -833,8 +855,31 @@ impl Engine {
         if code < 300 {
             match dialog.state {
                 State::Calling { .. } | State::Proceeding => {
-                    let session =
-                        Session::parse(std::str::from_utf8(&response.body)?, &dialog.codecs)?;
+                    let session = match dialog.answer(&response.body) {
+                        Ok(session) => session,
+                        Err(_) => {
+                            dialog.cseq = dialog.cseq.checked_add(1).ok_or(SipError::Capacity)?;
+                            output.datagrams.push(Datagram {
+                                peer,
+                                bytes: related(
+                                    dialog,
+                                    Method::Bye,
+                                    &dialog.remote_to,
+                                    dialog.cseq,
+                                    true,
+                                )?,
+                            });
+                            output.events.push(SipEvent::Ended {
+                                id: dialog.id.clone(),
+                                generation: dialog.generation,
+                                cause: 21,
+                            });
+                            dialog.state = State::Terminated {
+                                expires: now.saturating_add(32_000),
+                            };
+                            return Ok(output);
+                        }
+                    };
                     output.events.push(SipEvent::Answered {
                         id: dialog.id.clone(),
                         generation: dialog.generation,

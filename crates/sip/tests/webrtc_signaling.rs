@@ -126,6 +126,64 @@ fn resolved_origination_keeps_the_configured_uri_and_uses_the_physical_peer() ->
 }
 
 #[test]
+fn unacceptable_successful_answers_are_acked_and_ended_without_an_answered_event(
+) -> Result<(), SipError> {
+    let plain = descriptions::offer().replace("UDP/TLS/RTP/SAVPF", "RTP/AVP");
+    let browser_answer = descriptions::offer().replace("a=setup:actpass", "a=setup:passive");
+    for (webrtc, body) in [
+        (true, String::new()),
+        (true, plain),
+        (false, browser_answer),
+        (true, descriptions::offer()),
+    ] {
+        let mut engine = Engine::new(config(webrtc)?, [7; 32]);
+        let offer = if webrtc {
+            engine.originate_with_sdp(
+                outbound()?,
+                &WebRtcDescription::parse(&descriptions::offer())?,
+                0,
+            )?
+        } else {
+            engine.originate(outbound()?, 0)?
+        };
+        let packet = offer.datagrams.first().ok_or(SipError::InvalidPacket)?;
+        let SipMessage::Request(request) =
+            SipMessage::try_from(std::str::from_utf8(&packet.bytes)?)?
+        else {
+            return Err(SipError::InvalidPacket);
+        };
+        let response = format!("SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=peer\r\nCall-ID: {}\r\nCSeq: {}\r\nContact: <sip:phone@127.0.0.1:5061>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", request.top_via_header()?.value(), request.from_header()?.value(), request.to_header()?.value(), request.call_id_header()?.value(), request.cseq_header()?.value(), body.len());
+        let result = engine.receive(response.as_bytes(), packet.peer, 1)?;
+        let methods: Result<Vec<_>, SipError> = result
+            .datagrams
+            .iter()
+            .map(|packet| {
+                assert_eq!(packet.peer, "127.0.0.1:5061".parse()?);
+                match SipMessage::try_from(std::str::from_utf8(&packet.bytes)?)? {
+                    SipMessage::Request(request) => Ok(request.method),
+                    SipMessage::Response(_) => Err(SipError::InvalidPacket),
+                }
+            })
+            .collect();
+        assert_eq!(methods?, [Method::Ack, Method::Bye]);
+        assert_eq!(result.events.len(), 1);
+        assert!(
+            matches!(result.events.first(), Some(SipEvent::Ended { id, generation: 7, cause: 21 }) if id == "browser-call")
+        );
+        let duplicate = engine.receive(response.as_bytes(), packet.peer, 2)?;
+        assert_eq!(duplicate.datagrams.len(), 1);
+        assert!(duplicate.events.is_empty());
+        let SipMessage::Request(ack) =
+            SipMessage::try_from(std::str::from_utf8(&duplicate.datagrams[0].bytes)?)?
+        else {
+            return Err(SipError::InvalidPacket);
+        };
+        assert_eq!(ack.method, Method::Ack);
+    }
+    Ok(())
+}
+
+#[test]
 fn incoming_browser_answers_keep_the_checked_ice_and_dtls_description() -> Result<(), SipError> {
     let mut engine = Engine::new(config(true)?, [7; 32]);
     let incoming = authenticated(&mut engine, &descriptions::offer())?;
