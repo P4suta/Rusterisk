@@ -1,5 +1,5 @@
-use rusterisk_api::{ChannelId, EventKind};
-use rusterisk_server::{Action, Control, ControlError};
+use rusterisk_api::{ChannelId, EventKind, ExternalRtpTarget, StaticRtpCodec};
+use rusterisk_server::{Action, Control, ControlError, Signal};
 use std::collections::BTreeMap;
 
 fn id(name: &str) -> Result<ChannelId, ControlError> {
@@ -106,5 +106,42 @@ fn invalid_initial_values_reject_the_entire_creation_before_reserving_its_identi
             0
         )
         .is_err());
+    Ok(())
+}
+
+#[test]
+fn external_admission_returns_initial_values_together_with_transport_variables(
+) -> Result<(), ControlError> {
+    let mut control = Control::new(2);
+    control.subscribe("app")?;
+    control.apply_with_variables(
+        Action::ExternalRtp {
+            id: id("external")?,
+            app: "app".into(),
+            data: String::new(),
+            target: ExternalRtpTarget::new(
+                "127.0.0.1:12000"
+                    .parse()
+                    .map_err(|_| ControlError::Unsupported)?,
+                StaticRtpCodec::Pcmu,
+            )
+            .map_err(|_| ControlError::Unsupported)?,
+        },
+        BTreeMap::from([("FIRST".into(), "one".into())]),
+        "created",
+        0,
+    )?;
+    let reply = control.signal(
+        Signal::ExternalRtpAdmitted {
+            key: control.key(&id("external")?)?,
+            result: Ok("127.0.0.1:10000"
+                .parse()
+                .map_err(|_| ControlError::Unsupported)?),
+        },
+        "admitted",
+    )?;
+    let body = reply.body.ok_or(ControlError::Capacity)?;
+    assert_eq!(body["channelvars"]["FIRST"], "one");
+    assert_eq!(body["channelvars"]["UNICASTRTP_LOCAL_PORT"], "10000");
     Ok(())
 }

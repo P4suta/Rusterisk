@@ -243,9 +243,9 @@ impl Control {
         ]
         .into_iter()
         .collect();
-        entry.variables.extend(variables.clone());
+        entry.variables.extend(variables);
         let mut snapshot = entry.snapshot.clone();
-        snapshot.channelvars = Some(variables);
+        snapshot.channelvars = Some(entry.variables.clone());
         Outcome::json(snapshot)
     }
 

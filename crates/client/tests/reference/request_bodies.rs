@@ -81,6 +81,15 @@ pub async fn initial_variables(
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let channel: Channel = response.json().await?;
     assert_eq!(channel.caller.name, "Alice");
+    let variables = channel
+        .channelvars
+        .as_ref()
+        .ok_or(Error::Invalid("initial channel variables"))?;
+    assert_eq!(
+        variables.get("FIRST").map(String::as_str),
+        Some("value /&=test")
+    );
+    assert_eq!(variables.get("EMPTY").map(String::as_str), Some(""));
     for (name, expected) in [
         ("FIRST", "value /&=test"),
         ("EMPTY", ""),
