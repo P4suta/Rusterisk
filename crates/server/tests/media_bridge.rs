@@ -106,14 +106,19 @@ async fn owned_workers_bridge_real_received_audio_and_stop_together() -> Result<
         }
         media.bridge(1, [key("alice")?, key("bob")?].into_iter().collect())?;
         let mut sender = RtpSender::new(AudioFormat::Pcmu, 0, [8; 10])?;
-        for (peer, destination, value) in
-            [(&alice, alice_address, 4000), (&bob, bob_address, -7000)]
-        {
-            let bytes = sender.packet(Frame::new(&[value; 160], 8000)?)?.encode()?;
-            peer.data()
-                .send_to(&bytes, destination)
-                .await
-                .map_err(failure)?;
+        for (peer, destination, value, sizes) in [
+            (&alice, alice_address, 4000, [80, 80]),
+            (&bob, bob_address, -7000, [240, 80]),
+        ] {
+            for size in sizes {
+                let bytes = sender
+                    .packet(Frame::new(&vec![value; size], 8000)?)?
+                    .encode()?;
+                peer.data()
+                    .send_to(&bytes, destination)
+                    .await
+                    .map_err(failure)?;
+            }
         }
         tokio::try_join!(receives(&alice, -7000), receives(&bob, 4000))?;
         for _ in 0..2 {
