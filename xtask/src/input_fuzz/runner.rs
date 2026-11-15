@@ -222,7 +222,18 @@ pub fn execute(scope: Scope, execution: Execution, image: &str) -> Result<(), Fu
                 Phase::Inventory => validate_inventory(&bytes)?,
                 Phase::Fetch | Phase::Build(_) => snapshot.check_harness(&state)?,
                 Phase::Run(target) => {
-                    let count = validate_run(&bytes, target.seeds().len())?;
+                    let count = match validate_run(&bytes, target.seeds().len()) {
+                        Ok(count) => count,
+                        Err(error) => {
+                            eprintln!(
+                                "fuzz native completion rejected for {}:\n{}",
+                                target.name(),
+                                String::from_utf8_lossy(&bytes)
+                            );
+                            preserve(&root, &state, &identity, target)?;
+                            return Err(error);
+                        }
+                    };
                     if std::fs::read_dir(state.join("artifacts").join(target.name()))?
                         .next()
                         .is_some()
