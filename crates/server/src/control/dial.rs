@@ -67,12 +67,17 @@ impl Control {
             else {
                 continue;
             };
-            effects += 1 + usize::from(entry.call.bridge().is_some());
+            let managed_bridge = entry
+                .call
+                .bridge()
+                .is_some_and(|token| self.bridges.values().any(|bridge| bridge.token == token));
+            effects += 1 + usize::from(managed_bridge);
             if let Some(dial) = entry
                 .dialplan
                 .as_ref()
                 .and_then(|frame| frame.dial.as_ref())
             {
+                effects += usize::from(dial.bridge.is_some());
                 for child in &dial.children {
                     if self.key(&child.id).is_ok_and(|current| current == *child)
                         && discovered.insert(child.clone())
