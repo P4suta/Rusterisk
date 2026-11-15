@@ -1,4 +1,5 @@
 use rsipstack::sip::{headers::typed::Contact, uri::Scheme, Uri};
+mod identity;
 
 const MAX_ENTRIES: usize = 32;
 
@@ -50,6 +51,10 @@ impl RegistrationContact {
     }
     pub fn preference(&self) -> u16 {
         self.preference
+    }
+
+    pub fn equivalent(&self, other: &Self) -> bool {
+        identity::equivalent(self, other)
     }
 }
 
@@ -186,6 +191,7 @@ fn contact(source: &str, global: Option<u32>) -> Result<RegistrationContact, Con
     if raw_uri.len() > 2048 {
         return Err(ContactError::Capacity);
     }
+    identity::validate(raw_uri)?;
     Contact::parse(prefix).map_err(|_| ContactError::Invalid)?;
     let uri = Uri::try_from(raw_uri).map_err(|_| ContactError::Invalid)?;
     if !matches!(uri.scheme, Some(Scheme::Sip | Scheme::Sips))

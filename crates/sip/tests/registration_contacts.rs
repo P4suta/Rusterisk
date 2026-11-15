@@ -1,5 +1,21 @@
 use rsipstack::sip::{Param, Transport};
-use rusterisk_sip::{parse_registration_contacts, ContactError, RegistrationContacts};
+use rusterisk_sip::{
+    parse_registration_contacts, ContactError, RegistrationContact, RegistrationContacts,
+};
+
+fn one(uri: &str) -> Result<RegistrationContact, ContactError> {
+    let source = format!("<{uri}>");
+    let RegistrationContacts::Bindings(contacts) =
+        parse_registration_contacts([source.as_str()], None)?
+    else {
+        return Err(ContactError::Invalid);
+    };
+    contacts
+        .as_slice()
+        .first()
+        .cloned()
+        .ok_or(ContactError::Invalid)
+}
 
 #[test]
 fn repeated_contact_lists_preserve_quoted_boundaries_uri_parameters_and_owned_values(
@@ -133,4 +149,89 @@ fn contact_entry_uri_and_source_limits_apply_before_unbounded_parsing() -> Resul
         Err(ContactError::Capacity)
     ));
     Ok(())
+}
+
+#[test]
+fn uri_equivalence_preserves_component_roles_and_parameter_presence() -> Result<(), ContactError> {
+    for (left, right) in [
+        (
+            "sip:%61lice@EXAMPLE.com;transport=UDP",
+            "sip:alice@example.COM;Transport=udp",
+        ),
+        (
+            "sip:alice@example.com;extension=one",
+            "sip:alice@example.com",
+        ),
+        (
+            "sip:alice@example.com;method=REGISTER;transport=tcp",
+            "sip:alice@example.com;transport=TCP;method=REGISTER",
+        ),
+        (
+            "sip:alice@example.com?subject=Call&priority=urgent",
+            "sip:alice@example.com?Priority=Urgent&Subject=Call",
+        ),
+    ] {
+        let left = one(left)?;
+        let right = one(right)?;
+        assert!(left.equivalent(&right));
+        assert!(right.equivalent(&left));
+    }
+    for (left, right) in [
+        ("sip:Alice@example.com", "sip:alice@example.com"),
+        ("sip:alice@example.com", "sips:alice@example.com"),
+        ("sip:alice@example.com", "sip:alice@example.com:5060"),
+        (
+            "sip:alice@example.com",
+            "sip:alice@example.com;transport=udp",
+        ),
+        ("sip:alice@example.com", "sip:alice@example.com;user=phone"),
+        (
+            "sip:alice@example.com",
+            "sip:alice@example.com;maddr=239.1.1.1",
+        ),
+        (
+            "sip:alice@example.com",
+            "sip:alice@example.com?Subject=Call",
+        ),
+        (
+            "sip:alice@example.com;method=REGISTER",
+            "sip:alice@example.com;method=register",
+        ),
+        (
+            "sip:alice@example.com?Subject=Call&Subject=Call",
+            "sip:alice@example.com?Subject=Call&Subject=Other",
+        ),
+        (
+            "sip:alice/example@example.com",
+            "sip:alice%2fexample@example.com",
+        ),
+    ] {
+        let left = one(left)?;
+        let right = one(right)?;
+        assert!(!left.equivalent(&right));
+        assert!(!right.equivalent(&left));
+    }
+    assert!(one("sip:alice%2Fexample@example.com")?
+        .equivalent(&one("sip:alice%2fexample@example.com")?));
+    let bare = one("sip:alice@example.com")?;
+    let enabled = one("sip:alice@example.com;security=on")?;
+    let disabled = one("sip:alice@example.com;security=off")?;
+    assert!(bare.equivalent(&enabled));
+    assert!(bare.equivalent(&disabled));
+    assert!(!enabled.equivalent(&disabled));
+    Ok(())
+}
+
+#[test]
+fn invalid_escapes_and_duplicate_uri_parameters_cannot_create_bindings() {
+    for source in [
+        "sip:a%zz@example.com",
+        "sip:a@%65xample.com",
+        "sip:a@example.com;transport=udp;Transport=tcp",
+        "sip:a@example.com;extension=one;%65xtension=two",
+        "sip:a@example.com;extension=one;",
+        "sip:a@example.com;;extension=one",
+    ] {
+        assert!(one(source).is_err(), "{source}");
+    }
 }
