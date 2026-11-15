@@ -38,8 +38,8 @@ fn dialplan_channels_exist_before_stasis_and_only_stasis_controls_require_an_app
                 "now",
                 0
             )
-            .map(|_| ()),
-        Err(ControlError::Conflict("Channel not in Stasis application"))
+            .map(|outcome| outcome.body),
+        Ok(Some(serde_json::json!({"value": "200"})))
     );
     control.signal(
         Signal::Milestone {
