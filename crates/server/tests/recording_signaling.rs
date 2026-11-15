@@ -56,10 +56,10 @@ async fn recording_jobs_report_file_conflicts_and_finish_active_files_before_shu
         let mut subscription = controller.subscribe(credentials()?, None, "app".into()).await?;
         controller.execute(credentials()?, None, Action::CreateBridge { id: id("mix")?, name: String::new() }).await?;
         assert!(matches!(event(&mut subscription.events).await?, EventKind::BridgeCreated { .. }));
-        assert!(matches!(controller.execute(credentials()?, None, Action::RecordBridge { bridge: id("mix")?, name: id("taken")? }).await, Err(ControlError::Conflict(_))));
+        assert!(matches!(controller.execute(credentials()?, None, Action::RecordBridge { bridge: id("mix")?, name: id("taken")?, policy: Default::default() }).await, Err(ControlError::Conflict(_))));
         assert!(matches!(event(&mut subscription.events).await?, EventKind::RecordingFailed { recording } if recording.cause.as_deref() == Some("Recording already exists")));
         for name in ["saved", "shutdown"] {
-            controller.execute(credentials()?, None, Action::RecordBridge { bridge: id("mix")?, name: id(name)? }).await?;
+            controller.execute(credentials()?, None, Action::RecordBridge { bridge: id("mix")?, name: id(name)?, policy: Default::default() }).await?;
             assert!(matches!(event(&mut subscription.events).await?, EventKind::RecordingStarted { recording } if recording.name == name && recording.state == RecordingState::Recording));
             if name == "saved" {
                 controller.execute(credentials()?, None, Action::EndRecording { name: id(name)?, mode: RecordingEnd::Finish }).await?;

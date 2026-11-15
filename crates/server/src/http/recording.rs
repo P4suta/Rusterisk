@@ -1,10 +1,15 @@
 use super::{id, required};
 use crate::ControlError;
-use rusterisk_api::ChannelId;
+use rusterisk_api::{ChannelId, RecordingIfExists};
 use rusterisk_core::DtmfDigit;
 use std::collections::BTreeMap;
 
-pub(super) fn name(parameters: &BTreeMap<String, String>) -> Result<ChannelId, ControlError> {
+pub(super) struct Arguments {
+    pub name: ChannelId,
+    pub policy: RecordingIfExists,
+}
+
+pub(super) fn arguments(parameters: &BTreeMap<String, String>) -> Result<Arguments, ControlError> {
     let name = id(required(parameters, "name")?)?;
     let format = required(parameters, "format")?;
     if format != "wav" {
@@ -26,14 +31,15 @@ pub(super) fn name(parameters: &BTreeMap<String, String>) -> Result<ChannelId, C
             return Err(ControlError::Unsupported);
         }
     }
-    match parameters
-        .get("ifExists")
-        .map(String::as_str)
-        .unwrap_or("fail")
-    {
-        "" | "fail" => {}
-        "overwrite" | "append" => return Err(ControlError::Unsupported),
-        _ => return Err(ControlError::Invalid("Invalid recording conflict policy")),
+    let policy = RecordingIfExists::try_from(
+        parameters
+            .get("ifExists")
+            .map(String::as_str)
+            .unwrap_or("fail"),
+    )
+    .map_err(|_| ControlError::Invalid("Invalid recording conflict policy"))?;
+    if policy == RecordingIfExists::Append {
+        return Err(ControlError::Unsupported);
     }
     match parameters
         .get("beep")
@@ -61,5 +67,5 @@ pub(super) fn name(parameters: &BTreeMap<String, String>) -> Result<ChannelId, C
         }
         return Err(ControlError::Invalid("Invalid recording termination"));
     }
-    Ok(name)
+    Ok(Arguments { name, policy })
 }

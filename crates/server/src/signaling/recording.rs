@@ -2,7 +2,7 @@ use super::{failure, Signaling};
 use crate::media::{RecordingEnd, RecordingTarget};
 use crate::storage::WorkerError;
 use crate::{ControlError, MediaOwner, Signal};
-use rusterisk_api::ChannelId;
+use rusterisk_api::{ChannelId, RecordingIfExists};
 use rusterisk_core::MediaTaskToken;
 use rusterisk_storage::StorageError;
 use std::time::Duration;
@@ -21,6 +21,8 @@ enum JobResult {
 fn storage_error(error: WorkerError) -> ControlError {
     if matches!(&error, WorkerError::Storage(StorageError::Exists)) {
         ControlError::Conflict("Recording already exists")
+    } else if matches!(&error, WorkerError::Storage(StorageError::Unsupported)) {
+        ControlError::Unsupported
     } else if matches!(
         &error,
         WorkerError::Capacity | WorkerError::Storage(StorageError::Capacity)
@@ -37,6 +39,7 @@ impl Signaling {
         owner: MediaOwner,
         token: MediaTaskToken,
         name: ChannelId,
+        policy: RecordingIfExists,
         now: u64,
     ) -> Result<(), ControlError> {
         let admitted = async {
@@ -75,7 +78,7 @@ impl Signaling {
         let controller = self.controller.clone();
         self.recordings.spawn(async move {
             let admission = async {
-                let sink = storage.record(name, 8000).await.map_err(storage_error)?;
+                let sink = storage.record_with_policy(name, 8000, policy).await.map_err(storage_error)?;
                 media.attach_recording(token, sink).await.map_err(failure)?;
                 if !controller.is_stopping() { controller.signal(Signal::RecordingAdmitted { owner: owner.clone(), token, result: Ok(()) }).await?; }
                 Ok(())

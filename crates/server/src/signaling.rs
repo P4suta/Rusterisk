@@ -463,8 +463,14 @@ impl Signaling {
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
-            Effect::RecordMedia { owner, token, name } => {
-                self.start_recording(owner, token, name, now).await?;
+            Effect::RecordMedia {
+                owner,
+                token,
+                name,
+                policy,
+            } => {
+                self.start_recording(owner, token, name, policy, now)
+                    .await?;
             }
             Effect::ControlRecording { token, operation } => {
                 if let Err(error) = self.media.control_recording(token, operation).await {

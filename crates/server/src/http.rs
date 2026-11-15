@@ -331,14 +331,22 @@ async fn dispatch(
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let action = match (method.as_str(), segments.as_slice()) {
-        ("POST", ["ari", "channels", channel, "record"]) => Action::RecordChannel {
-            channel: id(channel)?,
-            name: recording::name(parameters)?,
-        },
-        ("POST", ["ari", "bridges", bridge, "record"]) => Action::RecordBridge {
-            bridge: id(bridge)?,
-            name: recording::name(parameters)?,
-        },
+        ("POST", ["ari", "channels", channel, "record"]) => {
+            let arguments = recording::arguments(parameters)?;
+            Action::RecordChannel {
+                channel: id(channel)?,
+                name: arguments.name,
+                policy: arguments.policy,
+            }
+        }
+        ("POST", ["ari", "bridges", bridge, "record"]) => {
+            let arguments = recording::arguments(parameters)?;
+            Action::RecordBridge {
+                bridge: id(bridge)?,
+                name: arguments.name,
+                policy: arguments.policy,
+            }
+        }
         ("GET", ["ari", "recordings", "live", name]) => Action::GetRecording(id(name)?),
         ("DELETE", ["ari", "recordings", "live", name]) => Action::EndRecording {
             name: id(name)?,

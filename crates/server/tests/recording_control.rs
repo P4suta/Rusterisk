@@ -30,6 +30,7 @@ fn completion_after_app_disconnection_cannot_route_to_a_replacement_subscription
         Action::RecordChannel {
             channel: id("phone")?,
             name: id("saved")?,
+            policy: Default::default(),
         },
         "now",
         0,
@@ -76,6 +77,7 @@ fn recording_admission_controls_and_publication_are_separate_owned_transitions(
         Action::RecordBridge {
             bridge: id("mix")?,
             name: id("saved")?,
+            policy: Default::default(),
         },
         "now",
         0,
@@ -90,7 +92,10 @@ fn recording_admission_controls_and_publication_are_separate_owned_transitions(
         "queued"
     );
     assert!(accepted.events.is_empty());
-    let [Effect::RecordMedia { owner, token, name }] = &accepted.effects[..] else {
+    let [Effect::RecordMedia {
+        owner, token, name, ..
+    }] = &accepted.effects[..]
+    else {
         return Err(ControlError::Unsupported);
     };
     assert_eq!(name, &id("saved")?);
@@ -112,7 +117,8 @@ fn recording_admission_controls_and_publication_are_separate_owned_transitions(
         .apply(
             Action::RecordBridge {
                 bridge: id("mix")?,
-                name: id("other")?
+                name: id("other")?,
+                policy: Default::default(),
             },
             "now",
             0
@@ -207,6 +213,7 @@ fn failed_admission_releases_ownership_and_deletion_waits_for_file_completion(
             Action::RecordBridge {
                 bridge: id("mix")?,
                 name: id("failed")?,
+                policy: Default::default(),
             },
             "now",
             0,
@@ -229,6 +236,7 @@ fn failed_admission_releases_ownership_and_deletion_waits_for_file_completion(
             Action::RecordBridge {
                 bridge: id("mix")?,
                 name: id("current")?,
+                policy: Default::default(),
             },
             "now",
             0,

@@ -54,10 +54,14 @@ async fn event(
 async fn http_recording_admission_reports_conflicts_and_preserves_pause_stop_and_discard_controls(
 ) -> Result<(), ControlError> {
     let directory = tempfile::tempdir().map_err(failure)?;
-    rusterisk_storage::Recorder::create(directory.path(), "taken", 8000)
-        .map_err(failure)?
-        .finish()
+    let mut original =
+        rusterisk_storage::Recorder::create(directory.path(), "taken", 8000).map_err(failure)?;
+    original
+        .write(rusterisk_media::Frame::new(&[1234; 160], 8000).map_err(failure)?)
         .map_err(failure)?;
+    original.finish().map_err(failure)?;
+    let original_audio =
+        std::fs::read(directory.path().join("recordings/taken.wav")).map_err(failure)?;
     let (storage, worker) = StorageWorker::start(directory.path().to_owned())
         .await
         .map_err(failure)?;
@@ -100,9 +104,20 @@ async fn http_recording_admission_reports_conflicts_and_preserves_pause_stop_and
         assert!(storage.recordings().await.map_err(failure)?.iter().any(|recording| recording.name == "saved"));
         assert_eq!(app.clone().oneshot(request("POST", "/ari/bridges/mix/record?name=discarded&format=wav", "app")?).await.map_err(failure)?.status(), StatusCode::CREATED);
         assert!(matches!(event(&mut subscription.events).await?, EventKind::RecordingStarted { .. }));
-        assert_eq!(app.oneshot(request("DELETE", "/ari/recordings/live/discarded", "app")?).await.map_err(failure)?.status(), StatusCode::NO_CONTENT);
+        assert_eq!(app.clone().oneshot(request("DELETE", "/ari/recordings/live/discarded", "app")?).await.map_err(failure)?.status(), StatusCode::NO_CONTENT);
         assert!(matches!(event(&mut subscription.events).await?, EventKind::RecordingFinished { recording } if recording.state == RecordingState::Canceled));
         assert!(!storage.recordings().await.map_err(failure)?.iter().any(|recording| recording.name == "discarded"));
+        for (method, suffix, state) in [("DELETE", "", RecordingState::Canceled), ("POST", "/stop", RecordingState::Done)] {
+            let response = app.clone().oneshot(request("POST", "/ari/bridges/mix/record?name=taken&format=wav&ifExists=OVERWRITE", "app")?).await.map_err(failure)?;
+            assert_eq!(response.status(), StatusCode::CREATED);
+            assert!(matches!(event(&mut subscription.events).await?, EventKind::RecordingStarted { .. }));
+            assert_eq!(std::fs::read(directory.path().join("recordings/taken.wav")).map_err(failure)?, original_audio);
+            assert_eq!(app.clone().oneshot(request(method, &format!("/ari/recordings/live/taken{suffix}"), "app")?).await.map_err(failure)?.status(), StatusCode::NO_CONTENT);
+            assert!(matches!(event(&mut subscription.events).await?, EventKind::RecordingFinished { recording } if recording.state == state));
+            let audio = std::fs::read(directory.path().join("recordings/taken.wav")).map_err(failure)?;
+            if state == RecordingState::Canceled { assert_eq!(audio, original_audio); } else { assert_ne!(audio, original_audio); }
+            assert!(!directory.path().join("recordings/taken.replacement").exists());
+        }
         Ok(())
     }.await;
     controller.shutdown();
