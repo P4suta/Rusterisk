@@ -13,12 +13,14 @@ Dynamic receiving source replacement discards existing reception history.
 
 ## Decision
 
-Vendor the published package through a Cargo path patch.
-Preserve version 0.25.0, licenses, and the published package checksum.
+Patch published 0.25.0 through Cargo.
+Preserve licenses and checksum.
 Add source-specific sending queues and optional bounded receiving contexts.
-Reject failed authentication without replacing established contexts.
+Share four receiving slots between declarations and authenticated history.
+Reject failed authentication without replacing contexts.
 Keep authentication, replay protection, rollover, and control reports per source.
-Verify every published file hash after reversing the recorded patch.
+Compare reversed-patch file hashes with the published archive.
+Require unchanged public key fixtures before exact-path secret exclusions.
 Capture the dependency and provenance in verification snapshots.
 
 ## Alternatives
@@ -31,9 +33,9 @@ An unpinned upstream revision changes the approved dependency contract.
 ## Consequences
 
 Maintain and review the local patch.
-Reconsider vendoring when a published release passes the same source tests.
+Reconsider after a published release passes identical tests.
 
 ## Confirmation
 
-Separate encrypted sending and receiving tests must preserve authentication, replay protection, rollover, existing replacement behavior, and secure duplex audio with distinct clocks.
+Encrypted sending and receiving tests must preserve authentication, replay protection, rollover, replacement behavior, and duplex audio with distinct clocks.
 Require formatting, source integrity, dependency, license, Rust 1.89, and browser checks.
