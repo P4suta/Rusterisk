@@ -755,12 +755,16 @@ impl Signaling {
                 owner,
                 token,
                 media,
+                language,
             } => {
                 let media = match media {
-                    MediaUri::Sound(name) => PlaybackMedia::Sound(name),
-                    MediaUri::Recording(name) => PlaybackMedia::Recording(name),
+                    MediaUri::Sound(name) if !language.is_empty() => ChannelId::try_from(language)
+                        .map(|language| PlaybackMedia::LocalizedSound { name, language })
+                        .map_err(ControlError::from),
+                    MediaUri::Sound(name) => Ok(PlaybackMedia::Sound(name)),
+                    MediaUri::Recording(name) => Ok(PlaybackMedia::Recording(name)),
                 };
-                self.start_playback(owner, token, Ok(media)).await?;
+                self.start_playback(owner, token, media).await?;
             }
             Effect::ControlPlayback { token, operation } => self
                 .media

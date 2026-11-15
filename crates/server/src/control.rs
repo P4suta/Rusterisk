@@ -207,11 +207,13 @@ pub enum Action {
         bridge: ChannelId,
         id: ChannelId,
         media: MediaUri,
+        language: Option<ChannelId>,
     },
     PlayChannel {
         channel: ChannelId,
         id: ChannelId,
         media: MediaUri,
+        language: Option<ChannelId>,
     },
     GetPlayback(ChannelId),
     ControlPlayback {
@@ -433,6 +435,7 @@ pub enum Effect {
         owner: MediaOwner,
         token: MediaTaskToken,
         media: MediaUri,
+        language: String,
     },
     ControlPlayback {
         token: MediaTaskToken,
@@ -1161,8 +1164,18 @@ impl Control {
                 self.control_recording(&name, operation)
             }
             Action::EndRecording { name, mode } => self.end_recording(&name, mode),
-            Action::PlayBridge { bridge, id, media } => self.play_bridge(bridge, id, media),
-            Action::PlayChannel { channel, id, media } => self.play_channel(channel, id, media),
+            Action::PlayBridge {
+                bridge,
+                id,
+                media,
+                language,
+            } => self.play_bridge(bridge, id, media, language),
+            Action::PlayChannel {
+                channel,
+                id,
+                media,
+                language,
+            } => self.play_channel(channel, id, media, language),
             Action::GetPlayback(id) => self.get_playback(&id),
             Action::ControlPlayback { id, operation } => {
                 self.control_playback(&id, operation, timestamp)

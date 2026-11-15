@@ -100,6 +100,7 @@ impl Control {
         channel: ChannelId,
         id: ChannelId,
         media: MediaUri,
+        language: Option<ChannelId>,
     ) -> Result<Outcome, ControlError> {
         let entry = self
             .channels
@@ -118,7 +119,10 @@ impl Control {
             id: channel,
             generation: entry.call.generation(),
         };
-        let language = entry.snapshot.language.clone();
+        let language = language.map_or_else(
+            || entry.snapshot.language.clone(),
+            |value| value.to_string(),
+        );
         self.enqueue_playback(MediaOwner::Channel(key), id, media, language)
     }
 
@@ -127,6 +131,7 @@ impl Control {
         bridge: ChannelId,
         id: ChannelId,
         media: MediaUri,
+        language: Option<ChannelId>,
     ) -> Result<Outcome, ControlError> {
         let entry = self
             .bridges
@@ -136,7 +141,12 @@ impl Control {
             id: bridge,
             generation: entry.token,
         };
-        self.enqueue_playback(owner, id, media, String::new())
+        self.enqueue_playback(
+            owner,
+            id,
+            media,
+            language.map_or_else(String::new, |value| value.to_string()),
+        )
     }
 
     fn enqueue_playback(
@@ -181,6 +191,7 @@ impl Control {
                 .ok_or(ControlError::Conflict("Playback ownership is missing"))?;
             let id = id.clone();
             let media = playback.media.clone();
+            let language = playback.language.clone();
             self.media_tasks(owner)?.start(token)?;
             self.playbacks
                 .get_mut(&id)
@@ -190,6 +201,7 @@ impl Control {
                 owner: owner.clone(),
                 token,
                 media,
+                language,
             });
         }
         Ok(())

@@ -215,18 +215,22 @@ fn response(outcome: Outcome) -> Result<Response, ControlError> {
 }
 
 fn playback_media(parameters: &BTreeMap<String, String>) -> Result<MediaUri, ControlError> {
-    if parameters
-        .get("lang")
-        .is_some_and(|language| !language.is_empty())
-    {
-        return Err(ControlError::Unsupported);
-    }
     MediaUri::try_from(required(parameters, "media")?).map_err(|error| match error {
         InvalidMediaUri::Unsupported => ControlError::Unsupported,
         InvalidMediaUri::Syntax | InvalidMediaUri::Name => {
             ControlError::Invalid("Invalid media URI")
         }
     })
+}
+
+fn playback_language(
+    parameters: &BTreeMap<String, String>,
+) -> Result<Option<ChannelId>, ControlError> {
+    parameters
+        .get("lang")
+        .filter(|language| !language.is_empty())
+        .map(|language| id(language))
+        .transpose()
 }
 
 fn playback_control(
@@ -524,21 +528,25 @@ async fn dispatch(
             channel: id(channel)?,
             id: optional_id(parameters, "playbackId")?,
             media: playback_media(parameters)?,
+            language: playback_language(parameters)?,
         },
         ("POST", ["ari", "channels", channel, "play", playback]) => Action::PlayChannel {
             channel: id(channel)?,
             id: id(playback)?,
             media: playback_media(parameters)?,
+            language: playback_language(parameters)?,
         },
         ("POST", ["ari", "bridges", bridge, "play"]) => Action::PlayBridge {
             bridge: id(bridge)?,
             id: optional_id(parameters, "playbackId")?,
             media: playback_media(parameters)?,
+            language: playback_language(parameters)?,
         },
         ("POST", ["ari", "bridges", bridge, "play", playback]) => Action::PlayBridge {
             bridge: id(bridge)?,
             id: id(playback)?,
             media: playback_media(parameters)?,
+            language: playback_language(parameters)?,
         },
         ("GET", ["ari", "playbacks", playback]) => Action::GetPlayback(id(playback)?),
         ("DELETE", ["ari", "playbacks", playback]) => Action::ControlPlayback {

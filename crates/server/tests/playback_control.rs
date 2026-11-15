@@ -32,6 +32,7 @@ fn empty_bridges_own_playback_and_deletion_cannot_affect_a_replacement_bridge(
                 bridge: id("mix")?,
                 id: id("play")?,
                 media: media("sound:welcome")?,
+                language: None,
             },
             "now",
             0,
@@ -78,6 +79,7 @@ fn empty_bridges_own_playback_and_deletion_cannot_affect_a_replacement_bridge(
                 bridge: id("mix")?,
                 id: id("queued")?,
                 media: media("recording:saved")?,
+                language: None,
             },
             "now",
             0,
@@ -134,6 +136,7 @@ fn playback_acceptance_start_and_completion_are_distinct_and_queued_audio_starts
             channel: key.id.clone(),
             id: id("first")?,
             media: media("sound:welcome")?,
+            language: None,
         },
         "now",
         1,
@@ -159,6 +162,7 @@ fn playback_acceptance_start_and_completion_are_distinct_and_queued_audio_starts
             channel: key.id.clone(),
             id: id("second")?,
             media: media("recording:call-1")?,
+            language: None,
         },
         "now",
         2,
@@ -252,7 +256,8 @@ fn playback_requires_stasis_state_and_reserves_bounded_slots_without_replacing_e
             Action::PlayChannel {
                 channel: key.id.clone(),
                 id: id("early")?,
-                media: media("sound:welcome")?
+                media: media("sound:welcome")?,
+                language: None,
             },
             "now",
             0
@@ -272,6 +277,7 @@ fn playback_requires_stasis_state_and_reserves_bounded_slots_without_replacing_e
                 channel: key.id.clone(),
                 id: id(&format!("play-{index}"))?,
                 media: media("sound:welcome")?,
+                language: None,
             },
             "now",
             0,
@@ -282,7 +288,8 @@ fn playback_requires_stasis_state_and_reserves_bounded_slots_without_replacing_e
             Action::PlayChannel {
                 channel: key.id.clone(),
                 id: id("overflow")?,
-                media: media("sound:welcome")?
+                media: media("sound:welcome")?,
+                language: None,
             },
             "now",
             0
@@ -294,7 +301,8 @@ fn playback_requires_stasis_state_and_reserves_bounded_slots_without_replacing_e
             Action::PlayChannel {
                 channel: key.id.clone(),
                 id: id("play-0")?,
-                media: media("sound:other")?
+                media: media("sound:other")?,
+                language: None,
             },
             "now",
             0
