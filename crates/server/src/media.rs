@@ -1,3 +1,4 @@
+use crate::audiosocket::AudioSocketLink;
 use crate::rtp::{LinkStats, RtpChannels, RtpDigitCommand, RtpLink, RtpSession, SocketPair};
 use crate::storage::{PlaybackSource, RecordingSink, WorkerError};
 use crate::CallKey;
@@ -9,6 +10,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 mod playback;
 mod recording;
+mod streams;
 pub use playback::PlaybackControl;
 use playback::Playbacks;
 use recording::Recordings;
@@ -84,6 +86,12 @@ enum Command {
         sockets: SocketPair,
         session: RtpSession,
         direction: PeerMediaDirection,
+        reply: oneshot::Sender<Result<(), MediaError>>,
+    },
+    AttachAudioSocket {
+        key: CallKey,
+        socket: tokio::net::TcpStream,
+        rate: u32,
         reply: oneshot::Sender<Result<(), MediaError>>,
     },
     Release {
@@ -345,6 +353,26 @@ impl MediaPort {
             .try_send(Command::Release { key })
             .map_err(|_| MediaError::Capacity)
     }
+    pub async fn attach_audiosocket(
+        &self,
+        key: CallKey,
+        socket: tokio::net::TcpStream,
+        rate: u32,
+    ) -> Result<(), MediaError> {
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .try_send(Command::AttachAudioSocket {
+                key,
+                socket,
+                rate,
+                reply,
+            })
+            .map_err(|_| MediaError::Capacity)?;
+        tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+    }
     pub fn bridge(&self, id: u64, members: Vec<CallKey>) -> Result<(), MediaError> {
         if members.len() > 64 {
             return Err(MediaError::Capacity);
@@ -389,13 +417,18 @@ enum Connection {
     Waiting,
     Connected,
 }
+enum DigitSupport {
+    Unsupported,
+    Rfc4733(TelephoneFormat),
+    AudioSocket,
+}
 struct Port {
     incoming: mpsc::Receiver<Frame>,
     digits: mpsc::Receiver<DtmfTone>,
     outgoing: mpsc::Sender<Frame>,
     commands: mpsc::Sender<RtpDigitCommand>,
     completed: mpsc::Receiver<DtmfToken>,
-    telephone: Option<TelephoneFormat>,
+    digit_support: DigitSupport,
     stop: watch::Sender<bool>,
     direction: watch::Sender<PeerMediaDirection>,
     connection: Connection,
@@ -503,7 +536,10 @@ impl MediaHub {
                 outgoing,
                 commands,
                 completed: completions,
-                telephone: session.telephone,
+                digit_support: session
+                    .telephone
+                    .map(DigitSupport::Rfc4733)
+                    .unwrap_or(DigitSupport::Unsupported),
                 stop,
                 direction,
                 connection: Connection::Waiting,
@@ -620,11 +656,17 @@ impl MediaHub {
                         .get(&key)
                         .ok_or(MediaError::UnknownStream)
                         .and_then(|port| {
-                            let format = port.telephone.ok_or(MediaError::Unsupported)?;
+                            let events = match port.digit_support {
+                                DigitSupport::Unsupported => return Err(MediaError::Unsupported),
+                                DigitSupport::Rfc4733(format) => format.events(),
+                                DigitSupport::AudioSocket => u16::MAX,
+                            };
                             let supported = match &command {
-                                RtpDigitCommand::Tone(tone) => format.supports(tone.digit),
+                                RtpDigitCommand::Tone(tone) => {
+                                    events & (1 << tone.digit.event()) != 0
+                                }
                                 RtpDigitCommand::Sequence(command) => {
-                                    command.sequence.supported_by(format.events())
+                                    command.sequence.supported_by(events)
                                 }
                             };
                             if !supported {
@@ -654,6 +696,19 @@ impl MediaHub {
                 }
             }
             Command::Release { key } => self.remove(&key)?,
+            Command::AttachAudioSocket {
+                key,
+                socket,
+                rate,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let result = self.attach_audiosocket(key.clone(), socket, rate);
+                    if reply.send(result).is_err() {
+                        self.remove(&key)?;
+                    }
+                }
+            }
             Command::ReleaseBridge { id } => {
                 self.playbacks.release_bridge(id);
                 self.recordings.release_bridge(id);
