@@ -306,8 +306,12 @@ pub enum EventKind {
         channel: Channel,
     },
     ChannelHangupRequest {
-        cause: u16,
-        soft: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cause: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tech_cause: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        soft: Option<bool>,
         channel: Channel,
     },
     ChannelEnteredBridge {
