@@ -57,7 +57,12 @@ The Rust client exposes typed external datagram targets and bounded bridge membe
 AudioSocket supports client connections with numeric destinations, binary session identifiers, and 8 kHz signed linear audio through `format=slin`.
 Connection attempts have deadlines and preserve signaling progress.
 Cancelling admission closes the owned connection without reviving the channel.
-External WebSocket services remain pending.
+Incoming external WebSocket channels publish an ephemeral connection identifier and an optimal frame size.
+Media connections use the `media` subprotocol and the connection identifier as a bearer credential.
+Origin validation and exclusive connection claims protect channel generations.
+The service supports JSON and plain text controls, G.711 and signed linear audio, buffering, queue markers, pause, resume, and direction changes.
+Disconnecting releases the channel and its owned media.
+Outgoing WebSocket clients and Opus passthrough remain pending.
 
 ## Configuration and persistence
 
@@ -83,6 +88,7 @@ Datagram tests compare received audio through actual sockets and bridges, includ
 The local `just interop` gate compares bridge lifecycle, endpoint resources, routing availability, app subscriptions, external channel admission, and resource errors with Asterisk 22.9.0.
 Both servers bridge known external audio samples in both directions with `PCMU` and `PCMA`.
 AudioSocket comparisons also check session identifiers and exact received samples through both servers.
+Incoming WebSocket comparisons check start and status messages and known received samples in both directions with `PCMU`.
 The reference distinguishes case-sensitive technology lists from case-insensitive endpoint detail queries.
 See [reference comparisons](reference-comparisons.md) for scope and resource limits.
 Reference signaling calls, browser audio, supported-platform distributions, and physical `HT813` observations remain unverified.
