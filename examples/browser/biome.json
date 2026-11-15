@@ -1,5 +1,5 @@
 {
-	"root": false,
+	"root": true,
 	"$schema": "https://biomejs.dev/schemas/2.6.2/schema.json",
 	"files": {
 		"includes": [
@@ -11,6 +11,6 @@
 		]
 	},
 	"assist": { "actions": { "source": { "organizeImports": "on" } } },
-	"linter": { "enabled": false },
-	"formatter": { "indentStyle": "tab", "lineWidth": 100 }
+	"linter": { "enabled": true },
+	"formatter": { "indentStyle": "tab", "lineWidth": 80 }
 }
