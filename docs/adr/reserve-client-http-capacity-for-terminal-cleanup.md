@@ -9,7 +9,6 @@ status: proposed
 
 Originate responses can remain pending while a caller cancels or observes Stasis entry.
 Starting one request for every handle can exhaust server connections and delay cleanup.
-Waiting for a media state request inside event reception can block its own notification.
 
 ## Decision
 
@@ -20,6 +19,7 @@ Keep terminal cleanup pending in its call entry until a worker slot becomes avai
 Read existing media state after Stasis entry through an owned worker.
 Report a failed state request through the call snapshot and milestone wait.
 Join all workers when the session closes.
+Give queued cleanup 60 seconds, covering 64 handles and late originate responses within ten-second request deadlines.
 
 ## Alternatives
 
@@ -29,7 +29,7 @@ A global mutable semaphore would add shared domain state.
 
 ## Consequences
 
-Sessions still share the server's admission limits.
+Sessions share the server's admission limits.
 Reconsider worker budgets using measured setup and cleanup latency.
 
 ## Confirmation

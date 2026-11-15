@@ -29,6 +29,7 @@ pub enum Error {
     EventLagged(u64),
     CallEnded(CallCompletion),
     StasisExited,
+    MediaProbe(CallFailure),
     CallFailed(CallFailure),
     Cleanup(String),
 }
@@ -49,6 +50,7 @@ impl std::fmt::Display for Error {
             Self::EventLagged(count) => write!(f, "event consumer missed {count} events"),
             Self::CallEnded(completion) => write!(f, "call completed: {completion:?}"),
             Self::StasisExited => f.write_str("channel left Stasis"),
+            Self::MediaProbe(failure) => write!(f, "media state request: {}", failure.message),
             Self::CallFailed(failure) => f.write_str(&failure.message),
             Self::Cleanup(message) => write!(f, "call cleanup: {message}"),
         }

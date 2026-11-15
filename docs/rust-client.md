@@ -38,6 +38,10 @@ The four milestones keep their independent meanings.
 The milestone means the server received an audio frame.
 Checking received audio remains necessary to verify the intended signal.
 The automatic notification is a Rusterisk extension.
+After Stasis entry, an independent worker also reads the current media connection variable.
+A missing variable leaves the milestone pending for a later notification.
+Other request failures appear in `CallSnapshot::media_probe_failure` and return `Error::MediaProbe` from the media milestone wait.
+A later connection notification clears the failure and completes the milestone.
 
 `wait_completion` returns the terminal snapshot after peer termination, cancellation, or failure.
 Leaving Stasis completes the handle with `CallCompletion::StasisExited` and releases remote cleanup responsibility.
@@ -56,7 +60,7 @@ Await explicit cleanup before shutting down the runtime.
 ## Bound transport and event work
 
 A session holds at most 64 call handles and remembers at most 4096 issued identifiers.
-At most eight originate requests run together, with 16 request workers available for setup and cleanup.
+At most eight originate and media state requests run together, with 16 request workers available for setup and cleanup.
 Foreground saturation rejects new originate commands with `Error::Capacity`.
 Pending cleanup stays in its call entry until a worker becomes available.
 The event queue retains 64 events.
@@ -66,7 +70,8 @@ Call progress continues to update while the caller waits for a milestone.
 Requests have a ten-second deadline and a five-second connection deadline.
 The client rejects URLs larger than 4096 bytes and JSON response bodies larger than one mebibyte.
 The event transport limits messages to 64 kibibytes.
-Session cleanup has a 22-second deadline.
+Remote cleanup has a 60-second deadline for queued requests and late originate responses.
+Closing the event socket has a separate two-second deadline.
 The driver then aborts and joins any remaining workers.
 
 ## Download stored audio

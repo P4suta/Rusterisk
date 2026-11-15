@@ -126,6 +126,9 @@ async fn run(
                 worker = calls.cleanups.join_next(), if !calls.cleanups.is_empty() => {
                     if let Some(worker) = worker { let (id, result) = worker.map_err(|_| Error::Closed)?; calls.cleaned(id, result); }
                 }
+                worker = calls.probes.join_next(), if !calls.probes.is_empty() => {
+                    if let Some(worker) = worker { let (id, result) = worker.map_err(|_| Error::Closed)?; calls.probed(id, result); }
+                }
                 _instant = lifetime_tick.tick() => calls.tick(),
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { break; },
                 message = socket.next() => {

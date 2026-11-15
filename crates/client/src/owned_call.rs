@@ -4,9 +4,14 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot, watch};
+mod media_probe;
+#[cfg(test)]
+mod media_probe_tests;
+use media_probe::Probe;
 
 const MAX_FOREGROUND_REQUESTS: usize = 8;
 const MAX_REQUESTS: usize = 16;
+const CLEANUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug)]
 pub struct Originate {
@@ -56,6 +61,7 @@ impl From<Error> for CallFailure {
     fn from(error: Error) -> Self {
         let status = match &error {
             Error::Api { status, .. } => Some(*status),
+            Error::MediaProbe(failure) => failure.status,
             Error::Invalid(_)
             | Error::Id(_)
             | Error::Io(_)
@@ -91,6 +97,7 @@ pub struct CallSnapshot {
     pub channel: Option<api::Channel>,
     pub failure: Option<CallFailure>,
     pub cleanup: Cleanup,
+    pub media_probe_failure: Option<CallFailure>,
 }
 
 pub struct OwnedCall {
@@ -153,6 +160,11 @@ impl OwnedCall {
                 if snapshot.progress.has_reached(milestone) {
                     return Ok(snapshot);
                 }
+                if milestone == CallMilestone::MediaConnected {
+                    if let Some(failure) = snapshot.media_probe_failure {
+                        return Err(Error::MediaProbe(failure));
+                    }
+                }
                 self.progress.changed().await.map_err(|_| Error::Closed)?;
             }
         })
@@ -175,7 +187,7 @@ impl OwnedCall {
     }
     pub async fn close(mut self) -> Result<(), Error> {
         self.cancel();
-        tokio::time::timeout(Duration::from_secs(23), async {
+        tokio::time::timeout(CLEANUP_TIMEOUT + Duration::from_secs(1), async {
             loop {
                 match self.progress.borrow_and_update().cleanup.clone() {
                     Cleanup::Complete => return Ok(()),
@@ -193,7 +205,74 @@ impl OwnedCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
     use std::future::IntoFuture;
+
+    #[tokio::test]
+    async fn stasis_entry_reads_existing_media_state_and_preserves_query_failures(
+    ) -> Result<(), Error> {
+        for (status, value) in [(200, "1"), (200, "0"), (404, "missing"), (503, "failed")] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+            let address = listener.local_addr()?;
+            let app = axum::Router::new().route(
+                "/ari/channels/{id}/variable",
+                axum::routing::get(
+                    move |axum::extract::Query(query): axum::extract::Query<
+                        BTreeMap<String, String>,
+                    >| async move {
+                        assert_eq!(
+                            query.get("variable").map(String::as_str),
+                            Some("RUSTERISK_MEDIA_CONNECTED")
+                        );
+                        Ok::<_, axum::http::StatusCode>(if status == 200 {
+                            axum::Json(api::Variable {
+                                value: value.into(),
+                            })
+                            .into_response()
+                        } else {
+                            (
+                                axum::http::StatusCode::from_u16(status)
+                                    .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?,
+                                axum::Json(api::ApiError {
+                                    message: value.into(),
+                                }),
+                            )
+                                .into_response()
+                        })
+                    },
+                ),
+            );
+            let server = tokio::spawn(axum::serve(listener, app).into_future());
+            let result: Result<(), Error> = async {
+                let client = Client::new(&format!("http://{address}"), "app", "password")?;
+                let (_commands, mut calls) = Calls::new(client, api::ChannelId::try_from("app".to_owned())?);
+                let channel = channel("media")?;
+                let (progress, received) = watch::channel(CallSnapshot { progress: OwnedCallProgress::new(), channel: Some(channel.clone()), failure: None, cleanup: Cleanup::Pending, media_probe_failure: None });
+                let (lifetime, dropped) = oneshot::channel();
+                calls.entries.insert(channel.id.clone(), Entry { progress, lifetime: dropped, work: Work::Idle, probe: Probe::Waiting });
+                let event = api::Event { application: "app".into(), timestamp: "now".into(), kind: api::EventKind::StasisStart { channel: channel.clone(), args: Vec::new() } };
+                calls.event(&event);
+                calls.event(&event);
+                assert_eq!(calls.probes.len(), 1);
+                let (id, result) = tokio::time::timeout(Duration::from_secs(1), calls.probes.join_next()).await.map_err(|_| Error::Timeout)?.ok_or(Error::Closed)?.map_err(|_| Error::Closed)?;
+                calls.probed(id, result);
+                assert_eq!(received.borrow().progress.has_reached(CallMilestone::MediaConnected), status == 200 && value == "1");
+                assert_eq!(received.borrow().media_probe_failure.as_ref().and_then(|failure| failure.status), if status == 503 { Some(503) } else { None });
+                let mut call = OwnedCall { id: channel.id.clone(), progress: received, lifetime: Lifetime::Owned(lifetime) };
+                if status == 503 { assert!(matches!(call.wait(CallMilestone::MediaConnected, Duration::from_secs(1)).await, Err(Error::MediaProbe(failure)) if failure.status == Some(503))); }
+                calls.event(&api::Event { application: "app".into(), timestamp: "connected".into(), kind: api::EventKind::ChannelVarset { channel: channel.clone(), variable: "RUSTERISK_MEDIA_CONNECTED".into(), value: "1".into() } });
+                assert!(call.wait(CallMilestone::MediaConnected, Duration::from_secs(1)).await?.media_probe_failure.is_none());
+                calls.event(&api::Event { application: "app".into(), timestamp: "later".into(), kind: api::EventKind::StasisEnd { channel } });
+                drop(call);
+                calls.close().await?;
+                Ok(())
+            }.await;
+            server.abort();
+            assert!(server.await.is_err());
+            result?;
+        }
+        Ok(())
+    }
 
     fn channel(id: &str) -> Result<api::Channel, Error> {
         Ok(serde_json::from_value(serde_json::json!({
@@ -242,6 +321,7 @@ mod tests {
                     channel: None,
                     failure: None,
                     cleanup: Cleanup::Pending,
+                    media_probe_failure: None,
                 });
                 let (lifetime, dropped) = oneshot::channel();
                 let (reply, mut response) = oneshot::channel();
@@ -268,6 +348,7 @@ mod tests {
                     channel: Some(channel.clone()),
                     failure: None,
                     cleanup: Cleanup::Pending,
+                    media_probe_failure: None,
                 });
                 let (lifetime, dropped) = oneshot::channel();
                 calls.entries.insert(
@@ -276,6 +357,7 @@ mod tests {
                         progress,
                         lifetime: dropped,
                         work: Work::Idle,
+                        probe: Probe::Waiting,
                     },
                 );
                 leases.push((lifetime, received));
@@ -313,6 +395,7 @@ mod tests {
                 channel: Some(channel.clone()),
                 failure: None,
                 cleanup: Cleanup::Pending,
+                media_probe_failure: None,
             });
             let (lifetime, released) = oneshot::channel();
             calls.entries.insert(
@@ -321,6 +404,7 @@ mod tests {
                     progress,
                     lifetime: released,
                     work,
+                    probe: Probe::Waiting,
                 },
             );
             let event = api::Event {
@@ -361,6 +445,7 @@ mod tests {
             channel: None,
             failure: None,
             cleanup: Cleanup::Pending,
+            media_probe_failure: None,
         });
         let (lifetime, _dropped) = oneshot::channel();
         let mut call = OwnedCall {
@@ -415,6 +500,7 @@ pub(crate) async fn originate(
         channel: None,
         failure: None,
         cleanup: Cleanup::Pending,
+        media_probe_failure: None,
     });
     let (lifetime, dropped) = oneshot::channel();
     let (reply, accepted) = oneshot::channel();
@@ -449,6 +535,7 @@ struct Entry {
     progress: watch::Sender<CallSnapshot>,
     lifetime: oneshot::Receiver<()>,
     work: Work,
+    probe: Probe,
 }
 pub(crate) struct Calls {
     client: Client,
@@ -458,6 +545,7 @@ pub(crate) struct Calls {
     pub commands: mpsc::Receiver<Command>,
     pub originates: tokio::task::JoinSet<(api::ChannelId, Result<api::Channel, Error>)>,
     pub cleanups: tokio::task::JoinSet<(api::ChannelId, Result<(), Error>)>,
+    pub probes: tokio::task::JoinSet<(api::ChannelId, Result<api::Variable, Error>)>,
     cleanup_failure: Option<Error>,
 }
 
@@ -474,6 +562,7 @@ impl Calls {
                 commands: received,
                 originates: tokio::task::JoinSet::new(),
                 cleanups: tokio::task::JoinSet::new(),
+                probes: tokio::task::JoinSet::new(),
                 cleanup_failure: None,
             },
         )
@@ -486,8 +575,8 @@ impl Calls {
         if self.entries.len() >= 64
             || self.used.len() >= 4096
             || self.used.contains(&command.id)
-            || self.originates.len() >= MAX_FOREGROUND_REQUESTS
-            || self.originates.len() + self.cleanups.len() >= MAX_REQUESTS
+            || self.originates.len() + self.probes.len() >= MAX_FOREGROUND_REQUESTS
+            || self.originates.len() + self.probes.len() + self.cleanups.len() >= MAX_REQUESTS
         {
             let _delivered = command.reply.send(Err(Error::Capacity));
             return;
@@ -506,6 +595,7 @@ impl Calls {
                 progress,
                 lifetime,
                 work: Work::Originating,
+                probe: Probe::Waiting,
             },
         );
         let client = self.client.clone();
@@ -607,6 +697,9 @@ impl Calls {
                 }
                 if let Some(milestone) = milestone {
                     snapshot.progress = snapshot.progress.observe(milestone);
+                    if milestone == CallMilestone::MediaConnected {
+                        snapshot.media_probe_failure = None;
+                    }
                 }
                 if let Some(completion) = completion {
                     snapshot.progress = snapshot.progress.finish(completion);
@@ -630,7 +723,8 @@ impl Calls {
             let cleanup = {
                 let snapshot = entry.progress.borrow();
                 if snapshot.progress.completion().is_none()
-                    || self.originates.len() + self.cleanups.len() >= MAX_REQUESTS
+                    || self.originates.len() + self.probes.len() + self.cleanups.len()
+                        >= MAX_REQUESTS
                 {
                     false
                 } else {
@@ -663,6 +757,7 @@ impl Calls {
         }
         self.entries
             .retain(|_, entry| entry.work != Work::Done || !entry.progress.is_closed());
+        self.start_probes();
     }
 
     pub fn originated(&mut self, id: api::ChannelId, result: Result<api::Channel, Error>) {
@@ -754,9 +849,12 @@ impl Calls {
             });
         }
         self.tick();
-        let result = tokio::time::timeout(Duration::from_secs(22), async {
-            while !self.originates.is_empty() || !self.cleanups.is_empty() {
+        let result = tokio::time::timeout(CLEANUP_TIMEOUT, async {
+            while !self.originates.is_empty() || !self.cleanups.is_empty() || !self.probes.is_empty() {
                 tokio::select! {
+                    worker = self.probes.join_next(), if !self.probes.is_empty() => {
+                        if let Some(worker) = worker { let (id, result) = worker.map_err(|_| Error::Closed)?; self.probed(id, result); }
+                    }
                     worker = self.originates.join_next(), if !self.originates.is_empty() => {
                         if let Some(worker) = worker { let (id, result) = worker.map_err(|_| Error::Closed)?; self.originated(id, result); }
                     }
@@ -770,8 +868,10 @@ impl Calls {
         .await;
         self.originates.abort_all();
         self.cleanups.abort_all();
+        self.probes.abort_all();
         while self.originates.join_next().await.is_some() {}
         while self.cleanups.join_next().await.is_some() {}
+        while self.probes.join_next().await.is_some() {}
         result.map_err(|_| Error::Timeout)??;
         match self.cleanup_failure.take() {
             Some(error) => Err(error),
