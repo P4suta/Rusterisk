@@ -5,8 +5,10 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 mod history;
 mod preparation;
+mod recording_file;
 pub use history::{CallHistoryChange, CallRecord};
 pub use preparation::RecordingPreparation;
+pub use recording_file::{RecordingChunk, StoredRecordingReader};
 
 const MAX_RECORDING: u64 = 1024 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 4096;
@@ -234,6 +236,10 @@ impl Store {
             name: name.to_owned(),
             format: "wav".into(),
         })
+    }
+
+    pub fn open_recording(&self, name: &str) -> Result<StoredRecordingReader, StorageError> {
+        StoredRecordingReader::open(&self.recording_path(name)?)
     }
 
     pub fn delete_recording(&mut self, name: &str) -> Result<(), StorageError> {
