@@ -132,7 +132,7 @@ async fn delayed_packets_and_completions_cannot_close_a_replacement_generation(
         })
         .await
         .map_err(failure)?;
-    network.jobs.spawn(async move { (previous, Ok(())) });
+    network.jobs.spawn(async move { Ok(()) });
     let Input::Packet(packet) = network.next().await? else {
         return Err(ControlError::Capacity);
     };

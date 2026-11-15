@@ -17,7 +17,9 @@ use tokio::task::JoinSet;
 mod external_media;
 #[cfg(test)]
 mod negotiation_tests;
+mod outbound;
 mod recording;
+mod resolver;
 pub(crate) mod sip_websocket;
 #[cfg(test)]
 mod stream_tests;
@@ -77,6 +79,10 @@ pub struct Signaling {
     notices: mpsc::Receiver<MediaNotice>,
     listeners: Vec<Listener>,
     network: transport::Network,
+    native_pending: BTreeMap<CallKey, outbound::Pending>,
+    native_jobs: JoinSet<outbound::Completion>,
+    resolver: Result<resolver::DestinationResolver, ControlError>,
+    resolution_cache: resolver::ResolutionCache,
     calls: BTreeMap<CallKey, Active>,
     external_media: BTreeSet<CallKey>,
     stream_admissions: BTreeMap<CallKey, external_media::PendingStream>,
@@ -151,6 +157,10 @@ impl Signaling {
             notices,
             listeners,
             network,
+            native_pending: BTreeMap::new(),
+            native_jobs: JoinSet::new(),
+            resolver: resolver::DestinationResolver::system(),
+            resolution_cache: resolver::ResolutionCache::default(),
             calls: BTreeMap::new(),
             external_media: BTreeSet::new(),
             stream_admissions: BTreeMap::new(),
@@ -465,6 +475,18 @@ impl Signaling {
         timeout: Option<u32>,
         now: u64,
     ) -> Result<(), ControlError> {
+        self.queue_native(key, endpoint, caller, timeout, now)
+    }
+
+    async fn start_resolved(
+        &mut self,
+        key: CallKey,
+        endpoint: String,
+        caller: String,
+        timeout: Option<u32>,
+        resolved_peer: Option<SocketAddr>,
+        now: u64,
+    ) -> Result<(), ControlError> {
         if self.calls.len()
             + self.external_media.len()
             + self.stream_admissions.len()
@@ -505,20 +527,20 @@ impl Signaling {
             local.port(),
         );
         let dtmf = endpoint.dtmf;
-        let output = self.listeners[listener]
-            .engine
-            .originate(
-                Outbound {
-                    id: key.id.as_str().into(),
-                    generation: key.generation,
-                    endpoint: endpoint.name.clone(),
-                    caller,
-                    local_rtp,
-                    timeout_ms: timeout.map(|timeout| u64::from(timeout) * 1000),
-                },
-                now,
-            )
-            .map_err(failure)?;
+        let outbound = Outbound {
+            id: key.id.as_str().into(),
+            generation: key.generation,
+            endpoint: endpoint.name.clone(),
+            caller,
+            local_rtp,
+            timeout_ms: timeout.map(|timeout| u64::from(timeout) * 1000),
+        };
+        let engine = &mut self.listeners[listener].engine;
+        let output = match resolved_peer {
+            Some(peer) => engine.originate_to(outbound, peer, now),
+            None => engine.originate(outbound, now),
+        }
+        .map_err(failure)?;
         self.calls.insert(
             key,
             Active {
@@ -746,6 +768,7 @@ impl Signaling {
                 .control_playback(token, operation)
                 .map_err(failure)?,
             Effect::Release { key } => {
+                self.cancel_native(&key);
                 if let Some(pending) = self.websocket_admissions.remove(&key) {
                     pending.cancel.send_replace(true);
                 }
@@ -996,7 +1019,9 @@ impl Signaling {
                             if let Err(error) = result { tracing::debug!(transport = %self.listeners[key.listener].name, %error, "signaling stream closed"); }
                             let output = self.listeners[key.listener].engine.disconnected(key.peer);
                             self.output(key.listener, output, now).await?;
-                        }
+                        },
+                        transport::Input::Prepared(prepared) => self.native_prepared(prepared, now).await?,
+                        transport::Input::SetupFinished { key, result } => self.native_setup_finished(key, result).await?,
                     }
                 }
                 notice = self.notices.recv() => match notice {
@@ -1049,6 +1074,11 @@ impl Signaling {
                     let completed = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
                     self.websocket_completed(completed).await?;
                 },
+                result = self.native_jobs.join_next(), if !self.native_jobs.is_empty() => {
+                    let completed = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
+                    let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
+                    self.native_completed(completed, now).await?;
+                },
                 _instant = tick.tick() => {
                     let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
                     for listener in 0..self.listeners.len() {
@@ -1067,6 +1097,9 @@ impl Signaling {
         let result = self.serve(&mut stop, started).await;
         let mut cleanup = Ok(());
         let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
+        if let Err(error) = self.finish_native().await {
+            cleanup = Err(error);
+        }
         if let Err(error) = self.finish_streams().await {
             cleanup = Err(error);
         }

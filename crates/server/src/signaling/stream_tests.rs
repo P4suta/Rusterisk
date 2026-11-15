@@ -356,12 +356,14 @@ async fn initial_call<S: AsyncRead + AsyncWrite + Unpin>(
     token: &str,
     controller: &Controller,
     id: &ChannelId,
+    target: &str,
 ) -> Result<(), ControlError> {
     let mut decoder = SipStreamDecoder::new();
     let SipMessage::Request(invite) = receive(&mut peer, &mut decoder).await? else {
         return Err(ControlError::Unsupported);
     };
     assert_eq!(invite.method, Method::Invite);
+    assert_eq!(invite.uri, Uri::try_from(target).map_err(failure)?);
     assert!(invite
         .top_via_header()
         .map_err(failure)?
@@ -393,22 +395,24 @@ async fn initial_outbound_connections_use_tcp_or_verified_tls_and_fail_closed(
     std::fs::write(&private_key, identity.signing_key.serialize_pem()).map_err(failure)?;
     std::fs::write(&other_certificate, wrong_name.cert.pem()).map_err(failure)?;
     std::fs::write(&other_key, wrong_name.signing_key.serialize_pem()).map_err(failure)?;
-    for (protocol, token, name_matches, trusted) in [
-        ("tcp", "TCP", true, true),
-        ("tls", "TLS", true, true),
-        ("tls", "TLS", false, true),
-        ("tls", "TLS", true, false),
+    for (protocol, token, name_matches, trusted, hostname) in [
+        ("tcp", "TCP", true, true, false),
+        ("tcp", "TCP", true, true, true),
+        ("tls", "TLS", true, true, false),
+        ("tls", "TLS", true, true, true),
+        ("tls", "TLS", false, true, false),
+        ("tls", "TLS", true, false, false),
     ] {
         let peer_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(failure)?;
         let peer_address = peer_listener.local_addr().map_err(failure)?;
-        let remote_certificate = if name_matches {
+        let remote_certificate = if name_matches != hostname {
             &certificate
         } else {
             &other_certificate
         };
-        let remote_key = if name_matches {
+        let remote_key = if name_matches != hostname {
             &private_key
         } else {
             &other_key
@@ -429,7 +433,12 @@ async fn initial_outbound_connections_use_tcp_or_verified_tls_and_fail_closed(
             String::new()
         };
         let mut config = configuration(protocol, &files)?;
-        config.aors[0].contact = Some(format!("sip:phone@{peer_address}"));
+        let target = if hostname {
+            format!("sip:phone@localhost:{}", peer_address.port())
+        } else {
+            format!("sip:phone@{peer_address}")
+        };
+        config.aors[0].contact = Some(target.clone());
         let (controller, runner, effects) = Controller::new(config.clone(), 4);
         let (media, hub, notices) = MediaHub::new(4);
         let signaling =
@@ -461,7 +470,7 @@ async fn initial_outbound_connections_use_tcp_or_verified_tls_and_fail_closed(
                 .map_err(failure)?
                 .map_err(failure)?;
             match protocol {
-                "tcp" => initial_call(peer, peer_address, token, &controller, &id).await?,
+                "tcp" => initial_call(peer, peer_address, token, &controller, &id, &target).await?,
                 "tls" => {
                     let context = TlsContext::load(&TlsFiles {
                         certificate: remote_certificate.to_string_lossy().into(),
@@ -470,7 +479,8 @@ async fn initial_outbound_connections_use_tcp_or_verified_tls_and_fail_closed(
                     .await?;
                     let accepted = context.accept(peer).await;
                     if name_matches && trusted {
-                        initial_call(accepted?, peer_address, token, &controller, &id).await?;
+                        initial_call(accepted?, peer_address, token, &controller, &id, &target)
+                            .await?;
                     } else {
                         if let Ok(mut peer) = accepted {
                             let mut byte = [0; 1];

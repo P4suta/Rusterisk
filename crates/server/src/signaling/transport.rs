@@ -9,13 +9,15 @@ use rusterisk_sip::{Datagram, SipStreamDecoder, StreamItem, MAX_MESSAGE};
 use std::{collections::BTreeMap, net::SocketAddr, task::Poll, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
-    net::{TcpListener, TcpSocket, TcpStream, UdpSocket},
+    net::{TcpListener, TcpStream, UdpSocket},
     sync::{mpsc, watch},
     task::JoinSet,
 };
+mod setup;
 #[cfg(test)]
 mod tests;
 mod websocket;
+pub(super) use setup::{Prepared, RegisteredRoute, SetupKey};
 
 enum ListenerSocket {
     Datagram(UdpSocket),
@@ -77,6 +79,7 @@ struct Port {
     packets: mpsc::Sender<Vec<u8>>,
     stop: watch::Sender<bool>,
     state: ConnectionState,
+    identity: Option<String>,
 }
 
 struct StreamPacket {
@@ -112,6 +115,11 @@ enum ListenerInput {
 
 pub(super) enum Input {
     Packet(Received),
+    Prepared(Prepared),
+    SetupFinished {
+        key: SetupKey,
+        result: Result<(), ControlError>,
+    },
     Closed {
         key: ConnectionKey,
         result: Result<(), ControlError>,
@@ -121,12 +129,15 @@ pub(super) enum Input {
 pub(super) struct Network {
     listeners: Vec<ListenerSocket>,
     ports: BTreeMap<(usize, SocketAddr), Port>,
-    jobs: JoinSet<(ConnectionKey, Result<(), ControlError>)>,
+    jobs: JoinSet<Result<(), ControlError>>,
     sender: mpsc::Sender<StreamPacket>,
     received: mpsc::Receiver<StreamPacket>,
     generation: u64,
     upgrades: mpsc::Receiver<UpgradeRequest>,
     upgrade_requests: mpsc::Sender<UpgradeRequest>,
+    preparations: BTreeMap<SetupKey, setup::Preparation>,
+    preparation_sender: mpsc::Sender<setup::SetupEvent>,
+    prepared: mpsc::Receiver<setup::SetupEvent>,
 }
 
 async fn listen(listeners: &[ListenerSocket]) -> Result<ListenerInput, ControlError> {
@@ -266,6 +277,7 @@ impl Network {
         }
         let (sender, received) = mpsc::channel(128);
         let (upgrade_requests, upgrades) = mpsc::channel(64);
+        let (preparation_sender, prepared) = mpsc::channel(64);
         Ok(Self {
             listeners,
             ports: BTreeMap::new(),
@@ -275,6 +287,9 @@ impl Network {
             generation: 0,
             upgrades,
             upgrade_requests,
+            preparations: BTreeMap::new(),
+            preparation_sender,
+            prepared,
         })
     }
 
@@ -299,7 +314,7 @@ impl Network {
     }
 
     fn reserve(&mut self, listener: usize, peer: SocketAddr) -> Result<Reserved, ControlError> {
-        if self.ports.len() >= 64
+        if self.ports.len() + self.preparations.len() >= 64
             || self.jobs.len() >= 64
             || self.ports.contains_key(&(listener, peer))
         {
@@ -323,6 +338,7 @@ impl Network {
                 packets,
                 stop,
                 state: ConnectionState::Open,
+                identity: None,
             },
         );
         Ok(Reserved {
@@ -342,10 +358,7 @@ impl Network {
         let (socket, received) = tokio::sync::oneshot::channel();
         let sender = self.sender.clone();
         self.jobs.spawn(async move {
-            (
-                key,
-                websocket::connection(received, key, packets, sender, stop).await,
-            )
+            websocket::connection(received, key, packets, sender, stop).await
         });
         Ok(socket)
     }
@@ -373,7 +386,7 @@ impl Network {
         } = self.reserve(listener, peer)?;
         let sender = self.sender.clone();
         self.jobs.spawn(async move {
-            let result = match encryption {
+            match encryption {
                 None => connection(stream, key, packets, sender, stop).await,
                 Some(context) => {
                     tokio::select! {
@@ -381,57 +394,7 @@ impl Network {
                         accepted = context.accept(stream) => match accepted { Ok(stream) => connection(stream, key, packets, sender, stop).await, Err(error) => finished(&sender, key, Err(error), &stop).await },
                     }
                 }
-            };
-            (key, result)
-        });
-        Ok(())
-    }
-
-    fn connect(&mut self, listener: usize, peer: SocketAddr) -> Result<(), ControlError> {
-        let encryption = match &self.listeners[listener] {
-            ListenerSocket::Stream(_) => None,
-            ListenerSocket::Encrypted { client, .. } => Some(client.clone()),
-            ListenerSocket::Datagram(_) | ListenerSocket::WebSocket { .. } => {
-                return Err(ControlError::Unsupported)
             }
-        };
-        let local = SocketAddr::new(self.local_addr(listener)?.ip(), 0);
-        let socket = if peer.is_ipv4() {
-            TcpSocket::new_v4()
-        } else {
-            TcpSocket::new_v6()
-        }
-        .map_err(failure)?;
-        socket.bind(local).map_err(failure)?;
-        let Reserved {
-            key,
-            packets,
-            mut stop,
-        } = self.reserve(listener, peer)?;
-        let sender = self.sender.clone();
-        self.jobs.spawn(async move {
-            let result = tokio::select! {
-                changed = stop.changed() => match changed { Ok(()) | Err(_) => finished(&sender, key, Ok(()), &stop).await },
-                connected = tokio::time::timeout(Duration::from_secs(4), socket.connect(peer)) => match connected {
-                    Ok(Ok(stream)) => {
-                        match encryption {
-                            None => connection(stream, key, packets, sender, stop).await,
-                            Some(context) => {
-                                tokio::select! {
-                                    changed = stop.changed() => match changed { Ok(()) | Err(_) => finished(&sender, key, Ok(()), &stop).await },
-                                    connected = context.connect(stream, tokio_rustls::rustls::pki_types::ServerName::IpAddress(peer.ip().into())) => match connected {
-                                        Ok(stream) => connection(stream, key, packets, sender, stop).await,
-                                        Err(error) => finished(&sender, key, Err(error), &stop).await,
-                                    },
-                                }
-                            }
-                        }
-                    },
-                    Ok(Err(error)) => finished(&sender, key, Err(failure(error)), &stop).await,
-                    Err(error) => finished(&sender, key, Err(failure(error)), &stop).await,
-                },
-            };
-            (key, result)
         });
         Ok(())
     }
@@ -460,13 +423,10 @@ impl Network {
                 ))
             };
         }
-        if !self.ports.contains_key(&(listener, packet.peer)) {
-            self.connect(listener, packet.peer)?;
-        }
         let port = self
             .ports
             .get_mut(&(listener, packet.peer))
-            .ok_or(ControlError::Capacity)?;
+            .ok_or(ControlError::Conflict("Signaling flow is not admitted"))?;
         match &port.state {
             ConnectionState::Open => {
                 if let Err(error) = port.packets.try_send(packet.bytes) {
@@ -482,6 +442,9 @@ impl Network {
     pub(super) async fn next(&mut self) -> Result<Input, ControlError> {
         loop {
             tokio::select! {
+                event = self.prepared.recv() => {
+                    if let Some(input) = self.prepared_event(event.ok_or(ControlError::Capacity)?) { return Ok(input); }
+                },
                 upgrade = self.upgrades.recv() => {
                     let request = upgrade.ok_or(ControlError::Capacity)?;
                     let result = self.upgrade(request.scheme, request.peer);
@@ -511,7 +474,7 @@ impl Network {
                     }
                 },
                 result = self.jobs.join_next(), if !self.jobs.is_empty() => {
-                    let (_key, result) = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
+                    let result = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
                     if let Err(error) = result { tracing::debug!(%error, "signaling stream cleanup failed"); }
                 },
             }
@@ -536,13 +499,15 @@ impl Network {
         for port in self.ports.values() {
             port.stop.send_replace(true);
         }
+        self.close_preparations();
+        self.prepared.close();
         self.received.close();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut failure = None;
         while !self.jobs.is_empty() {
             match tokio::time::timeout_at(deadline, self.jobs.join_next()).await {
-                Ok(Some(Ok((_, Ok(()))))) | Ok(None) => {}
-                Ok(Some(Ok((_, Err(error))))) => {
+                Ok(Some(Ok(Ok(())))) | Ok(None) => {}
+                Ok(Some(Ok(Err(error)))) => {
                     if failure.is_none() {
                         failure = Some(error);
                     }
@@ -564,6 +529,7 @@ impl Network {
             }
         }
         self.ports.clear();
+        self.preparations.clear();
         match failure {
             Some(error) => Err(error),
             None => Ok(()),
