@@ -140,7 +140,8 @@ fn all_failed_attempts_resume_once_and_late_failures_do_not_end_the_parent(
         .into_iter()
         .map(|effect| match effect {
             Effect::Start { key, .. } => Ok(key),
-            Effect::Dtmf { .. }
+            Effect::ConnectExternalRtp { .. }
+            | Effect::Dtmf { .. }
             | Effect::Playback { .. }
             | Effect::PlayMedia { .. }
             | Effect::RecordMedia { .. }
