@@ -747,7 +747,7 @@ async fn dialplan_answer_wait_and_hangup_finish_a_real_invitation_without_stasis
 }
 
 #[tokio::test]
-async fn dialplan_playback_continues_after_a_missing_sound_and_resumes_after_received_audio(
+async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_completion(
 ) -> Result<(), ControlError> {
     let directory = tempfile::tempdir().map_err(failure)?;
     let mut recording =
@@ -764,6 +764,14 @@ async fn dialplan_playback_continues_after_a_missing_sound_and_resumes_after_rec
         directory.path().join("sounds/welcome.wav"),
     )
     .map_err(failure)?;
+    let mut saved =
+        rusterisk_storage::Recorder::create(directory.path(), "saved", 8000).map_err(failure)?;
+    for _ in 0..20 {
+        saved
+            .write(Frame::new(&[-6000; 160], 8000).map_err(failure)?)
+            .map_err(failure)?;
+    }
+    saved.finish().map_err(failure)?;
     let (storage, worker) =
         rusterisk_server::storage::StorageWorker::start(directory.path().to_owned())
             .await
@@ -819,6 +827,18 @@ async fn dialplan_playback_continues_after_a_missing_sound_and_resumes_after_rec
             }
             Err(ControlError::Capacity)
         }).await.map_err(failure)??;
+        let app = rusterisk_server::http::router(controller.clone());
+        for (name, source, expected) in [("saved-play", "recording:saved", -6000), ("welcome-play", "sound:welcome", 5000)] {
+            let request = Request::builder().method("POST").uri(format!("/ari/channels/{channel}/play/{name}?media={source}"))
+                .header("Authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("app:test-password"))).body(Body::empty()).map_err(failure)?;
+            let accepted = app.clone().oneshot(request).await.map_err(failure)?;
+            assert_eq!(accepted.status(), StatusCode::CREATED);
+            let started = tokio::time::timeout(Duration::from_secs(2), subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
+            assert!(matches!(started.kind, EventKind::PlaybackStarted { playback } if playback.id.as_str() == name && playback.media_uri == source));
+            receive_audio(&audio, expected).await?;
+            let finished = tokio::time::timeout(Duration::from_secs(2), subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
+            assert!(matches!(finished.kind, EventKind::PlaybackFinished { playback } if playback.id.as_str() == name && playback.state == rusterisk_api::PlaybackState::Done));
+        }
         controller.execute(credentials()?, None, Action::Hangup(channel)).await?;
         finish_bye(&phone).await?;
         Ok(())
