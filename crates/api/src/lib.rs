@@ -14,6 +14,8 @@ mod websocket_media_options;
 pub use media_events::{MediaEvent, MediaFormat};
 pub use websocket_media_options::WebSocketMediaOptions;
 mod media_uri;
+mod sound_id;
+pub use sound_id::{InvalidSoundId, SoundId};
 pub use media_commands::{MediaCommand, MediaCommandError, MediaControlFormat, MediaDirection};
 mod recording_options;
 mod recording_policy;

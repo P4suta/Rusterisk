@@ -1,8 +1,8 @@
-use crate::ChannelId;
+use crate::{ChannelId, SoundId};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MediaUri {
-    Sound(ChannelId),
+    Sound(SoundId),
     Recording(ChannelId),
 }
 
@@ -36,10 +36,13 @@ impl TryFrom<&str> for MediaUri {
         if name.len() > 128 {
             return Err(InvalidMediaUri::Name);
         }
-        let name = ChannelId::try_from(name.to_owned()).map_err(|_| InvalidMediaUri::Name)?;
         match scheme {
-            "sound" => Ok(Self::Sound(name)),
-            "recording" => Ok(Self::Recording(name)),
+            "sound" => SoundId::try_from(name.to_owned())
+                .map(Self::Sound)
+                .map_err(|_| InvalidMediaUri::Name),
+            "recording" => ChannelId::try_from(name.to_owned())
+                .map(Self::Recording)
+                .map_err(|_| InvalidMediaUri::Name),
             _ => Err(InvalidMediaUri::Unsupported),
         }
     }
@@ -48,8 +51,8 @@ impl TryFrom<&str> for MediaUri {
 impl std::fmt::Display for MediaUri {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (scheme, name) = match self {
-            Self::Sound(name) => ("sound", name),
-            Self::Recording(name) => ("recording", name),
+            Self::Sound(name) => ("sound", name.as_str()),
+            Self::Recording(name) => ("recording", name.as_str()),
         };
         write!(f, "{scheme}:{name}")
     }

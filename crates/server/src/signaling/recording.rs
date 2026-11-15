@@ -95,7 +95,7 @@ impl Signaling {
             let admission = async {
                 let sink = storage.record_with_policy(name, 8000, options.if_exists).await.map_err(storage_error)?;
                 let source = if options.beep {
-                    match storage.play(PlaybackMedia::Sound(ChannelId::try_from("beep".to_owned())?)).await {
+                    match storage.play(PlaybackMedia::Sound(ChannelId::try_from("beep".to_owned())?.into())).await {
                         Ok(source) => Some(source),
                         Err(error) => {
                             tracing::warn!(?owner, ?token, %error, "recording prompt unavailable");

@@ -1,5 +1,5 @@
 use super::{receive, StoragePort, WorkerError};
-use rusterisk_api::ChannelId;
+use rusterisk_api::{ChannelId, SoundId};
 use rusterisk_media::Frame;
 use rusterisk_storage::{StorageError, WaveReader};
 use std::collections::BTreeMap;
@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 
 pub enum PlaybackMedia {
     Recording(ChannelId),
-    Sound(ChannelId),
+    Sound(SoundId),
 }
 
 enum State {
@@ -152,15 +152,29 @@ impl PlaybackSet {
             .generation
             .checked_add(1)
             .ok_or(StorageError::Capacity)?;
-        let (directory, name) = match media {
-            PlaybackMedia::Recording(name) => ("recordings", name),
-            PlaybackMedia::Sound(name) => ("sounds", name),
+        let (directory, name) = match &media {
+            PlaybackMedia::Recording(name) => ("recordings", name.as_str()),
+            PlaybackMedia::Sound(name) => ("sounds", name.as_str()),
         };
-        let directory = self.root.join(directory);
+        let mut directory = self.root.join(directory);
         if !std::fs::symlink_metadata(&directory)?.is_dir() {
             return Err(StorageError::InvalidName);
         }
-        let path = directory.join(format!("{name}.wav"));
+        let relative = std::path::Path::new(name);
+        if let Some(parent) = relative.parent() {
+            for component in parent.components() {
+                directory.push(component);
+                if !std::fs::symlink_metadata(&directory)?.is_dir() {
+                    return Err(StorageError::InvalidName);
+                }
+            }
+        }
+        let mut leaf = relative
+            .file_name()
+            .ok_or(StorageError::InvalidName)?
+            .to_os_string();
+        leaf.push(".wav");
+        let path = directory.join(leaf);
         if !std::fs::symlink_metadata(&path)?.is_file() {
             return Err(StorageError::InvalidName);
         }

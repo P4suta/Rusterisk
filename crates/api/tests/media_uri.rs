@@ -6,7 +6,9 @@ fn media_uris_keep_their_scheme_and_validated_resource_name() -> Result<(), Inva
         (
             "sound:welcome",
             MediaUri::Sound(
-                ChannelId::try_from("welcome".to_owned()).map_err(|_| InvalidMediaUri::Name)?,
+                ChannelId::try_from("welcome".to_owned())
+                    .map_err(|_| InvalidMediaUri::Name)?
+                    .into(),
             ),
         ),
         (

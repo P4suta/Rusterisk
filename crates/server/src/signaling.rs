@@ -745,9 +745,9 @@ impl Signaling {
                 }
             }
             Effect::Playback { key, token, media } => {
-                let media = ChannelId::try_from(media)
+                let media = rusterisk_api::SoundId::try_from(media)
                     .map(PlaybackMedia::Sound)
-                    .map_err(ControlError::from);
+                    .map_err(|_| ControlError::Invalid("Invalid sound name"));
                 self.start_playback(MediaOwner::Channel(key), token, media)
                     .await?;
             }
