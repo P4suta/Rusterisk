@@ -45,6 +45,7 @@ impl Models {
         schema: &Value,
         path: &str,
         depth: usize,
+        optional: bool,
     ) -> Result<Value, SwaggerError> {
         if depth > 32 {
             return Err(SwaggerError::Capacity);
@@ -61,12 +62,28 @@ impl Models {
                 return Ok(json!({"$ref": name}));
             }
             let definition = definition.clone();
-            return self.property(&definition, path, depth + 1);
+            return self.property(&definition, path, depth + 1, optional);
         }
-        let kind = schema
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or_else(|| SwaggerError::Schema(path.into()))?;
+        let kind = match schema.get("type") {
+            Some(Value::String(kind)) => kind.as_str(),
+            Some(Value::Array(kinds))
+                if optional && kinds.len() == 2 && kinds.iter().any(|kind| kind == "null") =>
+            {
+                kinds
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .find(|kind| *kind != "null")
+                    .ok_or_else(|| SwaggerError::Schema(path.into()))?
+            }
+            Some(
+                Value::Array(_)
+                | Value::Object(_)
+                | Value::Number(_)
+                | Value::Bool(_)
+                | Value::Null,
+            )
+            | None => return Err(SwaggerError::Schema(path.into())),
+        };
         if kind == "object" {
             self.enqueue(path.into(), schema.clone())?;
             return Ok(json!({"$ref": path}));
@@ -82,7 +99,7 @@ impl Models {
             if items.get("type").and_then(Value::as_str) == Some("array") {
                 return Err(SwaggerError::Schema(path.into()));
             }
-            output["items"] = self.property(items, &format!("{path}_item"), depth + 1)?;
+            output["items"] = self.property(items, &format!("{path}_item"), depth + 1, false)?;
         }
         if let Some(format) = schema
             .get("format")
@@ -109,7 +126,7 @@ impl Models {
         if let Some(value) = schema.get("const") {
             output["enum"] = crate::json_array([value.clone()]);
         }
-        if let Some(value) = schema.get("default") {
+        if let Some(value) = schema.get("default").filter(|value| !value.is_null()) {
             output["defaultValue"] = value.clone();
         }
         for key in ["minimum", "maximum"] {
@@ -124,9 +141,13 @@ impl Models {
         let mut properties = Map::new();
         if let Some(fields) = schema.get("properties").and_then(Value::as_object) {
             for (field, value) in fields {
+                let optional = !schema
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .is_some_and(|required| required.iter().any(|name| name == field));
                 properties.insert(
                     field.clone(),
-                    self.property(value, &format!("{name}_{field}"), 0)?,
+                    self.property(value, &format!("{name}_{field}"), 0, optional)?,
                 );
             }
         }
@@ -205,4 +226,36 @@ pub(crate) fn models() -> Result<Value, SwaggerError> {
         }
     }
     Ok(Value::Object(models.output))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Models, SwaggerError};
+    use serde_json::{json, Map};
+    use std::collections::VecDeque;
+
+    #[test]
+    fn optional_primitive_fields_use_omission_and_required_nullable_fields_are_rejected(
+    ) -> Result<(), SwaggerError> {
+        let mut models = Models {
+            definitions: Map::new(),
+            pending: VecDeque::new(),
+            output: Map::new(),
+        };
+        let required = serde_json::to_value(["name"])
+            .map_err(|error| SwaggerError::Schema(error.to_string()))?;
+        let nullable = serde_json::to_value(["string", "null"])
+            .map_err(|error| SwaggerError::Schema(error.to_string()))?;
+        let mut schema = json!({"type":"object", "properties":{"cause":{"type":nullable}, "name":{"type":"string"}}, "required":required});
+        let projected = models.object("recording", &schema)?;
+        assert_eq!(projected["properties"]["cause"]["type"], "string");
+        assert_eq!(projected["required"], schema["required"]);
+        schema["required"] = serde_json::to_value(["name", "cause"])
+            .map_err(|error| SwaggerError::Schema(error.to_string()))?;
+        assert!(matches!(
+            models.object("recording", &schema),
+            Err(SwaggerError::Schema(_))
+        ));
+        Ok(())
+    }
 }
