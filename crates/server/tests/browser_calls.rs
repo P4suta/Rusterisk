@@ -1,4 +1,5 @@
-use axum::{http::header, routing::get, Router};
+#[path = "../examples/browser/assets.rs"]
+mod assets;
 use rusterisk_config::Config;
 use rusterisk_media::Frame;
 use rusterisk_server::{runtime::Server, ControlError, Credentials};
@@ -94,49 +95,6 @@ fn stored_audio_requires_both_known_senders_even_when_one_sender_is_loud(
     Ok(())
 }
 
-fn artifacts(root: &Path) -> Result<Router, ControlError> {
-    let index = std::fs::read_to_string(root.join("index.html")).map_err(failure)?;
-    let styles = std::fs::read_to_string(root.join("style.css")).map_err(failure)?;
-    let bundle = std::fs::read_to_string(root.join("dist/app.js")).map_err(failure)?;
-    if [index.len(), styles.len(), bundle.len()]
-        .into_iter()
-        .any(|size| size > 1024 * 1024)
-    {
-        return Err(ControlError::Capacity);
-    }
-    Ok(Router::new()
-        .route(
-            "/favicon.ico",
-            get(|| async { axum::http::StatusCode::NO_CONTENT }),
-        )
-        .route(
-            "/",
-            get(move || {
-                let body = index.clone();
-                async move { ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], body) }
-            }),
-        )
-        .route(
-            "/style.css",
-            get(move || {
-                let body = styles.clone();
-                async move { ([(header::CONTENT_TYPE, "text/css; charset=utf-8")], body) }
-            }),
-        )
-        .route(
-            "/app.js",
-            get(move || {
-                let body = bundle.clone();
-                async move {
-                    (
-                        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
-                        body,
-                    )
-                }
-            }),
-        ))
-}
-
 async fn joined(mut task: JoinHandle<Result<(), ControlError>>) -> Result<(), ControlError> {
     match tokio::time::timeout(Duration::from_secs(6), &mut task).await {
         Ok(result) => result.map_err(failure)?,
@@ -159,12 +117,12 @@ async fn joined(mut task: JoinHandle<Result<(), ControlError>>) -> Result<(), Co
 async fn actual_browser_calls_exchange_known_audio_and_store_both_senders(
 ) -> Result<(), ControlError> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/browser");
-    let app = artifacts(&root)?;
+    let app = assets::router(&root).map_err(failure)?;
     let listener = TcpListener::bind("127.0.0.1:0").await.map_err(failure)?;
     let ui = listener.local_addr().map_err(failure)?;
     let mut sip = "[browser]\ntype=transport\nprotocol=ws\nbind=127.0.0.1\n".to_owned();
     for name in ["alice", "bob"] {
-        sip.push_str(&format!("[{name}-auth]\ntype=auth\nusername={name}\npassword=test-password\n[{name}-aor]\ntype=aor\n[{name}]\ntype=endpoint\ntransport=browser\nauth={name}-auth\naors={name}-aor\nallow=ulaw\nwebrtc=yes\ndtmf_mode=info\ncontext=internal\n"));
+        sip.push_str(&format!("[{name}-auth]\ntype=auth\nusername={name}\npassword=test-password\n[{name}]\ntype=aor\nmax_contacts=1\n[{name}-endpoint]\ntype=endpoint\ntransport=browser\nauth={name}-auth\naors={name}\nallow=ulaw\nwebrtc=yes\ndtmf_mode=info\ncontext=internal\n"));
     }
     let mut config = Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",

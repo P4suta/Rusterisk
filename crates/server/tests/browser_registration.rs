@@ -12,7 +12,7 @@ async fn browser_signaling_adapter_registers_reconnects_and_refuses_incorrect_cr
     let mut config = Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
         "[app]\ntype=user\npassword=test-password\n",
-        "[browser]\ntype=transport\nprotocol=ws\nbind=127.0.0.1\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[aor]\ntype=aor\n[phone]\ntype=endpoint\ntransport=browser\nauth=auth\naors=aor\nallow=ulaw\nwebrtc=yes\ndtmf_mode=info\ncontext=internal\n",
+        "[browser]\ntype=transport\nprotocol=ws\nbind=127.0.0.1\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[phone]\ntype=aor\nmax_contacts=1\n[phone-endpoint]\ntype=endpoint\ntransport=browser\nauth=auth\naors=phone\nallow=ulaw\nwebrtc=yes\ndtmf_mode=info\ncontext=internal\n",
         "",
         "[internal]\nexten => 100,1,Stasis(calls)\n",
     ).map_err(failure)?;
