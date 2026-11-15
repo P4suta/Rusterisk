@@ -18,6 +18,43 @@ pub struct Snapshot {
     pub normalized: String,
 }
 
+#[derive(Clone, Copy)]
+enum FileBounds {
+    Project,
+    Vendor,
+}
+
+fn directory(path: &Path) -> Result<(), FuzzError> {
+    if !std::fs::symlink_metadata(path)?.file_type().is_dir() {
+        return Err(FuzzError::Manifest);
+    }
+    Ok(())
+}
+
+fn parents(root: &Path, path: &Path) -> Result<(), FuzzError> {
+    let relative = path.strip_prefix(root).map_err(|_| FuzzError::Manifest)?;
+    if relative.as_os_str().is_empty()
+        || relative.components().any(|component| match component {
+            Component::Normal(name) => name.to_str().is_none_or(|name| {
+                name.chars()
+                    .any(|value| value.is_control() || value == '\\')
+            }),
+            Component::Prefix(_)
+            | Component::RootDir
+            | Component::CurDir
+            | Component::ParentDir => true,
+        })
+    {
+        return Err(FuzzError::Manifest);
+    }
+    let mut ancestor = root.to_owned();
+    for component in relative.parent().ok_or(FuzzError::Manifest)?.components() {
+        ancestor.push(component);
+        directory(&ancestor)?;
+    }
+    Ok(())
+}
+
 pub fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, FuzzError> {
     let kind = std::fs::symlink_metadata(path)?.file_type();
     if !kind.is_file() || kind.is_symlink() {
@@ -34,12 +71,33 @@ pub fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, FuzzError> {
 }
 
 fn add(root: &Path, path: &Path, files: &mut Vec<File>) -> Result<(), FuzzError> {
+    add_file(root, path, files, FileBounds::Project)
+}
+
+fn add_file(
+    root: &Path,
+    path: &Path,
+    files: &mut Vec<File>,
+    bounds: FileBounds,
+) -> Result<(), FuzzError> {
+    parents(root, path)?;
     if files.len() >= 1024 {
         return Err(FuzzError::Manifest);
     }
-    let bytes = read_bounded(path, 1024 * 1024)?;
+    let limit = match bounds {
+        FileBounds::Project => 1024 * 1024,
+        FileBounds::Vendor => 8 * 1024 * 1024,
+    };
+    let bytes = read_bounded(path, limit)?;
     let total: usize = files.iter().map(|file| file.bytes.len()).sum();
-    if total + bytes.len() > 16 * 1024 * 1024 {
+    let vendor: usize = files
+        .iter()
+        .filter(|file| file.path.starts_with("vendor/str0m"))
+        .map(|file| file.bytes.len())
+        .sum();
+    if total + bytes.len() > 40 * 1024 * 1024
+        || (matches!(bounds, FileBounds::Vendor) && vendor + bytes.len() > 12 * 1024 * 1024)
+    {
         return Err(FuzzError::Manifest);
     }
     files.push(File {
@@ -53,19 +111,31 @@ fn add(root: &Path, path: &Path, files: &mut Vec<File>) -> Result<(), FuzzError>
 }
 
 fn walk(root: &Path, directory: &Path, files: &mut Vec<File>, depth: u8) -> Result<(), FuzzError> {
+    walk_files(root, directory, files, depth, FileBounds::Project)
+}
+
+fn walk_files(
+    root: &Path,
+    path: &Path,
+    files: &mut Vec<File>,
+    depth: u8,
+    bounds: FileBounds,
+) -> Result<(), FuzzError> {
+    parents(root, path)?;
+    directory(path)?;
     if depth > 8 {
         return Err(FuzzError::Manifest);
     }
-    for entry in std::fs::read_dir(directory)? {
+    for entry in std::fs::read_dir(path)? {
         let entry = entry?;
         let kind = entry.file_type()?;
         if kind.is_symlink() {
             return Err(FuzzError::Manifest);
         }
         if kind.is_dir() {
-            walk(root, &entry.path(), files, depth + 1)?;
+            walk_files(root, &entry.path(), files, depth + 1, bounds)?;
         } else if kind.is_file() {
-            add(root, &entry.path(), files)?;
+            add_file(root, &entry.path(), files, bounds)?;
         } else {
             return Err(FuzzError::Manifest);
         }
@@ -73,8 +143,36 @@ fn walk(root: &Path, directory: &Path, files: &mut Vec<File>, depth: u8) -> Resu
     Ok(())
 }
 
+fn vendor(root: &Path, manifest: &toml::Value, files: &mut Vec<File>) -> Result<(), FuzzError> {
+    let path = manifest
+        .get("patch")
+        .and_then(|value| value.get("crates-io"))
+        .and_then(|value| value.get("str0m"))
+        .and_then(|value| value.get("path"));
+    let Some(path) = path else { return Ok(()) };
+    if path.as_str() != Some("vendor/str0m") {
+        return Err(FuzzError::Manifest);
+    }
+    for path in ["vendor/str0m-source.toml", "vendor/str0m.patch"] {
+        add(root, &root.join(path), files)?;
+    }
+    let before = files.len();
+    walk_files(
+        root,
+        &root.join("vendor/str0m"),
+        files,
+        0,
+        FileBounds::Vendor,
+    )?;
+    if files.len() == before {
+        return Err(FuzzError::Manifest);
+    }
+    Ok(())
+}
+
 impl Snapshot {
     pub fn read(root: &Path) -> Result<Self, FuzzError> {
+        directory(root)?;
         let mut files = Vec::new();
         for path in [
             "Cargo.toml",
@@ -118,6 +216,7 @@ impl Snapshot {
         for path in ["src", "tests", "fuzz_targets"] {
             walk(root, &root.join("xtask/fuzz").join(path), &mut files, 0)?;
         }
+        vendor(root, &manifest, &mut files)?;
         files.sort_by(|left, right| left.path.cmp(&right.path));
         if files.windows(2).any(|pair| pair[0].path == pair[1].path) {
             return Err(FuzzError::Manifest);
