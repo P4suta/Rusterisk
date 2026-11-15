@@ -11,6 +11,7 @@ mod media_tasks;
 mod owned_progress;
 mod recording_clock;
 mod recording_gate;
+mod recording_silence;
 mod recording_stop_keys;
 mod stasis;
 pub use dial_failure::DialFailure;
@@ -27,6 +28,7 @@ pub use media_tasks::{MediaTaskError, MediaTaskKind, MediaTaskState, MediaTaskTo
 pub use owned_progress::{CallCompletion, CallMilestone, OwnedCallProgress};
 pub use recording_clock::RecordingClock;
 pub use recording_gate::{RecordingControl, RecordingGate};
+pub use recording_silence::RecordingSilence;
 pub use recording_stop_keys::RecordingStopKey;
 pub use stasis::{StasisApplication, StasisMembership};
 
