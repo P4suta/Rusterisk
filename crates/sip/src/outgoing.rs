@@ -101,7 +101,7 @@ struct InviteAnswer {
 }
 
 impl Outgoing {
-    fn answer(&self, source: &[u8]) -> Result<Session, SipError> {
+    fn answer(&mut self, source: &[u8]) -> Result<DialogMedia, SipError> {
         let session = Session::parse(std::str::from_utf8(source)?, &self.codecs)?;
         match (&self.local_security, &session.security) {
             (SessionSecurity::Rtp, SessionSecurity::Rtp) => {}
@@ -115,7 +115,16 @@ impl Outgoing {
                 return Err(SipError::Unsupported)
             }
         }
-        Ok(session)
+        let local_security =
+            crate::media_direction::establish(&self.local_security, &session.security)?;
+        let answer_version = crate::media_direction::version(&local_security, self.session_id)?;
+        self.local_security = local_security;
+        Ok(DialogMedia {
+            session,
+            answer_version,
+            peer_description: source.to_vec(),
+            pending: None,
+        })
     }
 
     fn matches(&self, request: &Request, peer: SocketAddr) -> Result<bool, SipError> {
@@ -855,8 +864,8 @@ impl Engine {
         if code < 300 {
             match dialog.state {
                 State::Calling { .. } | State::Proceeding => {
-                    let session = match dialog.answer(&response.body) {
-                        Ok(session) => session,
+                    let media = match dialog.answer(&response.body) {
+                        Ok(media) => media,
                         Err(_) => {
                             dialog.cseq = dialog.cseq.checked_add(1).ok_or(SipError::Capacity)?;
                             output.datagrams.push(Datagram {
@@ -883,14 +892,9 @@ impl Engine {
                     output.events.push(SipEvent::Answered {
                         id: dialog.id.clone(),
                         generation: dialog.generation,
-                        session: session.clone(),
+                        session: media.session.clone(),
                     });
-                    dialog.state = State::Established(DialogMedia {
-                        session,
-                        peer_description: response.body,
-                        answer_version: dialog.session_id,
-                        pending: None,
-                    });
+                    dialog.state = State::Established(media);
                 }
                 State::CancelPending { .. } | State::Cancelling { .. } => {
                     dialog.cseq = dialog.cseq.checked_add(1).ok_or(SipError::Capacity)?;
@@ -980,10 +984,11 @@ impl Engine {
                     "",
                 )?)));
             }
-            let updated = match crate::incoming::direction_update(
+            let updated = match crate::media_direction::update(
                 &media.peer_description,
                 &request.body,
                 &media.session,
+                &dialog.local_security,
             ) {
                 Ok(updated) => updated,
                 Err(_) => {
@@ -1014,7 +1019,13 @@ impl Engine {
                 200,
                 "OK",
                 &extra,
-                &updated.answer_with_version(dialog.local_media, dialog.session_id, version)?,
+                &crate::media_direction::answer(
+                    &updated,
+                    &dialog.local_security,
+                    dialog.local_media,
+                    dialog.session_id,
+                    version,
+                )?,
             )?;
             let events = if updated.direction != media.session.direction {
                 [SipEvent::PeerDirection {

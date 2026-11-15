@@ -12,6 +12,8 @@ use rusterisk_sip::{
 };
 #[path = "support/webrtc.rs"]
 mod descriptions;
+#[path = "webrtc_signaling/direction.rs"]
+mod direction;
 
 fn config(webrtc: bool) -> Result<Config, SipError> {
     Ok(Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test\n", &format!("[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:5060\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[aor]\ntype=aor\ncontact=sip:phone@127.0.0.1:5061\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=aor\nallow=ulaw,alaw,opus\nwebrtc={}\n", if webrtc { "yes" } else { "no" }), "", "")?)

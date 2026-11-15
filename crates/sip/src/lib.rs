@@ -17,6 +17,7 @@ use subtle::ConstantTimeEq;
 mod destination;
 mod incoming;
 mod info;
+mod media_direction;
 mod outgoing;
 mod peer_lifetime;
 mod request_identity;

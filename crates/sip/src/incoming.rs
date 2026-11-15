@@ -27,6 +27,7 @@ pub(crate) struct Incoming {
     remote_cseq: u32,
     local_media: SocketAddr,
     answer_version: u64,
+    local_security: crate::SessionSecurity,
     offer: Vec<u8>,
     remote_target: rsipstack::sip::Uri,
 }
@@ -133,66 +134,6 @@ fn same_invite(
             == RequestIdentity::for_invite(request, peer)?
         && invite.request.from_header()?.typed()? == request.from_header()?.typed()?
         && invite.request.to_header()?.typed()? == request.to_header()?.typed()?)
-}
-
-fn origin(source: &str) -> Result<([&str; 5], u64), SipError> {
-    let mut origins = source.lines().filter_map(|line| line.strip_prefix("o="));
-    let line = origins.next().ok_or(SipError::InvalidPacket)?;
-    if origins.next().is_some() {
-        return Err(SipError::InvalidPacket);
-    }
-    let fields: Vec<&str> = line.split_whitespace().take(7).collect();
-    let [user, id, version, network, family, address] = fields.as_slice() else {
-        return Err(SipError::InvalidPacket);
-    };
-    id.parse::<i64>()
-        .ok()
-        .filter(|id| *id >= 0)
-        .ok_or(SipError::InvalidPacket)?;
-    let version = version
-        .parse::<i64>()
-        .ok()
-        .filter(|version| *version >= 0)
-        .ok_or(SipError::InvalidPacket)?;
-    Ok(([*user, *id, *network, *family, *address], version as u64))
-}
-
-fn unchanged_field(line: &&str) -> bool {
-    !line.starts_with("o=")
-        && !matches!(
-            *line,
-            "a=sendrecv" | "a=sendonly" | "a=recvonly" | "a=inactive"
-        )
-}
-
-pub(super) fn direction_update(
-    previous: &[u8],
-    offered: &[u8],
-    session: &Session,
-) -> Result<Session, SipError> {
-    let previous = std::str::from_utf8(previous)?;
-    let offered = std::str::from_utf8(offered)?;
-    let (old_identity, old_version) = origin(previous)?;
-    let (identity, version) = origin(offered)?;
-    if identity != old_identity
-        || (version == old_version && previous != offered)
-        || (version != old_version && old_version.checked_add(1) != Some(version))
-        || !previous
-            .lines()
-            .filter(unchanged_field)
-            .eq(offered.lines().filter(unchanged_field))
-    {
-        return Err(SipError::Unsupported);
-    }
-    let updated = Session::parse(offered, &[session.codec])?;
-    if updated.remote != session.remote
-        || updated.codec != session.codec
-        || updated.payload_type != session.payload_type
-        || updated.telephone != session.telephone
-    {
-        return Err(SipError::Unsupported);
-    }
-    Ok(updated)
 }
 
 impl Engine {
@@ -347,10 +288,11 @@ impl Engine {
             .find(|(_, invite)| invite.id == id)
             .ok_or(SipError::InvalidPacket)?;
         let key = key.clone();
-        let (body, telephone) = match (&invite.session.security, description) {
+        let (body, telephone, local_security) = match (&invite.session.security, description) {
             (crate::SessionSecurity::Rtp, None) => (
                 invite.session.answer(local, generation)?,
                 invite.session.telephone,
+                crate::SessionSecurity::Rtp,
             ),
             (crate::SessionSecurity::WebRtc(_), Some(description)) => {
                 match description.setup() {
@@ -361,12 +303,21 @@ impl Engine {
                 if local_session.payload_type != invite.session.payload_type {
                     return Err(SipError::Unsupported);
                 }
-                (description.as_str().to_owned(), local_session.telephone)
+                let security = crate::media_direction::establish(
+                    &local_session.security,
+                    &invite.session.security,
+                )?;
+                let body = match &security {
+                    crate::SessionSecurity::WebRtc(description) => description.as_str().to_owned(),
+                    crate::SessionSecurity::Rtp => return Err(SipError::Unsupported),
+                };
+                (body, local_session.telephone, security)
             }
             (crate::SessionSecurity::Rtp, Some(_)) | (crate::SessionSecurity::WebRtc(_), None) => {
                 return Err(SipError::Unsupported)
             }
         };
+        let answer_version = crate::media_direction::version(&local_security, generation)?;
         let extra = format!(
             "Contact: {}\r\nAllow: INVITE, ACK, CANCEL, BYE, OPTIONS\r\nSupported: \r\n",
             crate::transport::contact(invite.protocol, invite.local)
@@ -405,7 +356,8 @@ impl Engine {
                 local_cseq: 0,
                 remote_cseq: sequence,
                 local_media: local,
-                answer_version: generation,
+                answer_version,
+                local_security,
                 offer,
                 remote_target,
             },
@@ -496,19 +448,23 @@ impl Engine {
                 }
                 State::Established => {}
             }
-            let updated =
-                match direction_update(&dialog.offer, &request.body, &dialog.invite.session) {
-                    Ok(updated) => updated,
-                    Err(_) => {
-                        return Ok(Some(DialogReply::response(response(
+            let updated = match crate::media_direction::update(
+                &dialog.offer,
+                &request.body,
+                &dialog.invite.session,
+                &dialog.local_security,
+            ) {
+                Ok(updated) => updated,
+                Err(_) => {
+                    return Ok(Some(DialogReply::response(response(
                         request,
                         488,
                         "Not Acceptable Here",
                         "Warning: 399 rusterisk \"Only media direction changes are supported\"\r\n",
                         "",
                     )?)));
-                    }
-                };
+                }
+            };
             let target = request
                 .headers
                 .iter()
@@ -535,7 +491,13 @@ impl Engine {
                 200,
                 "OK",
                 &extra,
-                &updated.answer_with_version(dialog.local_media, dialog.generation, version)?,
+                &crate::media_direction::answer(
+                    &updated,
+                    &dialog.local_security,
+                    dialog.local_media,
+                    dialog.generation,
+                    version,
+                )?,
             )?;
             let events = if changed {
                 [SipEvent::PeerDirection {
