@@ -1,5 +1,7 @@
 use crate::Exception;
-use syn::{Expr, Fields, GenericArgument, Item, Local, Path, PathArguments, Type};
+use syn::{
+    Expr, Fields, FnArg, GenericArgument, Item, Local, Member, Pat, Path, PathArguments, Stmt, Type,
+};
 
 fn exact_path(path: &Path, names: &[&str], absolute: bool) -> bool {
     path.leading_colon.is_some() == absolute
@@ -74,6 +76,101 @@ pub(super) fn verifier(file: &syn::File) -> bool {
             &["tokio_rustls", "rustls", "RootCertStore"],
             true,
         )
+        && factory(file)
+}
+
+fn binding(pattern: &Pat, name: &str) -> bool {
+    let Pat::Ident(pattern) = pattern else {
+        return false;
+    };
+    pattern.ident == name
+        && pattern.attrs.is_empty()
+        && pattern.by_ref.is_none()
+        && pattern.mutability.is_none()
+        && pattern.subpat.is_none()
+}
+
+fn factory(file: &syn::File) -> bool {
+    let mut functions = file
+        .items
+        .iter()
+        .filter_map(|item| {
+            if let Item::Fn(item) = item {
+                Some(item)
+            } else {
+                None
+            }
+        })
+        .filter(|item| item.sig.ident == "sip_client_configuration");
+    let Some(function) = functions.next() else {
+        return false;
+    };
+    if functions.next().is_some()
+        || !function.attrs.is_empty()
+        || !function.sig.generics.params.is_empty()
+        || function.sig.generics.where_clause.is_some()
+        || function.sig.inputs.len() != 1
+    {
+        return false;
+    }
+    let Some(FnArg::Typed(roots)) = function.sig.inputs.first() else {
+        return false;
+    };
+    let Type::Path(kind) = roots.ty.as_ref() else {
+        return false;
+    };
+    if !roots.attrs.is_empty()
+        || !binding(&roots.pat, "roots")
+        || kind.qself.is_some()
+        || !exact_path(
+            &kind.path,
+            &["tokio_rustls", "rustls", "RootCertStore"],
+            true,
+        )
+    {
+        return false;
+    }
+    let [Stmt::Local(value), Stmt::Local(shared), Stmt::Expr(_, None)] =
+        function.block.stmts.as_slice()
+    else {
+        return false;
+    };
+    if !value.attrs.is_empty()
+        || !binding(&value.pat, "verifier")
+        || !binding(&shared.pat, "verifier")
+        || !constructor(shared)
+    {
+        return false;
+    }
+    let Some(initializer) = &value.init else {
+        return false;
+    };
+    if initializer.diverge.is_some() {
+        return false;
+    }
+    let Expr::Struct(value) = initializer.expr.as_ref() else {
+        return false;
+    };
+    if !value.attrs.is_empty()
+        || value.qself.is_some()
+        || !value.path.is_ident("SipDomainVerifier")
+        || value.rest.is_some()
+        || value.fields.len() != 1
+    {
+        return false;
+    }
+    let Some(field) = value.fields.first() else {
+        return false;
+    };
+    let Expr::Path(argument) = &field.expr else {
+        return false;
+    };
+    matches!(&field.member, Member::Named(name) if name == "roots")
+        && field.attrs.is_empty()
+        && field.colon_token.is_none()
+        && argument.attrs.is_empty()
+        && argument.qself.is_none()
+        && argument.path.is_ident("roots")
 }
 
 pub(super) fn constructor(local: &Local) -> bool {

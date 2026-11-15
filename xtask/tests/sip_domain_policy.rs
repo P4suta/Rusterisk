@@ -45,6 +45,10 @@ fn rejects_sip_verifier_aliases_wrappers_added_state_and_scope_escape_routes(
         .unwrap_or("");
     assert!(!attribute.is_empty());
     let fixtures = [
+        source.replace("let verifier = SipDomainVerifier { roots };", "let verifier = crate::encryption::sip_domain::SipDomainVerifier::new(roots);"),
+        source.replace("let verifier = SipDomainVerifier { roots };", "type SipDomainVerifier = OwnCallState; let verifier = SipDomainVerifier { roots };"),
+        source.replace("fn sip_client_configuration(", "fn sip_client_configuration<SipDomainVerifier>("),
+        source.replace("fn sip_client_configuration(roots: ::tokio_rustls::rustls::RootCertStore)", "fn sip_client_configuration(roots: ::tokio_rustls::rustls::RootCertStore, verifier: OwnCallState)"),
         format!(
             "{}\n#[cfg(not(feature = \"foreign\"))] type SipDomainVerifier = OwnCallState;",
             source.replace(
