@@ -15,9 +15,11 @@ Bridge creation, membership changes, deletion, channel playback, bridge playback
 Stored recordings support listing, metadata, copying, deletion, and streamed `audio/wav` downloads.
 The ping endpoint returns a `pong` response.
 App queries report subscribed apps and their channel and bridge resources.
+Endpoint queries report configured resources, routing availability, and exact channel membership.
+Registration expiry changes routing availability without ending active calls.
 
 Known operations without working adapters return `501`.
-Explicit resource subscriptions, endpoint queries, sound queries, server information, external media, and channel redirection still use that response.
+Explicit resource subscriptions, sound queries, server information, external media, and channel redirection still use that response.
 Requests with JSON bodies also return `501` after body validation.
 Playback supports start, pause, resume, and stop.
 Seeking and media lists remain unsupported.
