@@ -198,6 +198,26 @@ impl Client {
         Self::decode_response(self.prepare_request(operation, path, query)?.send().await?).await
     }
 
+    async fn request_body<T: DeserializeOwned>(
+        &self,
+        operation: &str,
+        path: &[(&str, &str)],
+        query: &[(&str, &str)],
+        body: &impl serde::Serialize,
+    ) -> Result<T, Error> {
+        let body = serde_json::to_vec(body)?;
+        if body.len() > 16384 {
+            return Err(Error::Capacity);
+        }
+        let response = self
+            .prepare_request(operation, path, query)?
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .send()
+            .await?;
+        Self::decode_response(response).await
+    }
+
     async fn decode_response<T: DeserializeOwned>(
         mut response: reqwest::Response,
     ) -> Result<T, Error> {

@@ -3,7 +3,7 @@ use rusterisk_client::{
     Originate,
 };
 use rusterisk_server::{Effect, Milestone, Signal};
-use std::{future::IntoFuture, time::Duration};
+use std::{collections::BTreeMap, future::IntoFuture, time::Duration};
 
 enum AudioControl {
     Hold,
@@ -33,9 +33,41 @@ async fn owned_calls_wait_for_distinct_milestones_without_blocking_events_and_ca
     let result = async {
         let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
         let mut session = client.subscribe(&"app".to_owned().try_into()?).await?;
-        let mut call = session
-            .originate(Originate::new("PJSIP/phone".into())?)
-            .await?;
+        for variables in [
+            BTreeMap::from([
+                ("VALID".into(), "first".into()),
+                (String::new(), "refused".into()),
+            ]),
+            (0..65)
+                .map(|index| (format!("V{index}"), "value".into()))
+                .collect(),
+        ] {
+            let mut invalid = Originate::new("PJSIP/phone".into())?;
+            invalid.variables = variables;
+            assert!(matches!(
+                session.originate(invalid).await,
+                Err(Error::Invalid(_))
+            ));
+            assert!(effects.try_recv().is_err());
+            assert!(client.channels().await?.is_empty());
+        }
+        let mut oversized = Originate::new("PJSIP/phone".into())?;
+        oversized.variables = (0..5)
+            .map(|index| (format!("V{index}"), "x".repeat(4096)))
+            .collect();
+        assert!(matches!(
+            session.originate(oversized).await,
+            Err(Error::Capacity)
+        ));
+        assert!(effects.try_recv().is_err());
+        let mut options = Originate::new("PJSIP/phone".into())?;
+        options
+            .variables
+            .insert("INITIAL_TAG".into(), "value /&=test".into());
+        options
+            .variables
+            .insert("CALLERID(name)".into(), "Alice".into());
+        let mut call = session.originate(options).await?;
         let accepted = call
             .wait(CallMilestone::Accepted, Duration::from_secs(2))
             .await?;
@@ -44,6 +76,17 @@ async fn owned_calls_wait_for_distinct_milestones_without_blocking_events_and_ca
             Some(ChannelState::Down)
         );
         assert!(!accepted.progress.has_reached(CallMilestone::Stasis));
+        assert_eq!(
+            accepted
+                .channel
+                .as_ref()
+                .map(|channel| channel.caller.name.as_str()),
+            Some("Alice")
+        );
+        assert_eq!(
+            client.variable(call.id(), "INITIAL_TAG").await?.value,
+            "value /&=test"
+        );
         let effect = tokio::time::timeout(Duration::from_secs(2), effects.recv())
             .await
             .map_err(|_| Error::Timeout)?

@@ -31,6 +31,9 @@ External origins require HTTPS.
 ## Own calls and observe progress
 
 Create a `Client`, await `subscribe`, and call `Session::originate` with `Originate` options.
+Set `Originate::variables` before calling `originate` to send initial channel variables in a bounded JSON body.
+The server installs valid values before publishing the channel's creation event.
+Empty variable names, excess entries, and oversize bodies fail before the client starts a request.
 An `OwnedCall` reserves an identifier before sending the request.
 `wait` observes a named `CallMilestone` without consuming the session's event queue.
 An answer or Stasis event can arrive before the HTTP acceptance response.

@@ -19,6 +19,12 @@ pub struct Originate {
     pub caller_id: String,
     pub arguments: Vec<String>,
     pub timeout: Duration,
+    pub variables: BTreeMap<String, String>,
+}
+
+#[derive(serde::Serialize)]
+struct CreationBody<'a> {
+    variables: &'a BTreeMap<String, String>,
 }
 
 impl Originate {
@@ -28,6 +34,7 @@ impl Originate {
             caller_id: String::new(),
             arguments: Vec::new(),
             timeout: Duration::from_secs(30),
+            variables: BTreeMap::new(),
         };
         value.validate()?;
         Ok(value)
@@ -44,8 +51,25 @@ impl Originate {
                 .any(|argument| argument.len() > 256 || argument.contains(','))
             || self.timeout.subsec_nanos() != 0
             || !(1..=3600).contains(&self.timeout.as_secs())
+            || self.variables.len() > 64
+            || self.variables.iter().any(|(name, value)| {
+                name.is_empty()
+                    || name.len() > 128
+                    || name.chars().any(char::is_control)
+                    || value.len() > 4096
+                    || value.chars().any(char::is_control)
+            })
         {
             return Err(Error::Invalid("invalid originate options"));
+        }
+        if !self.variables.is_empty()
+            && serde_json::to_vec(&CreationBody {
+                variables: &self.variables,
+            })?
+            .len()
+                > 16384
+        {
+            return Err(Error::Capacity);
         }
         Ok(())
     }
@@ -649,7 +673,20 @@ impl Calls {
                     if !options.arguments.is_empty() {
                         query.push(("appArgs", &arguments));
                     }
-                    client.request("channels.originate", &[], &query).await
+                    if options.variables.is_empty() {
+                        client.request("channels.originate", &[], &query).await
+                    } else {
+                        client
+                            .request_body(
+                                "channels.originate",
+                                &[],
+                                &query,
+                                &CreationBody {
+                                    variables: &options.variables,
+                                },
+                            )
+                            .await
+                    }
                 }
                 Start::WebSocket { options, data } => {
                     client
