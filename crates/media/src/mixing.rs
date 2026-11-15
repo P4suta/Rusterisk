@@ -35,6 +35,11 @@ pub struct Mixer<K> {
     inputs: BTreeMap<K, Input>,
 }
 
+pub struct MixedAudio<K> {
+    pub channels: Vec<(K, Frame)>,
+    pub bridges: Vec<(u64, Frame)>,
+}
+
 impl<K: Ord + Clone> Mixer<K> {
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -116,6 +121,10 @@ impl<K: Ord + Clone> Mixer<K> {
     }
 
     pub fn tick(&mut self) -> Result<Vec<(K, Frame)>, MediaError> {
+        Ok(self.tick_with_recordings()?.channels)
+    }
+
+    pub fn tick_with_recordings(&mut self) -> Result<MixedAudio<K>, MediaError> {
         let frames: Vec<_> = self
             .inputs
             .iter_mut()
@@ -146,6 +155,28 @@ impl<K: Ord + Clone> Mixer<K> {
             let samples = sum.map(|sample| sample.clamp(i16::MIN.into(), i16::MAX.into()) as i16);
             output.push((key.clone(), Frame::new(&samples, 48000)?));
         }
-        Ok(output)
+        let bridge_ids = frames
+            .iter()
+            .filter_map(|(_, bridge, _, _)| *bridge)
+            .collect::<BTreeSet<_>>();
+        let mut bridges = Vec::with_capacity(bridge_ids.len());
+        for bridge in bridge_ids {
+            let mut sum = [0i32; MAX_SAMPLES];
+            for (_, source_bridge, _, frame) in &frames {
+                if *source_bridge == Some(bridge) {
+                    if let Some(frame) = frame {
+                        for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
+                            *sum += i32::from(*sample);
+                        }
+                    }
+                }
+            }
+            let samples = sum.map(|sample| sample.clamp(i16::MIN.into(), i16::MAX.into()) as i16);
+            bridges.push((bridge, Frame::new(&samples, 48000)?));
+        }
+        Ok(MixedAudio {
+            channels: output,
+            bridges,
+        })
     }
 }

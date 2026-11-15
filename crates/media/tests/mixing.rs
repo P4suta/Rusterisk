@@ -74,3 +74,31 @@ fn capacity_and_membership_failures_preserve_existing_routes() -> Result<(), Med
     assert!(mixer.push(&1, frame(1000)?).is_err());
     Ok(())
 }
+
+#[test]
+fn bridge_recordings_include_every_received_voice_once_and_respect_input_gates(
+) -> Result<(), MediaError> {
+    let mut mixer = Mixer::new(4);
+    for key in 1..=4 {
+        mixer.insert(key)?;
+    }
+    mixer.bridge(10, &[1, 2, 3])?;
+    mixer.bridge(20, &[4])?;
+    for (key, sample) in [(1, 30000), (2, 30000), (3, -30000), (4, -1200)] {
+        mixer.push(&key, frame(sample)?)?;
+    }
+    let output = mixer.tick_with_recordings()?;
+    assert_eq!(output.bridges.len(), 2);
+    assert_eq!(output.bridges[0].0, 10);
+    assert_eq!(output.bridges[0].1.samples(), &[30000; 960]);
+    assert_eq!(output.bridges[1].1.samples(), &[-1200; 960]);
+    assert_eq!(output.channels[3].1.samples(), &[0; 960]);
+    mixer.gate(&1, Gate::IncomingMuted)?;
+    mixer.gate(&2, Gate::OutgoingMuted)?;
+    mixer.push(&1, frame(1000)?)?;
+    mixer.push(&2, frame(2000)?)?;
+    let output = mixer.tick_with_recordings()?;
+    assert_eq!(output.bridges[0].1.samples(), &[2000; 960]);
+    assert_eq!(output.channels[1].1.samples(), &[0; 960]);
+    Ok(())
+}
