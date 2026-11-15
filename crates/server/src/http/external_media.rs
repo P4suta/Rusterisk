@@ -53,8 +53,11 @@ pub(super) fn action(parameters: &BTreeMap<String, String>) -> Result<Action, Co
     if !matches!(direction, "both" | "in" | "out") {
         return Err(ControlError::Invalid("Invalid direction specified"));
     }
-    if transport == "websocket" && encapsulation == "none" && connection == "server" {
-        if !host.is_empty() && host != "INCOMING" {
+    if transport == "websocket"
+        && encapsulation == "none"
+        && matches!(connection, "server" | "client")
+    {
+        if connection == "server" && !host.is_empty() && host != "INCOMING" {
             return Err(ControlError::Unsupported);
         }
         let format = match format {
@@ -96,6 +99,18 @@ pub(super) fn action(parameters: &BTreeMap<String, String>) -> Result<Action, Co
             "both" => rusterisk_api::MediaDirection::Both,
             _ => return Err(ControlError::Invalid("Invalid direction specified")),
         };
+        if connection == "client" {
+            return Ok(Action::ExternalWebSocketClient {
+                id: optional_id(parameters, "channelId")?,
+                app: app.into(),
+                client: host.into(),
+                format,
+                control_format,
+                direction,
+                auto_answer,
+                data: value(parameters, "data", "").into(),
+            });
+        }
         return Ok(Action::ExternalWebSocket {
             id: optional_id(parameters, "channelId")?,
             app: app.into(),
