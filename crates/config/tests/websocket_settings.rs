@@ -105,3 +105,20 @@ fn media_connection_names_must_fit_the_typed_protocol_identifier() -> Result<(),
     }
     Ok(())
 }
+
+#[test]
+fn media_uri_schemes_are_normalized_before_tls_selection() -> Result<(), ConfigError> {
+    for (scheme, encrypted) in [("WS", false), ("WsS", true)] {
+        let config = base()?.with_websocket_configuration("", &format!("[agent]\ntype=websocket_client\nconnection_type=per_call_config\nuri={scheme}://localhost/media?token=private-token\nprotocols=media\ntls_enabled={}\n", if encrypted { "yes" } else { "no" }))?;
+        let client = &config.websocket.clients[0];
+        assert_eq!(client.requires_tls(), encrypted);
+        assert_eq!(
+            client.uri.expose(),
+            format!(
+                "{}://localhost/media?token=private-token",
+                scheme.to_ascii_lowercase()
+            )
+        );
+    }
+    Ok(())
+}

@@ -25,6 +25,12 @@ pub struct WebSocketClient {
     pub reconnect_attempts: u16,
 }
 
+impl WebSocketClient {
+    pub fn requires_tls(&self) -> bool {
+        self.uri.expose().starts_with("wss:")
+    }
+}
+
 fn client(section: Section) -> Result<WebSocketClient, ConfigError> {
     let file = "websocket_client.conf";
     if section.name.contains('/') || matches!(section.name.as_str(), "." | "..") {
@@ -152,7 +158,7 @@ fn client(section: Section) -> Result<WebSocketClient, ConfigError> {
     }
     Ok(WebSocketClient {
         name: section.name.clone(),
-        uri: Secret(uri.into()),
+        uri: Secret(url.to_string()),
         username: username.map(|value| Secret(value.into())),
         password: password.map(|value| Secret(value.into())),
         ca_list_file: ca_list_file.map(str::to_owned),
