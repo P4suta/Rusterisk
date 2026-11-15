@@ -7,7 +7,7 @@ use rusterisk_server::{
     signaling::Signaling,
     Action, ControlError, Controller, Credentials,
 };
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 use tokio::sync::mpsc;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -18,6 +18,7 @@ async fn exercise(
     client: &str,
     sockets: &mut mpsc::Receiver<WebSocket>,
     trusted: bool,
+    remove_trust_after_bind: Option<&Path>,
 ) -> Result<(), ControlError> {
     let config = Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
@@ -32,6 +33,9 @@ async fn exercise(
     let (controller, runner, effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
     let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    if let Some(path) = remove_trust_after_bind {
+        std::fs::remove_file(path).map_err(failure)?;
+    }
     let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
@@ -46,7 +50,7 @@ async fn exercise(
             assert!(matches!(MediaSocket::receive(&mut socket).await.map_err(failure)?, Some(SocketMessage::Text(text)) if text.contains("MEDIA_START")));
             controller.execute(credentials, None, Action::Hangup(id)).await?;
         } else {
-            assert!(matches!(result, Err(ControlError::Adapter(message)) if message == "WebSocket connection failed"));
+            assert!(matches!(&result, Err(ControlError::Adapter(message)) if message == "WebSocket connection failed"), "Expected TLS verification rejection, received {result:?}");
             assert!(sockets.try_recv().is_err());
         }
         Ok::<(), ControlError>(())
@@ -99,10 +103,10 @@ async fn tls_clients_require_a_trusted_certificate_and_a_matching_hostname(
     );
     let result = async {
         let settings = format!("[agent]\ntype=websocket_client\nconnection_type=per_call_config\nuri=wss://localhost:{port}/media?token=private-query\nprotocols=media\ntls_enabled=yes\nreconnect_attempts=1\n");
-        exercise(&settings, &mut sockets, false).await?;
+        exercise(&settings, &mut sockets, false, None).await?;
         let trusted = format!("{settings}ca_list_file={}\n", ca.display());
-        exercise(&trusted.replace("localhost:", "127.0.0.1:"), &mut sockets, false).await?;
-        exercise(&trusted, &mut sockets, true).await
+        exercise(&trusted.replace("localhost:", "127.0.0.1:"), &mut sockets, false, None).await?;
+        exercise(&trusted.replace("uri=wss:", "uri=WsS:"), &mut sockets, true, Some(&ca)).await
     }.await;
     handle.shutdown();
     server.await.map_err(failure)?.map_err(failure)?;

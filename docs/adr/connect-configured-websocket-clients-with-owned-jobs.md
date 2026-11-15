@@ -13,6 +13,7 @@ Connection setup must preserve signaling progress and a call's starting configur
 ## Decision
 
 Copy the selected client configuration into the call's connection effect.
+Prepare immutable TLS trust during startup, before admission timers run.
 Run each connection in an owned, cancellable job with a four-second admission deadline.
 Verify TLS certificates, hostnames, and the negotiated `media` subprotocol.
 Bind attachment, answer, and received audio to the channel generation.

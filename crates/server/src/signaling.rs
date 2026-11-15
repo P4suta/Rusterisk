@@ -83,6 +83,7 @@ pub struct Signaling {
     stream_jobs: JoinSet<external_media::StreamCompletion>,
     websocket_admissions: BTreeMap<CallKey, websocket::PendingWebSocket>,
     websocket_jobs: JoinSet<websocket::Completion>,
+    websocket_clients: websocket::PreparedClients,
     storage: Option<StoragePort>,
     playbacks: JoinSet<(MediaOwner, MediaTaskToken, Result<(), ControlError>)>,
     recordings: JoinSet<recording::Completion>,
@@ -124,9 +125,10 @@ impl Signaling {
         media: MediaPort,
         notices: mpsc::Receiver<MediaNotice>,
     ) -> Result<Self, ControlError> {
-        if config.transports.len() > 16 {
+        if config.transports.len() > rusterisk_config::MAX_TRANSPORTS {
             return Err(ControlError::Capacity);
         }
+        let websocket_clients = websocket::PreparedClients::new(&config.websocket.clients)?;
         let network = transport::Network::bind(&mut config).await?;
         let mut listeners = Vec::with_capacity(config.transports.len());
         for transport in &config.transports {
@@ -155,6 +157,7 @@ impl Signaling {
             stream_jobs: JoinSet::new(),
             websocket_admissions: BTreeMap::new(),
             websocket_jobs: JoinSet::new(),
+            websocket_clients,
             storage: None,
             playbacks: JoinSet::new(),
             recordings: JoinSet::new(),

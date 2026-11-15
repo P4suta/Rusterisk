@@ -28,15 +28,39 @@ pub(super) struct Completion {
     result: Result<(), ControlError>,
 }
 
-async fn connect(client: &WebSocketClient) -> Result<ClientSocket, ControlError> {
-    let tls = if client.uri.expose().starts_with("wss:") {
-        Some(
-            TlsClientContext::load(client.ca_list_file.as_deref())
-                .map_err(|_| ControlError::Adapter("WebSocket TLS configuration failed".into()))?,
-        )
-    } else {
-        None
-    };
+pub(super) struct PreparedClients(Vec<(WebSocketClient, Option<TlsClientContext>)>);
+
+impl PreparedClients {
+    pub(super) fn new(clients: &[WebSocketClient]) -> Result<Self, ControlError> {
+        let mut prepared = Vec::with_capacity(clients.len());
+        for client in clients {
+            let tls = if client.requires_tls() {
+                Some(
+                    TlsClientContext::load(client.ca_list_file.as_deref()).map_err(|_| {
+                        ControlError::Adapter("WebSocket TLS configuration failed".into())
+                    })?,
+                )
+            } else {
+                None
+            };
+            prepared.push((client.clone(), tls));
+        }
+        Ok(Self(prepared))
+    }
+
+    fn context(&self, client: &WebSocketClient) -> Result<Option<TlsClientContext>, ControlError> {
+        self.0
+            .iter()
+            .find(|(settings, _tls)| settings == client)
+            .map(|(_settings, tls)| tls.clone())
+            .ok_or(ControlError::Invalid("WebSocket client was not prepared"))
+    }
+}
+
+async fn connect(
+    client: &WebSocketClient,
+    tls: Option<TlsClientContext>,
+) -> Result<ClientSocket, ControlError> {
     let mut remaining = client.reconnect_attempts;
     loop {
         let mut request = client
@@ -109,6 +133,7 @@ impl Signaling {
         {
             return Err(ControlError::Capacity);
         }
+        let tls = self.websocket_clients.context(&client)?;
         let options = MediaLinkOptions {
             connection_id: ChannelId::try_from(client.name.clone())?,
             channel_id: key.id.clone(),
@@ -131,7 +156,7 @@ impl Signaling {
         let media = self.media.clone();
         self.websocket_jobs.spawn(async move {
             let connection = async {
-                let socket = connect(&client).await?;
+                let socket = connect(&client, tls).await?;
                 media.attach_client_websocket(key.clone(), socket, options).await.map_err(failure)
             };
             let mut result = tokio::select! {

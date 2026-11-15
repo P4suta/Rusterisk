@@ -59,7 +59,7 @@ async fn a_failed_upgrade_retries_and_returns_the_successful_owned_connection(
             assert!(failed.elapsed() >= Duration::from_millis(100));
             tokio_tungstenite::accept_hdr_async(accepted, SelectMedia).await.map_err(failure)
         };
-        let (client, server) = tokio::join!(connect(&config.websocket.clients[0]), server);
+        let (client, server) = tokio::join!(connect(&config.websocket.clients[0], None), server);
         let mut client = client?;
         let mut server = server?;
         client.send(Message::Binary(vec![0xff; 160].into())).await.map_err(failure)?;
@@ -89,7 +89,7 @@ async fn each_upgrade_timeout_closes_its_socket_before_the_next_bounded_attempt(
             Ok::<(), ControlError>(())
         };
         let started = tokio::time::Instant::now();
-        let (client, server) = tokio::join!(connect(&config.websocket.clients[0]), server);
+        let (client, server) = tokio::join!(connect(&config.websocket.clients[0], None), server);
         assert!(matches!(client, Err(ControlError::Adapter(message)) if message == "WebSocket connection failed"));
         assert!(started.elapsed() >= Duration::from_millis(210));
         server
