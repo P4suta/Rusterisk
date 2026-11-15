@@ -148,10 +148,10 @@ impl Control {
             for source in subscriptions.sources() {
                 match source {
                     ResourceSource::All(ResourceKind::Channel) => {
-                        channels.push(ChannelId::try_from("__ALL_CHANNELS__".to_owned())?)
+                        channels.push(ChannelId::try_from("__AST_CHANNEL_ALL_TOPIC".to_owned())?)
                     }
                     ResourceSource::All(ResourceKind::Bridge) => {
-                        bridges.push(ChannelId::try_from("__ALL_BRIDGES__".to_owned())?)
+                        bridges.push(ChannelId::try_from("__AST_BRIDGE_ALL_TOPIC".to_owned())?)
                     }
                     ResourceSource::Specific {
                         kind: ResourceKind::Channel,

@@ -15,6 +15,27 @@ fn application(control: &mut Control, name: &str) -> Result<Application, Control
 }
 
 #[test]
+fn wildcard_subscription_snapshots_use_the_reference_topic_identifiers() -> Result<(), ControlError>
+{
+    let mut control = Control::new(4);
+    control.subscribe("events")?;
+    control.apply(
+        Action::SubscribeResources {
+            application: "events".into(),
+            sources: ["channel:".to_owned(), "bridge:".to_owned()]
+                .into_iter()
+                .collect(),
+        },
+        "now",
+        0,
+    )?;
+    let snapshot = application(&mut control, "events")?;
+    assert_eq!(snapshot.channel_ids, [id("__AST_CHANNEL_ALL_TOPIC")?]);
+    assert_eq!(snapshot.bridge_ids, [id("__AST_BRIDGE_ALL_TOPIC")?]);
+    Ok(())
+}
+
+#[test]
 fn app_queries_follow_reserved_channels_moves_and_bridge_membership() -> Result<(), ControlError> {
     let mut control = Control::new(4);
     let empty = control.apply(Action::ListApplications, "now", 0)?;
