@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { connectionOptions } from "../src/config.ts";
+import { type AccountFields, connectionOptions } from "../src/config.ts";
 
 const account = {
 	server: "ws://127.0.0.1:8088/ws",
@@ -28,6 +28,39 @@ await test("connection options admit loopback development and secure remote sign
 		}).iceServers.length,
 		1,
 	);
+});
+
+await test("account validation identifies the rejected field without exposing private input or parser failures", (): void => {
+	const invalid: readonly (readonly [keyof AccountFields, string, string])[] = [
+		[
+			"server",
+			"wss://alice:private-fixture-password@example.test/ws",
+			"WebSocket server URL",
+		],
+		[
+			"address",
+			"sip:alice:private-fixture-password@example.test",
+			"Account SIP address",
+		],
+		["username", "line\nbreak", "Authentication username"],
+		["password", "", "Password"],
+		["ice", '{"credential":"private-fixture-password"', "ICE servers"],
+	];
+	for (const [field, value, label] of invalid)
+		assert.throws(
+			(): void => {
+				connectionOptions({ ...account, [field]: value });
+			},
+			(error: unknown): boolean => {
+				assert.ok(error instanceof Error);
+				assert.ok("field" in error);
+				assert.equal(error.field, field);
+				assert.ok(error.message.startsWith(`${label}:`));
+				assert.ok(!error.message.includes("private-fixture-password"));
+				assert.equal(error.cause, undefined);
+				return true;
+			},
+		);
 });
 
 await test("connection options reject insecure remote URLs, credentials in URLs, invalid addresses, and unbounded ICE configuration", (): void => {

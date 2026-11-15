@@ -9,6 +9,31 @@ export interface AccountFields {
 	readonly ice: string;
 }
 
+export class AccountFieldError extends Error {
+	public readonly field: keyof AccountFields;
+	public constructor(field: keyof AccountFields) {
+		const messages: Readonly<Record<keyof AccountFields, string>> = {
+			server:
+				"WebSocket server URL: use wss:// remotely or ws:// on loopback, without credentials, a query, or a fragment.",
+			address:
+				"Account SIP address: enter a complete SIP address without a password.",
+			username: "Authentication username: enter the username for your account.",
+			password: "Password: enter the password for your account.",
+			ice: "ICE servers: enter the JSON array supplied for your server.",
+		};
+		super(messages[field]);
+		this.field = field;
+	}
+}
+
+function fieldValue<T>(field: keyof AccountFields, read: () => T): T {
+	try {
+		return read();
+	} catch {
+		throw new AccountFieldError(field);
+	}
+}
+
 function record(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -101,10 +126,9 @@ export function destination(source: string): string {
 	return source;
 }
 
-export function connectionOptions(fields: AccountFields): ConnectionOptions {
-	if (!bounded(fields.server, 2048))
-		throw new Error("Enter a WebSocket server URL.");
-	const server = new URL(fields.server);
+function serverUrl(source: string): string {
+	if (!bounded(source, 2048)) throw new Error("Enter a WebSocket server URL.");
+	const server = new URL(source);
 	if (
 		!["ws:", "wss:"].includes(server.protocol) ||
 		server.username ||
@@ -120,13 +144,18 @@ export function connectionOptions(fields: AccountFields): ConnectionOptions {
 		!["localhost", "127.0.0.1", "[::1]"].includes(server.hostname)
 	)
 		throw new Error("Remote signaling requires a secure WebSocket URL.");
-	if (!bounded(fields.username, 128) || !bounded(fields.password, 4096))
-		throw new Error("Enter the account username and password.");
+	return server.href;
+}
+
+export function connectionOptions(fields: AccountFields): ConnectionOptions {
+	const server = fieldValue("server", (): string => serverUrl(fields.server));
+	if (!bounded(fields.username, 128)) throw new AccountFieldError("username");
+	if (!bounded(fields.password, 4096)) throw new AccountFieldError("password");
 	return {
-		server: server.href,
-		address: destination(fields.address),
+		server,
+		address: fieldValue("address", (): string => destination(fields.address)),
 		username: fields.username,
 		password: fields.password,
-		iceServers: iceServers(fields.ice),
+		iceServers: fieldValue("ice", (): RTCIceServer[] => iceServers(fields.ice)),
 	};
 }
