@@ -5,6 +5,8 @@ mod run;
 pub use run::{Phase, RunPlan};
 mod snapshot;
 pub use snapshot::{SourceError, SourceSnapshot};
+mod native;
+pub use native::{validate_execution, validate_inventory, BrowserInventory, NativeError};
 use std::{
     io::{Read, Write},
     path::Path,
