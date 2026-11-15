@@ -466,16 +466,16 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
         )
         .await?;
         external_websockets::compare(
-            &actual,
-            &format!("http://{address}"),
-            &mut actual_session,
+            &reference,
+            &reference_address,
+            &mut reference_session,
             app.as_str(),
         )
         .await?;
         external_websockets::compare(
-            &reference,
-            &reference_address,
-            &mut reference_session,
+            &actual,
+            &format!("http://{address}"),
+            &mut actual_session,
             app.as_str(),
         )
         .await?;
