@@ -6,6 +6,20 @@ pub struct Interop {
     configuration: String,
 }
 
+pub fn media_address(output: &str) -> Result<std::net::Ipv4Addr, ReferenceError> {
+    if output.len() > 128 {
+        return Err(ReferenceError::InvalidAddress);
+    }
+    let address: std::net::Ipv4Addr = output
+        .trim()
+        .parse()
+        .map_err(|_| ReferenceError::InvalidAddress)?;
+    if !address.is_private() {
+        return Err(ReferenceError::InvalidAddress);
+    }
+    Ok(address)
+}
+
 pub fn published_address(output: &str) -> Result<SocketAddr, ReferenceError> {
     if output.len() > 128 {
         return Err(ReferenceError::InvalidAddress);
@@ -83,6 +97,18 @@ impl Interop {
 
     pub fn port(&self) -> Step {
         step(&["port", &self.name, "8088/tcp"], 10)
+    }
+
+    pub fn media_address(&self) -> Step {
+        step(
+            &[
+                "inspect",
+                "--format",
+                "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{\"\\n\"}}{{end}}",
+                &self.name,
+            ],
+            10,
+        )
     }
 
     pub fn logs(&self) -> Step {
