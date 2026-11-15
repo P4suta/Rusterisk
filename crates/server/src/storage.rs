@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
+mod playback;
 mod recording;
+use playback::PlaybackSet;
+pub use playback::{PlaybackMedia, PlaybackSource};
 pub use recording::RecordingSink;
 use recording::{RecordingKey, RecordingSet};
 use rusterisk_media::Frame;
@@ -46,6 +49,13 @@ impl From<std::io::Error> for WorkerError {
 
 enum Command {
     Wake,
+    Play {
+        media: PlaybackMedia,
+        output: mpsc::Sender<Frame>,
+        lifetime: oneshot::Receiver<()>,
+        completed: oneshot::Sender<Result<(), StorageError>>,
+        reply: oneshot::Sender<Result<(), StorageError>>,
+    },
     Start {
         id: ChannelId,
         timestamp: String,
@@ -171,9 +181,25 @@ fn respond<T>(reply: oneshot::Sender<Result<T, StorageError>>, result: Result<T,
     }
 }
 
-fn command(store: &mut Store, recordings: &mut RecordingSet, command: Command) {
+fn command(
+    store: &mut Store,
+    recordings: &mut RecordingSet,
+    playbacks: &mut PlaybackSet,
+    command: Command,
+) {
     match command {
         Command::Wake => {}
+        Command::Play {
+            media,
+            output,
+            lifetime,
+            completed,
+            reply,
+        } => {
+            if !reply.is_closed() {
+                respond(reply, playbacks.begin(media, output, lifetime, completed));
+            }
+        }
         Command::Start {
             id,
             timestamp,
@@ -245,22 +271,27 @@ fn serve(
     mut commands: mpsc::Receiver<Command>,
     stop: watch::Receiver<bool>,
 ) {
-    let mut recordings = RecordingSet::new(root);
+    let mut recordings = RecordingSet::new(root.clone());
+    let mut playbacks = PlaybackSet::new(root);
     loop {
         if *stop.borrow() {
             commands.close();
             while let Ok(next) = commands.try_recv() {
                 recordings.pump();
-                command(&mut store, &mut recordings, next);
+                playbacks.pump();
+                command(&mut store, &mut recordings, &mut playbacks, next);
             }
             recordings.pump();
+            playbacks.pump();
             break;
         }
         match commands.blocking_recv() {
             Some(next) => {
                 recordings.pump();
-                command(&mut store, &mut recordings, next);
+                playbacks.pump();
+                command(&mut store, &mut recordings, &mut playbacks, next);
                 recordings.pump();
+                playbacks.pump();
             }
             None => break,
         }
