@@ -109,14 +109,14 @@ fn bulk_messages_preserve_partial_samples_and_complete_in_queue_order() -> Resul
     assert!(
         matches!(completion.item, Some(BufferItem::Notice(BufferNotice::BufferingCompleted(id))) if id == "transfer")
     );
-    assert!(completion.drained);
+    assert!(!completion.drained);
+    assert!(buffer.pop().drained);
     assert!(!buffer.pop().drained);
     Ok(())
 }
 
 #[test]
-fn paused_queues_preserve_audio_and_flush_resets_controls_without_completing_marks(
-) -> Result<(), MediaError> {
+fn flush_preserves_playout_and_discards_audio_and_marks() -> Result<(), MediaError> {
     let mut buffer = MediaBuffer::new(MediaFormat::Pcmu)?;
     buffer.push(&[0xff; 159])?;
     assert!(buffer.pop().item.is_none());
@@ -134,7 +134,11 @@ fn paused_queues_preserve_audio_and_flush_resets_controls_without_completing_mar
     buffer.report_drained();
     let _flow = buffer.flush();
     assert!(!buffer.is_buffering());
-    assert!(!buffer.is_paused());
+    assert!(buffer.is_paused());
+    let empty = buffer.pop();
+    assert!(empty.item.is_none());
+    assert!(!empty.drained);
+    buffer.resume();
     let empty = buffer.pop();
     assert!(empty.item.is_none());
     assert!(empty.drained);
@@ -156,16 +160,16 @@ fn backpressure_and_capacity_failures_preserve_queued_samples() -> Result<(), Me
     assert_eq!(buffer.push(&[0xff; 160])?, Some(FlowNotice::Xoff));
     assert!(matches!(buffer.push(&[0; 160]), Err(MediaError::Capacity)));
     assert_eq!(buffer.queued_frames(), 900);
-    for _ in 0..100 {
+    for _ in 0..101 {
         assert_eq!(buffer.pop().flow, None);
     }
     assert_eq!(buffer.pop().flow, Some(FlowNotice::Xon));
-    assert_eq!(buffer.queued_frames(), 799);
+    assert_eq!(buffer.queued_frames(), 798);
     assert!(matches!(
         buffer.push(&[0; 65501]),
         Err(MediaError::Capacity)
     ));
-    assert_eq!(buffer.queued_frames(), 799);
+    assert_eq!(buffer.queued_frames(), 798);
     for _ in 0..128 {
         buffer.mark("marker".into())?;
     }
@@ -173,6 +177,32 @@ fn backpressure_and_capacity_failures_preserve_queued_samples() -> Result<(), Me
         buffer.mark("excess".into()),
         Err(MediaError::Capacity)
     ));
-    assert_eq!(buffer.queued_frames(), 799);
+    assert_eq!(buffer.queued_frames(), 798);
+    Ok(())
+}
+
+#[test]
+fn paused_flush_defers_xon_and_drained_notifications_until_playout_resumes(
+) -> Result<(), MediaError> {
+    let mut buffer = MediaBuffer::new(MediaFormat::Pcmu)?;
+    for _ in 0..899 {
+        assert_eq!(buffer.push(&[0xff; 160])?, None);
+    }
+    assert_eq!(buffer.push(&[0xff; 160])?, Some(FlowNotice::Xoff));
+    buffer.pause();
+    buffer.report_drained();
+    assert_eq!(buffer.flush(), None);
+    assert!(buffer.is_paused());
+    assert!(buffer.is_full());
+    assert_eq!(buffer.queued_frames(), 0);
+    let paused = buffer.pop();
+    assert_eq!(paused.flow, None);
+    assert!(!paused.drained);
+    buffer.resume();
+    let resumed = buffer.pop();
+    assert_eq!(resumed.flow, Some(FlowNotice::Xon));
+    assert!(resumed.drained);
+    assert!(!buffer.is_full());
+    assert_eq!(buffer.pop().flow, None);
     Ok(())
 }

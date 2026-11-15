@@ -221,19 +221,19 @@ impl MediaBuffer {
                 drained: false,
             };
         }
-        let item = self.queue.pop_front();
-        match &item {
-            Some(BufferItem::Frame(_)) => self.frames -= 1,
-            Some(BufferItem::Notice(_)) => self.markers -= 1,
-            None => {}
-        }
         let flow = if self.flow == Flow::Backpressured && self.frames < 800 {
             self.flow = Flow::Open;
             Some(FlowNotice::Xon)
         } else {
             None
         };
-        let drained = self.queue.is_empty() && self.drain == Drain::Requested;
+        let item = self.queue.pop_front();
+        match &item {
+            Some(BufferItem::Frame(_)) => self.frames -= 1,
+            Some(BufferItem::Notice(_)) => self.markers -= 1,
+            None => {}
+        }
+        let drained = item.is_none() && self.drain == Drain::Requested;
         if drained {
             self.drain = Drain::Idle;
         }
@@ -275,13 +275,6 @@ impl MediaBuffer {
         self.markers = 0;
         self.used = 0;
         self.mode = BufferMode::Discrete;
-        self.playout = Playout::Running;
-        let flow = if self.flow == Flow::Backpressured {
-            Some(FlowNotice::Xon)
-        } else {
-            None
-        };
-        self.flow = Flow::Open;
-        flow
+        None
     }
 }
