@@ -251,6 +251,21 @@ impl Client {
     pub async fn ping(&self) -> Result<api::AsteriskPing, Error> {
         self.request("asterisk.ping", &[], &[]).await
     }
+    pub async fn server_info(&self, only: &[api::InfoSection]) -> Result<api::AsteriskInfo, Error> {
+        if only.len() > api::InfoSection::ALL.len() {
+            return Err(Error::Capacity);
+        }
+        if only.is_empty() {
+            return self.request("asterisk.getInfo", &[], &[]).await;
+        }
+        let selected = only
+            .iter()
+            .map(|section| section.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        self.request("asterisk.getInfo", &[], &[("only", &selected)])
+            .await
+    }
     pub async fn channels(&self) -> Result<Vec<api::Channel>, Error> {
         self.request("channels.list", &[], &[]).await
     }
