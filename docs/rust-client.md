@@ -84,6 +84,23 @@ Use `Client::external_websocket_client` to request an outgoing connection throug
 Pass the configured connection name as `connection` and select media options explicitly.
 The server owns the outgoing socket and retries within its configured admission deadline.
 
+## Run the external audio example
+
+Create a mixing bridge with `create_bridge` and add the intended telephone channel with `add_channels`.
+Set `RUSTERISK_BRIDGE` to the bridge identifier and use the same connection settings as the call example.
+Run the example from the workspace root:
+
+```sh
+mise x -- cargo run --locked --package rusterisk-client --example external_audio
+```
+
+The example creates an owned external channel and joins the existing bridge.
+It sends a 440 Hz tone as signed little-endian 16-bit samples at 16 kHz in 20-millisecond frames.
+It receives audio on the same socket and prints the received byte count once per second.
+Press Ctrl+C to end the external channel and release the socket.
+The bridge and its other channels stay available.
+The example also ends after one hour.
+
 ## Bound transport and event work
 
 A session holds at most 64 call handles and remembers at most 4096 issued identifiers.
