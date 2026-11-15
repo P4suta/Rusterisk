@@ -1,6 +1,19 @@
 use rusterisk_api::{ExternalRtpTarget, StaticRtpCodec};
 
 #[test]
+fn external_media_discovery_keeps_optional_hosts_and_both_data_fields() {
+    let operation = rusterisk_api::OPERATIONS
+        .iter()
+        .find(|operation| operation.id == "channels.externalMedia");
+    assert!(
+        operation.is_some_and(|operation| ["external_host", "data", "transport_data"]
+            .iter()
+            .all(|parameter| operation.parameters.contains(parameter)))
+    );
+    assert!(!operation.is_some_and(|operation| operation.parameters.contains(&"external_host!")));
+}
+
+#[test]
 fn external_rtp_targets_keep_the_selected_static_codec_and_unicast_destination(
 ) -> Result<(), serde_json::Error> {
     for (name, codec, payload) in [

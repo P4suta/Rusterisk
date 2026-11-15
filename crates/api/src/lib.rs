@@ -721,13 +721,15 @@ pub const OPERATIONS: &[Operation] = &[
         "Channel",
         [
             "app!",
-            "external_host!",
+            "external_host",
             "format!",
             "channelId",
             "encapsulation",
             "transport",
             "connection_type",
             "direction",
+            "data",
+            "transport_data",
             "variables"
         ]
     ),
