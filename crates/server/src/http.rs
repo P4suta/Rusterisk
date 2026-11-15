@@ -346,6 +346,26 @@ async fn dispatch(
         .into_response());
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    if method == Method::GET {
+        let sound_query = if path == "/ari/sounds" {
+            Some(crate::runner::SoundQuery::List {
+                language: parameters.get("lang").cloned(),
+                format: parameters.get("format").cloned(),
+            })
+        } else if let Some(name) = path.strip_prefix("/ari/sounds/") {
+            let name = percent_encoding::percent_decode_str(name)
+                .decode_utf8()
+                .map_err(|_| ControlError::Invalid("Invalid sound name"))?;
+            let name = rusterisk_api::SoundId::try_from(name.into_owned())
+                .map_err(|_| ControlError::Invalid("Invalid sound name"))?;
+            Some(crate::runner::SoundQuery::Get(name))
+        } else {
+            None
+        };
+        if let Some(query) = sound_query {
+            return response(controller.sounds(credentials, origin, query).await?);
+        }
+    }
     if let ("PUT", ["ari", "applications", application, "eventFilter"]) =
         (method.as_str(), segments.as_slice())
     {

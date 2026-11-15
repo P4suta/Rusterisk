@@ -18,6 +18,8 @@ use history::HistoryRecorder;
 pub use media_connections::{ClaimedMediaConnection, MediaConnectionLease};
 pub(crate) use stored_recordings::Operation as StoredRecordingOperation;
 pub(crate) use stored_recordings::Response as StoredRecordingResponse;
+mod sounds;
+pub(crate) use sounds::Query as SoundQuery;
 
 struct StorageServices {
     port: StoragePort,
@@ -54,6 +56,12 @@ impl Credentials {
 }
 
 enum Request {
+    Sounds {
+        credentials: Credentials,
+        origin: Option<String>,
+        query: SoundQuery,
+        reply: oneshot::Sender<Result<Outcome, ControlError>>,
+    },
     CallLifetime {
         key: CallKey,
         lifetime: mpsc::Receiver<()>,
@@ -467,6 +475,14 @@ impl Runner {
 
     fn request(&mut self, request: Request, now_ms: u64) -> Result<(), ControlError> {
         match request {
+            Request::Sounds {
+                credentials,
+                origin,
+                query,
+                reply,
+            } => {
+                self.sound_request(credentials, origin, query, reply);
+            }
             Request::CallLifetime {
                 key,
                 lifetime,
