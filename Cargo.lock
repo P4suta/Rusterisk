@@ -3527,6 +3527,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
  "syn 2.0.119",
  "toml",
 ]
