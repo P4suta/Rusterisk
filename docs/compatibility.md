@@ -4,7 +4,7 @@ Rusterisk targets the public contracts in [Asterisk 22.9.0](https://github.com/a
 The public Rust models and operation catalog generate the discovery documents and OpenAPI description.
 Declaring an operation in discovery doesn't certify its call behavior.
 The authenticated `/rusterisk/capabilities` endpoint reports the reference version and each operation's `call_verified` value.
-Every operation reports `false` because reference call and received-audio comparisons haven't run.
+Every operation reports `false` while complete operation coverage remains pending.
 
 ## Control interface
 
@@ -29,7 +29,7 @@ Endpoint queries report configured resources, routing availability, and exact ch
 Registration expiry changes routing availability without ending active calls.
 
 Known operations without working adapters return `501`.
-Sound queries, server information, external media, and channel redirection still use that response.
+Sound queries, server information, and channel redirection still use that response.
 Requests with JSON bodies other than event filter updates return `501` after body validation.
 Playback supports start, pause, resume, and stop.
 Seeking and media lists remain unsupported.
@@ -50,7 +50,11 @@ Peer hold and resume preserve local hold and directional audio controls.
 The adapter confirms direction changes before sending the negotiated answer.
 Unsupported media changes return `488`.
 Blind transfer, attended transfer, stream transports, browser media, and legacy hold through an unspecified connection address remain pending.
-The AudioSocket codec and secure media primitives don't yet provide external media services.
+External media supports bidirectional unicast datagrams with numeric destinations and `ulaw` or `alaw` formats.
+Creation returns bound transport variables after socket admission.
+Stasis participation and received audio remain independent milestones.
+The Rust client exposes typed external datagram targets and bounded bridge membership operations.
+AudioSocket and external WebSocket services remain pending.
 
 ## Configuration and persistence
 
@@ -73,7 +77,8 @@ The local `just check` gate covers formatting, source policy, Rust 1.89 core tes
 The local `just security` gate checks advisories, dependency policy, licenses, sources, and secrets.
 The private historical JavaScript fixture uses a [scoped dependency assessment](legacy-client-dependency-scope.md) that reports its known advisories and rejects unreviewed changes.
 Datagram tests compare received audio through actual sockets and bridges, including peer hold, resume, and mixed packet durations.
-The local `just interop` gate compares bridge lifecycle, endpoint resources, routing availability, app subscriptions, and resource errors with Asterisk 22.9.0.
+The local `just interop` gate compares bridge lifecycle, endpoint resources, routing availability, app subscriptions, external channel admission, and resource errors with Asterisk 22.9.0.
+Both servers bridge known external audio samples in both directions with `PCMU` and `PCMA`.
 The reference distinguishes case-sensitive technology lists from case-insensitive endpoint detail queries.
 See [reference comparisons](reference-comparisons.md) for scope and resource limits.
-Reference calls, browser audio, supported-platform distributions, and physical `HT813` observations remain unverified.
+Reference signaling calls, browser audio, supported-platform distributions, and physical `HT813` observations remain unverified.

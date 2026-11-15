@@ -59,6 +59,12 @@ The test normalizes creation timestamps.
 The test checks `video_mode=none` for Rusterisk and `video_mode=talker` for the reference before comparing the remaining fields.
 The [audio bridge decision](adr/report-bridge-video-mode-within-supported-media.md) records the media scope difference.
 
-The resource scenario doesn't certify call or audio compatibility.
-SIPp scenarios, calls, received audio, and browser comparisons still require integration work.
+External channel comparisons check bound transport variables and Stasis participation.
+Audio comparisons connect two external channels to a bridge on each server.
+Both directions send distinct known samples and check received sample values for `PCMU` and `PCMA`.
+The runner inspects its reference container's private address and requires direct container routing.
+The local rehearsal used OrbStack on macOS ARM64.
+
+The scenario doesn't certify complete operation compatibility.
+SIPp scenarios, signaling calls, and browser comparisons still require integration work.
 The capability response keeps `call_verified=false` until the required call and audio comparisons pass.
