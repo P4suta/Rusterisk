@@ -205,7 +205,7 @@ fn write_tree(root: &Path, files: &BTreeMap<String, Vec<u8>>) -> Result<(), Vend
     Ok(())
 }
 
-fn copy_published(source: &Path, target: &Path) -> Result<(), VendorError> {
+fn copy_with_permissions(source: &Path, target: &Path) -> Result<(), VendorError> {
     let files = tree(source)?;
     write_tree(target, &files)?;
     for relative in files.keys() {
@@ -401,7 +401,7 @@ pub fn import(root: &Path, archive: &Path) -> Result<usize, VendorError> {
         };
         record.validate()?;
         let record = toml::to_string(&record)?;
-        copy_published(&source, &vendor.join("str0m"))?;
+        copy_with_permissions(&source, &vendor.join("str0m"))?;
         std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -448,7 +448,7 @@ pub fn patch(root: &Path, archive: &Path) -> Result<usize, VendorError> {
         if original_hashes != record.files {
             return Err(VendorError::Changed);
         }
-        write_tree(&temporary.join("b"), &tree(&vendor.join("str0m"))?)?;
+        copy_with_permissions(&vendor.join("str0m"), &temporary.join("b"))?;
         let output = temporary.join("source.patch");
         let file = std::fs::OpenOptions::new()
             .write(true)

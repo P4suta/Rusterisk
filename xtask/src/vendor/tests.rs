@@ -45,7 +45,7 @@ fn importing_original_files_preserves_the_publishers_executable_mode(
             std::fs::Permissions::from_mode(0o755),
         )?;
         let target = root.join("target");
-        super::copy_published(&original, &target)?;
+        super::copy_with_permissions(&original, &target)?;
         assert_eq!(
             std::fs::metadata(target.join("tool.sh"))?
                 .permissions()
