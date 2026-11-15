@@ -929,6 +929,11 @@ impl Control {
             generation: entry.call.generation(),
         })
     }
+    pub(crate) fn has_channel(&self, key: &CallKey) -> bool {
+        self.channels
+            .get(&key.id)
+            .is_some_and(|entry| entry.call.generation() == key.generation)
+    }
     pub fn channel(&self, id: &ChannelId) -> Result<&Channel, ControlError> {
         self.channels
             .get(id)

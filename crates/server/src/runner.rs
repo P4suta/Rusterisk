@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
+mod external_admission;
 mod history;
 mod recording_admission;
 mod stored_recordings;
@@ -20,6 +21,14 @@ struct StorageServices {
 }
 
 const MAX_PENDING_EFFECTS: usize = 64 * 2 + 1;
+
+enum Admission {
+    Recording {
+        owner: crate::MediaOwner,
+        token: rusterisk_core::MediaTaskToken,
+    },
+    ExternalRtp(CallKey),
+}
 
 #[derive(Clone)]
 pub struct Credentials {
@@ -115,6 +124,7 @@ pub struct Runner {
     history_jobs: JoinSet<Result<(), WorkerError>>,
     stored_jobs: JoinSet<()>,
     recording_admissions: BTreeMap<rusterisk_core::MediaTaskToken, recording_admission::Pending>,
+    external_admissions: BTreeMap<CallKey, external_admission::Pending>,
 }
 
 pub struct Subscription {
@@ -185,6 +195,7 @@ impl Controller {
                 history_jobs: JoinSet::new(),
                 stored_jobs: JoinSet::new(),
                 recording_admissions: BTreeMap::new(),
+                external_admissions: BTreeMap::new(),
             },
             effect_receiver,
         )
@@ -484,6 +495,7 @@ impl Runner {
                     &action,
                     Action::RecordChannel { .. } | Action::RecordBridge { .. }
                 );
+                let external = matches!(&action, Action::ExternalRtp { .. });
                 let result = self
                     .authorize(&credentials, origin.as_deref(), action.read_only())
                     .and_then(|()| {
@@ -492,6 +504,9 @@ impl Runner {
                             || (recording
                                 && (self.recording_admissions.len() >= 64
                                     || now_ms.checked_add(5000).is_none()))
+                            || (external
+                                && (self.external_admissions.len() >= 64
+                                    || now_ms.checked_add(5000).is_none()))
                         {
                             return Err(ControlError::Capacity);
                         }
@@ -499,9 +514,12 @@ impl Runner {
                     });
                 let result = match result {
                     Ok(mut outcome) => {
-                        let recording = outcome.effects.iter().find_map(|effect| match effect {
+                        let admission = outcome.effects.iter().find_map(|effect| match effect {
                             Effect::RecordMedia { owner, token, .. } => {
-                                Some((owner.clone(), *token))
+                                Some(Admission::Recording {
+                                    owner: owner.clone(),
+                                    token: *token,
+                                })
                             }
                             Effect::ControlRecording { .. }
                             | Effect::EndRecording { .. }
@@ -518,7 +536,9 @@ impl Runner {
                             | Effect::Bridge { .. }
                             | Effect::ReleaseBridge { .. }
                             | Effect::DialBridge { .. } => None,
-                            Effect::ConnectExternalRtp { .. } => None,
+                            Effect::ConnectExternalRtp { key, .. } => {
+                                Some(Admission::ExternalRtp(key.clone()))
+                            }
                         });
                         if let Err(error) = self.publish(&mut outcome) {
                             if reply.send(Err(error.clone())).is_err() {
@@ -526,13 +546,25 @@ impl Runner {
                             }
                             return Err(error);
                         }
-                        if let Some((owner, token)) = recording {
+                        if let Some(admission) = admission {
                             let deadline =
                                 now_ms.checked_add(5000).ok_or(ControlError::Capacity)?;
-                            self.recording_admissions.insert(
-                                token,
-                                recording_admission::Pending::new(owner, reply, outcome, deadline),
-                            );
+                            match admission {
+                                Admission::Recording { owner, token } => {
+                                    self.recording_admissions.insert(
+                                        token,
+                                        recording_admission::Pending::new(
+                                            owner, reply, outcome, deadline,
+                                        ),
+                                    );
+                                }
+                                Admission::ExternalRtp(key) => {
+                                    self.external_admissions.insert(
+                                        key,
+                                        external_admission::Pending::new(reply, deadline),
+                                    );
+                                }
+                            }
                             return Ok(());
                         }
                         Ok(outcome)
@@ -666,6 +698,7 @@ impl Runner {
             self.publish(&mut outcome)?;
         }
         self.expire_recording_admissions(now)?;
+        self.expire_external_admissions(now)?;
         Ok(())
     }
 
@@ -728,6 +761,7 @@ impl Runner {
 
     async fn close(&mut self) -> Result<(), ControlError> {
         self.close_recording_admissions();
+        self.close_external_admissions();
         let result = self
             .control
             .shutdown(&timestamp())
