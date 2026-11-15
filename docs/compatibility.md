@@ -29,7 +29,9 @@ Endpoint queries report configured resources, routing availability, and exact ch
 Registration expiry changes routing availability without ending active calls.
 
 Known operations without working adapters return `501`.
-Sound queries and channel redirection still use that response.
+Channel redirection still uses that response.
+Sound queries list configured wave files by sound identifier, language, and format.
+Channel and bridge playback resolve sound identifiers within the configured library and preserve each request's language.
 Authenticated readers can select [server information](server-information.md) sections with case-insensitive names.
 The response preserves process identity, startup time, and the bounded channel limit.
 Registered JSON body parameters override query values while path identifiers remain authoritative.
@@ -44,7 +46,19 @@ Live recording duration statistics remain absent.
 The signaling adapter handles `SIP` over `UDP`, native `TCP`, verified `TLS`, and signaling WebSockets, with digest authentication, incoming calls, outgoing calls, cancellation, and hangup.
 Native stream tests cover authenticated registration, partial messages, shared flows, initial outbound connections, call control, half-close responses, saturation, and shutdown.
 HTTP `/ws` upgrades require the `sip` subprotocol and enforce the configured Origin policy.
-Each endpoint preserves one registered Contact URI and routes browser placeholder hosts through the registered connection.
+Authenticated REGISTER requests select an address of record through the endpoint configuration and the To URI.
+Each address has a configurable dynamic binding limit capped at 16, within a shared limit of 128 per signaling engine.
+A zero contact limit disables dynamic registration.
+Binding updates apply atomically, and successful responses report the remaining bindings.
+Each Contact's `expires` value overrides `Expires`.
+For omitted expiry, `default_expiration` supplies the requested lifetime.
+`minimum_expiration` and `maximum_expiration` bound positive lifetimes.
+Queries, targeted removal, wildcard removal, and expiry preserve unrelated bindings.
+Closing a registered stream removes its bindings while preserving other peers.
+Endpoint availability changes when its first binding appears or last binding disappears across configured addresses.
+Calls select live bindings by configured address order, then Contact preference.
+Bindings keep Contact URIs separate from physical routing peers and route browser placeholder hosts through the registered connection.
+Complete URI header matching and outbound REGISTER clients remain pending.
 Authenticated endpoint identity determines the context independently of displayed caller identification.
 Telephone digits use `RFC 4733` packets or `SIP INFO` according to the endpoint's configuration.
 The audio adapter decodes `PCMU`, `PCMA`, and Opus into complete 20 ms mixer frames.
