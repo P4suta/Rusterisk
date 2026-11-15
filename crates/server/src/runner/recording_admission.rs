@@ -120,3 +120,129 @@ impl Runner {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::Request;
+    use super::Runner;
+    use crate::{Action, ControlError, Controller, Credentials, Effect, Outcome, Signal};
+    use rusterisk_api::ChannelId;
+    use rusterisk_config::Config;
+    use tokio::sync::{mpsc, oneshot};
+
+    fn id(value: &str) -> Result<ChannelId, ControlError> {
+        Ok(ChannelId::try_from(value.to_owned())?)
+    }
+    fn runner() -> Result<(Runner, mpsc::Receiver<Effect>), ControlError> {
+        let config = Config::parse(
+            "[general]\nbindaddr=127.0.0.1\n",
+            "[app]\ntype=user\npassword=password\n",
+            "",
+            "",
+            "",
+        )
+        .map_err(|error| ControlError::Adapter(error.to_string()))?;
+        let (_controller, mut runner, effects) = Controller::new(config, 4);
+        runner.control.subscribe("calls")?;
+        runner.control.apply(
+            Action::CreateBridge {
+                id: id("mix")?,
+                name: String::new(),
+            },
+            "now",
+            0,
+        )?;
+        Ok((runner, effects))
+    }
+    fn record(
+        runner: &mut Runner,
+        now: u64,
+    ) -> Result<oneshot::Receiver<Result<Outcome, ControlError>>, ControlError> {
+        let (reply, response) = oneshot::channel();
+        runner.request(
+            Request::Apply {
+                credentials: Credentials::new("app".into(), "password".into())?,
+                origin: None,
+                action: Action::RecordBridge {
+                    bridge: id("mix")?,
+                    name: id("saved")?,
+                },
+                reply,
+            },
+            now,
+        )?;
+        Ok(response)
+    }
+
+    #[test]
+    fn admission_expires_at_five_seconds_and_late_success_cannot_restart_cancelled_audio(
+    ) -> Result<(), ControlError> {
+        let (mut runner, mut effects) = runner()?;
+        let mut reply = record(&mut runner, 1000)?;
+        let Effect::RecordMedia { owner, token, .. } =
+            effects.try_recv().map_err(|_| ControlError::Capacity)?
+        else {
+            return Err(ControlError::Unsupported);
+        };
+        runner.expire_recording_admissions(5999)?;
+        assert!(matches!(
+            reply.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        runner.expire_recording_admissions(6000)?;
+        assert!(matches!(
+            reply.try_recv().map_err(|_| ControlError::Capacity)?,
+            Err(ControlError::Capacity)
+        ));
+        assert!(
+            matches!(effects.try_recv().map_err(|_| ControlError::Capacity)?, Effect::EndRecording { token: current, mode: crate::media::RecordingEnd::Cancel } if current == token)
+        );
+        runner.apply_signal(
+            Signal::RecordingAdmitted {
+                owner: owner.clone(),
+                token,
+                result: Ok(()),
+            },
+            6000,
+        )?;
+        let current = runner
+            .control
+            .apply(Action::GetRecording(id("saved")?), "now", 6000)?
+            .body
+            .ok_or(ControlError::Capacity)?;
+        assert_eq!(current["state"], "canceled");
+        runner.apply_signal(
+            Signal::RecordingFinished {
+                owner,
+                token,
+                result: Ok(()),
+            },
+            6000,
+        )?;
+        assert!(matches!(
+            runner
+                .control
+                .apply(Action::GetRecording(id("saved")?), "now", 6000),
+            Err(ControlError::NotFound(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn admission_clock_overflow_fails_before_reserving_a_recording() -> Result<(), ControlError> {
+        let (mut runner, mut effects) = runner()?;
+        let mut reply = record(&mut runner, u64::MAX - 4999)?;
+        assert!(matches!(
+            reply.try_recv().map_err(|_| ControlError::Capacity)?,
+            Err(ControlError::Capacity)
+        ));
+        assert!(effects.try_recv().is_err());
+        assert!(matches!(
+            runner
+                .control
+                .apply(Action::GetRecording(id("saved")?), "now", 0),
+            Err(ControlError::NotFound(_))
+        ));
+        Ok(())
+    }
+}
