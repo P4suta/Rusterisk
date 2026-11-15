@@ -1,6 +1,6 @@
 use super::optional_id;
 use crate::{Action, ControlError};
-use rusterisk_api::{ExternalRtpTarget, StaticRtpCodec};
+use rusterisk_api::{AudioSocketTarget, ExternalRtpTarget, StaticRtpCodec};
 use std::{collections::BTreeMap, net::SocketAddr};
 
 fn value<'a>(parameters: &'a BTreeMap<String, String>, name: &str, default: &'a str) -> &'a str {
@@ -53,9 +53,10 @@ pub(super) fn action(parameters: &BTreeMap<String, String>) -> Result<Action, Co
     if !matches!(direction, "both" | "in" | "out") {
         return Err(ControlError::Invalid("Invalid direction specified"));
     }
-    if transport != "udp"
-        || encapsulation != "rtp"
-        || connection != "client"
+    if !matches!(
+        (transport, encapsulation),
+        ("udp", "rtp") | ("tcp", "audiosocket")
+    ) || connection != "client"
         || direction != "both"
         || !value(parameters, "transport_data", "").is_empty()
     {
@@ -80,6 +81,27 @@ pub(super) fn action(parameters: &BTreeMap<String, String>) -> Result<Action, Co
             return Err(ControlError::Unsupported);
         }
     };
+    if transport == "tcp" {
+        let data = value(parameters, "data", "");
+        if data.is_empty() {
+            return Err(ControlError::Invalid("data can not be empty"));
+        }
+        let session = uuid::Uuid::parse_str(data).map_err(|_| {
+            ControlError::Adapter(
+                "An internal error prevented this request from being handled".into(),
+            )
+        })?;
+        if format != "slin" {
+            return Err(ControlError::Unsupported);
+        }
+        let target = AudioSocketTarget::new(remote, *session.as_bytes())
+            .map_err(|_| ControlError::Invalid("Invalid external media address"))?;
+        return Ok(Action::ExternalAudioSocket {
+            id: optional_id(parameters, "channelId")?,
+            app: app.into(),
+            target,
+        });
+    }
     let codec = match format {
         "ulaw" => StaticRtpCodec::Pcmu,
         "alaw" => StaticRtpCodec::Pcma,
