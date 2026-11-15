@@ -23,6 +23,44 @@ fn client_connector(config: ::tokio_rustls::rustls::ClientConfig) -> tokio_tungs
     tokio_tungstenite::Connector::Rustls(config)
 }
 
+pub(super) fn native_certificates(
+    mut load: impl FnMut() -> rustls_native_certs::CertificateResult,
+    mut wait: impl FnMut(),
+) -> Result<Vec<CertificateDer<'static>>, ControlError> {
+    let mut certificates = load();
+    for _ in 0..2 {
+        if certificates.errors.is_empty() {
+            break;
+        }
+        wait();
+        certificates = load();
+    }
+    if let Some(error) = certificates.errors.first() {
+        let detail = match &error.kind {
+            rustls_native_certs::ErrorKind::Io { inner, .. } => {
+                format!("I/O {:?} ({:?})", inner.kind(), inner.raw_os_error())
+            }
+            rustls_native_certs::ErrorKind::Os(error) => {
+                format!("Operating system: {error:?}")
+            }
+            rustls_native_certs::ErrorKind::Pem(error) => format!("PEM: {error}"),
+            _ => "Unknown native trust error".into(),
+        };
+        return Err(ControlError::Adapter(format!("Native certificate authority loading failed ({} certificates, {} errors): {}: {detail}", certificates.certs.len(), certificates.errors.len(), error.context)));
+    }
+    if certificates.certs.len() > 1024
+        || certificates
+            .certs
+            .iter()
+            .map(|certificate| certificate.len())
+            .sum::<usize>()
+            > 4 * 1024 * 1024
+    {
+        return Err(ControlError::Capacity);
+    }
+    Ok(certificates.certs)
+}
+
 impl TlsClientContext {
     pub(crate) fn websocket_connector(&self) -> tokio_tungstenite::Connector {
         self.0.clone()
@@ -43,31 +81,11 @@ impl TlsClientContext {
                 }
             }
             None => {
-                let certificates = rustls_native_certs::load_native_certs();
-                if let Some(error) = certificates.errors.first() {
-                    let detail = match &error.kind {
-                        rustls_native_certs::ErrorKind::Io { inner, .. } => {
-                            format!("I/O {:?} ({:?})", inner.kind(), inner.raw_os_error())
-                        }
-                        rustls_native_certs::ErrorKind::Os(error) => {
-                            format!("Operating system: {error}")
-                        }
-                        rustls_native_certs::ErrorKind::Pem(error) => format!("PEM: {error}"),
-                        _ => "Unknown native trust error".into(),
-                    };
-                    return Err(ControlError::Adapter(format!("Native certificate authority loading failed ({} certificates, {} errors): {}: {detail}", certificates.certs.len(), certificates.errors.len(), error.context)));
-                }
-                if certificates.certs.len() > 1024
-                    || certificates
-                        .certs
-                        .iter()
-                        .map(|certificate| certificate.len())
-                        .sum::<usize>()
-                        > 4 * 1024 * 1024
-                {
-                    return Err(ControlError::Capacity);
-                }
-                for certificate in certificates.certs {
+                let certificates =
+                    native_certificates(rustls_native_certs::load_native_certs, || {
+                        std::thread::sleep(Duration::from_millis(100))
+                    })?;
+                for certificate in certificates {
                     roots.add(certificate).map_err(failure)?;
                 }
             }
