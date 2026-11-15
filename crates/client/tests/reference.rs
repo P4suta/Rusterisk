@@ -1,8 +1,59 @@
 use rusterisk_client::{
-    api::{ApiError, ChannelId},
+    api::{ApiError, Bridge, BridgeVideoMode, ChannelId},
     Client, Error,
 };
 use std::{future::IntoFuture, time::Duration};
+
+fn audio_bridge(mut bridge: Bridge, expected_mode: BridgeVideoMode) -> Bridge {
+    assert_eq!(bridge.video_mode, Some(expected_mode));
+    assert!(bridge.video_source_id.is_none());
+    assert!(!bridge.creationtime.is_empty());
+    bridge.creationtime.clear();
+    bridge.video_mode = None;
+    bridge
+}
+
+async fn compare_bridges(actual: &Client, reference: &Client) -> Result<(), Error> {
+    let id = ChannelId::try_from("compat-bridge".to_owned())?;
+    let created = actual.create_bridge(&id, "Conversation").await?;
+    let expected = reference.create_bridge(&id, "Conversation").await?;
+    assert_eq!(
+        audio_bridge(created, BridgeVideoMode::None),
+        audio_bridge(expected, BridgeVideoMode::Talker)
+    );
+    assert_eq!(
+        audio_bridge(actual.bridge(&id).await?, BridgeVideoMode::None),
+        audio_bridge(reference.bridge(&id).await?, BridgeVideoMode::Talker)
+    );
+    let actual_list: Vec<Bridge> = actual
+        .bridges()
+        .await?
+        .into_iter()
+        .map(|bridge| audio_bridge(bridge, BridgeVideoMode::None))
+        .collect();
+    let expected_list: Vec<Bridge> = reference
+        .bridges()
+        .await?
+        .into_iter()
+        .map(|bridge| audio_bridge(bridge, BridgeVideoMode::Talker))
+        .collect();
+    assert_eq!(actual_list, expected_list);
+    assert_eq!(
+        rejection(actual.create_bridge(&id, "Duplicate").await)?,
+        rejection(reference.create_bridge(&id, "Duplicate").await)?
+    );
+    actual.destroy_bridge(&id).await?;
+    reference.destroy_bridge(&id).await?;
+    assert_eq!(
+        rejection(actual.bridge(&id).await)?,
+        rejection(reference.bridge(&id).await)?
+    );
+    assert_eq!(
+        rejection(actual.destroy_bridge(&id).await)?,
+        rejection(reference.destroy_bridge(&id).await)?
+    );
+    Ok(())
+}
 
 fn rejection<T>(result: Result<T, Error>) -> Result<(u16, ApiError), Error> {
     match result {
@@ -77,6 +128,7 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
             actual.applications().await?,
             reference.applications().await?
         );
+        compare_bridges(&actual, &reference).await?;
         let mut expected = reference.endpoints().await?;
         expected.sort_by(|left, right| left.resource.cmp(&right.resource));
         assert_eq!(actual.endpoints().await?, expected);
