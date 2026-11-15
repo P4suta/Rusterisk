@@ -1,4 +1,4 @@
-use rusterisk_api::ChannelId;
+use rusterisk_api::{ChannelId, EventKind};
 use rusterisk_core::{AudioGate, MuteDirection, PeerMediaDirection};
 use rusterisk_server::{Action, CallKey, Control, ControlError, Effect, Milestone, Signal};
 
@@ -35,7 +35,6 @@ fn direction(
     assert!(
         matches!(&outcome.effects[..], [Effect::PeerDirection { key: actual, direction: actual_direction, gate: actual_gate }] if actual == key && *actual_direction == direction && *actual_gate == gate)
     );
-    assert!(outcome.events.is_empty());
     Ok(())
 }
 
@@ -89,6 +88,55 @@ fn peer_resume_preserves_local_audio_controls() -> Result<(), ControlError> {
         &resumed.effects[..],
         [Effect::Gate {
             gate: AudioGate::IncomingMuted,
+            ..
+        }]
+    ));
+    Ok(())
+}
+
+#[test]
+fn peer_hold_notifications_follow_remote_direction_independently_of_local_hold(
+) -> Result<(), ControlError> {
+    let mut control = Control::new(1);
+    control.subscribe("app")?;
+    let key = originate(&mut control)?;
+    control.signal(
+        Signal::Milestone {
+            key: key.clone(),
+            milestone: Milestone::Answered,
+        },
+        "now",
+    )?;
+    control.apply(Action::Hold(key.id.clone()), "now", 0)?;
+    for (direction, notification) in [
+        (PeerMediaDirection::ReceiveOnly, None),
+        (PeerMediaDirection::SendOnly, Some(true)),
+        (PeerMediaDirection::Inactive, None),
+        (PeerMediaDirection::SendReceive, Some(false)),
+        (PeerMediaDirection::SendReceive, None),
+    ] {
+        let outcome = control.signal(
+            Signal::PeerDirection {
+                key: key.clone(),
+                direction,
+            },
+            "now",
+        )?;
+        match notification {
+            None => assert!(outcome.events.is_empty()),
+            Some(true) => assert!(
+                matches!(&outcome.events[..], [event] if matches!(&event.kind, EventKind::ChannelHold { channel, musicclass: Some(class) } if channel.id == key.id && class == "default"))
+            ),
+            Some(false) => assert!(
+                matches!(&outcome.events[..], [event] if matches!(&event.kind, EventKind::ChannelUnhold { channel } if channel.id == key.id))
+            ),
+        }
+    }
+    let resumed = control.apply(Action::Unhold(key.id), "now", 0)?;
+    assert!(matches!(
+        &resumed.effects[..],
+        [Effect::Gate {
+            gate: AudioGate::Open,
             ..
         }]
     ));

@@ -1564,6 +1564,7 @@ impl Control {
                         && entry.call.state() != CallState::Ended
                 }) {
                     if entry.call.peer_direction() != direction {
+                        let was_held = !entry.call.peer_direction().can_receive();
                         entry.call = entry.call.with_peer_direction(direction)?;
                         if entry.call.state() == CallState::Up {
                             outcome.effects.push(Effect::PeerDirection {
@@ -1571,6 +1572,23 @@ impl Control {
                                 direction,
                                 gate: entry.call.audio_gate(),
                             });
+                            let held = !direction.can_receive();
+                            if held != was_held {
+                                outcome.optional_event(
+                                    application_name(&self.applications, entry.call.stasis())?,
+                                    timestamp,
+                                    if held {
+                                        EventKind::ChannelHold {
+                                            channel: entry.snapshot.clone(),
+                                            musicclass: Some("default".into()),
+                                        }
+                                    } else {
+                                        EventKind::ChannelUnhold {
+                                            channel: entry.snapshot.clone(),
+                                        }
+                                    },
+                                );
+                            }
                         }
                     }
                 }
