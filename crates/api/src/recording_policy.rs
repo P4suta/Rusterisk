@@ -27,7 +27,17 @@ impl TryFrom<&str> for RecordingIfExists {
         if value.is_empty() {
             return Ok(Self::default());
         }
-        Self::deserialize(serde::de::value::StrDeserializer::<serde::de::value::Error>::new(value))
-            .map_err(|_| InvalidRecordingIfExists)
+        let mut canonical = [0u8; 16];
+        if value.len() > canonical.len() || !value.is_ascii() {
+            return Err(InvalidRecordingIfExists);
+        }
+        canonical[..value.len()].copy_from_slice(value.as_bytes());
+        canonical.make_ascii_lowercase();
+        let canonical =
+            std::str::from_utf8(&canonical[..value.len()]).map_err(|_| InvalidRecordingIfExists)?;
+        Self::deserialize(
+            serde::de::value::StrDeserializer::<serde::de::value::Error>::new(canonical),
+        )
+        .map_err(|_| InvalidRecordingIfExists)
     }
 }

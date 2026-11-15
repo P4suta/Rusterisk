@@ -17,9 +17,17 @@ fn recording_conflict_policies_roundtrip_their_canonical_wire_values(
     }
     assert_eq!(RecordingIfExists::default(), RecordingIfExists::Fail);
     assert_eq!(RecordingIfExists::try_from(""), Ok(RecordingIfExists::Fail));
-    for invalid in ["replace", "OVERWRITE", "fail,append"] {
+    for (text, policy) in [
+        ("FaIl", RecordingIfExists::Fail),
+        ("OVERWRITE", RecordingIfExists::Overwrite),
+        ("Append", RecordingIfExists::Append),
+    ] {
+        assert_eq!(RecordingIfExists::try_from(text), Ok(policy));
+    }
+    for invalid in ["replace", "fail,append", "ｆａｉｌ"] {
         assert!(RecordingIfExists::try_from(invalid).is_err());
     }
+    assert!(RecordingIfExists::try_from("overwrite".repeat(4096).as_str()).is_err());
     Ok(())
 }
 
