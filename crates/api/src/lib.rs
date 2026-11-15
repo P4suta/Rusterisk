@@ -485,7 +485,7 @@ impl Operation {
                 ParameterKind::Integer
             }
             "beep" | "subscribeAll" => ParameterKind::Boolean,
-            "channel" | "eventSource" | "media" => ParameterKind::StringList,
+            "channel" | "eventSource" | "media" | "only" => ParameterKind::StringList,
             "variables" => ParameterKind::Variables,
             "filter" => ParameterKind::Filter,
             _ => ParameterKind::String,
@@ -1191,6 +1191,9 @@ fn path_parameters(path: &str) -> impl Iterator<Item = &str> {
 
 fn parameter_schema(name: &str, kind: ParameterKind) -> Value {
     match name {
+        "only" => {
+            json!({"type": "array", "items": schemars::schema_for!(InfoSection).to_value(), "maxItems": 32})
+        }
         "ifExists" => schemars::schema_for!(RecordingIfExists).to_value(),
         "maxDurationSeconds" | "maxSilenceSeconds" => {
             schemars::schema_for!(RecordingSeconds).to_value()
@@ -1229,7 +1232,11 @@ fn parameters(operation: &Operation, format: Option<DiscoveryFormat>) -> Vec<Val
             for field in ["format", "minimum", "maximum", "items", "maxItems"] {
                 if let Some(value) = schema.get(field) { parameter[field] = value.clone(); }
             }
-            if let Some(values) = schema.get("enum") {
+            if let Some(values) = schema.get("enum").or_else(|| {
+                (multiple && format == DiscoveryFormat::Asterisk)
+                    .then(|| schema.get("items").and_then(|items| items.get("enum")))
+                    .flatten()
+            }) {
                 match format {
                     DiscoveryFormat::Asterisk => parameter["allowableValues"] = json!({"valueType": "LIST", "values": values}),
                     DiscoveryFormat::Standard => parameter["enum"] = values.clone(),

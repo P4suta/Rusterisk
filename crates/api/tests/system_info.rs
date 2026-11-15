@@ -52,3 +52,49 @@ fn information_descriptions_keep_all_sections_optional() -> Result<(), rusterisk
     );
     Ok(())
 }
+
+#[test]
+fn information_selection_describes_comma_separated_known_sections(
+) -> Result<(), rusterisk_api::SwaggerError> {
+    let expected = serde_json::Value::Array(
+        ["build", "system", "config", "status"]
+            .into_iter()
+            .map(|value| serde_json::Value::String(value.into()))
+            .collect(),
+    );
+    let document = openapi();
+    let parameters = document["paths"]["/asterisk/info"]["get"]["parameters"].as_array();
+    assert!(parameters.is_some());
+    let parameter = parameters.and_then(|parameters| {
+        parameters
+            .iter()
+            .find(|parameter| parameter["name"] == "only")
+    });
+    assert!(parameter.is_some());
+    if let Some(parameter) = parameter {
+        assert_eq!(parameter["schema"]["type"], "array");
+        assert_eq!(parameter["schema"]["items"]["enum"], expected);
+        assert_eq!(parameter["explode"], false);
+    }
+    let legacy = rusterisk_api::swagger_for("asterisk", rusterisk_api::DiscoveryFormat::Asterisk)?;
+    let selected = legacy["apis"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| entry["path"] == "/asterisk/info");
+    assert!(selected.is_some());
+    if let Some(selected) = selected {
+        let parameter = selected["operations"][0]["parameters"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|parameter| parameter["name"] == "only");
+        assert!(parameter.is_some());
+        if let Some(parameter) = parameter {
+            assert_eq!(parameter["dataType"], "string");
+            assert_eq!(parameter["allowMultiple"], true);
+            assert_eq!(parameter["allowableValues"]["values"], expected);
+        }
+    }
+    Ok(())
+}
