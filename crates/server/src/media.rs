@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 mod playback;
 mod recording;
+pub use playback::PlaybackControl;
 use playback::Playbacks;
 use recording::Recordings;
 pub use recording::{RecordingEnd, RecordingTarget};
@@ -39,8 +40,9 @@ enum Command {
         completed: oneshot::Sender<Result<(), MediaError>>,
         reply: oneshot::Sender<Result<(), MediaError>>,
     },
-    EndPlayback {
+    ControlPlayback {
         token: MediaTaskToken,
+        operation: PlaybackControl,
     },
     Record {
         token: MediaTaskToken,
@@ -108,8 +110,16 @@ impl MediaPort {
     }
 
     pub fn stop_playback(&self, token: MediaTaskToken) -> Result<(), MediaError> {
+        self.control_playback(token, PlaybackControl::Stop)
+    }
+
+    pub fn control_playback(
+        &self,
+        token: MediaTaskToken,
+        operation: PlaybackControl,
+    ) -> Result<(), MediaError> {
         self.commands
-            .try_send(Command::EndPlayback { token })
+            .try_send(Command::ControlPlayback { token, operation })
             .map_err(|_| MediaError::Capacity)
     }
 
@@ -356,7 +366,9 @@ impl MediaHub {
                     }
                 }
             }
-            Command::EndPlayback { token } => self.playbacks.end(token, Ok(())),
+            Command::ControlPlayback { token, operation } => {
+                self.playbacks.control(token, operation)
+            }
             Command::Record {
                 token,
                 target,

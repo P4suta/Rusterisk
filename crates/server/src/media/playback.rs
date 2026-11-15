@@ -7,11 +7,24 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaybackControl {
+    Pause,
+    Resume,
+    Stop,
+}
+
+enum State {
+    Active,
+    Paused,
+}
+
 struct Playback {
     target: AudioTarget<CallKey>,
     source: PlaybackSource,
     completed: oneshot::Sender<Result<(), MediaError>>,
     progress: Instant,
+    state: State,
 }
 
 pub(super) struct Playbacks {
@@ -50,6 +63,7 @@ impl Playbacks {
                 source,
                 completed,
                 progress: Instant::now(),
+                state: State::Active,
             },
         );
         Ok(())
@@ -63,6 +77,22 @@ impl Playbacks {
             }
             if entry.completed.send(result).is_err() {
                 tracing::debug!(?token, "playback receiver disconnected");
+            }
+        }
+    }
+
+    pub fn control(&mut self, token: MediaTaskToken, operation: PlaybackControl) {
+        match operation {
+            PlaybackControl::Stop => self.end(token, Ok(())),
+            PlaybackControl::Pause | PlaybackControl::Resume => {
+                if let Some(entry) = self.entries.get_mut(&token) {
+                    entry.state = match operation {
+                        PlaybackControl::Pause => State::Paused,
+                        PlaybackControl::Resume => State::Active,
+                        PlaybackControl::Stop => return,
+                    };
+                    entry.progress = Instant::now();
+                }
             }
         }
     }
@@ -87,6 +117,9 @@ impl Playbacks {
         for (token, entry) in &mut self.entries {
             if entry.completed.is_closed() {
                 finished.push((*token, Ok(())));
+                continue;
+            }
+            if matches!(entry.state, State::Paused) {
                 continue;
             }
             match entry.source.try_read() {
@@ -122,5 +155,63 @@ impl Playbacks {
         for token in tokens {
             self.end(token, Ok(()));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PlaybackControl, Playbacks};
+    use crate::storage::{PlaybackMedia, StorageWorker};
+    use rusterisk_api::ChannelId;
+    use rusterisk_core::{MediaTaskKind, MediaTasks};
+    use rusterisk_media::{AudioTarget, Frame, MediaError};
+    use rusterisk_storage::Recorder;
+    use tokio::sync::oneshot;
+
+    fn failure(error: impl std::fmt::Display) -> MediaError {
+        MediaError::Transport(error.to_string())
+    }
+
+    #[tokio::test]
+    async fn paused_playback_keeps_its_next_sample_and_stopping_releases_the_source(
+    ) -> Result<(), MediaError> {
+        let directory = tempfile::tempdir().map_err(failure)?;
+        let mut recording = Recorder::create(directory.path(), "ordered", 8000).map_err(failure)?;
+        for sample in [1000, 2000, 3000, 4000] {
+            recording
+                .write(Frame::new(&[sample; 160], 8000)?)
+                .map_err(failure)?;
+        }
+        recording.finish().map_err(failure)?;
+        let (storage, worker) = StorageWorker::start(directory.path().to_owned())
+            .await
+            .map_err(failure)?;
+        let source = storage
+            .play(PlaybackMedia::Recording(
+                ChannelId::try_from("ordered".to_owned()).map_err(failure)?,
+            ))
+            .await
+            .map_err(failure)?;
+        storage.recordings().await.map_err(failure)?;
+        let mut tasks = MediaTasks::new(1);
+        let token = tasks
+            .reserve(MediaTaskKind::Playback)
+            .map_err(|_| MediaError::Capacity)?;
+        let mut playbacks = Playbacks::new();
+        let (completed, completion) = oneshot::channel();
+        playbacks.begin(token, AudioTarget::Bridge(1), source, completed)?;
+        assert_eq!(playbacks.tick()?[0].1.samples(), &[1000; 960]);
+        playbacks.control(token, PlaybackControl::Pause);
+        for _ in 0..100 {
+            assert!(playbacks.tick()?.is_empty());
+        }
+        playbacks.control(token, PlaybackControl::Resume);
+        assert_eq!(playbacks.tick()?[0].1.samples(), &[2000; 960]);
+        playbacks.control(token, PlaybackControl::Stop);
+        completion.await.map_err(failure)??;
+        assert!(playbacks.tick()?.is_empty());
+        storage.recordings().await.map_err(failure)?;
+        worker.close().await.map_err(failure)?;
+        Ok(())
     }
 }
