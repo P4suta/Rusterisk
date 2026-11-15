@@ -2,7 +2,9 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 mod expansion;
+mod websocket;
 pub use expansion::{expand_variables, ExpansionError};
+pub use websocket::{WebSocketClient, WebSocketConfig, WebSocketControlFormat};
 
 const MAX_FILE: usize = 1024 * 1024;
 const MAX_SECTIONS: usize = 256;
@@ -304,6 +306,7 @@ pub struct Rtp {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
+    pub websocket: WebSocketConfig,
     pub http: Http,
     pub users: Vec<AriUser>,
     pub origins: Vec<String>,
@@ -416,6 +419,7 @@ impl Config {
             ));
         }
         let mut config = Self {
+            websocket: WebSocketConfig::default(),
             http: Http { bind, tls },
             users: Vec::new(),
             origins: Vec::new(),
