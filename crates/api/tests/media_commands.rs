@@ -59,7 +59,6 @@ fn media_commands_roundtrip_both_reference_control_formats() -> Result<(), serde
         "answer",
         "SET_MEDIA_DIRECTION",
         "SET_MEDIA_DIRECTION sideways",
-        "ANSWER extra",
         "UNKNOWN",
         &"x".repeat(129),
     ] {
@@ -70,5 +69,17 @@ fn media_commands_roundtrip_both_reference_control_formats() -> Result<(), serde
         MediaControlFormat::Json
     )
     .is_err());
+    assert_eq!(
+        MediaCommand::parse(" \tANSWER extra \r\n", MediaControlFormat::PlainText)
+            .map_err(serde::de::Error::custom)?,
+        MediaCommand::Answer
+    );
+    let long_json = format!("{{\"command\":\"ANSWER\"}}{}", " ".repeat(128));
+    assert!(MediaCommand::parse(&long_json, MediaControlFormat::Json).is_err());
+    let long_marker: MediaCommand = serde_json::from_str(&format!(
+        "{{\"command\":\"MARK_MEDIA\",\"correlation_id\":\"{}\"}}",
+        "x".repeat(100)
+    ))?;
+    assert!(long_marker.encode(MediaControlFormat::Json).is_err());
     Ok(())
 }

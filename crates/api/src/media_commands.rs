@@ -88,7 +88,7 @@ impl MediaCommand {
     pub fn parse(text: &str, format: MediaControlFormat) -> Result<Self, MediaCommandError> {
         let command = match format {
             MediaControlFormat::Json => {
-                if text.len() > 16384 {
+                if text.len() > 128 {
                     return Err(MediaCommandError::Capacity);
                 }
                 serde_json::from_str(text).map_err(MediaCommandError::Json)?
@@ -97,25 +97,26 @@ impl MediaCommand {
                 if text.len() > 128 {
                     return Err(MediaCommandError::Capacity);
                 }
+                let text = text.trim_matches(|character: char| character.is_ascii_whitespace());
                 if !text.is_ascii() || text.chars().any(char::is_control) {
                     return Err(MediaCommandError::Invalid);
                 }
                 let (name, data) = text.split_once(' ').unwrap_or((text, ""));
                 match (name, data) {
-                    ("ANSWER", "") => Self::Answer,
-                    ("HANGUP", "") => Self::Hangup,
-                    ("START_MEDIA_BUFFERING", "") => Self::StartMediaBuffering,
+                    ("ANSWER", _) => Self::Answer,
+                    ("HANGUP", _) => Self::Hangup,
+                    ("START_MEDIA_BUFFERING", _) => Self::StartMediaBuffering,
                     ("STOP_MEDIA_BUFFERING", data) => Self::StopMediaBuffering {
                         correlation_id: (!data.is_empty()).then(|| data.to_owned()),
                     },
-                    ("FLUSH_MEDIA", "") => Self::FlushMedia,
-                    ("PAUSE_MEDIA", "") => Self::PauseMedia,
-                    ("CONTINUE_MEDIA", "") => Self::ContinueMedia,
+                    ("FLUSH_MEDIA", _) => Self::FlushMedia,
+                    ("PAUSE_MEDIA", _) => Self::PauseMedia,
+                    ("CONTINUE_MEDIA", _) => Self::ContinueMedia,
                     ("MARK_MEDIA", data) => Self::MarkMedia {
                         correlation_id: (!data.is_empty()).then(|| data.to_owned()),
                     },
-                    ("GET_STATUS", "") => Self::GetStatus,
-                    ("REPORT_QUEUE_DRAINED", "") => Self::ReportQueueDrained,
+                    ("GET_STATUS", _) => Self::GetStatus,
+                    ("REPORT_QUEUE_DRAINED", _) => Self::ReportQueueDrained,
                     ("SET_MEDIA_DIRECTION", "both") => Self::SetMediaDirection {
                         direction: MediaDirection::Both,
                     },
@@ -137,7 +138,11 @@ impl MediaCommand {
         self.validate()?;
         match format {
             MediaControlFormat::Json => {
-                serde_json::to_string(self).map_err(MediaCommandError::Json)
+                let text = serde_json::to_string(self).map_err(MediaCommandError::Json)?;
+                if text.len() > 128 {
+                    return Err(MediaCommandError::Capacity);
+                }
+                Ok(text)
             }
             MediaControlFormat::PlainText => {
                 let (name, data) = match self {
