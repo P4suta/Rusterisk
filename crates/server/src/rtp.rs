@@ -1,13 +1,13 @@
-use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone, PeerMediaDirection};
+pub use crate::media_link::{Channels as RtpChannels, DigitCommand as RtpDigitCommand, LinkStats};
 use rusterisk_media::{
-    AudioFormat, Frame, MediaError, RtpPacket, RtpReceiver, RtpSender, SourceReport,
-    TelephoneFormat, TelephoneReceiver, TelephoneSender, MAX_PACKET,
+    AudioFormat, MediaError, RtpPacket, RtpReceiver, RtpSender, SourceReport, TelephoneFormat,
+    TelephoneReceiver, TelephoneSender, MAX_PACKET,
 };
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 
 pub struct SocketPair {
     data: UdpSocket,
@@ -89,28 +89,6 @@ pub struct RtpSession {
     pub format: AudioFormat,
     pub payload_type: u8,
     pub telephone: Option<TelephoneFormat>,
-}
-
-pub struct RtpChannels {
-    pub incoming: mpsc::Sender<Frame>,
-    pub digits: mpsc::Sender<DtmfTone>,
-    pub outgoing: mpsc::Receiver<Frame>,
-    pub commands: mpsc::Receiver<RtpDigitCommand>,
-    pub completed: mpsc::Sender<DtmfToken>,
-    pub stop: watch::Receiver<bool>,
-    pub direction: watch::Receiver<PeerMediaDirection>,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct LinkStats {
-    pub packets_received: u64,
-    pub packets_sent: u64,
-    pub dropped: u64,
-}
-
-pub enum RtpDigitCommand {
-    Tone(DtmfTone),
-    Sequence(DtmfCommand),
 }
 
 pub struct RtpLink {
