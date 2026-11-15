@@ -312,3 +312,4 @@ impl<'ast> Visit<'ast> for Policy<'_> {
         visit::visit_macro(self, node);
     }
 }
+pub mod vendor;

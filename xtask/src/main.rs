@@ -135,6 +135,24 @@ fn run(program: &str, arguments: &[&str]) -> Result<(), TaskError> {
 fn execute() -> Result<(), TaskError> {
     let arguments: Vec<String> = std::env::args().skip(1).take(6).collect();
     match arguments.as_slice() {
+        [task, flag, archive] if task == "vendor-patch" && flag == "--archive" => {
+            let count = xtask::vendor::patch(&std::env::current_dir()?, Path::new(archive))
+                .map_err(|error| TaskError::Contract(error.to_string()))?;
+            println!("vendor: recorded changes to {count} published source files");
+            Ok(())
+        }
+        [task, flag, archive] if task == "vendor-import" && flag == "--archive" => {
+            let count = xtask::vendor::import(&std::env::current_dir()?, Path::new(archive))
+                .map_err(|error| TaskError::Contract(error.to_string()))?;
+            println!("vendor: imported {count} published source files");
+            Ok(())
+        }
+        [task] if task == "vendor-check" => {
+            let count = xtask::vendor::check(&std::env::current_dir()?)
+                .map_err(|error| TaskError::Contract(error.to_string()))?;
+            println!("vendor: {count} published source files verified");
+            Ok(())
+        }
         [task] if task == "browser-types" => xtask::browser::prepare_types(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string())),
         [task, mode, flag, image] if task == "browser" && flag == "--image" => {
             let execution = match mode.as_str() {
@@ -183,6 +201,7 @@ fn execute() -> Result<(), TaskError> {
         [task] if task == "node-check" => node_check(),
         [task] if task == "browser-check" => xtask::browser::check(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string())),
         [task] if task == "check" => {
+            xtask::vendor::check(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string()))?;
             run("cargo", xtask::WORKSPACE_FORMAT_CHECK)?;
             run("cargo", &["fmt", "--manifest-path", "xtask/fuzz/Cargo.toml", "--", "--check"])?;
             policy()?;
@@ -223,7 +242,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|security|(reference-build|verification-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
         )),
     }
 }

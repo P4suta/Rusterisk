@@ -27,8 +27,17 @@ browser *arguments="--dry-run":
 security:
     cargo run --locked --target-dir target/xtask --package xtask -- security
 
+vendor-check:
+    cargo run --locked --target-dir target/xtask --package xtask -- vendor-check
+
+vendor-import archive:
+    cargo run --locked --target-dir target/xtask --package xtask -- vendor-import --archive "{{ archive }}"
+
+vendor-patch archive:
+    cargo run --locked --target-dir target/xtask --package xtask -- vendor-patch --archive "{{ archive }}"
+
 fmt:
-    cargo fmt --all
+    cargo fmt
     cargo fmt --manifest-path xtask/fuzz/Cargo.toml
 
 reference-build *arguments="--dry-run":
