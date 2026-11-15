@@ -193,52 +193,61 @@ async fn duplex(format: MediaFormat) -> Result<(), MediaError> {
                 },
             }
         }
-        MediaSocket::send(&mut left, SocketMessage::Close).await?;
-        loop {
-            match MediaSocket::receive(&mut left).await? {
-                Some(SocketMessage::Close) => break,
-                Some(
-                    SocketMessage::Binary(_) | SocketMessage::Text(_) | SocketMessage::Pong(_),
-                ) => {}
-                Some(SocketMessage::Ping(bytes)) => {
-                    MediaSocket::send(&mut left, SocketMessage::Pong(bytes)).await?
+        for (peer, expected) in [(&mut left, &left_key), (&mut right, &right_key)] {
+            MediaSocket::send(peer, SocketMessage::Close).await?;
+            let mut acknowledged = false;
+            loop {
+                match MediaSocket::receive(peer).await? {
+                    Some(SocketMessage::Close) => acknowledged = true,
+                    None if acknowledged => break,
+                    None => return Err(MediaError::InvalidPacket),
+                    Some(
+                        SocketMessage::Binary(_) | SocketMessage::Text(_) | SocketMessage::Pong(_),
+                    ) => {}
+                    Some(SocketMessage::Ping(bytes)) => {
+                        MediaSocket::send(peer, SocketMessage::Pong(bytes)).await?
+                    }
                 }
-                None => return Err(MediaError::InvalidPacket),
+            }
+            loop {
+                if let Some(MediaNotice::Stopped { key, result }) = notices.recv().await {
+                    assert_eq!(&key, expected);
+                    result?;
+                    break;
+                }
             }
         }
-        loop {
-            if let Some(MediaNotice::Stopped { key, result }) = notices.recv().await {
-                assert_eq!(key, left_key);
-                result?;
-                break;
-            }
-        }
-        media.release(right_key)?;
         Ok::<(), MediaError>(())
     })
     .await
     .map_err(failure);
     stop.send_replace(true);
-    task.await.map_err(failure)??;
+    let cleanup = task.await.map_err(failure).and_then(|result| result);
     http.abort();
     assert!(http.await.is_err());
-    match result? {
+    let primary = match result.and_then(|result| result) {
         Ok(()) => Ok(()),
         Err(primary) => {
+            let mut primary = primary;
             while let Ok(notice) = notices.try_recv() {
                 if let MediaNotice::Stopped {
                     key,
                     result: Err(error),
                 } = notice
                 {
-                    return Err(failure(format!(
-                        "{primary}; media link {} failed: {error}",
-                        key.id
-                    )));
+                    primary = failure(format!("{primary}; media link {} failed: {error}", key.id));
                 }
             }
             Err(primary)
         }
+    };
+    match (primary, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(primary), Ok(())) => Err(primary),
+        (Ok(()), Err(cleanup)) => Err(failure(format!("media hub shutdown failed: {cleanup}"))),
+        (Err(primary), Err(cleanup)) => Err(failure(format!(
+            "{primary}; media hub shutdown failed: {cleanup}"
+        ))),
     }
 }
 
