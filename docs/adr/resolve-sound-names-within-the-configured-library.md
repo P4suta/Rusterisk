@@ -1,6 +1,6 @@
 ---
 date: 2026-11-16
-status: proposed
+status: accepted
 ---
 
 # Resolve sound names within the configured library
@@ -32,4 +32,4 @@ Reconsider when a deployment requires more trusted libraries.
 ## Confirmation
 
 Check round trips, traversal rejection, ancestor links, missing files, and agreement between advertised sounds and received playback audio.
-Keep the record proposed until reference playback comparisons pass.
+The [reference comparison](../../crates/client/tests/reference/sound_playback.rs) verifies English and Japanese channel and bridge playback through received audio samples.
