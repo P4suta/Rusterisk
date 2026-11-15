@@ -60,16 +60,21 @@ impl MediaTasks {
         if matches!(self.admission, Admission::Ended) {
             return Err(MediaTaskError::Ended);
         }
-        if kind == MediaTaskKind::Recording
-            && self.tasks.iter().flatten().any(|task| task.kind == kind)
-        {
-            return Err(MediaTaskError::Recording);
+        if kind == MediaTaskKind::Recording {
+            for slot in &self.tasks {
+                if matches!(slot, Some(task) if task.kind == kind) {
+                    return Err(MediaTaskError::Recording);
+                }
+            }
         }
-        let index = self
-            .tasks
-            .iter()
-            .position(Option::is_none)
-            .ok_or(MediaTaskError::Capacity)?;
+        let mut available = None;
+        for (index, slot) in self.tasks.iter().enumerate() {
+            if slot.is_none() {
+                available = Some(index);
+                break;
+            }
+        }
+        let index = available.ok_or(MediaTaskError::Capacity)?;
         let sequence = self
             .sequence
             .checked_add(1)
@@ -88,21 +93,22 @@ impl MediaTasks {
     }
 
     pub fn state(&self, token: MediaTaskToken) -> Option<MediaTaskState> {
-        self.tasks
-            .iter()
-            .flatten()
-            .find(|task| task.token == token)
-            .map(|task| task.state)
+        for slot in &self.tasks {
+            match slot {
+                Some(task) if task.token == token => return Some(task.state),
+                Some(_) | None => {}
+            }
+        }
+        None
     }
 
     pub fn next_playback(&self) -> Option<MediaTaskToken> {
         let mut next = None;
-        for task in self
-            .tasks
-            .iter()
-            .flatten()
-            .filter(|task| task.kind == MediaTaskKind::Playback)
-        {
+        for slot in &self.tasks {
+            let task = match slot {
+                Some(task) if task.kind == MediaTaskKind::Playback => task,
+                Some(_) | None => continue,
+            };
             match task.state {
                 MediaTaskState::Active | MediaTaskState::Paused => return None,
                 MediaTaskState::Queued => {
@@ -119,10 +125,12 @@ impl MediaTasks {
         if matches!(self.admission, Admission::Ended) {
             return Err(MediaTaskError::Ended);
         }
-        self.tasks
-            .iter()
-            .position(|task| task.is_some_and(|task| task.token == token))
-            .ok_or(MediaTaskError::Unknown)
+        for (index, slot) in self.tasks.iter().enumerate() {
+            if matches!(slot, Some(task) if task.token == token) {
+                return Ok(index);
+            }
+        }
+        Err(MediaTaskError::Unknown)
     }
 
     pub fn start(&mut self, token: MediaTaskToken) -> Result<(), MediaTaskError> {
@@ -170,16 +178,13 @@ impl MediaTasks {
     }
 
     pub fn finish(&mut self, token: MediaTaskToken) -> bool {
-        if let Some(slot) = self
-            .tasks
-            .iter_mut()
-            .find(|slot| slot.is_some_and(|task| task.token == token))
-        {
-            *slot = None;
-            true
-        } else {
-            false
+        for slot in &mut self.tasks {
+            if matches!(slot, Some(task) if task.token == token) {
+                *slot = None;
+                return true;
+            }
         }
+        false
     }
 
     pub fn cancel(&mut self) -> [Option<MediaTaskToken>; 8] {
