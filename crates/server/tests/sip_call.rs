@@ -794,6 +794,18 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
         directory.path().join("sounds/welcome.wav"),
     )
     .map_err(failure)?;
+    let mut beep =
+        rusterisk_storage::Recorder::create(directory.path(), "beep", 8000).map_err(failure)?;
+    for _ in 0..10 {
+        beep.write(Frame::new(&[3000; 160], 8000).map_err(failure)?)
+            .map_err(failure)?;
+    }
+    beep.finish().map_err(failure)?;
+    std::fs::rename(
+        directory.path().join("recordings/beep.wav"),
+        directory.path().join("sounds/beep.wav"),
+    )
+    .map_err(failure)?;
     let mut saved =
         rusterisk_storage::Recorder::create(directory.path(), "saved", 8000).map_err(failure)?;
     for _ in 0..20 {
@@ -871,8 +883,10 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
         }
         let destination = Session::parse(std::str::from_utf8(&answered.body).map_err(failure)?, &[Codec::Pcmu]).map_err(failure)?.remote;
         let mut sender = RtpSender::new(AudioFormat::Pcmu, 0, [19; 10]).map_err(failure)?;
-        for (index, name) in ["received-info", "received-rtp", "received-silence"].into_iter().enumerate() {
-        let options = if index == 2 { "maxSilenceSeconds=1" } else { "terminateOn=%23" };
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum StopRecordingWith { Info, Rtp, Silence, Control }
+        for (mode, name) in [(StopRecordingWith::Info, "received-info"), (StopRecordingWith::Rtp, "received-rtp"), (StopRecordingWith::Silence, "received-silence"), (StopRecordingWith::Control, "received-beep")] {
+        let options = match mode { StopRecordingWith::Info | StopRecordingWith::Rtp => "terminateOn=%23", StopRecordingWith::Silence => "maxSilenceSeconds=1", StopRecordingWith::Control => "beep=true" };
         let request = Request::builder().method("POST").uri(format!("/ari/channels/{channel}/record?name={name}&format=wav&{options}"))
             .header("Authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("app:test-password"))).body(Body::empty()).map_err(failure)?;
         assert_eq!(app.clone().oneshot(request).await.map_err(failure)?.status(), StatusCode::CREATED);
@@ -885,6 +899,10 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
             }
             Err(ControlError::Capacity)
         }).await.map_err(failure)??;
+        if mode == StopRecordingWith::Control {
+            receive_audio(&audio, 3000).await?;
+            receive_audio(&audio, 0).await?;
+        }
         let mut period = tokio::time::interval(Duration::from_millis(20));
         period.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         for _ in 0..20 {
@@ -893,7 +911,8 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
             audio.data().send_to(&packet, destination).await.map_err(failure)?;
             drain_received_audio(&audio)?;
         }
-        if index == 0 {
+        match mode {
+        StopRecordingWith::Info => {
             let body = "Signal=#\r\nDuration=120\r\n";
             let info = ack.replace("ACK sip:", "INFO sip:")
                 .replace("z9hG4bK-playback-ack", "z9hG4bK-recording-info")
@@ -901,19 +920,27 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
                 .replace("Content-Length: 0\r\n\r\n", &format!("Content-Type: application/dtmf-relay\r\nContent-Length: {}\r\n\r\n{body}", body.len()));
             phone.send_to(info.as_bytes(), target).await.map_err(failure)?;
             assert_eq!(response(&phone).await?.status_code.code(), 200);
-        } else if index == 1 {
+        }
+        StopRecordingWith::Rtp => {
             for sequence in 1..=3 {
                 let event = TelephoneEvent::new(DtmfDigit::Hash, true, 10, 960).map_err(failure)?.encode();
                 let packet = RtpPacket::new(101, sequence, 1000, 0x19191919, &event).map_err(failure)?.encode().map_err(failure)?;
                 audio.data().send_to(&packet, destination).await.map_err(failure)?;
             }
-        } else {
+        }
+        StopRecordingWith::Silence => {
             for _ in 0..60 {
                 period.tick().await;
                 let packet = sender.packet(Frame::new(&[0; 160], 8000).map_err(failure)?).map_err(failure)?.encode().map_err(failure)?;
                 audio.data().send_to(&packet, destination).await.map_err(failure)?;
                 drain_received_audio(&audio)?;
             }
+        }
+        StopRecordingWith::Control => {
+            let request = Request::builder().method("POST").uri(format!("/ari/recordings/live/{name}/stop"))
+                .header("Authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("app:test-password"))).body(Body::empty()).map_err(failure)?;
+            assert_eq!(app.clone().oneshot(request).await.map_err(failure)?.status(), StatusCode::NO_CONTENT);
+        }
         }
         tokio::time::timeout(Duration::from_secs(2), async {
             while let Some(event) = subscription.events.recv().await {
@@ -935,7 +962,7 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
             silent_tail = if frame.samples().iter().all(|sample| sample.unsigned_abs() < 128) { silent_tail + 1 } else { 0 };
         }
         assert!(longest >= 6);
-        if index == 2 { assert_eq!(silent_tail, 10); }
+        if mode == StopRecordingWith::Silence { assert_eq!(silent_tail, 10); }
         }
         controller.execute(credentials()?, None, Action::CreateBridge { id: id("playback-mix")?, name: String::new() }).await?;
         controller.execute(credentials()?, None, Action::AddChannels { bridge: id("playback-mix")?, channels: [channel.clone()].into_iter().collect() }).await?;

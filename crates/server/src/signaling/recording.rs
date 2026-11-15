@@ -1,9 +1,10 @@
 use super::{failure, Signaling};
 use crate::media::{RecordingEnd, RecordingTarget};
-use crate::storage::WorkerError;
+use crate::storage::{PlaybackMedia, WorkerError};
 use crate::{ControlError, MediaOwner, Signal};
 use rusterisk_api::{ChannelId, RecordingOptions};
 use rusterisk_core::MediaTaskToken;
+use rusterisk_media::AudioTarget;
 use rusterisk_storage::StorageError;
 use std::time::Duration;
 
@@ -59,10 +60,24 @@ impl Signaling {
                 .reserve_recording(target, token)
                 .await
                 .map_err(failure)?;
-            Ok((storage, completed))
+            let prompt = if options.beep {
+                let target = match &owner {
+                    MediaOwner::Channel(key) => AudioTarget::Channel(key.clone()),
+                    MediaOwner::Bridge { generation, .. } => AudioTarget::Bridge(*generation),
+                };
+                Some(
+                    self.media
+                        .reserve_playback(target, token)
+                        .await
+                        .map_err(failure)?,
+                )
+            } else {
+                None
+            };
+            Ok((storage, completed, prompt))
         }
         .await;
-        let (storage, completed) = match admitted {
+        let (storage, completed, prompt) = match admitted {
             Ok(admitted) => admitted,
             Err(error) => {
                 self.notify(Signal::RecordingAdmitted {
@@ -79,7 +94,11 @@ impl Signaling {
         self.recordings.spawn(async move {
             let admission = async {
                 let sink = storage.record_with_policy(name, 8000, options.if_exists).await.map_err(storage_error)?;
-                media.attach_recording_with_options(token, sink, options, None).await.map_err(failure)?;
+                let source = if options.beep {
+                    Some(storage.play(PlaybackMedia::Sound(ChannelId::try_from("beep".to_owned())?)).await.map_err(storage_error)?)
+                } else { None };
+                media.attach_recording_with_options(token, sink, options, prompt).await.map_err(failure)?;
+                if let Some(source) = source { media.attach_playback(token, source).await.map_err(failure)?; }
                 if !controller.is_stopping() { controller.signal(Signal::RecordingAdmitted { owner: owner.clone(), token, result: Ok(()) }).await?; }
                 Ok(())
             }.await;

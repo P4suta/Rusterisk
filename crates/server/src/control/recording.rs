@@ -149,9 +149,6 @@ impl Control {
         options: RecordingOptions,
         application: Option<StasisApplication>,
     ) -> Result<Outcome, ControlError> {
-        if options.beep {
-            return Err(ControlError::Unsupported);
-        }
         if self.recordings.contains_key(&name) {
             return Err(ControlError::Conflict("Recording already exists"));
         }
