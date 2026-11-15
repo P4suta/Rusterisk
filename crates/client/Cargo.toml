@@ -15,6 +15,10 @@ test = true
 name = "external_audio"
 test = true
 
+[[example]]
+name = "browser_bridge"
+test = true
+
 [dependencies]
 rusterisk-api = { version = "0.1.0", path = "../api" }
 rusterisk-core = { version = "0.1.0", path = "../core" }
