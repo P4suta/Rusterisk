@@ -260,6 +260,10 @@ pub enum Effect {
         id: ChannelId,
         channels: Vec<CallKey>,
     },
+    DialBridge {
+        parent: CallKey,
+        peer: Option<CallKey>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1442,6 +1446,12 @@ impl Control {
                     Milestone::Ended => {
                         return Err(ControlError::Conflict("Terminal event was already handled"))
                     }
+                }
+                if milestone == Milestone::Answered {
+                    if let Some(branch) = self.dial_branch(&key) {
+                        outcome.append(self.answered_dial_branch(branch, now, timestamp)?);
+                    }
+                    outcome.append(self.connect_dial(&key)?);
                 }
                 Ok(outcome)
             }

@@ -1,6 +1,9 @@
 use super::{CallKey, ChannelEntry, Control, ControlError, Effect, Outcome};
 use rusterisk_api::{Channel, ChannelId, ChannelState};
-use rusterisk_core::{Call, DialFailure, DialFork, DialForkError, DialForkOutcome, DialplanToken};
+use rusterisk_core::{
+    Call, CallState, DialFailure, DialFork, DialForkError, DialForkOutcome, DialForkState,
+    DialplanToken,
+};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) struct DialBranches {
@@ -8,6 +11,8 @@ pub(super) struct DialBranches {
     pub fork: DialFork,
     children: Vec<CallKey>,
     failure: DialFailure,
+    parent: CallKey,
+    bridge: Option<u64>,
 }
 
 pub(super) struct DialBranch {
@@ -69,9 +74,20 @@ impl Control {
                 .and_then(|frame| frame.dial.as_ref())
             {
                 for child in &dial.children {
-                    if discovered.insert(child.clone()) {
+                    if self.key(&child.id).is_ok_and(|current| current == *child)
+                        && discovered.insert(child.clone())
+                    {
                         pending.push(child.clone());
                     }
+                }
+            }
+            if let Some(branch) = self.dial_branch(&key) {
+                let winner = self.channels.get(&branch.parent.id)
+                    .and_then(|entry| entry.dialplan.as_ref())
+                    .and_then(|frame| frame.dial.as_ref())
+                    .is_some_and(|dial| matches!(dial.fork.state(), DialForkState::Bridged { winner } if winner == branch.index));
+                if winner && discovered.insert(branch.parent.clone()) {
+                    pending.push(branch.parent);
                 }
             }
         }
@@ -171,6 +187,155 @@ impl Control {
                 Err(error)
             }
         }
+    }
+
+    pub(super) fn answered_dial_branch(
+        &mut self,
+        branch: DialBranch,
+        now: u64,
+        timestamp: &str,
+    ) -> Result<Outcome, ControlError> {
+        let dial = self
+            .channels
+            .get_mut(&branch.parent.id)
+            .filter(|entry| entry.call.generation() == branch.parent.generation)
+            .and_then(|entry| entry.dialplan.as_mut())
+            .and_then(|frame| {
+                if frame
+                    .dial
+                    .as_ref()
+                    .is_some_and(|dial| dial.token == branch.token)
+                {
+                    frame.dial.take()
+                } else {
+                    None
+                }
+            });
+        let Some(mut dial) = dial else {
+            return Ok(Outcome::empty());
+        };
+        let result = dial
+            .fork
+            .answer(branch.token, branch.index, now)
+            .map_err(fork_error)
+            .and_then(|decision| {
+                self.release_dial(&dial, decision.release, timestamp)
+                    .map(|outcome| (decision.outcome, outcome))
+            });
+        let frame = self
+            .channels
+            .get_mut(&branch.parent.id)
+            .and_then(|entry| entry.dialplan.as_mut())
+            .ok_or(ControlError::Conflict("Dial parent disappeared"))?;
+        match result {
+            Ok((DialForkOutcome::Pending, outcome)) => {
+                frame.dial = Some(dial);
+                Ok(outcome)
+            }
+            Ok((DialForkOutcome::Connect { .. }, mut outcome)) => {
+                frame.dial = Some(dial);
+                self.channels
+                    .get_mut(&branch.parent.id)
+                    .ok_or(ControlError::NotFound("Channel not found"))?
+                    .variables
+                    .insert("DIALSTATUS".into(), "ANSWER".into());
+                outcome.append(self.connect_dial(&branch.parent)?);
+                Ok(outcome)
+            }
+            Ok((DialForkOutcome::Continue, outcome)) => {
+                if let Err(error) = frame.complete_dial(dial.token) {
+                    frame.dial = Some(dial);
+                    return Err(error);
+                }
+                self.channels
+                    .get_mut(&branch.parent.id)
+                    .ok_or(ControlError::NotFound("Channel not found"))?
+                    .variables
+                    .insert("DIALSTATUS".into(), "NOANSWER".into());
+                Ok(outcome)
+            }
+            Ok((DialForkOutcome::End, _)) => {
+                frame.dial = Some(dial);
+                Err(ControlError::Conflict(
+                    "Answer cannot end its dial operation",
+                ))
+            }
+            Err(error) => {
+                frame.dial = Some(dial);
+                Err(error)
+            }
+        }
+    }
+
+    pub(super) fn connect_dial(&mut self, parent: &CallKey) -> Result<Outcome, ControlError> {
+        let Some(entry) = self
+            .channels
+            .get(&parent.id)
+            .filter(|entry| entry.call.generation() == parent.generation)
+        else {
+            return Ok(Outcome::empty());
+        };
+        let Some(dial) = entry
+            .dialplan
+            .as_ref()
+            .and_then(|frame| frame.dial.as_ref())
+        else {
+            return Ok(Outcome::empty());
+        };
+        if dial.bridge.is_some() {
+            return Ok(Outcome::empty());
+        }
+        let winner = match dial.fork.state() {
+            DialForkState::Bridged { winner } => winner,
+            DialForkState::Dialing { .. } | DialForkState::Ended => return Ok(Outcome::empty()),
+        };
+        let peer = dial
+            .children
+            .get(usize::from(winner))
+            .ok_or(ControlError::Conflict("Dial winner is missing"))?
+            .clone();
+        let mut outcome = Outcome::empty();
+        if entry.call.state() != CallState::Up {
+            outcome.effects.push(Effect::Answer {
+                key: parent.clone(),
+            });
+            return Ok(outcome);
+        }
+        let parent_call = entry.call;
+        let parent_caller = entry.snapshot.caller.clone();
+        let peer_entry = self
+            .channels
+            .get(&peer.id)
+            .filter(|entry| entry.call.generation() == peer.generation)
+            .ok_or(ControlError::Conflict("Dial peer disappeared"))?;
+        let peer_call = peer_entry.call;
+        let peer_caller = peer_entry.snapshot.caller.clone();
+        let token = self.generation()?;
+        let parent_call = parent_call.join(token)?;
+        let peer_call = peer_call.join(token)?;
+        let parent_entry = self
+            .channels
+            .get_mut(&parent.id)
+            .ok_or(ControlError::NotFound("Channel not found"))?;
+        parent_entry.call = parent_call;
+        parent_entry.snapshot.connected = peer_caller;
+        parent_entry
+            .dialplan
+            .as_mut()
+            .and_then(|frame| frame.dial.as_mut())
+            .ok_or(ControlError::Conflict("Dial operation disappeared"))?
+            .bridge = Some(token);
+        let peer_entry = self
+            .channels
+            .get_mut(&peer.id)
+            .ok_or(ControlError::NotFound("Channel not found"))?;
+        peer_entry.call = peer_call;
+        peer_entry.snapshot.connected = parent_caller;
+        outcome.effects.push(Effect::DialBridge {
+            parent: parent.clone(),
+            peer: Some(peer),
+        });
+        Ok(outcome)
     }
 
     pub(super) fn begin_dial(
@@ -274,6 +439,8 @@ impl Control {
                 fork,
                 children,
                 failure: DialFailure::Unavailable,
+                parent: parent.clone(),
+                bridge: None,
             },
             outcome,
         ))
@@ -301,6 +468,14 @@ impl Control {
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
         let release = dial.fork.cancel().release;
-        self.release_dial(dial, release, timestamp)
+        let mut outcome = Outcome::empty();
+        if dial.bridge.take().is_some() {
+            outcome.effects.push(Effect::DialBridge {
+                parent: dial.parent.clone(),
+                peer: None,
+            });
+        }
+        outcome.append(self.release_dial(dial, release, timestamp)?);
+        Ok(outcome)
     }
 }

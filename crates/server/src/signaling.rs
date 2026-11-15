@@ -25,6 +25,12 @@ struct Active {
     digits: DigitDelivery,
 }
 
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum BridgeIdentity {
+    Application(ChannelId),
+    Dialplan(CallKey),
+}
+
 enum DigitDelivery {
     Media,
     Signaling(VecDeque<DtmfCommand>),
@@ -59,7 +65,7 @@ pub struct Signaling {
     notices: mpsc::Receiver<MediaNotice>,
     listeners: Vec<Listener>,
     calls: BTreeMap<CallKey, Active>,
-    bridges: BTreeMap<ChannelId, u64>,
+    bridges: BTreeMap<BridgeIdentity, u64>,
     serial: u64,
 }
 
@@ -542,25 +548,41 @@ impl Signaling {
                 self.media.release(key).map_err(failure)?;
             }
             Effect::Bridge { id, channels } => {
-                let token = match self.bridges.get(&id) {
-                    Some(token) => *token,
-                    None if channels.is_empty() => return Ok(()),
-                    None => {
-                        if self.bridges.len() >= 64 {
-                            return Err(ControlError::Capacity);
-                        }
-                        self.serial = self.serial.checked_add(1).ok_or(ControlError::Capacity)?;
-                        self.bridges.insert(id.clone(), self.serial);
-                        self.serial
-                    }
+                self.apply_bridge(BridgeIdentity::Application(id), channels)?;
+            }
+            Effect::DialBridge { parent, peer } => {
+                let identity = BridgeIdentity::Dialplan(parent.clone());
+                let channels = match peer {
+                    Some(peer) => [parent, peer].into_iter().collect(),
+                    None => Vec::new(),
                 };
-                if channels.is_empty() {
-                    self.bridges.remove(&id);
-                }
-                self.media.bridge(token, channels).map_err(failure)?;
+                self.apply_bridge(identity, channels)?;
             }
         }
         Ok(())
+    }
+
+    fn apply_bridge(
+        &mut self,
+        id: BridgeIdentity,
+        channels: Vec<CallKey>,
+    ) -> Result<(), ControlError> {
+        let token = match self.bridges.get(&id) {
+            Some(token) => *token,
+            None if channels.is_empty() => return Ok(()),
+            None => {
+                if self.bridges.len() >= 64 {
+                    return Err(ControlError::Capacity);
+                }
+                self.serial = self.serial.checked_add(1).ok_or(ControlError::Capacity)?;
+                self.bridges.insert(id.clone(), self.serial);
+                self.serial
+            }
+        };
+        if channels.is_empty() {
+            self.bridges.remove(&id);
+        }
+        self.media.bridge(token, channels).map_err(failure)
     }
 
     async fn answer(&mut self, key: &CallKey, now: u64) -> Result<(), ControlError> {

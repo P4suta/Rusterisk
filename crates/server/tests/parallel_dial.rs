@@ -145,7 +145,8 @@ fn all_failed_attempts_resume_once_and_late_failures_do_not_end_the_parent(
             | Effect::Answer { .. }
             | Effect::Ring { .. }
             | Effect::Release { .. }
-            | Effect::Bridge { .. } => Err(ControlError::Unsupported),
+            | Effect::Bridge { .. }
+            | Effect::DialBridge { .. } => Err(ControlError::Unsupported),
         })
         .collect::<Result<Vec<_>, _>>()?;
     for (index, child) in children.iter().enumerate() {
@@ -177,5 +178,109 @@ fn all_failed_attempts_resume_once_and_late_failures_do_not_end_the_parent(
     }
     assert!(control.channel(&parent.id).is_ok());
     assert!(control.tick_dialplans(400, "later")?.events.is_empty());
+    Ok(())
+}
+
+#[test]
+fn the_first_answer_cancels_its_peers_and_bridges_after_the_parent_answers(
+) -> Result<(), ControlError> {
+    for selected in 0..2 {
+        let (mut control, parent, started) = start(4, ",1")?;
+        let children = started
+            .effects
+            .into_iter()
+            .filter_map(|effect| {
+                if let Effect::Start { key, .. } = effect {
+                    Some(key)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let winner = children[selected].clone();
+        let loser = children[1 - selected].clone();
+        let answered = control.signal_at(
+            rusterisk_server::Signal::Milestone {
+                key: winner.clone(),
+                milestone: rusterisk_server::Milestone::Answered,
+            },
+            "later",
+            100,
+        )?;
+        assert_eq!(answered.effects.len(), 2);
+        assert!(answered
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Release { key } if key == &loser)));
+        assert!(answered
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Answer { key } if key == &parent)));
+        assert!(control.channel(&loser.id).is_err());
+        assert_eq!(
+            control.channel(&parent.id)?.state,
+            rusterisk_api::ChannelState::Ring
+        );
+        assert!(control
+            .signal_at(
+                rusterisk_server::Signal::Milestone {
+                    key: winner.clone(),
+                    milestone: rusterisk_server::Milestone::Answered
+                },
+                "later",
+                101
+            )?
+            .effects
+            .is_empty());
+        let connected = control.signal_at(
+            rusterisk_server::Signal::Milestone {
+                key: parent.clone(),
+                milestone: rusterisk_server::Milestone::Answered,
+            },
+            "later",
+            110,
+        )?;
+        assert!(
+            matches!(&connected.effects[..], [Effect::DialBridge { parent: root, peer: Some(peer) }] if root == &parent && peer == &winner)
+        );
+        assert!(control
+            .signal_at(
+                rusterisk_server::Signal::Milestone {
+                    key: parent.clone(),
+                    milestone: rusterisk_server::Milestone::Answered
+                },
+                "later",
+                111
+            )?
+            .effects
+            .is_empty());
+        let late = control.signal_at(
+            rusterisk_server::Signal::Milestone {
+                key: loser.clone(),
+                milestone: rusterisk_server::Milestone::Answered,
+            },
+            "later",
+            120,
+        )?;
+        assert!(matches!(&late.effects[..], [Effect::Release { key }] if key == &loser));
+        assert!(control.tick_dialplans(2000, "later")?.events.is_empty());
+        let ended = if selected == 0 {
+            control.apply(Action::Hangup(parent.id.clone()), "later", 2000)?
+        } else {
+            control.signal_at(
+                rusterisk_server::Signal::Terminated {
+                    key: winner.clone(),
+                    cause: 16,
+                },
+                "later",
+                2000,
+            )?
+        };
+        assert_eq!(ended.effects.len(), 3);
+        assert!(ended.effects.iter().any(|effect| matches!(effect, Effect::DialBridge { parent: root, peer: None } if root == &parent)));
+        assert!(control.channel(&parent.id).is_err());
+        assert!(control.channel(&winner.id).is_err());
+        assert!(control.tick_dialplans(3000, "later")?.events.is_empty());
+    }
     Ok(())
 }
