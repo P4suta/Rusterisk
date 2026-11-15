@@ -156,8 +156,12 @@ impl PlaybackSet {
             PlaybackMedia::Recording(name) => ("recordings", name),
             PlaybackMedia::Sound(name) => ("sounds", name),
         };
-        let path = self.root.join(directory).join(format!("{name}.wav"));
-        if std::fs::symlink_metadata(&path)?.file_type().is_symlink() {
+        let directory = self.root.join(directory);
+        if !std::fs::symlink_metadata(&directory)?.is_dir() {
+            return Err(StorageError::InvalidName);
+        }
+        let path = directory.join(format!("{name}.wav"));
+        if !std::fs::symlink_metadata(&path)?.is_file() {
             return Err(StorageError::InvalidName);
         }
         let reader = WaveReader::open(&path)?;

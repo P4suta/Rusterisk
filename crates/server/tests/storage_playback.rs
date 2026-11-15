@@ -48,3 +48,25 @@ async fn missing_and_invalid_sounds_return_errors_without_stopping_storage(
     worker.close().await?;
     Ok(())
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn playback_rejects_a_sound_directory_that_is_a_symbolic_link() -> Result<(), WorkerError> {
+    let directory = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let mut recording = rusterisk_storage::Recorder::create(outside.path(), "outside", 8000)?;
+    recording.write(Frame::new(&[10; 160], 8000).map_err(StorageError::from)?)?;
+    recording.finish()?;
+    std::os::unix::fs::symlink(
+        outside.path().join("recordings"),
+        directory.path().join("sounds"),
+    )?;
+    let (port, worker) = StorageWorker::start(directory.path().to_owned()).await?;
+    let result = port.play(PlaybackMedia::Sound(id("outside")?)).await;
+    worker.close().await?;
+    assert!(matches!(
+        result,
+        Err(WorkerError::Storage(StorageError::InvalidName))
+    ));
+    Ok(())
+}
