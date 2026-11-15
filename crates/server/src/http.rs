@@ -1,4 +1,4 @@
-use crate::media::PlaybackControl;
+use crate::media::{PlaybackControl, RecordingEnd};
 use crate::{Action, ControlError, Controller, Credentials, Outcome};
 use axum::{
     body::Bytes,
@@ -10,9 +10,10 @@ use axum::{
 };
 use base64::Engine;
 use rusterisk_api::{ChannelId, InvalidMediaUri, MediaUri};
-use rusterisk_core::{DtmfTiming, MuteDirection};
+use rusterisk_core::{DtmfTiming, MuteDirection, RecordingControl};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+mod recording;
 
 pub fn router(controller: Controller) -> Router {
     router_for_scheme(controller, HttpScheme::Http)
@@ -46,6 +47,7 @@ pub(crate) fn error(error: ControlError) -> Response {
         404 => StatusCode::NOT_FOUND,
         409 => StatusCode::CONFLICT,
         412 => StatusCode::PRECONDITION_FAILED,
+        422 => StatusCode::UNPROCESSABLE_ENTITY,
         501 => StatusCode::NOT_IMPLEMENTED,
         503 => StatusCode::SERVICE_UNAVAILABLE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
@@ -329,6 +331,39 @@ async fn dispatch(
     }
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let action = match (method.as_str(), segments.as_slice()) {
+        ("POST", ["ari", "channels", channel, "record"]) => Action::RecordChannel {
+            channel: id(channel)?,
+            name: recording::name(parameters)?,
+        },
+        ("POST", ["ari", "bridges", bridge, "record"]) => Action::RecordBridge {
+            bridge: id(bridge)?,
+            name: recording::name(parameters)?,
+        },
+        ("GET", ["ari", "recordings", "live", name]) => Action::GetRecording(id(name)?),
+        ("DELETE", ["ari", "recordings", "live", name]) => Action::EndRecording {
+            name: id(name)?,
+            mode: RecordingEnd::Cancel,
+        },
+        ("POST", ["ari", "recordings", "live", name, "stop"]) => Action::EndRecording {
+            name: id(name)?,
+            mode: RecordingEnd::Finish,
+        },
+        ("POST", ["ari", "recordings", "live", name, "pause"]) => Action::ControlRecording {
+            name: id(name)?,
+            operation: RecordingControl::Pause,
+        },
+        ("DELETE", ["ari", "recordings", "live", name, "pause"]) => Action::ControlRecording {
+            name: id(name)?,
+            operation: RecordingControl::Resume,
+        },
+        ("POST", ["ari", "recordings", "live", name, "mute"]) => Action::ControlRecording {
+            name: id(name)?,
+            operation: RecordingControl::Mute,
+        },
+        ("DELETE", ["ari", "recordings", "live", name, "mute"]) => Action::ControlRecording {
+            name: id(name)?,
+            operation: RecordingControl::Unmute,
+        },
         ("POST", ["ari", "channels", channel, "play"]) => Action::PlayChannel {
             channel: id(channel)?,
             id: optional_id(parameters, "playbackId")?,

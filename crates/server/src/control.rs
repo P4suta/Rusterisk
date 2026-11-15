@@ -22,6 +22,7 @@ pub enum ControlError {
     NotFound(&'static str),
     Conflict(&'static str),
     InvalidState(&'static str),
+    Unprocessable(&'static str),
     Capacity,
     Unauthorized,
     Forbidden,
@@ -37,6 +38,7 @@ impl ControlError {
             Self::NotFound(_) => 404,
             Self::Conflict(_) => 409,
             Self::InvalidState(_) => 412,
+            Self::Unprocessable(_) => 422,
             Self::Capacity => 503,
             Self::Unauthorized => 401,
             Self::Forbidden => 403,
@@ -52,6 +54,7 @@ impl std::fmt::Display for ControlError {
             Self::Invalid(message)
             | Self::NotFound(message)
             | Self::Conflict(message)
+            | Self::Unprocessable(message)
             | Self::InvalidState(message) => f.write_str(message),
             Self::Capacity => f.write_str("Resource capacity exceeded"),
             Self::Unauthorized => f.write_str("Authentication required"),

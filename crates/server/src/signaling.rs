@@ -344,6 +344,7 @@ impl Signaling {
                             ControlError::NotFound(_) => RejectReason::NoRoute,
                             ControlError::Unsupported => RejectReason::Unsupported,
                             ControlError::Invalid(_)
+                            | ControlError::Unprocessable(_)
                             | ControlError::InvalidState(_)
                             | ControlError::Conflict(_)
                             | ControlError::Unauthorized
