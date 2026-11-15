@@ -17,15 +17,16 @@ fn invalid(error: impl std::fmt::Display) -> Error {
 pub(super) type Peer =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn connect(
+pub(super) async fn connect(
     client: &Client,
     address: &str,
     session: &mut Session,
     app: &str,
     id: &ChannelId,
     format: MediaControlFormat,
+    media_format: MediaFormat,
 ) -> Result<Peer, Error> {
-    let mut options = WebSocketMediaOptions::new(MediaFormat::Pcmu);
+    let mut options = WebSocketMediaOptions::new(media_format);
     options.control_format = format;
     let channel = client
         .external_websocket(id, app, options, "media,agent")
@@ -39,7 +40,7 @@ async fn connect(
         variables
             .remove("MEDIA_WEBSOCKET_OPTIMAL_FRAME_SIZE")
             .as_deref(),
-        Some("160")
+        Some(media_format.optimal_frame_size().to_string()).as_deref()
     );
     let connection = ChannelId::try_from(
         variables
@@ -75,16 +76,16 @@ async fn connect(
     match format {
         MediaControlFormat::Json => {
             let start: MediaEvent = serde_json::from_str(&text)?;
-            assert!(matches!(start, MediaEvent::MediaStart { connection_id, channel_id, format: MediaFormat::Pcmu, optimal_frame_size: 160, ptime: 20, .. } if connection_id == connection && channel_id == *id));
+            assert!(matches!(start, MediaEvent::MediaStart { connection_id, channel_id, format, optimal_frame_size, ptime: 20, .. } if connection_id == connection && channel_id == *id && format == media_format && optimal_frame_size == media_format.optimal_frame_size()));
         }
-        MediaControlFormat::PlainText => assert_eq!(text.as_str(), format!("MEDIA_START connection_id:{connection} channel:{} channel_id:{id} format:ulaw optimal_frame_size:160 ptime:20", channel.name)),
+        MediaControlFormat::PlainText => assert_eq!(text.as_str(), format!("MEDIA_START connection_id:{connection} channel:{} channel_id:{id} format:{} optimal_frame_size:{} ptime:20", channel.name, media_format.as_str(), media_format.optimal_frame_size())),
     }
     super::external_audio::started(session, id).await?;
     status(&mut peer, id, format, 0, false, false).await?;
     Ok(peer)
 }
 
-async fn command(
+pub(super) async fn command(
     peer: &mut Peer,
     command: MediaCommand,
     format: MediaControlFormat,
@@ -96,7 +97,7 @@ async fn command(
     Ok(())
 }
 
-async fn expect(
+pub(super) async fn expect(
     peer: &mut Peer,
     event: MediaEvent,
     format: MediaControlFormat,
@@ -405,6 +406,7 @@ pub async fn compare(
         app,
         &ids[0],
         MediaControlFormat::Json,
+        MediaFormat::Pcmu,
     )
     .await?;
     let mut right = connect(
@@ -414,6 +416,7 @@ pub async fn compare(
         app,
         &ids[1],
         MediaControlFormat::Json,
+        MediaFormat::Pcmu,
     )
     .await?;
     let bridge = ChannelId::try_from("websocket-bridge".to_owned())?;
@@ -458,6 +461,7 @@ pub async fn compare(
         app,
         &id,
         MediaControlFormat::PlainText,
+        MediaFormat::Pcmu,
     )
     .await?;
     controls(client, &mut plain, &id, MediaControlFormat::PlainText).await?;

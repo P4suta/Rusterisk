@@ -8,6 +8,8 @@ use rusterisk_client::{
 use std::{future::IntoFuture, net::Ipv4Addr, time::Duration};
 #[path = "reference/external_audio.rs"]
 mod external_audio;
+#[path = "reference/external_opus.rs"]
+mod external_opus;
 #[path = "reference/external_streams.rs"]
 mod external_streams;
 #[path = "reference/external_websocket_clients.rs"]
@@ -511,6 +513,20 @@ async fn compare_resources(
         )
         .await?;
         external_websockets::compare(
+            &actual,
+            &format!("http://{address}"),
+            &mut actual_session,
+            app.as_str(),
+        )
+        .await?;
+        external_opus::compare(
+            &reference,
+            &reference_address,
+            &mut reference_session,
+            app.as_str(),
+        )
+        .await?;
+        external_opus::compare(
             &actual,
             &format!("http://{address}"),
             &mut actual_session,

@@ -70,6 +70,7 @@ pub(super) fn action(parameters: &BTreeMap<String, String>) -> Result<Action, Co
             "slin32" => rusterisk_api::MediaFormat::Pcm32,
             "slin44" => rusterisk_api::MediaFormat::Pcm44,
             "slin48" => rusterisk_api::MediaFormat::Pcm48,
+            "opus" => rusterisk_api::MediaFormat::Opus,
             _ => return Err(ControlError::Unsupported),
         };
         let mut control_format = None;
