@@ -62,6 +62,7 @@ impl Runner {
             | Signal::PlaybackStarted { .. }
             | Signal::PlaybackFinished { .. }
             | Signal::DtmfReady { .. }
+            | Signal::PeerDirection { .. }
             | Signal::DtmfFinished { .. }
             | Signal::DtmfReceived { .. }
             | Signal::Milestone { .. }
@@ -318,6 +319,7 @@ mod tests {
                     | Effect::Playback { .. }
                     | Effect::Dtmf { .. }
                     | Effect::Gate { .. }
+                    | Effect::PeerDirection { .. }
                     | Effect::Answer { .. }
                     | Effect::Start { .. }
                     | Effect::ReleaseBridge { .. }

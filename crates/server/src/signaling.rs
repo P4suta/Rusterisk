@@ -533,6 +533,21 @@ impl Signaling {
                 };
                 self.media.gate(key, gate).map_err(failure)?;
             }
+            Effect::PeerDirection {
+                key,
+                direction,
+                gate,
+            } => {
+                let gate = match gate {
+                    AudioGate::Open => Gate::Open,
+                    AudioGate::IncomingMuted => Gate::IncomingMuted,
+                    AudioGate::OutgoingMuted => Gate::OutgoingMuted,
+                    AudioGate::Closed => Gate::Closed,
+                };
+                self.media
+                    .peer_direction(key, direction, gate)
+                    .map_err(failure)?;
+            }
             Effect::Answer { key } => {
                 if let Err(error) = self.answer(&key, now).await {
                     tracing::warn!(channel = %key.id, generation = key.generation, %error, "incoming answer failed");

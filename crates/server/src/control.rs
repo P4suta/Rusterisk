@@ -6,7 +6,8 @@ use rusterisk_api::{
 use rusterisk_core::{
     AudioGate, Call, CallEvent, CallState, DtmfCommand, DtmfDigit, DtmfError, DtmfOutbox,
     DtmfTiming, DtmfToken, MediaConnection, MediaState, MediaTaskError, MediaTaskToken, MediaTasks,
-    MuteDirection, RecordingControl, StasisApplication, StasisMembership, Transition,
+    MuteDirection, PeerMediaDirection, RecordingControl, StasisApplication, StasisMembership,
+    Transition,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -347,6 +348,11 @@ pub enum Effect {
         key: CallKey,
         gate: AudioGate,
     },
+    PeerDirection {
+        key: CallKey,
+        direction: PeerMediaDirection,
+        gate: AudioGate,
+    },
     Answer {
         key: CallKey,
     },
@@ -387,6 +393,10 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
+    PeerDirection {
+        key: CallKey,
+        direction: PeerMediaDirection,
+    },
     RecordingAdmitted {
         owner: MediaOwner,
         token: MediaTaskToken,
@@ -1546,6 +1556,25 @@ impl Control {
         now: u64,
     ) -> Result<Outcome, ControlError> {
         match signal {
+            Signal::PeerDirection { key, direction } => {
+                let mut outcome = Outcome::empty();
+                if let Some(entry) = self.channels.get_mut(&key.id).filter(|entry| {
+                    entry.call.generation() == key.generation
+                        && entry.call.state() != CallState::Ended
+                }) {
+                    if entry.call.peer_direction() != direction {
+                        entry.call = entry.call.with_peer_direction(direction)?;
+                        if entry.call.state() == CallState::Up {
+                            outcome.effects.push(Effect::PeerDirection {
+                                key,
+                                direction,
+                                gate: entry.call.audio_gate(),
+                            });
+                        }
+                    }
+                }
+                Ok(outcome)
+            }
             Signal::RecordingAdmitted {
                 owner,
                 token,

@@ -102,6 +102,7 @@ enum Command {
     PeerDirection {
         key: CallKey,
         direction: PeerMediaDirection,
+        gate: Gate,
     },
 }
 
@@ -362,9 +363,14 @@ impl MediaPort {
         &self,
         key: CallKey,
         direction: PeerMediaDirection,
+        gate: Gate,
     ) -> Result<(), MediaError> {
         self.commands
-            .try_send(Command::PeerDirection { key, direction })
+            .try_send(Command::PeerDirection {
+                key,
+                direction,
+                gate,
+            })
             .map_err(|_| MediaError::Capacity)
     }
 }
@@ -651,8 +657,13 @@ impl MediaHub {
                     self.mixer.gate(&key, gate)?;
                 }
             }
-            Command::PeerDirection { key, direction } => {
+            Command::PeerDirection {
+                key,
+                direction,
+                gate,
+            } => {
                 if let Some(port) = self.ports.get(&key) {
+                    self.mixer.gate(&key, gate)?;
                     port.direction.send_replace(direction);
                 }
             }

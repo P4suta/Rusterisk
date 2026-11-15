@@ -506,6 +506,7 @@ impl Runner {
                             | Effect::Playback { .. }
                             | Effect::Dtmf { .. }
                             | Effect::Gate { .. }
+                            | Effect::PeerDirection { .. }
                             | Effect::Answer { .. }
                             | Effect::Ring { .. }
                             | Effect::Start { .. }
