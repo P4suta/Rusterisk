@@ -17,6 +17,9 @@ use recording::Recordings;
 pub use recording::{RecordingEnd, RecordingPrompt, RecordingTarget};
 
 pub enum MediaNotice {
+    Answer {
+        key: CallKey,
+    },
     DtmfFinished {
         key: CallKey,
         token: DtmfToken,
@@ -119,6 +122,7 @@ enum Command {
 #[derive(Clone)]
 pub struct MediaPort {
     commands: mpsc::Sender<Command>,
+    websocket: mpsc::Sender<streams::WebSocketAttachment>,
 }
 
 impl MediaPort {
@@ -420,9 +424,10 @@ enum Connection {
 enum DigitSupport {
     Unsupported,
     Rfc4733(TelephoneFormat),
-    AudioSocket,
+    Stream,
 }
 struct Port {
+    answers: Option<mpsc::Receiver<()>>,
     incoming: mpsc::Receiver<Frame>,
     digits: mpsc::Receiver<DtmfTone>,
     outgoing: mpsc::Sender<Frame>,
@@ -437,6 +442,7 @@ struct Port {
 pub struct MediaHub {
     capacity: usize,
     commands: mpsc::Receiver<Command>,
+    websocket: mpsc::Receiver<streams::WebSocketAttachment>,
     notices: mpsc::Sender<MediaNotice>,
     mixer: Mixer<CallKey>,
     ports: BTreeMap<CallKey, Port>,
@@ -449,12 +455,17 @@ pub struct MediaHub {
 impl MediaHub {
     pub fn new(capacity: usize) -> (MediaPort, Self, mpsc::Receiver<MediaNotice>) {
         let (commands, receiver) = mpsc::channel(128);
+        let (websocket, websocket_receiver) = mpsc::channel(8);
         let (notices, events) = mpsc::channel(128);
         (
-            MediaPort { commands },
+            MediaPort {
+                commands,
+                websocket,
+            },
             Self {
                 capacity: capacity.min(64),
                 commands: receiver,
+                websocket: websocket_receiver,
                 notices,
                 mixer: Mixer::new(capacity),
                 ports: BTreeMap::new(),
@@ -614,7 +625,7 @@ impl MediaHub {
                             let events = match port.digit_support {
                                 DigitSupport::Unsupported => return Err(MediaError::Unsupported),
                                 DigitSupport::Rfc4733(format) => format.events(),
-                                DigitSupport::AudioSocket => u16::MAX,
+                                DigitSupport::Stream => u16::MAX,
                             };
                             let supported = match &command {
                                 RtpDigitCommand::Tone(tone) => {
@@ -714,6 +725,20 @@ impl MediaHub {
 
     fn tick(&mut self) -> Result<(), MediaError> {
         for (key, port) in &mut self.ports {
+            if let Some(answers) = &mut port.answers {
+                for _ in 0..8 {
+                    match answers.try_recv() {
+                        Ok(()) => self
+                            .notices
+                            .try_send(MediaNotice::Answer { key: key.clone() })
+                            .map_err(|_| MediaError::Capacity)?,
+                        Err(
+                            mpsc::error::TryRecvError::Empty
+                            | mpsc::error::TryRecvError::Disconnected,
+                        ) => break,
+                    }
+                }
+            }
             for _ in 0..8 {
                 match port.completed.try_recv() {
                     Ok(token) => self
@@ -797,6 +822,10 @@ impl MediaHub {
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { break; },
                 command = self.commands.recv() => match command {
                     Some(command) => self.command(command)?,
+                    None => break,
+                },
+                attachment = self.websocket.recv() => match attachment {
+                    Some(attachment) => self.websocket_attachment(attachment)?,
                     None => break,
                 },
                 result = self.workers.join_next(), if !self.workers.is_empty() => {

@@ -991,6 +991,7 @@ impl Signaling {
                     }
                 }
                 notice = self.notices.recv() => match notice {
+                    Some(MediaNotice::Answer { key }) => self.notify(Signal::Milestone { key, milestone: Milestone::Answered }).await?,
                     Some(MediaNotice::DtmfFinished { key, token }) => self.notify(Signal::DtmfFinished { key, token }).await?,
                     Some(MediaNotice::Dtmf { key, tone }) => self.notify(Signal::DtmfReceived { key, digit: tone.digit, duration_ms: tone.duration_ms }).await?,
                     Some(MediaNotice::Connected { key }) => {

@@ -2,8 +2,16 @@ use super::{
     AudioSocketLink, Connection, DigitSupport, Gate, MediaError, MediaHub, PeerMediaDirection,
     Port, RtpChannels,
 };
+use crate::media_websocket::{MediaLinkOptions, WebSocketMediaLink};
 use crate::CallKey;
 use tokio::sync::{mpsc, watch};
+
+pub(super) struct WebSocketAttachment {
+    key: CallKey,
+    socket: axum::extract::ws::WebSocket,
+    options: MediaLinkOptions,
+    reply: tokio::sync::oneshot::Sender<Result<(), MediaError>>,
+}
 
 impl Port {
     pub(super) fn new(
@@ -19,6 +27,7 @@ impl Port {
         let (direction, directed) = watch::channel(initial_direction);
         (
             Self {
+                answers: None,
                 incoming: input,
                 digits: digit_input,
                 outgoing,
@@ -43,6 +52,26 @@ impl Port {
 }
 
 impl MediaHub {
+    pub(super) fn websocket_attachment(
+        &mut self,
+        attachment: WebSocketAttachment,
+    ) -> Result<(), MediaError> {
+        let WebSocketAttachment {
+            key,
+            socket,
+            options,
+            reply,
+        } = attachment;
+        if !reply.is_closed() {
+            let result = self.attach_websocket(key.clone(), socket, options);
+            let admitted = result.is_ok();
+            if reply.send(result).is_err() && admitted {
+                self.remove(&key)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn check_link(&self, key: &CallKey) -> Result<(), MediaError> {
         if self.ports.len() >= self.capacity || self.workers.len() >= self.capacity {
             return Err(MediaError::Capacity);
@@ -80,11 +109,52 @@ impl MediaHub {
         rate: u32,
     ) -> Result<(), MediaError> {
         self.check_link(&key)?;
-        let (port, channels) =
-            Port::new(PeerMediaDirection::SendReceive, DigitSupport::AudioSocket);
+        let (port, channels) = Port::new(PeerMediaDirection::SendReceive, DigitSupport::Stream);
         let link = AudioSocketLink::new(socket, channels, rate)?;
         self.install_link(key.clone(), port, PeerMediaDirection::SendReceive)?;
         self.workers.spawn(async move { (key, link.run().await) });
         Ok(())
+    }
+
+    pub(super) fn attach_websocket(
+        &mut self,
+        key: CallKey,
+        socket: axum::extract::ws::WebSocket,
+        options: MediaLinkOptions,
+    ) -> Result<(), MediaError> {
+        self.check_link(&key)?;
+        if options.channel_id != key.id {
+            return Err(MediaError::InvalidRoute);
+        }
+        let (mut port, channels) = Port::new(PeerMediaDirection::SendReceive, DigitSupport::Stream);
+        let (answer, answers) = mpsc::channel(8);
+        port.answers = Some(answers);
+        let link = WebSocketMediaLink::new(socket, channels, options, answer)?;
+        self.install_link(key.clone(), port, PeerMediaDirection::SendReceive)?;
+        self.workers.spawn(async move { (key, link.run().await) });
+        Ok(())
+    }
+}
+
+impl super::MediaPort {
+    pub async fn attach_websocket(
+        &self,
+        key: CallKey,
+        socket: axum::extract::ws::WebSocket,
+        options: MediaLinkOptions,
+    ) -> Result<(), MediaError> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.websocket
+            .try_send(WebSocketAttachment {
+                key,
+                socket,
+                options,
+                reply,
+            })
+            .map_err(|_| MediaError::Capacity)?;
+        tokio::time::timeout(std::time::Duration::from_secs(5), response)
+            .await
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+            .map_err(|error| MediaError::Transport(error.to_string()))?
     }
 }
