@@ -104,6 +104,28 @@ fn outgoing_browser_calls_send_the_owned_offer_and_refuse_profile_downgrades(
 }
 
 #[test]
+fn resolved_origination_keeps_the_configured_uri_and_uses_the_physical_peer() -> Result<(), SipError>
+{
+    let mut config = config(false)?;
+    config.aors[0].contact = Some("sip:phone@peer.invalid:5070;transport=udp".into());
+    let mut engine = Engine::new(config, [9; 32]);
+    let peer = "127.0.0.2:40999".parse()?;
+    let output = engine.originate_to(outbound()?, peer, 0)?;
+    let packet = output.datagrams.first().ok_or(SipError::InvalidPacket)?;
+    assert_eq!(packet.peer, peer);
+    let SipMessage::Request(request) = SipMessage::try_from(std::str::from_utf8(&packet.bytes)?)?
+    else {
+        return Err(SipError::InvalidPacket);
+    };
+    assert_eq!(
+        request.uri,
+        Uri::try_from("sip:phone@peer.invalid:5070;transport=udp")?
+    );
+    assert!(std::str::from_utf8(&request.body)?.contains("RTP/AVP"));
+    Ok(())
+}
+
+#[test]
 fn incoming_browser_answers_keep_the_checked_ice_and_dtls_description() -> Result<(), SipError> {
     let mut engine = Engine::new(config(true)?, [7; 32]);
     let incoming = authenticated(&mut engine, &descriptions::offer())?;

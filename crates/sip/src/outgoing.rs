@@ -392,6 +392,15 @@ impl Engine {
         self.originate_inner(outbound, None, None, now)
     }
 
+    pub fn originate_to(
+        &mut self,
+        outbound: Outbound,
+        peer: SocketAddr,
+        now: u64,
+    ) -> Result<Output, SipError> {
+        self.originate_inner(outbound, Some(peer), None, now)
+    }
+
     pub fn originate_with_sdp(
         &mut self,
         outbound: Outbound,
