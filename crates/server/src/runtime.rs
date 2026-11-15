@@ -60,12 +60,14 @@ impl Server {
                 config.clone(),
                 controller.clone(),
                 effects,
-                media_port,
+                media_port.clone(),
                 notices,
             )
             .await?
             .with_storage(storage_port);
-            let http = HttpServer::bind(&config.http, controller.clone()).await?;
+            let http = HttpServer::bind(&config.http, controller.clone())
+                .await?
+                .with_media(media_port);
             Ok((control, signaling, http))
         }
         .await;

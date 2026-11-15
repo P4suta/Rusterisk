@@ -56,14 +56,33 @@ async fn server_shutdown_waits_for_event_sockets_and_releases_every_listener(
         let (mut socket, _) = tokio_tungstenite::connect_async(request)
             .await
             .map_err(failure)?;
+        let channel: rusterisk_api::Channel = reqwest::Client::new()
+            .post(format!("http://{address}/ari/channels/externalMedia?app=app&transport=websocket&encapsulation=none&connection_type=server&format=ulaw&channelId=external"))
+            .basic_auth("app", Some("test-password"))
+            .send().await.map_err(failure)?.error_for_status().map_err(failure)?.json().await.map_err(failure)?;
+        let connection = channel.channelvars.ok_or(ControlError::Capacity)?.remove("MEDIA_WEBSOCKET_CONNECTION_ID").ok_or(ControlError::Capacity)?;
+        let mut request = format!("ws://{address}/media/{connection}").into_client_request().map_err(failure)?;
+        request.headers_mut().insert("Sec-WebSocket-Protocol", "media".parse().map_err(failure)?);
+        let (mut media, _) = tokio_tungstenite::connect_async(request).await.map_err(failure)?;
+        assert!(matches!(media.next().await, Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_)))));
         controller.shutdown();
-        let message = tokio::time::timeout(Duration::from_secs(3), socket.next())
-            .await
-            .map_err(failure)?;
-        assert!(matches!(
-            message,
-            None | Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))
-        ));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match socket.next().await {
+                    None | Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => break,
+                    Some(Ok(_)) => {},
+                    Some(Err(error)) => return Err(failure(error)),
+                }
+            }
+            loop {
+                match media.next().await {
+                    None | Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => break,
+                    Some(Ok(_)) => {},
+                    Some(Err(error)) => return Err(failure(error)),
+                }
+            }
+            Ok::<(), ControlError>(())
+        }).await.map_err(failure)??;
         Ok(())
     }
     .await;

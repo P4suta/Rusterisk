@@ -121,6 +121,21 @@ impl HttpServer {
         self.listener.local_addr().map_err(failure)
     }
 
+    pub fn with_media(mut self, media: crate::media::MediaPort) -> Self {
+        let scheme = match &self.encryption {
+            Some(_) => http::HttpScheme::Https,
+            None => http::HttpScheme::Http,
+        };
+        self.application =
+            http::router_with_media_for_scheme(self.controller.clone(), media, scheme).layer(
+                TimeoutLayer::with_status_code(
+                    StatusCode::REQUEST_TIMEOUT,
+                    Duration::from_secs(10),
+                ),
+            );
+        self
+    }
+
     pub async fn run(self) -> Result<(), ControlError> {
         let mut stopped = self.controller.shutdown_signal();
         let mut connections = JoinSet::new();
