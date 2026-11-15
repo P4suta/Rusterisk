@@ -95,7 +95,17 @@ impl Signaling {
             let admission = async {
                 let sink = storage.record_with_policy(name, 8000, options.if_exists).await.map_err(storage_error)?;
                 let source = if options.beep {
-                    Some(storage.play(PlaybackMedia::Sound(ChannelId::try_from("beep".to_owned())?)).await.map_err(storage_error)?)
+                    match storage.play(PlaybackMedia::Sound(ChannelId::try_from("beep".to_owned())?)).await {
+                        Ok(source) => Some(source),
+                        Err(error) => {
+                            tracing::warn!(?owner, ?token, %error, "recording prompt unavailable");
+                            drop(prompt);
+                            sink.cancel().await.map_err(storage_error)?;
+                            media.stop_recording(token, RecordingEnd::Cancel).map_err(failure)?;
+                            if !controller.is_stopping() { controller.signal(Signal::RecordingAdmitted { owner: owner.clone(), token, result: Ok(()) }).await?; }
+                            return Ok(());
+                        }
+                    }
                 } else { None };
                 media.attach_recording_with_options(token, sink, options, prompt).await.map_err(failure)?;
                 if let Some(source) = source { media.attach_playback(token, source).await.map_err(failure)?; }

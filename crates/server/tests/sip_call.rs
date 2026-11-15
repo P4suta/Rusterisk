@@ -957,6 +957,9 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
         let mut longest = 0;
         let mut silent_tail = 0;
         while let Some(frame) = saved.read_frame().map_err(failure)? {
+            if mode == StopRecordingWith::Control {
+                assert!(frame.samples().iter().all(|sample| (i32::from(*sample) - 1234).abs() < 300));
+            }
             consecutive = if frame.samples().iter().all(|sample| (i32::from(*sample) - 1234).abs() < 300) { consecutive + 1 } else { 0 };
             longest = longest.max(consecutive);
             silent_tail = if frame.samples().iter().all(|sample| sample.unsigned_abs() < 128) { silent_tail + 1 } else { 0 };
@@ -964,6 +967,15 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
         assert!(longest >= 6);
         if mode == StopRecordingWith::Silence { assert_eq!(silent_tail, 10); }
         }
+        std::fs::remove_file(directory.path().join("sounds/beep.wav")).map_err(failure)?;
+        let request = Request::builder().method("POST").uri(format!("/ari/channels/{channel}/record?name=missing-prompt&format=wav&beep=true"))
+            .header("Authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("app:test-password"))).body(Body::empty()).map_err(failure)?;
+        assert_eq!(app.clone().oneshot(request).await.map_err(failure)?.status(), StatusCode::CREATED);
+        matching_event(&mut subscription.events, |kind| matches!(kind, EventKind::RecordingStarted { recording } if recording.name == "missing-prompt")).await?;
+        let finished = matching_event(&mut subscription.events, |kind| matches!(kind, EventKind::RecordingFinished { recording } if recording.name == "missing-prompt")).await?;
+        assert!(matches!(finished, EventKind::RecordingFinished { recording } if recording.state == rusterisk_api::RecordingState::Done));
+        assert!(!directory.path().join("recordings/missing-prompt.wav").exists());
+        assert!(!directory.path().join("recordings/missing-prompt.partial").exists());
         controller.execute(credentials()?, None, Action::CreateBridge { id: id("playback-mix")?, name: String::new() }).await?;
         controller.execute(credentials()?, None, Action::AddChannels { bridge: id("playback-mix")?, channels: [channel.clone()].into_iter().collect() }).await?;
         matching_event(&mut subscription.events, |kind| matches!(kind, EventKind::ChannelEnteredBridge { bridge, .. } if bridge.id.as_str() == "playback-mix")).await?;
