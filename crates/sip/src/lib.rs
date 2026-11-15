@@ -1,12 +1,12 @@
 use hmac::{Hmac, KeyInit, Mac};
 use rsipstack::sip::{
-    HeadersExt, Method, Request, SipMessage,
     headers::{
         auth::{Algorithm, AuthQop},
         typed::Authorization,
         untyped::ToTypedHeader,
     },
     services::DigestGenerator,
+    HeadersExt, Method, Request, SipMessage,
 };
 use rusterisk_config::{Codec, Config, Protocol};
 use rusterisk_core::ContactPresence;
@@ -23,11 +23,13 @@ mod stream_framing;
 mod telephone;
 mod transactions;
 mod transport;
+mod websocket_framing;
 pub use incoming::RejectReason;
 pub use outgoing::Outbound;
 use request_identity::RequestIdentity;
 pub use stream_framing::{SipStreamDecoder, StreamFramingError, StreamItem};
 pub use telephone::DtmfFormat;
+pub use websocket_framing::validate_websocket_message;
 
 pub const MAX_MESSAGE: usize = 16384;
 

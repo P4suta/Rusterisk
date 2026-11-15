@@ -184,7 +184,7 @@ enum HeaderKind {
     Other,
 }
 
-fn body_length(headers: &[u8]) -> Result<usize, StreamFramingError> {
+pub(super) fn body_length(headers: &[u8]) -> Result<usize, StreamFramingError> {
     let mut lines = headers.split(|byte| *byte == b'\n');
     let start = lines.next().ok_or(StreamFramingError::InvalidLine)?;
     if start.is_empty() || start.starts_with(b" ") || start.starts_with(b"\t") {
