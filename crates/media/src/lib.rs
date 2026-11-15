@@ -1,6 +1,8 @@
 use bytes::Bytes;
 use webrtc_util::marshal::{Marshal, Unmarshal};
+mod audiosocket_stream;
 mod mixing;
+pub use audiosocket_stream::AudioSocketDecoder;
 mod rtcp;
 mod streams;
 mod telephone_events;
