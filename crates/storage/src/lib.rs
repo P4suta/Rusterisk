@@ -6,6 +6,7 @@ mod history;
 pub use history::{CallHistoryChange, CallRecord};
 
 const MAX_RECORDING: u64 = 1024 * 1024 * 1024;
+const MAX_DIRECTORY_ENTRIES: usize = 4096;
 
 #[derive(Debug)]
 pub enum StorageError {
@@ -131,7 +132,7 @@ impl Store {
         for entry in std::fs::read_dir(&recordings)? {
             let entry = entry?;
             count += 1;
-            if count > 4096 {
+            if count > MAX_DIRECTORY_ENTRIES {
                 return Err(StorageError::Capacity);
             }
             if entry.file_type()?.is_symlink() {
@@ -206,9 +207,9 @@ impl Store {
 
     pub fn recordings(&self) -> Result<Vec<rusterisk_api::StoredRecording>, StorageError> {
         let mut output = Vec::new();
-        for entry in std::fs::read_dir(&self.recordings)? {
+        for (index, entry) in std::fs::read_dir(&self.recordings)?.enumerate() {
             let entry = entry?;
-            if output.len() >= 4096 {
+            if index >= MAX_DIRECTORY_ENTRIES {
                 return Err(StorageError::Capacity);
             }
             if entry.file_type()?.is_file()
@@ -234,6 +235,18 @@ impl Store {
 
 fn validate_name(name: &str) -> Result<(), StorageError> {
     rusterisk_api::ChannelId::try_from(name.to_owned()).map_err(|_| StorageError::InvalidName)?;
+    Ok(())
+}
+
+fn reserve_directory_entries(directory: &Path, additional: usize) -> Result<(), StorageError> {
+    let mut count = additional;
+    for entry in std::fs::read_dir(directory)? {
+        entry?;
+        count = count.checked_add(1).ok_or(StorageError::Capacity)?;
+        if count > MAX_DIRECTORY_ENTRIES {
+            return Err(StorageError::Capacity);
+        }
+    }
     Ok(())
 }
 
@@ -293,6 +306,7 @@ impl Recorder {
         if directory.join(format!("{name}.wav")).exists() {
             return Err(StorageError::Exists);
         }
+        reserve_directory_entries(&directory, 2)?;
         let path = directory.join(format!("{name}.partial"));
         let mut file = OpenOptions::new()
             .create_new(true)
