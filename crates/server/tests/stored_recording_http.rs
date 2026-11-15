@@ -49,9 +49,12 @@ async fn stored_recording_routes_require_authentication_and_protect_writes_from_
         .record(ChannelId::try_from("saved".to_owned())?, 8000)
         .await
         .map_err(failure)?;
-    saved
-        .try_write(Frame::new(&[1234; 160], 8000).map_err(failure)?)
-        .map_err(failure)?;
+    for _ in 0..100 {
+        saved
+            .try_write(Frame::new(&[1234; 160], 8000).map_err(failure)?)
+            .map_err(failure)?;
+        storage.recordings().await.map_err(failure)?;
+    }
     saved.finish().await.map_err(failure)?;
     let pending = storage
         .record(ChannelId::try_from("pending".to_owned())?, 8000)
@@ -115,6 +118,45 @@ async fn stored_recording_routes_require_authentication_and_protect_writes_from_
             .map_err(failure)?
             .to_bytes();
         assert_eq!(bytes.as_ref(), expected);
+        let mut held = Vec::new();
+        for _ in 0..16 {
+            let response = app
+                .clone()
+                .oneshot(request(
+                    "GET",
+                    "/ari/recordings/stored/saved/file",
+                    "reader",
+                )?)
+                .await
+                .map_err(failure)?;
+            assert_eq!(response.status(), StatusCode::OK);
+            held.push(response);
+        }
+        assert_eq!(
+            app.clone()
+                .oneshot(request(
+                    "GET",
+                    "/ari/recordings/stored/saved/file",
+                    "reader"
+                )?)
+                .await
+                .map_err(failure)?
+                .status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        drop(held.pop());
+        let replacement = app
+            .clone()
+            .oneshot(request(
+                "GET",
+                "/ari/recordings/stored/saved/file",
+                "reader",
+            )?)
+            .await
+            .map_err(failure)?;
+        assert_eq!(replacement.status(), StatusCode::OK);
+        drop(replacement);
+        drop(held);
         for name in ["missing", "pending"] {
             assert_eq!(
                 app.clone()

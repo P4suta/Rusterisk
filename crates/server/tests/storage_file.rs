@@ -56,3 +56,44 @@ async fn stored_file_readers_preserve_exact_bytes_after_deletion_and_release_bou
     worker.close().await?;
     result
 }
+
+#[tokio::test]
+async fn stored_file_readers_report_truncated_files_and_worker_shutdown_instead_of_completion(
+) -> Result<(), WorkerError> {
+    let directory = tempfile::tempdir()?;
+    let (storage, worker) = StorageWorker::start(directory.path().to_owned()).await?;
+    save(&storage).await?;
+    let mut truncated = storage.recording_file(id()?).await?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(directory.path().join("recordings/saved.wav"))?
+        .set_len(0)?;
+    loop {
+        match truncated.read().await {
+            Ok(Some(_)) => {}
+            Err(WorkerError::Storage(StorageError::Io(error))) => {
+                assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+                break;
+            }
+            Ok(None) => return Err(WorkerError::Invalid),
+            Err(error) => return Err(error),
+        }
+    }
+    assert!(matches!(truncated.read().await, Err(WorkerError::Closed)));
+    storage.delete_recording(id()?).await?;
+    save(&storage).await?;
+    let mut interrupted = storage.recording_file(id()?).await?;
+    worker.close().await?;
+    loop {
+        match interrupted.read().await {
+            Ok(Some(_)) => {}
+            Err(WorkerError::Closed) => break,
+            Ok(None) => return Err(WorkerError::Invalid),
+            Err(error) => return Err(error),
+        }
+    }
+    assert!(matches!(interrupted.read().await, Err(WorkerError::Closed)));
+    let reopened = rusterisk_storage::Store::open(directory.path())?;
+    assert_eq!(reopened.recordings()?.len(), 1);
+    Ok(())
+}
