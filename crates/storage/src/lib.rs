@@ -15,6 +15,7 @@ pub enum StorageError {
     InvalidState,
     Capacity,
     UnknownSchema,
+    InUse,
 }
 
 impl std::fmt::Display for StorageError {
@@ -28,6 +29,7 @@ impl std::fmt::Display for StorageError {
             Self::InvalidState => f.write_str("invalid storage transition"),
             Self::Capacity => f.write_str("recording capacity exceeded"),
             Self::UnknownSchema => f.write_str("unsupported database schema"),
+            Self::InUse => f.write_str("storage directory is already in use"),
         }
     }
 }
@@ -77,11 +79,22 @@ impl CallOutcome {
 pub struct Store {
     connection: rusqlite::Connection,
     recordings: PathBuf,
+    _lock: File,
 }
 
 impl Store {
     pub fn open(root: &Path) -> Result<Self, StorageError> {
         std::fs::create_dir_all(root)?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.join(".rusterisk.lock"))?;
+        lock.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => StorageError::InUse,
+            std::fs::TryLockError::Error(error) => StorageError::Io(error),
+        })?;
         let recordings = root.join("recordings");
         std::fs::create_dir_all(&recordings)?;
         if std::fs::symlink_metadata(&recordings)?
@@ -132,6 +145,7 @@ impl Store {
         Ok(Self {
             connection,
             recordings,
+            _lock: lock,
         })
     }
 

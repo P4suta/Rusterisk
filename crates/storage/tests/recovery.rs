@@ -2,6 +2,23 @@ use rusterisk_media::Frame;
 use rusterisk_storage::{CallOutcome, Recorder, Store};
 
 #[test]
+fn another_store_cannot_reclassify_calls_while_the_first_store_is_running(
+) -> Result<(), rusterisk_storage::StorageError> {
+    let directory = tempfile::tempdir()?;
+    let mut first = Store::open(directory.path())?;
+    first.start_call("running", "start")?;
+    assert!(matches!(
+        Store::open(directory.path()),
+        Err(rusterisk_storage::StorageError::InUse)
+    ));
+    assert_eq!(first.call_outcome("running")?, CallOutcome::Active);
+    drop(first);
+    let restarted = Store::open(directory.path())?;
+    assert_eq!(restarted.call_outcome("running")?, CallOutcome::Interrupted);
+    Ok(())
+}
+
+#[test]
 fn restart_interrupts_active_calls_and_repairs_recording_headers(
 ) -> Result<(), rusterisk_storage::StorageError> {
     let directory = tempfile::tempdir()?;
