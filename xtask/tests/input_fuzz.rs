@@ -131,6 +131,36 @@ fn fuzz_manifest_binds_each_harness_to_the_actual_workspace_dependencies() -> Re
 }
 
 #[test]
+fn fuzz_vendor_patch_is_rebased_only_from_the_owned_project_relative_path() -> Result<(), FuzzError>
+{
+    let mut source: toml::Value =
+        toml::from_str(include_str!("../fuzz/Cargo.toml")).map_err(FuzzError::Toml)?;
+    source
+        .as_table_mut()
+        .ok_or(FuzzError::Manifest)?
+        .remove("patch");
+    let source = toml::to_string(&source).map_err(|_| FuzzError::Manifest)?;
+    let patched = format!("{source}\n[patch.crates-io]\nstr0m={{path='../../vendor/str0m'}}\n");
+    let normalized: toml::Value =
+        toml::from_str(&normalize_manifest(&patched)?).map_err(FuzzError::Toml)?;
+    assert_eq!(
+        normalized["patch"]["crates-io"]["str0m"]["path"].as_str(),
+        Some("/project/vendor/str0m")
+    );
+    for patch in [
+        "str0m={path='../vendor/str0m'}",
+        "str0m={path='../../vendor/other'}",
+        "str0m={path='/project/vendor/str0m'}",
+        "str0m={path=42}",
+        "str0m={git='https://example.invalid/str0m'}",
+        "other={path='../../vendor/str0m'}",
+    ] {
+        assert!(normalize_manifest(&format!("{source}\n[patch.crates-io]\n{patch}\n")).is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn native_fuzz_discovery_and_completion_refuse_empty_or_incomplete_runs() -> Result<(), FuzzError> {
     validate_inventory(b"media_controls\nmedia_packets\nsettings\nsip\n")?;
     for invalid in [

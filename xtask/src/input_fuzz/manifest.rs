@@ -90,6 +90,32 @@ pub fn normalize_manifest(source: &str) -> Result<String, FuzzError> {
             toml::Value::String(format!("/project/crates/{directory}")),
         );
     }
+    if let Some(patch) = manifest.get_mut("patch") {
+        let registries = patch.as_table_mut().ok_or(FuzzError::Manifest)?;
+        if registries.len() != 1 {
+            return Err(FuzzError::Manifest);
+        }
+        let dependencies = registries
+            .get_mut("crates-io")
+            .and_then(toml::Value::as_table_mut)
+            .ok_or(FuzzError::Manifest)?;
+        if dependencies.len() != 1 {
+            return Err(FuzzError::Manifest);
+        }
+        let dependency = dependencies
+            .get_mut("str0m")
+            .and_then(toml::Value::as_table_mut)
+            .ok_or(FuzzError::Manifest)?;
+        if dependency.len() != 1
+            || dependency.get("path").and_then(toml::Value::as_str) != Some("../../vendor/str0m")
+        {
+            return Err(FuzzError::Manifest);
+        }
+        dependency.insert(
+            "path".into(),
+            toml::Value::String("/project/vendor/str0m".into()),
+        );
+    }
     toml::to_string(&manifest).map_err(|_| FuzzError::Manifest)
 }
 
