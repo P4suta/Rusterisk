@@ -140,9 +140,9 @@ impl OwnedCall {
                             Some(failure) => Error::CallFailed(failure),
                             None => Error::CallEnded(completion),
                         },
-                        CallCompletion::Cancelled | CallCompletion::Ended => {
-                            Error::CallEnded(completion)
-                        }
+                        CallCompletion::Cancelled
+                        | CallCompletion::Ended
+                        | CallCompletion::StasisExited => Error::CallEnded(completion),
                     });
                 }
                 if snapshot.progress.has_reached(milestone) {

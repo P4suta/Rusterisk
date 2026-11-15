@@ -21,6 +21,7 @@ impl CallMilestone {
 pub enum CallCompletion {
     Cancelled,
     Ended,
+    StasisExited,
     Failed,
 }
 
@@ -49,9 +50,12 @@ impl OwnedCallProgress {
                 reached: self.reached | milestone.bit(),
                 completion: None,
             },
-            Some(CallCompletion::Cancelled | CallCompletion::Ended | CallCompletion::Failed) => {
-                self
-            }
+            Some(
+                CallCompletion::Cancelled
+                | CallCompletion::Ended
+                | CallCompletion::StasisExited
+                | CallCompletion::Failed,
+            ) => self,
         }
     }
     pub const fn finish(self, completion: CallCompletion) -> Self {
@@ -60,9 +64,12 @@ impl OwnedCallProgress {
                 reached: self.reached,
                 completion: Some(completion),
             },
-            Some(CallCompletion::Cancelled | CallCompletion::Ended | CallCompletion::Failed) => {
-                self
-            }
+            Some(
+                CallCompletion::Cancelled
+                | CallCompletion::Ended
+                | CallCompletion::StasisExited
+                | CallCompletion::Failed,
+            ) => self,
         }
     }
 }

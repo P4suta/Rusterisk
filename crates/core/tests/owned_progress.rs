@@ -34,6 +34,7 @@ fn every_terminal_result_absorbs_late_observations_and_other_results() {
         for completion in [
             CallCompletion::Cancelled,
             CallCompletion::Ended,
+            CallCompletion::StasisExited,
             CallCompletion::Failed,
         ] {
             let terminal = progress.finish(completion);
@@ -44,6 +45,7 @@ fn every_terminal_result_absorbs_late_observations_and_other_results() {
             for other in [
                 CallCompletion::Cancelled,
                 CallCompletion::Ended,
+                CallCompletion::StasisExited,
                 CallCompletion::Failed,
             ] {
                 assert_eq!(terminal.finish(other), terminal);
