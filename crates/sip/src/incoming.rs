@@ -78,7 +78,7 @@ impl RejectReason {
     }
 }
 
-fn tagged(request: &Request, tag: &str) -> Result<Request, SipError> {
+pub(super) fn tagged(request: &Request, tag: &str) -> Result<Request, SipError> {
     let mut request = request.clone();
     let to = request.to_header()?.typed()?.with_tag(tag.into());
     request.to_header_mut()?.replace(to.to_string());
@@ -146,7 +146,7 @@ impl Engine {
         let Some(invite) = invite else {
             return Ok(Output::response(
                 peer,
-                response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
+                self.render_response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
             ));
         };
         let id = invite.id.clone();

@@ -28,6 +28,7 @@ An unkeyed request hash makes tags predictable.
 
 Identical requests in one engine reproduce their response tags.
 Changing the private seed changes derived tags.
+The dependency includes `ctutils` and architecture-specific `cmov` arithmetic.
 Reconsider only if protocol or measured rendering costs require another construction.
 
 ## Confirmation

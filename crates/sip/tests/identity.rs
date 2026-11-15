@@ -211,6 +211,69 @@ fn tagged_invitations_never_enter_initial_call_admission() -> Result<(), SipErro
 }
 
 #[test]
+fn unmatched_requests_regenerate_stable_private_tags_without_transaction_state(
+) -> Result<(), SipError> {
+    let packet = "BYE sip:100@localhost SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-unmatched;rport\r\nFrom: <sip:phone@localhost>;tag=caller\r\nTo: <sip:100@localhost>\r\nCall-ID: unmatched\r\nCSeq: 1 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n";
+    let peer = "127.0.0.1:5061".parse()?;
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let original = engine.receive(packet.as_bytes(), peer, 0)?;
+    let original_tag =
+        response_tag(&original.datagrams[0].bytes)?.ok_or(SipError::InvalidPacket)?;
+    assert_eq!(original_tag.len(), 64);
+    let repeated = engine.receive(packet.as_bytes(), peer, 1)?;
+    assert_eq!(repeated.datagrams[0].bytes, original.datagrams[0].bytes);
+    let changed = engine.receive(
+        packet.replace("tag=caller", "tag=another").as_bytes(),
+        peer,
+        2,
+    )?;
+    assert_ne!(changed.datagrams[0].bytes, original.datagrams[0].bytes);
+    assert_ne!(
+        response_tag(&changed.datagrams[0].bytes)?,
+        Some(original_tag)
+    );
+    assert!(changed.datagrams[0].bytes.starts_with(b"SIP/2.0 481"));
+    let mut other = Engine::new(config()?, [8; 32]);
+    assert_ne!(
+        other.receive(packet.as_bytes(), peer, 0)?.datagrams[0].bytes,
+        original.datagrams[0].bytes
+    );
+    let supplied = packet.replace(
+        "To: <sip:100@localhost>",
+        "To: <sip:100@localhost>;tag=supplied",
+    );
+    let reply = engine.receive(supplied.as_bytes(), peer, 3)?;
+    let reply = match SipMessage::try_from(reply.datagrams[0].bytes.as_slice())? {
+        SipMessage::Response(reply) => reply,
+        SipMessage::Request(_) => return Err(SipError::InvalidPacket),
+    };
+    assert_eq!(
+        reply
+            .to_header()?
+            .typed()?
+            .tag()
+            .map(|tag| tag.value().to_owned()),
+        Some("supplied".to_owned())
+    );
+    let mut provisional = Engine::new(config()?, [7; 32]);
+    let (accepted, _, _) = authenticated_invite(&mut provisional)?;
+    assert_eq!(response_tag(&accepted.datagrams[0].bytes)?, None);
+    Ok(())
+}
+
+fn response_tag(packet: &[u8]) -> Result<Option<String>, SipError> {
+    let reply = match SipMessage::try_from(packet)? {
+        SipMessage::Response(reply) => reply,
+        SipMessage::Request(_) => return Err(SipError::InvalidPacket),
+    };
+    Ok(reply
+        .to_header()?
+        .typed()?
+        .tag()
+        .map(|tag| tag.value().to_owned()))
+}
+
+#[test]
 fn authenticated_identity_is_distinct_from_caller_id_and_retransmission_is_idempotent(
 ) -> Result<(), SipError> {
     let mut engine = Engine::new(config()?, [7; 32]);

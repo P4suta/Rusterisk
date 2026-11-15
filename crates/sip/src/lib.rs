@@ -1,3 +1,4 @@
+use hmac::{Hmac, KeyInit, Mac};
 use rsipstack::sip::{
     headers::{
         auth::{Algorithm, AuthQop},
@@ -28,6 +29,7 @@ pub enum SipError {
     Capacity,
     Unsupported,
     Entropy,
+    Tag,
     Config(rusterisk_config::ConfigError),
     Parse(rsipstack::sip::Error),
     Address(std::net::AddrParseError),
@@ -44,6 +46,7 @@ impl std::fmt::Display for SipError {
             Self::Capacity => f.write_str("Signaling capacity exceeded"),
             Self::Unsupported => f.write_str("Unsupported signaling or media"),
             Self::Entropy => f.write_str("Signaling entropy unavailable"),
+            Self::Tag => f.write_str("Signaling tag generation failed"),
             Self::Config(error) => write!(f, "{error}"),
             Self::Address(error) => write!(f, "{error}"),
             Self::Io(error) => write!(f, "{error}"),
@@ -402,14 +405,7 @@ impl Engine {
         let mut hash = Sha256::new();
         hash.update(self.seed);
         hash.update(self.serial.to_be_bytes());
-        let digest = hash.finalize();
-        let alphabet = b"0123456789abcdef";
-        let mut encoded = [0u8; 64];
-        for (pair, byte) in encoded.as_chunks_mut::<2>().0.iter_mut().zip(digest) {
-            pair[0] = alphabet[usize::from(byte >> 4)];
-            pair[1] = alphabet[usize::from(byte & 15)];
-        }
-        String::from_utf8(encoded.to_vec()).map_err(|_| SipError::InvalidPacket)
+        hexadecimal(hash.finalize().into())
     }
 
     fn authorize(
@@ -497,7 +493,7 @@ impl Engine {
         now: u64,
     ) -> Result<Vec<u8>, SipError> {
         if self.nonces.len() >= 128 {
-            return response(request, 503, "Service Unavailable", "", "");
+            return self.render_response(request, 503, "Service Unavailable", "", "");
         }
         let nonce = self.token()?;
         let realm = self
@@ -516,7 +512,7 @@ impl Engine {
                 count: 0,
             },
         );
-        response(request, 401, "Unauthorized", &extra, "")
+        self.render_response(request, 401, "Unauthorized", &extra, "")
     }
 
     pub fn receive(
@@ -598,17 +594,17 @@ impl Engine {
             }
             return Ok(Output::response(
                 peer,
-                response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
+                self.render_response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
             ));
         }
         if self.cache.len() >= 256 {
             return Ok(Output::response(
                 peer,
-                response(&request, 503, "Service Unavailable", "", "")?,
+                self.render_response(&request, 503, "Service Unavailable", "", "")?,
             ));
         }
         if self.merged_request(&request)? {
-            let reply = response(&request, 482, "Loop Detected", "", "")?;
+            let reply = self.render_response(&request, 482, "Loop Detected", "", "")?;
             return self.cache_reply(key, request, peer, now, reply, Vec::new());
         }
         if request.method == Method::Cancel {
@@ -633,12 +629,12 @@ impl Engine {
         if request.method == Method::Invite && request.to_header()?.typed()?.tag().is_some() {
             return Ok(Output::response(
                 peer,
-                response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
+                self.render_response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
             ));
         }
         let mut events = Vec::new();
         let reply = match request.method {
-            Method::Options => response(
+            Method::Options => self.render_response(
                 &request,
                 200,
                 "OK",
@@ -663,7 +659,7 @@ impl Engine {
                             .find(|auth| auth.name == endpoint.auth)
                             .ok_or(SipError::InvalidPacket)?;
                         if username != expected.username {
-                            response(&request, 403, "Forbidden", "", "")?
+                            self.render_response(&request, 403, "Forbidden", "", "")?
                         } else {
                             let expires = request
                                 .expires_header()
@@ -684,10 +680,10 @@ impl Engine {
                                 "Contact: {}\r\nExpires: {expires}\r\n",
                                 request.contact_header()?.value()
                             );
-                            response(&request, 200, "OK", &extra, "")?
+                            self.render_response(&request, 200, "OK", &extra, "")?
                         }
                     } else if self.pending.len() + self.incoming.len() >= 64 {
-                        response(&request, 486, "Busy Here", "", "")?
+                        self.render_response(&request, 486, "Busy Here", "", "")?
                     } else {
                         let session = match Session::parse(
                             std::str::from_utf8(&request.body)?,
@@ -697,7 +693,13 @@ impl Engine {
                             Err(SipError::Unsupported) => {
                                 return Ok(Output::response(
                                     peer,
-                                    response(&request, 488, "Not Acceptable Here", "", "")?,
+                                    self.render_response(
+                                        &request,
+                                        488,
+                                        "Not Acceptable Here",
+                                        "",
+                                        "",
+                                    )?,
                                 ))
                             }
                             Err(error) => return Err(error),
@@ -747,7 +749,7 @@ impl Engine {
                                 local,
                             },
                         );
-                        response(&request, 100, "Trying", "", "")?
+                        self.render_response(&request, 100, "Trying", "", "")?
                     }
                 } else {
                     self.challenge(&request, peer, now)?
@@ -756,7 +758,7 @@ impl Engine {
             Method::Bye | Method::Cancel | Method::Info => {
                 return Ok(Output::response(
                     peer,
-                    response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
+                    self.render_response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
                 ));
             }
             Method::Ack
@@ -767,9 +769,29 @@ impl Engine {
             | Method::Refer
             | Method::Subscribe
             | Method::Update
-            | Method::Other(_) => response(&request, 501, "Not Implemented", "", "")?,
+            | Method::Other(_) => self.render_response(&request, 501, "Not Implemented", "", "")?,
         };
         self.cache_reply(key, request, peer, now, reply, events)
+    }
+
+    fn render_response(
+        &self,
+        request: &Request,
+        code: u16,
+        phrase: &str,
+        extra: &str,
+        body: &str,
+    ) -> Result<Vec<u8>, SipError> {
+        if code == 100 || request.to_header()?.typed()?.tag().is_some() {
+            return response(request, code, phrase, extra, body);
+        }
+        let mut mac =
+            <Hmac<Sha256> as KeyInit>::new_from_slice(&self.seed).map_err(|_| SipError::Tag)?;
+        Mac::update(&mut mac, b"rusterisk-response-tag\0");
+        Mac::update(&mut mac, request.to_string().as_bytes());
+        let tag = hexadecimal(mac.finalize().into_bytes().into())?;
+        let request = incoming::tagged(request, &tag)?;
+        response(&request, code, phrase, extra, body)
     }
 
     fn merged_request(&self, request: &Request) -> Result<bool, SipError> {
@@ -825,6 +847,16 @@ impl Engine {
     }
 }
 
+fn hexadecimal(bytes: [u8; 32]) -> Result<String, SipError> {
+    let alphabet = b"0123456789abcdef";
+    let mut encoded = [0u8; 64];
+    for (pair, byte) in encoded.as_chunks_mut::<2>().0.iter_mut().zip(bytes) {
+        pair[0] = alphabet[usize::from(byte >> 4)];
+        pair[1] = alphabet[usize::from(byte & 15)];
+    }
+    String::from_utf8(encoded.to_vec()).map_err(|_| SipError::Tag)
+}
+
 fn response(
     request: &Request,
     code: u16,
@@ -832,21 +864,9 @@ fn response(
     extra: &str,
     body: &str,
 ) -> Result<Vec<u8>, SipError> {
-    let mut to = request.to_header()?.typed()?;
+    let to = request.to_header()?.typed()?;
     if code != 100 && to.tag().is_none() {
-        let mut bytes = [0; 16];
-        getrandom::fill(&mut bytes).map_err(|_| SipError::Entropy)?;
-        let alphabet = b"0123456789abcdef";
-        let tag: String = bytes
-            .iter()
-            .flat_map(|byte| {
-                [
-                    alphabet[usize::from(byte >> 4)] as char,
-                    alphabet[usize::from(byte & 15)] as char,
-                ]
-            })
-            .collect();
-        to = to.with_tag(tag.into());
+        return Err(SipError::Tag);
     }
     let mut output = format!("SIP/2.0 {code} {phrase}\r\n");
     for via in request
