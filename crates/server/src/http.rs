@@ -370,6 +370,14 @@ async fn dispatch(
         ("GET", ["ari", "applications", application]) => {
             Action::GetApplication(id(application)?.to_string())
         }
+        ("GET", ["ari", "endpoints"]) => Action::ListEndpoints { technology: None },
+        ("GET", ["ari", "endpoints", technology]) => Action::ListEndpoints {
+            technology: Some(id(technology)?.to_string()),
+        },
+        ("GET", ["ari", "endpoints", technology, resource]) => Action::GetEndpoint {
+            technology: id(technology)?.to_string(),
+            resource: id(resource)?.to_string(),
+        },
         ("POST", ["ari", "channels", channel, "record"]) => {
             let arguments = recording::arguments(parameters)?;
             Action::RecordChannel {

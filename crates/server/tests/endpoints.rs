@@ -135,3 +135,87 @@ fn endpoint_queries_keep_contact_availability_and_call_lifetimes_independent(
     assert_eq!(listed[1].resource, "phone-extra");
     Ok(())
 }
+
+#[tokio::test]
+async fn endpoint_routes_authenticate_and_return_reference_errors() -> Result<(), ControlError> {
+    use axum::{body::Body, http::Request};
+    use base64::Engine;
+    use http_body_util::BodyExt;
+    use rusterisk_server::{http::router, Controller};
+    use tower::ServiceExt;
+
+    let (controller, runner, _effects) = Controller::new(config()?, 4);
+    let task = tokio::spawn(runner.run());
+    let result = async {
+        let app = router(controller.clone());
+        for (path, status, message) in [
+            ("/ari/endpoints", 200, None),
+            ("/ari/endpoints/PJSIP", 200, None),
+            ("/ari/endpoints/PJSIP/phone", 200, None),
+            (
+                "/ari/endpoints/PJSIP/missing",
+                404,
+                Some("Endpoint not found"),
+            ),
+            (
+                "/ari/endpoints/unknown",
+                404,
+                Some("No Endpoints found - invalid tech unknown"),
+            ),
+        ] {
+            let request = Request::builder()
+                .uri(path)
+                .header(
+                    "Authorization",
+                    format!(
+                        "Basic {}",
+                        base64::engine::general_purpose::STANDARD.encode("app:test-password")
+                    ),
+                )
+                .body(Body::empty())
+                .map_err(|error| ControlError::Adapter(error.to_string()))?;
+            let response = app
+                .clone()
+                .oneshot(request)
+                .await
+                .map_err(|error| ControlError::Adapter(error.to_string()))?;
+            assert_eq!(response.status().as_u16(), status, "{path}");
+            let body: serde_json::Value = serde_json::from_slice(
+                &response
+                    .into_body()
+                    .collect()
+                    .await
+                    .map_err(|error| ControlError::Adapter(error.to_string()))?
+                    .to_bytes(),
+            )?;
+            if let Some(message) = message {
+                assert_eq!(body["message"], message);
+            } else if path.ends_with("/phone") {
+                let endpoint: Endpoint = serde_json::from_value(body)?;
+                assert_eq!(endpoint.state, Some(EndpointState::Offline));
+                assert!(endpoint.channel_ids.is_empty());
+            } else {
+                let endpoints: Vec<Endpoint> = serde_json::from_value(body)?;
+                assert_eq!(endpoints.len(), 2);
+            }
+        }
+        let request = Request::builder()
+            .uri("/ari/endpoints")
+            .body(Body::empty())
+            .map_err(|error| ControlError::Adapter(error.to_string()))?;
+        assert_eq!(
+            app.oneshot(request)
+                .await
+                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .status()
+                .as_u16(),
+            401
+        );
+        Ok(())
+    }
+    .await;
+    controller.shutdown();
+    task.await
+        .map_err(|error| ControlError::Adapter(error.to_string()))??;
+    result
+}

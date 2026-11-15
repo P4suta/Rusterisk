@@ -413,7 +413,9 @@ impl Signaling {
                     if let Err(error) = self.admit(listener, incoming).await {
                         let reason = match error {
                             ControlError::Capacity => RejectReason::Busy,
-                            ControlError::NotFound(_) => RejectReason::NoRoute,
+                            ControlError::NotFound(_) | ControlError::EndpointTechnology(_) => {
+                                RejectReason::NoRoute
+                            }
                             ControlError::Unsupported => RejectReason::Unsupported,
                             ControlError::Invalid(_)
                             | ControlError::Unprocessable(_)

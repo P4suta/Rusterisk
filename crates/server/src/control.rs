@@ -25,6 +25,7 @@ use endpoints::Endpoints;
 pub enum ControlError {
     Invalid(&'static str),
     NotFound(&'static str),
+    EndpointTechnology(String),
     Conflict(&'static str),
     InvalidState(&'static str),
     Unprocessable(&'static str),
@@ -40,7 +41,7 @@ impl ControlError {
     pub const fn status(&self) -> u16 {
         match self {
             Self::Invalid(_) => 400,
-            Self::NotFound(_) => 404,
+            Self::NotFound(_) | Self::EndpointTechnology(_) => 404,
             Self::Conflict(_) => 409,
             Self::InvalidState(_) => 412,
             Self::Unprocessable(_) => 422,
@@ -61,6 +62,9 @@ impl std::fmt::Display for ControlError {
             | Self::Conflict(message)
             | Self::Unprocessable(message)
             | Self::InvalidState(message) => f.write_str(message),
+            Self::EndpointTechnology(technology) => {
+                write!(f, "No Endpoints found - invalid tech {technology}")
+            }
             Self::Capacity => f.write_str("Resource capacity exceeded"),
             Self::Unauthorized => f.write_str("Authentication required"),
             Self::Forbidden => f.write_str("Operation forbidden"),
