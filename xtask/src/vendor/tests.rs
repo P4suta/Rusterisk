@@ -59,6 +59,32 @@ fn importing_original_files_preserves_the_publishers_executable_mode(
 }
 
 #[test]
+fn published_checks_bind_the_record_to_the_archive_and_preserve_public_key_fixtures(
+) -> Result<(), super::VendorError> {
+    let original: BTreeMap<String, Vec<u8>> = BTreeMap::from([
+        ("cert.pem".into(), b"published certificate fixture".to_vec()),
+        (
+            "examples/key.pem".into(),
+            b"published example fixture".to_vec(),
+        ),
+    ]);
+    let mut record = record();
+    record.files = original
+        .iter()
+        .map(|(name, bytes)| (name.clone(), digest(bytes)))
+        .collect();
+    super::verify_published(&record, &original, &original)?;
+    let mut changed = original.clone();
+    changed.insert("cert.pem".into(), b"a different key".to_vec());
+    assert!(super::verify_published(&record, &original, &changed).is_err());
+    record
+        .files
+        .insert("cert.pem".into(), digest(b"a different key"));
+    assert!(super::verify_published(&record, &original, &changed).is_err());
+    Ok(())
+}
+
+#[test]
 fn reverse_patch_verifies_the_complete_upstream_tree_and_rejects_unrecorded_changes(
 ) -> Result<(), super::VendorError> {
     fixture(|root| {

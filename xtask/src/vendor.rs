@@ -275,6 +275,48 @@ fn verify_tree(source: &Path, record: &Record, patch: &Path) -> Result<usize, Ve
     })
 }
 
+fn verify_published(
+    record: &Record,
+    original: &BTreeMap<String, Vec<u8>>,
+    current: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), VendorError> {
+    let hashes: BTreeMap<_, _> = original
+        .iter()
+        .map(|(name, bytes)| (name.clone(), digest(bytes)))
+        .collect();
+    if hashes != record.files {
+        return Err(VendorError::Changed);
+    }
+    for name in ["cert.pem", "examples/key.pem"] {
+        let published = original.get(name).ok_or(VendorError::Invalid)?;
+        if current.get(name) != Some(published) {
+            return Err(VendorError::Changed);
+        }
+    }
+    Ok(())
+}
+
+fn extract(archive: &[u8], root: &Path) -> Result<BTreeMap<String, Vec<u8>>, VendorError> {
+    let archive_path = root.join("published.crate");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&archive_path)?
+        .write_all(archive)?;
+    let source = root.join("published");
+    std::fs::create_dir(&source)?;
+    run(
+        Command::new("tar")
+            .args(["--extract", "--gzip", "--strip-components=1", "--file"])
+            .arg(&archive_path)
+            .arg("--directory")
+            .arg(&source),
+        Duration::from_secs(30),
+    )
+    .map_err(VendorError::Process)?;
+    tree(&source)
+}
+
 pub fn check(root: &Path) -> Result<usize, VendorError> {
     let manifest: toml::Value = toml::from_str(
         std::str::from_utf8(&read(&root.join("Cargo.toml"), 1024 * 1024)?)
@@ -299,6 +341,19 @@ pub fn check(root: &Path) -> Result<usize, VendorError> {
         std::str::from_utf8(&read(&vendor.join("str0m-source.toml"), 128 * 1024)?)
             .map_err(|_| VendorError::Invalid)?,
     )?;
+    directory(&vendor.join("archives"))?;
+    let archive = read(&vendor.join("archives/str0m-0.25.0.crate"), FILE_LIMIT)?;
+    if digest(&archive) != ARCHIVE_SHA256 {
+        return Err(VendorError::Invalid);
+    }
+    temporary(|temporary| {
+        verify_published(
+            &record,
+            &extract(&archive, temporary)?,
+            &tree(&vendor.join("str0m"))?,
+        )?;
+        Ok(record.files.len())
+    })?;
     verify_tree(&vendor.join("str0m"), &record, &vendor.join("str0m.patch"))
 }
 
