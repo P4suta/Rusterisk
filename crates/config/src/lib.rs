@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 mod expansion;
+mod ini_comments;
 mod registration;
 mod wait_duration;
 mod websocket;
@@ -105,7 +106,8 @@ impl Ini {
             if raw.len() > 4096 {
                 return Err(ConfigError::at(file, number, "line exceeds 4096 bytes"));
             }
-            let line = raw.split(';').next().unwrap_or("").trim();
+            let content = ini_comments::content(raw);
+            let line = content.trim();
             if line.is_empty() {
                 continue;
             }

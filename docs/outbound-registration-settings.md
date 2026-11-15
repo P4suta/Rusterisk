@@ -13,6 +13,8 @@ The parser admits at most 16 registration sections.
 `expiration` defaults to 3600 seconds, and `contact_user` defaults to `s`.
 Contact users follow Session Initiation Protocol (SIP) URI user syntax within 256 ASCII bytes.
 Percent escapes require two hexadecimal digits.
+Use `\;` for literal semicolons in configuration values.
+The parser removes only the immediately preceding backslash, following the [reference lexer](https://github.com/asterisk/asterisk/blob/22.9.0/main/config.c#L2399-L2405).
 
 `retry_interval` defaults to 60 seconds.
 `forbidden_retry_interval` and `fatal_retry_interval` default to zero.
@@ -23,4 +25,4 @@ The defaults follow [Asterisk 22.9.0](https://github.com/asterisk/asterisk/blob/
 
 Timer values use unsigned 32-bit seconds.
 Invalid values and capacity overflow report their file and line.
-Complete registration URI validation and escaped semicolon handling remain pending.
+Complete registration URI validation remains pending.
