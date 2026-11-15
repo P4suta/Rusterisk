@@ -309,7 +309,11 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
     pub async fn run(mut self) -> Result<LinkStats, MediaError> {
         let result = self.serve().await;
         let cleanup = match &result {
-            Ok((_, ClosedBy::Peer)) => Ok(()),
+            Ok((_, ClosedBy::Peer)) => {
+                tokio::time::timeout(Duration::from_millis(100), self.socket.flush())
+                    .await
+                    .map_err(failure)?
+            }
             Ok((_, ClosedBy::Local)) | Err(_) => self.send(SocketMessage::Close).await,
         };
         match (result, cleanup) {

@@ -56,6 +56,13 @@ async fn concrete_client_and_server_sockets_preserve_media_message_types() -> Re
             MediaSocket::receive(&mut accepted).await?,
             Some(SocketMessage::Close)
         );
+        MediaSocket::flush(&mut accepted).await?;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), MediaSocket::receive(&mut client))
+                .await
+                .map_err(failure)??,
+            Some(SocketMessage::Close)
+        );
         Ok(())
     }
     .await;

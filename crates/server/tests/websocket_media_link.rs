@@ -13,6 +13,10 @@ struct Socket {
     output: mpsc::Sender<SocketMessage>,
 }
 impl MediaSocket for Socket {
+    async fn flush(&mut self) -> Result<(), MediaError> {
+        Ok(())
+    }
+
     async fn receive(&mut self) -> Result<Option<SocketMessage>, MediaError> {
         Ok(self.input.recv().await)
     }

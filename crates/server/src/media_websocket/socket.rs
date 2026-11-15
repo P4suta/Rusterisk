@@ -21,6 +21,7 @@ pub trait MediaSocket: Send {
         &mut self,
         message: SocketMessage,
     ) -> impl Future<Output = Result<(), MediaError>> + Send;
+    fn flush(&mut self) -> impl Future<Output = Result<(), MediaError>> + Send;
 }
 
 fn failure(error: impl std::fmt::Display) -> MediaError {
@@ -28,6 +29,10 @@ fn failure(error: impl std::fmt::Display) -> MediaError {
 }
 
 impl MediaSocket for WebSocket {
+    async fn flush(&mut self) -> Result<(), MediaError> {
+        futures_util::SinkExt::flush(self).await.map_err(failure)
+    }
+
     async fn receive(&mut self) -> Result<Option<SocketMessage>, MediaError> {
         self.recv()
             .await
@@ -60,6 +65,10 @@ type ClientSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 impl MediaSocket for ClientSocket {
+    async fn flush(&mut self) -> Result<(), MediaError> {
+        futures_util::SinkExt::flush(self).await.map_err(failure)
+    }
+
     async fn receive(&mut self) -> Result<Option<SocketMessage>, MediaError> {
         let message = futures_util::StreamExt::next(self)
             .await
