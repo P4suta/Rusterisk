@@ -50,11 +50,15 @@ fn local(channel: Channel) -> Result<SocketAddr, Error> {
 }
 
 async fn received(peer: &SocketPair, codec: StaticRtpCodec, expected: i32) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    let mut packets = 0;
+    let mut last = None;
+    let result = tokio::time::timeout(Duration::from_secs(3), async {
         let mut bytes = [0; 2049];
         for _ in 0..150 {
-            let (size, _) = peer.data().recv_from(&mut bytes).await?;
+            let (size, source) = peer.data().recv_from(&mut bytes).await?;
             let packet = RtpPacket::parse(&bytes[..size]).map_err(invalid)?;
+            packets += 1;
+            last = Some((source, packet.payload().len()));
             if packet.payload().len() == 160
                 && packet.payload().iter().all(|byte| {
                     let sample = match codec {
@@ -70,7 +74,12 @@ async fn received(peer: &SocketPair, codec: StaticRtpCodec, expected: i32) -> Re
         Err(Error::Invalid("expected received audio"))
     })
     .await
-    .map_err(|_| Error::Timeout)?
+    .map_err(|_| Error::Timeout)
+    .and_then(|result| result);
+    if result.is_err() {
+        eprintln!("external audio receive failed: codec={codec:?}, expected={expected}, packets={packets}, last={last:?}");
+    }
+    result
 }
 
 pub async fn compare(
@@ -111,7 +120,7 @@ pub async fn compare(
                 RtpSender::new(format, codec.payload_type(), [32; 10]).map_err(invalid)?;
             let mut tick = tokio::time::interval(Duration::from_millis(20));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            for _ in 0..30 {
+            for _ in 0..150 {
                 tick.tick().await;
                 for (peer, destination, sender, value) in [
                     (&left, destinations[0], &mut first, 4000),
@@ -127,11 +136,17 @@ pub async fn compare(
             }
             Ok::<(), Error>(())
         };
-        tokio::try_join!(
-            send,
-            received(&left, codec, -7000),
-            received(&right, codec, 4000)
-        )?;
+        let receive = async {
+            tokio::try_join!(received(&left, codec, -7000), received(&right, codec, 4000))?;
+            Ok::<(), Error>(())
+        };
+        tokio::select! {
+            result = receive => result?,
+            result = send => {
+                result?;
+                return Err(Error::Timeout);
+            }
+        }
         client.remove_channels(&bridge, &ids).await?;
         for id in &ids {
             client.hangup(id).await?;
