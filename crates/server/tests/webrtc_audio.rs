@@ -94,7 +94,10 @@ async fn finished(
     }
 }
 
-async fn duplex(codec: Codec) -> Result<(), MediaError> {
+async fn duplex(
+    codec: Codec,
+    transform: impl Fn(&str) -> Result<String, MediaError>,
+) -> Result<(), MediaError> {
     let left = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
     let right = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
     let left_address = left.local_addr().map_err(failure)?;
@@ -103,11 +106,11 @@ async fn duplex(codec: Codec) -> Result<(), MediaError> {
     let (right, answer) = WebRtcSession::answer(
         right,
         right_address,
-        offer.description(),
+        &transform(offer.description())?,
         &[codec],
         Instant::now(),
     )?;
-    let left = offer.accept_answer(&answer)?;
+    let left = offer.accept_answer(&transform(&answer)?)?;
     assert!(!left.is_connected());
     assert!(!right.is_connected());
     let (left_channels, mut left_app) = channels();
@@ -148,19 +151,57 @@ async fn duplex(codec: Codec) -> Result<(), MediaError> {
 #[tokio::test]
 async fn pcmu_media_delivers_both_known_audio_signals_and_releases_every_task(
 ) -> Result<(), MediaError> {
-    duplex(Codec::Pcmu).await
+    duplex(Codec::Pcmu, |source| Ok(source.into())).await
 }
 
 #[tokio::test]
 async fn pcma_media_delivers_both_known_audio_signals_and_releases_every_task(
 ) -> Result<(), MediaError> {
-    duplex(Codec::Pcma).await
+    duplex(Codec::Pcma, |source| Ok(source.into())).await
 }
 
 #[tokio::test]
 async fn opus_media_delivers_both_known_audio_signals_and_releases_every_task(
 ) -> Result<(), MediaError> {
-    duplex(Codec::Opus).await
+    duplex(Codec::Opus, |source| Ok(source.into())).await
+}
+
+fn shadowed_description(source: &str) -> Result<String, MediaError> {
+    let sha1 = ["00"; 20].join(":");
+    let source = source.replace(
+        "a=fingerprint:sha-256 ",
+        &format!("a=fingerprint:sha-1 {sha1}\r\na=fingerprint:SHA-256 "),
+    );
+    let session = format!("a=ice-ufrag:shadow\r\na=ice-pwd:WrongSessionPassword0123456789\r\na=fingerprint:sha-256 {}\r\na=setup:active\r\nm=audio", ["00"; 32].join(":"));
+    let source = source.replacen("m=audio", &session, 1);
+    rusterisk_sip::WebRtcDescription::parse(&source).map_err(failure)?;
+    Ok(source)
+}
+
+fn inherited_description(source: &str) -> Result<String, MediaError> {
+    let password = source
+        .lines()
+        .find(|line| line.starts_with("a=ice-pwd:"))
+        .ok_or(MediaError::InvalidPacket)?;
+    let source = source
+        .lines()
+        .filter(|line| *line != password)
+        .collect::<Vec<_>>()
+        .join("\r\n")
+        + "\r\n";
+    let source = source.replacen("m=audio", &format!("{password}\r\nm=audio"), 1);
+    rusterisk_sip::WebRtcDescription::parse(&source).map_err(failure)?;
+    Ok(source)
+}
+
+#[tokio::test]
+async fn media_security_overrides_shadowed_session_attributes() -> Result<(), MediaError> {
+    duplex(Codec::Pcmu, shadowed_description).await
+}
+
+#[tokio::test]
+async fn session_security_defaults_supply_missing_media_fields() -> Result<(), MediaError> {
+    duplex(Codec::Pcmu, inherited_description).await
 }
 
 #[tokio::test]

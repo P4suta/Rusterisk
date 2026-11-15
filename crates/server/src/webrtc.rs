@@ -9,6 +9,7 @@ use str0m::{
     net::Transmit,
     Candidate, Event, IceCreds, Output, Rtc, RtcConfig,
 };
+mod description;
 mod link;
 pub use link::WebRtcStats;
 
@@ -38,7 +39,7 @@ fn negotiation_error(_error: impl fmt::Display) -> MediaError {
     MediaError::Transport("WebRTC negotiation failed".into())
 }
 
-fn description(source: &str) -> Result<rusterisk_sip::WebRtcDescription, MediaError> {
+fn checked_description(source: &str) -> Result<rusterisk_sip::WebRtcDescription, MediaError> {
     rusterisk_sip::WebRtcDescription::parse(source).map_err(|error| match error {
         rusterisk_sip::SipError::Capacity => MediaError::Capacity,
         rusterisk_sip::SipError::Unsupported => MediaError::Unsupported,
@@ -132,7 +133,7 @@ impl Engine {
             source.push_str(&self.tls_id);
             source.push_str("\r\n");
         }
-        description(&source)?;
+        checked_description(&source)?;
         Ok(source)
     }
 
@@ -243,8 +244,9 @@ impl WebRtcOffer {
     }
 
     pub fn accept_answer(mut self, answer: &str) -> Result<WebRtcSession, MediaError> {
-        description(answer)?;
-        let answer = SdpAnswer::from_sdp_string(answer).map_err(negotiation_error)?;
+        let checked = checked_description(answer)?;
+        let answer = SdpAnswer::from_sdp_string(&description::for_transport(&checked))
+            .map_err(negotiation_error)?;
         self.engine
             .rtc
             .sdp_api()
@@ -263,8 +265,10 @@ impl WebRtcSession {
         allowed: &[Codec],
         now: Instant,
     ) -> Result<(Self, String), MediaError> {
-        let identify_tls = description(offer)?.tls_id().is_some();
-        let offer = SdpOffer::from_sdp_string(offer).map_err(negotiation_error)?;
+        let checked = checked_description(offer)?;
+        let identify_tls = checked.tls_id().is_some();
+        let offer = SdpOffer::from_sdp_string(&description::for_transport(&checked))
+            .map_err(negotiation_error)?;
         let mut engine = Engine::new(sockets, advertised, allowed, now)?;
         let answer = engine
             .rtc

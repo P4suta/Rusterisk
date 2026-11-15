@@ -16,7 +16,8 @@ Own one str0m 0.25 `Rtc`, User Datagram Protocol (UDP) socket, and bounded chann
 Enable only AWS-LC cryptography.
 Separate plaintext Real-time Transport Protocol (RTP) from WebRTC with closed enum variants.
 Keep bounded descriptions out of diagnostics.
-Verify fingerprints and negotiate RTP Control Protocol (RTCP) multiplexing before accepting audio.
+Verify [fingerprints](https://www.rfc-editor.org/rfc/rfc8122) and negotiate RTP Control Protocol (RTCP) multiplexing before accepting audio.
+Resolve media-level security attributes before invoking str0m.
 
 ## Alternatives
 
