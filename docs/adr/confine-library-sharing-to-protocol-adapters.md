@@ -21,6 +21,7 @@ Keep webrtc-srtp dispatch inside an owned context per stream and direction with 
 Bound each direction to four authenticated stream contexts.
 Publish a stream slot only after authentication succeeds.
 Use opus 0.4's bundled libopus through opusic-sys.
+Use the borrowed Opus repacketizer only to construct bounded test packets.
 
 ## Alternatives
 

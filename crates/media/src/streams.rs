@@ -1,7 +1,13 @@
 use crate::{
     alaw_decode, alaw_encode, mulaw_decode, mulaw_encode, Frame, MediaError, OpusCodec, RtpPacket,
-    MAX_SAMPLES,
+    MAX_DECODED_SAMPLES, MAX_PACKET, MAX_SAMPLES,
 };
+use std::collections::VecDeque;
+
+struct DecodedAudio<'a> {
+    samples: &'a [i16],
+    rate: u32,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AudioFormat {
@@ -52,16 +58,19 @@ impl Codec {
         }
     }
 
-    fn decode(&mut self, bytes: &[u8]) -> Result<Frame, MediaError> {
-        if bytes.is_empty() || bytes.len() > 1275 {
+    fn decode<'a>(
+        &mut self,
+        bytes: &[u8],
+        samples: &'a mut [i16; MAX_DECODED_SAMPLES],
+    ) -> Result<DecodedAudio<'a>, MediaError> {
+        if bytes.is_empty() || bytes.len() > MAX_PACKET - 12 {
             return Err(MediaError::InvalidPacket);
         }
         match self {
             Self::Pcmu | Self::Pcma => {
-                if bytes.len() > MAX_SAMPLES {
+                if bytes.len() > 1600 {
                     return Err(MediaError::Capacity);
                 }
-                let mut samples = [0; MAX_SAMPLES];
                 for (sample, byte) in samples.iter_mut().zip(bytes) {
                     *sample = match self {
                         Self::Pcmu => mulaw_decode(*byte),
@@ -69,9 +78,18 @@ impl Codec {
                         Self::Opus(_) => return Err(MediaError::Unsupported),
                     };
                 }
-                Frame::new(&samples[..bytes.len()], 8000)
+                Ok(DecodedAudio {
+                    samples: &samples[..bytes.len()],
+                    rate: 8000,
+                })
             }
-            Self::Opus(codec) => codec.decode(bytes),
+            Self::Opus(codec) => {
+                let count = codec.decode_into(bytes, samples)?;
+                Ok(DecodedAudio {
+                    samples: &samples[..count],
+                    rate: 48000,
+                })
+            }
         }
     }
 }
@@ -163,6 +181,59 @@ enum Received {
     Signal(u16),
 }
 
+struct FrameAssembly {
+    partial: [i16; MAX_SAMPLES],
+    filled: usize,
+    rate: u32,
+    timestamp: Option<u32>,
+    ready: VecDeque<Frame>,
+}
+
+impl FrameAssembly {
+    fn new(format: AudioFormat) -> Self {
+        Self {
+            partial: [0; MAX_SAMPLES],
+            filled: 0,
+            rate: format.rate(),
+            timestamp: None,
+            ready: VecDeque::with_capacity(10),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.filled = 0;
+        self.timestamp = None;
+        self.ready.clear();
+    }
+
+    fn push(&mut self, audio: DecodedAudio<'_>, timestamp: u32) -> Result<(), MediaError> {
+        if audio.rate != self.rate {
+            return Err(MediaError::InvalidFrame);
+        }
+        let frame_len = self.rate as usize / 50;
+        let filled = if self.timestamp == Some(timestamp) {
+            self.filled
+        } else {
+            0
+        };
+        if self.ready.len() + (filled + audio.samples.len()) / frame_len > 10 {
+            return Err(MediaError::Capacity);
+        }
+        self.filled = filled;
+        for sample in audio.samples {
+            self.partial[self.filled] = *sample;
+            self.filled += 1;
+            if self.filled == frame_len {
+                self.ready
+                    .push_back(Frame::new(&self.partial[..frame_len], self.rate)?);
+                self.filled = 0;
+            }
+        }
+        self.timestamp = Some(timestamp.wrapping_add(audio.samples.len() as u32));
+        Ok(())
+    }
+}
+
 impl Received {
     fn sequence(&self) -> u16 {
         match self {
@@ -178,12 +249,14 @@ pub struct RtpReceiver {
     ssrc: Option<u32>,
     next: Option<u16>,
     packets: Vec<Received>,
+    assembly: FrameAssembly,
 }
 
 impl RtpReceiver {
     pub fn discard_pending(&mut self) {
         self.packets.clear();
         self.next = None;
+        self.assembly.clear();
     }
 
     pub fn new(format: AudioFormat, payload_type: u8) -> Result<Self, MediaError> {
@@ -196,6 +269,7 @@ impl RtpReceiver {
             ssrc: None,
             next: None,
             packets: Vec::with_capacity(16),
+            assembly: FrameAssembly::new(format),
         })
     }
 
@@ -244,6 +318,9 @@ impl RtpReceiver {
     }
 
     pub fn pop(&mut self) -> Result<Option<Frame>, MediaError> {
+        if let Some(frame) = self.assembly.ready.pop_front() {
+            return Ok(Some(frame));
+        }
         while !self.packets.is_empty() {
             let Some(next) = self.next else {
                 return Ok(None);
@@ -257,7 +334,20 @@ impl RtpReceiver {
                 return Ok(None);
             };
             match self.packets.remove(index) {
-                Received::Audio(packet) => return self.codec.decode(packet.payload()).map(Some),
+                Received::Audio(packet) => {
+                    let mut samples = [0; MAX_DECODED_SAMPLES];
+                    let decoded = match self.codec.decode(packet.payload(), &mut samples) {
+                        Ok(decoded) => decoded,
+                        Err(error) => {
+                            self.assembly.clear();
+                            return Err(error);
+                        }
+                    };
+                    self.assembly.push(decoded, packet.timestamp())?;
+                    if let Some(frame) = self.assembly.ready.pop_front() {
+                        return Ok(Some(frame));
+                    }
+                }
                 Received::Signal(_) => {}
             }
         }

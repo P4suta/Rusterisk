@@ -12,7 +12,8 @@ pub use telephone_events::{
 };
 
 pub const MAX_SAMPLES: usize = 960;
-pub const MAX_PACKET: usize = 1500;
+pub const MAX_PACKET: usize = 2048;
+const MAX_DECODED_SAMPLES: usize = 5760;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MediaError {
@@ -196,15 +197,30 @@ impl OpusCodec {
     }
 
     pub fn decode(&mut self, bytes: &[u8]) -> Result<Frame, MediaError> {
-        if bytes.len() > 1275 {
+        let mut output = [0i16; MAX_SAMPLES];
+        let count = self.decode_into(bytes, &mut output)?;
+        Frame::new(&output[..count], 48000)
+    }
+
+    fn decode_into(&mut self, bytes: &[u8], output: &mut [i16]) -> Result<usize, MediaError> {
+        if bytes.is_empty() || bytes.len() > MAX_PACKET - 12 || output.len() > MAX_DECODED_SAMPLES {
             return Err(MediaError::Capacity);
         }
-        let mut output = [0i16; MAX_SAMPLES];
+        let expected = self
+            .decoder
+            .get_nb_samples(bytes)
+            .map_err(|error| MediaError::Codec(error.to_string()))?;
+        if expected == 0 || expected > output.len() {
+            return Err(MediaError::Capacity);
+        }
         let count = self
             .decoder
-            .decode(bytes, &mut output, false)
+            .decode(bytes, output, false)
             .map_err(|error| MediaError::Codec(error.to_string()))?;
-        Frame::new(&output[..count], 48000)
+        if count != expected {
+            return Err(MediaError::InvalidFrame);
+        }
+        Ok(count)
     }
 }
 
