@@ -7,6 +7,11 @@ enum TaskError {
     Io(std::io::Error),
     Parse(toml::de::Error),
     Contract(String),
+    Process(xtask::process::ProcessError),
+    ReferenceCleanup {
+        operation: xtask::process::ProcessError,
+        cleanup: xtask::process::ProcessError,
+    },
 }
 
 impl std::fmt::Display for TaskError {
@@ -15,6 +20,13 @@ impl std::fmt::Display for TaskError {
             Self::Io(error) => write!(f, "{error}"),
             Self::Parse(error) => write!(f, "{error}"),
             Self::Contract(message) => f.write_str(message),
+            Self::Process(error) => write!(f, "{error}"),
+            Self::ReferenceCleanup { operation, cleanup } => {
+                write!(
+                    f,
+                    "reference build failed: {operation}, builder cleanup failed: {cleanup}"
+                )
+            }
         }
     }
 }
@@ -122,6 +134,8 @@ fn run(program: &str, arguments: &[&str]) -> Result<(), TaskError> {
 fn execute() -> Result<(), TaskError> {
     let arguments: Vec<String> = std::env::args().skip(1).take(4).collect();
     match arguments.as_slice() {
+        [task, mode] if task == "reference-build" && mode == "--dry-run" => reference_build(false),
+        [task, mode] if task == "reference-build" && mode == "--run" => reference_build(true),
         [task] if task == "policy" => policy(),
         [task] if task == "core-msrv" => core_msrv(),
         [task] if task == "check" => {
@@ -160,8 +174,49 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|security>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|security|reference-build --dry-run|reference-build --run>".into(),
         )),
+    }
+}
+
+fn reference_build(execute: bool) -> Result<(), TaskError> {
+    let identity = if execute {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| TaskError::Contract(error.to_string()))?;
+        format!("{}-{}", std::process::id(), timestamp.as_millis())
+    } else {
+        "preview".into()
+    };
+    let plan = xtask::reference::ReferenceBuild::new(&identity)
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
+    let steps = plan.steps();
+    let cleanup = plan.cleanup();
+    for step in steps.iter().chain(std::iter::once(&cleanup)) {
+        println!(
+            "budget={}s docker {}",
+            step.budget.as_secs(),
+            step.arguments.join(" ")
+        );
+    }
+    if !execute {
+        return Ok(());
+    }
+    let perform = |step: &xtask::reference::Step| {
+        xtask::process::run(Command::new("docker").args(&step.arguments), step.budget)
+    };
+    perform(
+        steps
+            .first()
+            .ok_or_else(|| TaskError::Contract("reference build has no creation step".into()))?,
+    )
+    .map_err(TaskError::Process)?;
+    let operation = steps.iter().skip(1).try_for_each(perform);
+    let cleanup = perform(&cleanup);
+    match (operation, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(operation), Err(cleanup)) => Err(TaskError::ReferenceCleanup { operation, cleanup }),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(TaskError::Process(error)),
     }
 }
 

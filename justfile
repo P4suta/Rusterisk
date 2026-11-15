@@ -17,3 +17,6 @@ security:
 
 fmt:
     cargo fmt --all
+
+reference-build *arguments="--dry-run":
+    cargo run --locked --target-dir target/xtask --package xtask -- reference-build {{ arguments }}
