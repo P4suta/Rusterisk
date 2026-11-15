@@ -53,4 +53,18 @@ export default defineConfig(
 			],
 		},
 	},
+	{
+		files: ["src/**/*.ts"],
+		rules: {
+			"no-console": "error",
+			"no-restricted-syntax": [
+				"error",
+				{
+					selector:
+						"Property:is([key.name=/^(logBuiltinEnabled|logConfiguration|traceSip)$/],[key.value=/^(logBuiltinEnabled|logConfiguration|traceSip)$/]):not([value.type='Literal'][value.raw='false'])",
+					message: "Sensitive signaling logging must be explicitly disabled.",
+				},
+			],
+		},
+	},
 );
