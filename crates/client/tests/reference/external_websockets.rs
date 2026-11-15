@@ -14,7 +14,7 @@ fn invalid(error: impl std::fmt::Display) -> Error {
     Error::Invalid("media WebSocket comparison")
 }
 
-type Peer =
+pub(super) type Peer =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect(
@@ -149,7 +149,7 @@ async fn status(
     .await
 }
 
-async fn controls(
+pub(super) async fn controls(
     client: &Client,
     peer: &mut Peer,
     id: &ChannelId,
@@ -374,7 +374,7 @@ async fn pressure(
     status(peer, id, format, 0, false, false).await
 }
 
-fn audio(
+pub(super) fn audio(
     message: Option<Result<Message, tokio_tungstenite::tungstenite::Error>>,
     expected: i32,
 ) -> Result<bool, Error> {

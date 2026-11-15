@@ -10,6 +10,8 @@ use std::{future::IntoFuture, net::Ipv4Addr, time::Duration};
 mod external_audio;
 #[path = "reference/external_streams.rs"]
 mod external_streams;
+#[path = "reference/external_websocket_clients.rs"]
+mod external_websocket_clients;
 #[path = "reference/external_websockets.rs"]
 mod external_websockets;
 
@@ -278,6 +280,25 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
     })
     .await
     .map_err(|_| Error::Timeout)?;
+    let mut outgoing = external_websocket_clients::Fixture::start().await?;
+    let result = compare_resources(reference_address, reference, &mut outgoing).await;
+    let cleanup = outgoing.shutdown().await;
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(primary), Err(cleanup)) => {
+            eprintln!("Reference comparison failed: {primary}; callback cleanup failed: {cleanup}");
+            Err(primary)
+        }
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+    }
+}
+
+async fn compare_resources(
+    reference_address: String,
+    reference: Client,
+    outgoing: &mut external_websocket_clients::Fixture,
+) -> Result<(), Error> {
+    outgoing.configure_reference(&reference_address).await?;
     let configuration = rusterisk_config::Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
         "[app]\ntype=user\npassword=test-password\n",
@@ -286,7 +307,9 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
         "",
         "",
     )
-    .map_err(|_| Error::Invalid("reference configuration"))?;
+    .map_err(|_| Error::Invalid("reference configuration"))?
+    .with_websocket_configuration("", &outgoing.configuration("127.0.0.1"))
+    .map_err(|_| Error::Invalid("native WebSocket configuration"))?;
     let (controller, runner, effects) = rusterisk_server::Controller::new(configuration.clone(), 4);
     let (media, hub, notices) = rusterisk_server::media::MediaHub::new(4);
     let signaling = rusterisk_server::signaling::Signaling::bind(
@@ -479,6 +502,15 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
             app.as_str(),
         )
         .await?;
+        external_websocket_clients::compare(
+            &reference,
+            &mut reference_session,
+            app.as_str(),
+            outgoing,
+        )
+        .await?;
+        external_websocket_clients::compare(&actual, &mut actual_session, app.as_str(), outgoing)
+            .await?;
         compare_subscriptions(&actual, &reference, app.as_str()).await?;
         reference_session.shutdown().await?;
         actual_session.shutdown().await?;
