@@ -11,6 +11,9 @@ use str0m::{
 };
 mod description;
 mod link;
+#[cfg(test)]
+mod rtp_tests;
+mod transmit_sources;
 pub use link::WebRtcStats;
 
 struct Engine {
@@ -97,7 +100,7 @@ impl Engine {
             .set_dtls_cert(certificate)
             .set_fingerprint_verification(true)
             .set_stats_interval(None)
-            .set_reordering_size_audio(16)
+            .set_rtp_mode(true)
             .set_send_buffer_audio(32);
         for codec in allowed {
             config = match codec {
@@ -171,7 +174,7 @@ impl Engine {
         Err(MediaError::Capacity)
     }
 
-    fn metadata(&mut self, event: Event) -> Result<Option<str0m::media::MediaData>, MediaError> {
+    fn metadata(&mut self, event: Event) -> Result<Option<str0m::rtp::RtpPacket>, MediaError> {
         match event {
             Event::MediaAdded(added) => {
                 if added.kind != MediaKind::Audio || self.mid.is_some_and(|mid| mid != added.mid) {
@@ -184,7 +187,7 @@ impl Engine {
                     return Err(MediaError::InvalidRoute);
                 }
             }
-            Event::MediaData(data) => return Ok(Some(data)),
+            Event::RtpPacket(packet) => return Ok(Some(packet)),
             Event::Connected
             | Event::IceConnectionStateChange(_)
             | Event::PeerStats(_)
@@ -199,7 +202,7 @@ impl Engine {
             | Event::ChannelData(_)
             | Event::ChannelClose(_)
             | Event::ChannelBufferedAmountLow(_)
-            | Event::RtpPacket(_)
+            | Event::MediaData(_)
             | Event::AppSpecificFeedback(_)
             | Event::RawPacket(_) => return Err(MediaError::Unsupported),
             _ => return Err(MediaError::Unsupported),
@@ -210,11 +213,16 @@ impl Engine {
     fn negotiated(mut self, allowed: &[Codec]) -> Result<WebRtcSession, MediaError> {
         let mid = self.mid.ok_or(MediaError::InvalidRoute)?;
         let selected = {
-            let writer = self.rtc.writer(mid).ok_or(MediaError::InvalidRoute)?;
+            let media = self.rtc.media(mid).ok_or(MediaError::InvalidRoute)?;
             allowed.iter().find_map(|codec| {
-                writer
-                    .payload_params()
-                    .find(|parameters| matches(*codec, parameters.spec().codec))
+                self.rtc
+                    .codec_config()
+                    .params()
+                    .iter()
+                    .find(|parameters| {
+                        matches(*codec, parameters.spec().codec)
+                            && media.remote_pts().contains(&parameters.pt())
+                    })
                     .map(|parameters| (*codec, parameters.pt()))
             })
         }

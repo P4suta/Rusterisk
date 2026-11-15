@@ -1,16 +1,16 @@
-use super::{negotiation_error, WebRtcSession};
+use super::{negotiation_error, transmit_sources::TransmitSources, WebRtcSession};
 use crate::media_link::{Channels, LinkStats};
 use rusterisk_config::Codec;
 use rusterisk_media::{
-    alaw_encode, mulaw_encode, AudioDecoder, AudioFormat, Frame, MediaError, OpusCodec, MAX_PACKET,
+    AudioFormat, Frame, MediaError, RtpPacket, RtpReceiver, RtpSender, MAX_PACKET,
 };
 use std::{
     mem,
     time::{Duration, Instant},
 };
 use str0m::{
-    media::{MediaData, MediaTime},
     net::{Protocol, Receive},
+    rtp::RtpWrite,
     Event, Input, Output,
 };
 use tokio::sync::mpsc;
@@ -21,45 +21,11 @@ pub struct WebRtcStats {
     pub audio: LinkStats,
 }
 
-enum Encoder {
-    Pcmu,
-    Pcma,
-    Opus(OpusCodec),
-}
-
-impl Encoder {
-    fn new(codec: Codec) -> Result<Self, MediaError> {
-        match codec {
-            Codec::Pcmu => Ok(Self::Pcmu),
-            Codec::Pcma => Ok(Self::Pcma),
-            Codec::Opus => Ok(Self::Opus(OpusCodec::new()?)),
-        }
-    }
-
-    fn encode(&mut self, frame: Frame) -> Result<Vec<u8>, MediaError> {
-        match self {
-            Self::Pcmu => Ok(frame
-                .resample(8000)?
-                .samples()
-                .iter()
-                .map(|sample| mulaw_encode(*sample))
-                .collect()),
-            Self::Pcma => Ok(frame
-                .resample(8000)?
-                .samples()
-                .iter()
-                .map(|sample| alaw_encode(*sample))
-                .collect()),
-            Self::Opus(codec) => codec.encode(frame),
-        }
-    }
-}
-
-fn format(codec: str0m::format::Codec) -> Result<AudioFormat, MediaError> {
+fn format(codec: str0m::format::Codec) -> Option<AudioFormat> {
     match codec {
-        str0m::format::Codec::PCMU => Ok(AudioFormat::Pcmu),
-        str0m::format::Codec::PCMA => Ok(AudioFormat::Pcma),
-        str0m::format::Codec::Opus => Ok(AudioFormat::Opus),
+        str0m::format::Codec::PCMU => Some(AudioFormat::Pcmu),
+        str0m::format::Codec::PCMA => Some(AudioFormat::Pcma),
+        str0m::format::Codec::Opus => Some(AudioFormat::Opus),
         str0m::format::Codec::G722
         | str0m::format::Codec::CN
         | str0m::format::Codec::AmrWb
@@ -73,8 +39,8 @@ fn format(codec: str0m::format::Codec) -> Result<AudioFormat, MediaError> {
         | str0m::format::Codec::Rtx
         | str0m::format::Codec::Red
         | str0m::format::Codec::Null
-        | str0m::format::Codec::Unknown => Err(MediaError::Unsupported),
-        _ => Err(MediaError::Unsupported),
+        | str0m::format::Codec::Unknown => None,
+        _ => None,
     }
 }
 
@@ -85,50 +51,118 @@ fn failure(error: impl std::fmt::Display) -> MediaError {
 struct Link {
     session: WebRtcSession,
     channels: Channels,
-    encoder: Encoder,
-    decoder: AudioDecoder,
-    decoded_format: AudioFormat,
+    sender: RtpSender,
+    input: Option<AudioInput>,
+    sources: TransmitSources,
     stats: WebRtcStats,
     started: Instant,
 }
 
+struct AudioInput {
+    format: AudioFormat,
+    payload: u8,
+    source: u32,
+    receiver: RtpReceiver,
+}
+
 impl Link {
-    fn receive(&mut self, data: MediaData) -> Result<(), MediaError> {
+    fn discard_input(&mut self) {
+        if let Some(input) = &mut self.input {
+            input.receiver.discard_pending();
+        }
+    }
+
+    fn receive(&mut self, data: str0m::rtp::RtpPacket) -> Result<(), MediaError> {
         if *self.channels.stop.borrow() || !self.channels.direction.borrow().can_send() {
-            self.decoder.clear();
+            self.discard_input();
             self.stats.audio.dropped += 1;
             return Ok(());
         }
-        let format = format(data.params.spec().codec)?;
-        if format != self.decoded_format {
-            self.decoder.reset(format)?;
-            self.decoded_format = format;
-        }
-        if !data.contiguous {
-            self.decoder.clear();
-        }
-        if let Err(error) = self.decoder.push(data.data.as_ref()) {
-            self.decoder.clear();
+        let mid = self.session.engine.mid.ok_or(MediaError::InvalidRoute)?;
+        let media = self
+            .session
+            .engine
+            .rtc
+            .media(mid)
+            .ok_or(MediaError::InvalidRoute)?;
+        let parameters =
+            self.session
+                .engine
+                .rtc
+                .codec_config()
+                .params()
+                .iter()
+                .find(|parameters| {
+                    parameters.pt() == data.header.payload_type
+                        && media.remote_pts().contains(&parameters.pt())
+                });
+        let Some(parameters) = parameters else {
             self.stats.audio.dropped += 1;
-            return match error {
-                MediaError::InvalidFrame
-                | MediaError::InvalidPacket
-                | MediaError::Capacity
-                | MediaError::Codec(_) => Ok(()),
-                error @ (MediaError::InvalidRoute
-                | MediaError::UnknownStream
-                | MediaError::Unsupported
-                | MediaError::Transport(_)
-                | MediaError::Control(_)) => Err(error),
-            };
+            return Ok(());
+        };
+        let Some(format) = format(parameters.spec().codec) else {
+            self.stats.audio.dropped += 1;
+            return Ok(());
+        };
+        let payload = *data.header.payload_type;
+        let source = *data.header.ssrc;
+        if self.input.as_ref().is_none_or(|input| {
+            input.format != format || input.payload != payload || input.source != source
+        }) {
+            self.input = Some(AudioInput {
+                format,
+                payload,
+                source,
+                receiver: RtpReceiver::new(format, payload)?,
+            });
         }
-        self.stats.audio.packets_received += 1;
-        while let Some(frame) = self.decoder.pop() {
-            match self.channels.incoming.try_send(frame) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => self.stats.audio.dropped += 1,
-                Err(mpsc::error::TrySendError::Closed(_)) => return Err(MediaError::UnknownStream),
+        let packet = RtpPacket::new(
+            payload,
+            data.header.sequence_number,
+            data.header.timestamp,
+            source,
+            &data.payload,
+        )?
+        .with_marker(data.header.marker);
+        let input = self.input.as_mut().ok_or(MediaError::InvalidRoute)?;
+        match input.receiver.push(&packet) {
+            Ok(true) => self.stats.audio.packets_received += 1,
+            Ok(false) | Err(_) => self.stats.audio.dropped += 1,
+        }
+        Ok(())
+    }
+
+    fn playout(&mut self) -> Result<(), MediaError> {
+        let Some(input) = &mut self.input else {
+            return Ok(());
+        };
+        let frame = match input.receiver.pop() {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                input.receiver.discard_pending();
+                self.stats.audio.dropped += 1;
+                return match error {
+                    MediaError::InvalidFrame
+                    | MediaError::InvalidPacket
+                    | MediaError::Capacity
+                    | MediaError::Codec(_) => Ok(()),
+                    error @ (MediaError::InvalidRoute
+                    | MediaError::UnknownStream
+                    | MediaError::Unsupported
+                    | MediaError::Transport(_)
+                    | MediaError::Control(_)) => Err(error),
+                };
             }
+        };
+        if *self.channels.stop.borrow() || !self.channels.direction.borrow().can_send() {
+            self.stats.audio.dropped += 1;
+            return Ok(());
+        }
+        match self.channels.incoming.try_send(frame) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => self.stats.audio.dropped += 1,
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(MediaError::UnknownStream),
         }
         Ok(())
     }
@@ -199,21 +233,28 @@ impl Link {
             self.stats.audio.dropped += 1;
             return Ok(());
         }
-        let payload = self.encoder.encode(frame)?;
         let now = Instant::now();
-        let mid = self.session.engine.mid.ok_or(MediaError::InvalidRoute)?;
+        let packet = self
+            .sender
+            .packet_at(frame, now.duration_since(self.started).as_millis() as u64)?;
+        let source = packet.ssrc().into();
+        let sequence = self.sources.sequence(packet.ssrc(), packet.sequence())?;
         self.session
             .engine
             .rtc
-            .writer(mid)
+            .direct_api()
+            .stream_tx(&source)
             .ok_or(MediaError::InvalidRoute)?
-            .write(
-                self.session.payload,
-                now,
-                MediaTime::from(now.duration_since(self.started)),
-                payload,
-            )
-            .map_err(negotiation_error)?;
+            .write_rtp(
+                RtpWrite::new(
+                    self.session.payload,
+                    sequence,
+                    packet.timestamp(),
+                    now,
+                    packet.payload().to_vec(),
+                )
+                .marker(packet.marker()),
+            );
         self.stats.audio.packets_sent += 1;
         Ok(())
     }
@@ -221,6 +262,11 @@ impl Link {
     async fn serve(&mut self) -> Result<(), MediaError> {
         let mut bytes = [0; MAX_PACKET + 1];
         let handshake_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut playout = tokio::time::interval_at(
+            tokio::time::Instant::now() + Duration::from_millis(40),
+            Duration::from_millis(20),
+        );
+        playout.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             if *self.channels.stop.borrow() || self.channels.incoming.is_closed() {
                 return Ok(());
@@ -232,7 +278,7 @@ impl Link {
             }
             tokio::select! {
                 changed = self.channels.stop.changed() => if changed.is_err() || *self.channels.stop.borrow() { return Ok(()); },
-                changed = self.channels.direction.changed() => { if changed.is_err() { return Ok(()); } self.decoder.clear(); }
+                changed = self.channels.direction.changed() => { if changed.is_err() { return Ok(()); } self.discard_input(); }
                 result = self.session.engine.sockets.data().recv_from(&mut bytes) => {
                     let (size, source) = result.map_err(failure)?;
                     if size > MAX_PACKET { self.stats.audio.dropped += 1; continue; }
@@ -242,6 +288,7 @@ impl Link {
                     self.session.engine.rtc.handle_input(input).map_err(negotiation_error)?;
                 }
                 frame = self.channels.outgoing.recv() => { let Some(frame) = frame else { return Ok(()); }; self.write(frame)?; }
+                _instant = playout.tick() => self.playout()?,
                 command = self.channels.commands.recv(), if !self.channels.commands.is_closed() || !self.channels.commands.is_empty() => { if command.is_some() { return Err(MediaError::Unsupported); } }
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(self.session.engine.timeout)) => self.session.engine.rtc.handle_input(Input::Timeout(Instant::now())).map_err(negotiation_error)?,
                 () = tokio::time::sleep_until(handshake_deadline), if !self.session.engine.rtc.is_connected() => return Err(MediaError::Transport("WebRTC handshake timed out".into())),
@@ -250,7 +297,7 @@ impl Link {
     }
 
     async fn close(&mut self) -> Result<(), MediaError> {
-        self.decoder.clear();
+        self.discard_input();
         self.session.engine.rtc.close().map_err(negotiation_error)?;
         let _alive = self.drain()?;
         self.flush().await
@@ -259,18 +306,30 @@ impl Link {
 
 impl WebRtcSession {
     pub async fn run(self, channels: Channels) -> Result<WebRtcStats, MediaError> {
-        let decoded_format = match self.codec {
+        let format = match self.codec {
             Codec::Pcmu => AudioFormat::Pcmu,
             Codec::Pcma => AudioFormat::Pcma,
             Codec::Opus => AudioFormat::Opus,
         };
-        let encoder = Encoder::new(self.codec)?;
+        let mut session = self;
+        let mid = session.engine.mid.ok_or(MediaError::InvalidRoute)?;
+        let source = session
+            .engine
+            .rtc
+            .direct_api()
+            .stream_tx_by_mid(mid, None)
+            .ok_or(MediaError::InvalidRoute)?
+            .ssrc();
+        let mut seed = [0; 10];
+        getrandom::fill(&mut seed).map_err(failure)?;
+        seed[..4].copy_from_slice(&(*source).to_be_bytes());
+        let sender = RtpSender::new(format, *session.payload, seed)?;
         let mut link = Link {
-            session: self,
+            session,
             channels,
-            encoder,
-            decoder: AudioDecoder::new(decoded_format)?,
-            decoded_format,
+            sender,
+            input: None,
+            sources: TransmitSources::new(),
             stats: WebRtcStats::default(),
             started: Instant::now(),
         };
