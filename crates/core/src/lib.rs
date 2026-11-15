@@ -9,6 +9,7 @@ mod digit_sequence;
 mod digits;
 mod media_tasks;
 mod owned_progress;
+mod peer_media;
 mod recording_clock;
 mod recording_gate;
 mod recording_silence;
@@ -26,6 +27,7 @@ pub use digit_sequence::{DtmfError, DtmfSequence, DtmfTiming, DtmfTone};
 pub use digits::DtmfDigit;
 pub use media_tasks::{MediaTaskError, MediaTaskKind, MediaTaskState, MediaTaskToken, MediaTasks};
 pub use owned_progress::{CallCompletion, CallMilestone, OwnedCallProgress};
+pub use peer_media::PeerMediaDirection;
 pub use recording_clock::RecordingClock;
 pub use recording_gate::{RecordingControl, RecordingGate};
 pub use recording_silence::RecordingSilence;
@@ -134,6 +136,7 @@ pub struct Call {
     media: MediaState,
     connection: MediaConnection,
     mute: AudioGate,
+    peer_direction: PeerMediaDirection,
     bridge: Option<u64>,
     stasis: StasisMembership,
 }
@@ -166,6 +169,7 @@ impl Call {
             media: MediaState::Waiting,
             connection: MediaConnection::Pending,
             mute: AudioGate::Open,
+            peer_direction: PeerMediaDirection::SendReceive,
             bridge: None,
             stasis: StasisMembership::Outside,
         }
@@ -185,9 +189,21 @@ impl Call {
 
     pub const fn audio_gate(self) -> AudioGate {
         match self.media {
-            MediaState::Active => self.mute,
+            MediaState::Active => self.peer_direction.restrict(self.mute),
             MediaState::Waiting | MediaState::Held | MediaState::Released => AudioGate::Closed,
         }
+    }
+
+    pub const fn peer_direction(self) -> PeerMediaDirection {
+        self.peer_direction
+    }
+
+    pub fn with_peer_direction(mut self, direction: PeerMediaDirection) -> Result<Self, CoreError> {
+        if self.state == CallState::Ended {
+            return Err(CoreError::Ended);
+        }
+        self.peer_direction = direction;
+        Ok(self)
     }
 
     pub fn mute(mut self, direction: MuteDirection) -> Result<Self, CoreError> {
