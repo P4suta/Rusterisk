@@ -170,6 +170,7 @@ fn execute() -> Result<(), TaskError> {
         [task] if task == "node-check" => node_check(),
         [task] if task == "check" => {
             run("cargo", &["fmt", "--all", "--", "--check"])?;
+            run("cargo", &["fmt", "--manifest-path", "xtask/fuzz/Cargo.toml", "--", "--check"])?;
             policy()?;
             core_msrv()?;
             node_check()?;
@@ -188,7 +189,9 @@ fn execute() -> Result<(), TaskError> {
                 "cargo",
                 &["check", "--workspace", "--all-targets", "--locked"],
             )?;
-            run("cargo", &["test", "--workspace", "--locked"])
+            run("cargo", &["test", "--workspace", "--locked"])?;
+            run("cargo", &["clippy", "--manifest-path", "xtask/fuzz/Cargo.toml", "--target-dir", "target", "--locked", "--all-targets", "--all-features", "--", "-D", "warnings"])?;
+            run("cargo", &["test", "--manifest-path", "xtask/fuzz/Cargo.toml", "--target-dir", "target", "--locked", "--features", "signaling,media", "--tests"])
         }
         [task] if task == "security" => {
             security::check()?;

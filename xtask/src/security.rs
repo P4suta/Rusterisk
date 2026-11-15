@@ -122,18 +122,23 @@ fn snapshot(root: &Path) -> Result<(), TaskError> {
     if count == 0 {
         return Err(TaskError::Contract("no advisory database inspected".into()));
     }
-    run(
-        "cargo",
-        &[
-            "deny",
-            "--config",
-            config,
-            "--offline",
-            "--locked",
-            "check",
-            "--hide-inclusion-graph",
-        ],
-    )?;
+    for manifest in ["Cargo.toml", "xtask/fuzz/Cargo.toml"] {
+        run(
+            "cargo",
+            &[
+                "deny",
+                "--manifest-path",
+                manifest,
+                "--all-features",
+                "--config",
+                config,
+                "--offline",
+                "--locked",
+                "check",
+                "--hide-inclusion-graph",
+            ],
+        )?;
+    }
     legacy(root)
 }
 

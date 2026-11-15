@@ -20,6 +20,7 @@ security:
 
 fmt:
     cargo fmt --all
+    cargo fmt --manifest-path xtask/fuzz/Cargo.toml
 
 reference-build *arguments="--dry-run":
     cargo run --locked --target-dir target/xtask --package xtask -- reference-build {{ arguments }}
@@ -35,3 +36,6 @@ core-miri *arguments="--dry-run":
 
 core-mutation *arguments="--dry-run":
     cargo run --locked --target-dir target/xtask --package xtask -- core-mutation {{ arguments }}
+
+input-fuzz *arguments="all --dry-run":
+    cargo run --locked --target-dir target/xtask --package xtask -- input-fuzz {{ arguments }}
