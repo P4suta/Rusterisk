@@ -2,6 +2,8 @@ use rusterisk_api::{
     Channel, ChannelId, ChannelState, MediaControlFormat, MediaDirection, MediaFormat,
 };
 use rusterisk_server::{Action, Control, ControlError, Milestone, Signal};
+use rusterisk_server::{Controller, Credentials};
+use std::time::Duration;
 
 fn id(value: &str) -> Result<ChannelId, ControlError> {
     Ok(ChannelId::try_from(value.to_owned())?)
@@ -103,4 +105,92 @@ fn unconnected_media_channels_expire_at_the_reference_originate_deadline(
         Err(ControlError::NotFound(_))
     ));
     Ok(())
+}
+
+#[tokio::test]
+async fn dropped_connection_leases_release_only_their_channel_generation(
+) -> Result<(), ControlError> {
+    let config = rusterisk_config::Config::parse(
+        "[general]\nbindaddr=127.0.0.1\n",
+        "[app]\ntype=user\npassword=test-password\n",
+        "",
+        "",
+        "",
+    )
+    .map_err(|error| ControlError::Adapter(error.to_string()))?;
+    let (controller, runner, _effects) = Controller::new(config, 4);
+    let task = tokio::spawn(runner.run());
+    let credentials = Credentials::new("app".into(), "test-password".into())?;
+    let result = async {
+        let _subscription = controller
+            .subscribe(credentials.clone(), None, "calls".into())
+            .await?;
+        controller
+            .execute(credentials.clone(), None, create("original")?)
+            .await?;
+        assert!(matches!(
+            controller
+                .claim_media_connection(id("original")?, Some("https://refused.example".into()))
+                .await,
+            Err(ControlError::Forbidden)
+        ));
+        let original = controller
+            .claim_media_connection(id("original")?, None)
+            .await?;
+        assert_eq!(original.options.channel_id, id("external")?);
+        assert!(matches!(
+            controller
+                .claim_media_connection(id("original")?, None)
+                .await,
+            Err(ControlError::Conflict(_))
+        ));
+        controller
+            .execute(credentials.clone(), None, Action::Hangup(id("external")?))
+            .await?;
+        controller
+            .execute(credentials.clone(), None, create("replacement")?)
+            .await?;
+        let replacement = controller
+            .claim_media_connection(id("replacement")?, None)
+            .await?;
+        assert_ne!(original.key, replacement.key);
+        drop(original);
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            controller
+                .execute(
+                    credentials.clone(),
+                    None,
+                    Action::GetChannel(id("external")?)
+                )
+                .await?
+                .status,
+            200
+        );
+        drop(replacement);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match controller
+                    .execute(
+                        credentials.clone(),
+                        None,
+                        Action::GetChannel(id("external")?),
+                    )
+                    .await
+                {
+                    Err(ControlError::NotFound(_)) => return Ok::<(), ControlError>(()),
+                    Ok(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    Err(error) => return Err(error),
+                }
+            }
+        })
+        .await
+        .map_err(|error| ControlError::Adapter(error.to_string()))??;
+        Ok(())
+    }
+    .await;
+    controller.shutdown();
+    task.await
+        .map_err(|error| ControlError::Adapter(error.to_string()))??;
+    result
 }

@@ -19,4 +19,6 @@ pub use control::{
 };
 pub(crate) use runner::StoredRecordingOperation;
 pub(crate) use runner::StoredRecordingResponse;
-pub use runner::{Controller, Credentials, Runner, Subscription};
+pub use runner::{
+    ClaimedMediaConnection, Controller, Credentials, MediaConnectionLease, Runner, Subscription,
+};

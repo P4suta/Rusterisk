@@ -9,9 +9,11 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 mod external_admission;
 mod history;
+mod media_connections;
 mod recording_admission;
 mod stored_recordings;
 use history::HistoryRecorder;
+pub use media_connections::{ClaimedMediaConnection, MediaConnectionLease};
 pub(crate) use stored_recordings::Operation as StoredRecordingOperation;
 pub(crate) use stored_recordings::Response as StoredRecordingResponse;
 
@@ -50,6 +52,14 @@ impl Credentials {
 }
 
 enum Request {
+    ClaimMediaConnection {
+        connection_id: rusterisk_api::ChannelId,
+        origin: Option<String>,
+        lifetime: mpsc::Receiver<()>,
+        reply: oneshot::Sender<
+            Result<(CallKey, crate::media_websocket::MediaLinkOptions), ControlError>,
+        >,
+    },
     StoredRecording {
         credentials: Credentials,
         origin: Option<String>,
@@ -125,6 +135,7 @@ pub struct Runner {
     stored_jobs: JoinSet<()>,
     recording_admissions: BTreeMap<rusterisk_core::MediaTaskToken, recording_admission::Pending>,
     external_admissions: BTreeMap<CallKey, external_admission::Pending>,
+    media_leases: BTreeMap<CallKey, mpsc::Receiver<()>>,
 }
 
 pub struct Subscription {
@@ -196,6 +207,7 @@ impl Controller {
                 stored_jobs: JoinSet::new(),
                 recording_admissions: BTreeMap::new(),
                 external_admissions: BTreeMap::new(),
+                media_leases: BTreeMap::new(),
             },
             effect_receiver,
         )
@@ -424,6 +436,12 @@ impl Runner {
 
     fn request(&mut self, request: Request, now_ms: u64) -> Result<(), ControlError> {
         match request {
+            Request::ClaimMediaConnection {
+                connection_id,
+                origin,
+                lifetime,
+                reply,
+            } => self.claim_media_request(connection_id, origin, lifetime, reply),
             Request::StoredRecording {
                 credentials,
                 origin,
@@ -704,6 +722,7 @@ impl Runner {
         }
         self.expire_recording_admissions(now)?;
         self.expire_external_admissions(now)?;
+        self.expire_media_connections(now)?;
         Ok(())
     }
 
@@ -765,6 +784,7 @@ impl Runner {
     }
 
     async fn close(&mut self) -> Result<(), ControlError> {
+        self.media_leases.clear();
         self.close_recording_admissions();
         self.close_external_admissions();
         let result = self
