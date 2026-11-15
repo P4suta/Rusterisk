@@ -80,3 +80,45 @@ fn tls_identifiers_preserve_legacy_peers_and_reject_invalid_media_attributes(
     }
     Ok(())
 }
+
+#[test]
+fn fingerprint_sets_accept_case_insensitive_hashes_and_prefer_the_media_scope(
+) -> Result<(), SipError> {
+    let sha1 = ["00"; 20].join(":");
+    let source = offer().replace(
+        "a=fingerprint:sha-256 ",
+        &format!("a=fingerprint:sha-1 {sha1}\r\na=fingerprint:SHA-256 "),
+    );
+    assert_eq!(WebRtcDescription::parse(&source)?.as_str(), source);
+    let scoped = source.replacen(
+        "m=audio",
+        &format!("a=fingerprint:sha-1 {sha1}\r\nm=audio"),
+        1,
+    );
+    WebRtcDescription::parse(&scoped)?;
+    let unsupported = offer()
+        .lines()
+        .map(|line| {
+            if line.starts_with("a=fingerprint:") {
+                format!("a=fingerprint:sha-1 {sha1}")
+            } else {
+                line.into()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    assert!(matches!(
+        WebRtcDescription::parse(&unsupported),
+        Err(SipError::Unsupported)
+    ));
+    let alternative = format!(
+        "{}a=fingerprint:sha-256 {}\r\n",
+        offer(),
+        ["01"; 32].join(":")
+    );
+    assert!(matches!(
+        WebRtcDescription::parse(&alternative),
+        Err(SipError::Unsupported)
+    ));
+    Ok(())
+}

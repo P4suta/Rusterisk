@@ -1,5 +1,6 @@
 use crate::{SipError, MAX_MESSAGE};
 use std::fmt;
+mod fingerprints;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionSecurity {
@@ -92,23 +93,14 @@ impl WebRtcDescription {
         {
             return Err(SipError::InvalidPacket);
         }
-        let fingerprint = attribute(source, "a=fingerprint:")?
-            .strip_prefix("sha-256 ")
-            .ok_or(SipError::Unsupported)?;
-        let mut octets = 0;
-        for octet in fingerprint.split(':') {
-            if octet.len() != 2 || !octet.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                return Err(SipError::InvalidPacket);
-            }
-            octets += 1;
-        }
+        fingerprints::validate(source)?;
         let setup = match attribute(source, "a=setup:")? {
             "actpass" => DtlsSetup::ActPass,
             "active" => DtlsSetup::Active,
             "passive" => DtlsSetup::Passive,
             _ => return Err(SipError::InvalidPacket),
         };
-        if octets != 32 || !source.lines().any(|line| line == "a=rtcp-mux") {
+        if !source.lines().any(|line| line == "a=rtcp-mux") {
             return Err(SipError::InvalidPacket);
         }
         let mid = attribute(source, "a=mid:")?;
