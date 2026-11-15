@@ -50,6 +50,25 @@ impl Models {
         if depth > 32 {
             return Err(SwaggerError::Capacity);
         }
+        if let Some(branches) = schema.get("anyOf").and_then(Value::as_array) {
+            let is_null =
+                |branch: &&Value| branch.get("type").and_then(Value::as_str) == Some("null");
+            if !optional || branches.len() != 2 || branches.iter().filter(is_null).count() != 1 {
+                return Err(SwaggerError::Schema(path.into()));
+            }
+            let branch = branches
+                .iter()
+                .find(|branch| !is_null(branch))
+                .ok_or_else(|| SwaggerError::Schema(path.into()))?;
+            let mut output = self.property(branch, path, depth + 1, false)?;
+            if let Some(description) = schema.get("description") {
+                output["description"] = description.clone();
+            }
+            if let Some(default) = schema.get("default").filter(|value| !value.is_null()) {
+                output["defaultValue"] = default.clone();
+            }
+            return Ok(output);
+        }
         if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
             let name = reference
                 .strip_prefix("#/components/schemas/")
@@ -233,6 +252,50 @@ mod tests {
     use super::{Models, SwaggerError};
     use serde_json::{json, Map};
     use std::collections::VecDeque;
+
+    #[test]
+    fn optional_references_preserve_enum_values_and_reject_ambiguous_unions(
+    ) -> Result<(), SwaggerError> {
+        let mut definitions = Map::new();
+        let values = crate::json_array([json!("offline"), json!("online")]);
+        definitions.insert(
+            "availability".into(),
+            json!({"type":"string", "enum":values}),
+        );
+        let mut models = Models {
+            definitions,
+            pending: VecDeque::new(),
+            output: Map::new(),
+        };
+        let branches = crate::json_array([
+            json!({"$ref":"#/components/schemas/availability"}),
+            json!({"type":"null"}),
+        ]);
+        let schema = json!({"anyOf":branches, "description":"Endpoint availability"});
+        let property = models.property(&schema, "state", 0, true)?;
+        assert_eq!(property["type"], "string");
+        assert_eq!(property["enum"], values);
+        assert_eq!(property["description"], "Endpoint availability");
+        assert!(matches!(
+            models.property(&schema, "state", 0, false),
+            Err(SwaggerError::Schema(_))
+        ));
+        for branches in [
+            crate::json_array([json!({"type":"null"}), json!({"type":"null"})]),
+            crate::json_array([json!({"type":"string"}), json!({"type":"integer"})]),
+            crate::json_array([
+                json!({"type":"string"}),
+                json!({"type":"integer"}),
+                json!({"type":"null"}),
+            ]),
+        ] {
+            assert!(matches!(
+                models.property(&json!({"anyOf":branches}), "state", 0, true),
+                Err(SwaggerError::Schema(_))
+            ));
+        }
+        Ok(())
+    }
 
     #[test]
     fn optional_primitive_fields_use_omission_and_required_nullable_fields_are_rejected(
