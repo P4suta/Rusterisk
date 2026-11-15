@@ -40,7 +40,7 @@ struct Active {
 
 struct DirectionReply {
     direction: PeerMediaDirection,
-    datagram: Datagram,
+    transmission: transport::DeferredTransmission,
 }
 
 enum DigitDelivery {
@@ -215,16 +215,16 @@ impl Signaling {
                     }
                     call.direction_reply = Some(DirectionReply {
                         direction: peer_direction(*direction),
-                        datagram,
+                        transmission: self.network.defer(listener, datagram)?,
                     });
                 }
             }
         }
         datagrams.retain(|packet| {
             !self.calls.values().any(|call| {
-                call.direction_reply.as_ref().is_some_and(|reply| {
-                    reply.datagram.peer == packet.peer && reply.datagram.bytes == packet.bytes
-                })
+                call.direction_reply
+                    .as_ref()
+                    .is_some_and(|reply| reply.transmission.matches(listener, packet))
             })
         });
         self.transmit(listener, datagrams).await?;
@@ -674,10 +674,10 @@ impl Signaling {
                         .is_some_and(|reply| reply.direction == direction)
                     {
                         let reply = call.direction_reply.take().ok_or(ControlError::Capacity)?;
-                        let listener = call.listener;
                         if applied {
-                            self.transmit(listener, [reply.datagram].into_iter().collect())
-                                .await?;
+                            if !self.network.send_deferred(reply.transmission).await? {
+                                self.notify(Signal::Terminated { key, cause: 41 }).await?;
+                            }
                         } else {
                             self.notify(Signal::Terminated { key, cause: 21 }).await?;
                         }

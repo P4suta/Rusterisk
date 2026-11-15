@@ -38,6 +38,31 @@ pub(super) struct ConnectionKey {
     generation: u64,
 }
 
+pub(super) enum DeferredTransmission {
+    Datagram {
+        listener: usize,
+        packet: Datagram,
+    },
+    Stream {
+        key: ConnectionKey,
+        packet: Datagram,
+    },
+    Closed,
+}
+
+impl DeferredTransmission {
+    pub(super) fn matches(&self, listener: usize, packet: &Datagram) -> bool {
+        let (expected_listener, expected) = match self {
+            Self::Datagram { listener, packet } => (*listener, packet),
+            Self::Stream { key, packet } => (key.listener, packet),
+            Self::Closed => return false,
+        };
+        expected_listener == listener
+            && expected.peer == packet.peer
+            && expected.bytes == packet.bytes
+    }
+}
+
 enum ConnectionState {
     Open,
     Closing(ControlError),
@@ -142,6 +167,58 @@ async fn listen(listeners: &[ListenerSocket]) -> Result<ListenerInput, ControlEr
 }
 
 impl Network {
+    pub(super) fn defer(
+        &self,
+        listener: usize,
+        packet: Datagram,
+    ) -> Result<DeferredTransmission, ControlError> {
+        if packet.bytes.len() > MAX_MESSAGE {
+            return Err(ControlError::Capacity);
+        }
+        match self
+            .listeners
+            .get(listener)
+            .ok_or(ControlError::Invalid("Unknown listener"))?
+        {
+            ListenerSocket::Datagram(_) => Ok(DeferredTransmission::Datagram { listener, packet }),
+            ListenerSocket::Stream(_)
+            | ListenerSocket::Encrypted { .. }
+            | ListenerSocket::WebSocket { .. } => match self.ports.get(&(listener, packet.peer)) {
+                Some(port) if matches!(port.state, ConnectionState::Open) => {
+                    Ok(DeferredTransmission::Stream {
+                        key: port.key,
+                        packet,
+                    })
+                }
+                Some(_) | None => Ok(DeferredTransmission::Closed),
+            },
+        }
+    }
+
+    pub(super) async fn send_deferred(
+        &mut self,
+        deferred: DeferredTransmission,
+    ) -> Result<bool, ControlError> {
+        let (listener, packet) = match deferred {
+            DeferredTransmission::Datagram { listener, packet } => (listener, packet),
+            DeferredTransmission::Stream { key, packet } => {
+                if !self
+                    .ports
+                    .get(&(key.listener, key.peer))
+                    .is_some_and(|port| {
+                        port.key == key && matches!(port.state, ConnectionState::Open)
+                    })
+                {
+                    return Ok(false);
+                }
+                (key.listener, packet)
+            }
+            DeferredTransmission::Closed => return Ok(false),
+        };
+        self.send(listener, packet).await?;
+        Ok(true)
+    }
+
     pub(super) async fn bind(config: &mut Config) -> Result<Self, ControlError> {
         let mut listeners = Vec::with_capacity(config.transports.len());
         for transport in &mut config.transports {
