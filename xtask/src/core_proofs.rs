@@ -1,6 +1,8 @@
 use crate::{process::ProcessError, reference::Step};
 use serde::Deserialize;
 use std::time::Duration;
+mod runner;
+pub use runner::{execute, Execution};
 
 pub const HARNESSES: [&str; 6] = [
     "proofs::terminal_release_is_absorbing",

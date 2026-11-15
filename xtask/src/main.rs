@@ -133,8 +133,16 @@ fn run(program: &str, arguments: &[&str]) -> Result<(), TaskError> {
 }
 
 fn execute() -> Result<(), TaskError> {
-    let arguments: Vec<String> = std::env::args().skip(1).take(4).collect();
+    let arguments: Vec<String> = std::env::args().skip(1).take(5).collect();
     match arguments.as_slice() {
+        [task, mode, flag, image] if task == "core-proofs" && flag == "--image" => {
+            let execution = match mode.as_str() {
+                "--dry-run" => xtask::core_proofs::Execution::DryRun,
+                "--run" => xtask::core_proofs::Execution::Run,
+                _ => return Err(TaskError::Contract("core-proofs requires --dry-run or --run".into())),
+            };
+            xtask::core_proofs::execute(execution, image).map_err(|error| TaskError::Contract(error.to_string()))
+        }
         [task] if task == "interop" => interop::execute(true),
         [task, mode] if task == "interop" && mode == "--dry-run" => interop::execute(false),
         [task, mode] if task == "reference-build" && mode == "--dry-run" => reference_build(false),
@@ -179,7 +187,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|security|reference-build --dry-run|reference-build --run|interop [--dry-run]>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|security|reference-build --dry-run|reference-build --run|interop [--dry-run]|core-proofs <--dry-run|--run> --image <name@sha256:digest>>".into(),
         )),
     }
 }

@@ -26,3 +26,6 @@ reference-build *arguments="--dry-run":
 
 interop *arguments="":
     cargo run --locked --target-dir target/xtask --package xtask -- interop {{ arguments }}
+
+core-proofs *arguments="--dry-run":
+    cargo run --locked --target-dir target/xtask --package xtask -- core-proofs {{ arguments }}
