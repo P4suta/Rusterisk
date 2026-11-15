@@ -13,6 +13,92 @@ pub enum RecordingTarget {
     Bridge(u64),
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{RecordingTarget, Recordings};
+    use crate::storage::{StorageWorker, WorkerError};
+    use rusterisk_api::ChannelId;
+    use rusterisk_core::{MediaTaskKind, MediaTasks};
+    use rusterisk_media::MediaError;
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+
+    fn failure(error: impl std::fmt::Display) -> MediaError {
+        MediaError::Transport(error.to_string())
+    }
+
+    #[test]
+    fn waiting_recordings_expire_at_their_deadline_and_release_their_target(
+    ) -> Result<(), MediaError> {
+        let mut recordings = Recordings::new();
+        let mut tasks = MediaTasks::new(1);
+        let token = tasks
+            .reserve(MediaTaskKind::Recording)
+            .map_err(|_| MediaError::Capacity)?;
+        let (completed, mut completion) = oneshot::channel();
+        recordings.reserve(token, RecordingTarget::Bridge(1), completed)?;
+        let deadline = recordings
+            .captures
+            .get(&token)
+            .ok_or(MediaError::UnknownStream)?
+            .requested
+            + Duration::from_secs(5);
+        recordings.bridges_at(&[], deadline - Duration::from_millis(1))?;
+        assert!(matches!(
+            completion.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+        recordings.bridges_at(&[], deadline)?;
+        assert!(matches!(
+            completion.try_recv().map_err(failure)?,
+            Err(WorkerError::Timeout)
+        ));
+        assert!(tasks.finish(token));
+        let replacement = tasks
+            .reserve(MediaTaskKind::Recording)
+            .map_err(|_| MediaError::Capacity)?;
+        let (completed, _completion) = oneshot::channel();
+        recordings.reserve(replacement, RecordingTarget::Bridge(1), completed)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recording_attachment_checks_expiry_before_the_next_audio_tick(
+    ) -> Result<(), MediaError> {
+        let directory = tempfile::tempdir().map_err(failure)?;
+        let (storage, worker) = StorageWorker::start(directory.path().to_owned())
+            .await
+            .map_err(failure)?;
+        let mut recordings = Recordings::new();
+        let mut tasks = MediaTasks::new(1);
+        let token = tasks
+            .reserve(MediaTaskKind::Recording)
+            .map_err(|_| MediaError::Capacity)?;
+        let (completed, mut completion) = oneshot::channel();
+        recordings.reserve(token, RecordingTarget::Bridge(1), completed)?;
+        let deadline = recordings
+            .captures
+            .get(&token)
+            .ok_or(MediaError::UnknownStream)?
+            .requested
+            + Duration::from_secs(5);
+        let name = ChannelId::try_from("expired".to_owned()).map_err(failure)?;
+        let sink = storage.record(name.clone(), 8000).await.map_err(failure)?;
+        assert!(matches!(
+            recordings.attach_at(token, sink, deadline),
+            Err(MediaError::Transport(_))
+        ));
+        assert!(matches!(
+            completion.try_recv().map_err(failure)?,
+            Err(WorkerError::Timeout)
+        ));
+        let replacement = storage.record(name, 8000).await.map_err(failure)?;
+        replacement.cancel().await.map_err(failure)?;
+        worker.close().await.map_err(failure)?;
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum RecordingEnd {
     Finish,
@@ -181,6 +267,10 @@ impl Recordings {
     }
 
     pub fn bridges(&mut self, frames: &[(u64, Frame)]) -> Result<(), MediaError> {
+        self.bridges_at(frames, Instant::now())
+    }
+
+    fn bridges_at(&mut self, frames: &[(u64, Frame)], now: Instant) -> Result<(), MediaError> {
         let silence = Frame::new(&[0; 960], 48000)?;
         let mut finished = Vec::new();
         let mut expired = Vec::new();
@@ -202,7 +292,7 @@ impl Recordings {
                 }
             }
             if matches!(capture.source, Source::Waiting)
-                && capture.requested.elapsed() >= Duration::from_secs(5)
+                && now.saturating_duration_since(capture.requested) >= Duration::from_secs(5)
             {
                 expired.push(*token);
             }
