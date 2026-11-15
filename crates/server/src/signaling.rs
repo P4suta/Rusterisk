@@ -488,7 +488,7 @@ impl Signaling {
             .iter()
             .find(|transport| transport.name == endpoint.transport)
             .ok_or(ControlError::NotFound("Transport not found"))?;
-        let bind = if endpoint.webrtc && transport.bind.ip().is_unspecified() {
+        let bind = if transport.bind.ip().is_unspecified() {
             let peer = media::destination_peer(
                 &self.listeners[listener].engine,
                 &endpoint.name,
@@ -910,9 +910,7 @@ impl Signaling {
             .pending(key.id.as_str())
             .ok_or(ControlError::NotFound("Incoming offer not found"))?;
         let offered = incoming.session.clone();
-        let bind = if matches!(&offered.security, rusterisk_sip::SessionSecurity::WebRtc(_))
-            && transport.bind.ip().is_unspecified()
-        {
+        let bind = if transport.bind.ip().is_unspecified() {
             media::local_ip(incoming.peer)?
         } else {
             transport.bind.ip()
