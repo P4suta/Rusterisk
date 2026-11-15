@@ -39,10 +39,14 @@ The test command has a five-minute deadline.
 The runner collects reference logs after a test failure and removes its container after every result.
 
 The same Rust client queries both servers.
+An owned Node.js process also uses `ari-client` 2.2.0 to discover operations, subscribe over WebSocket, and compare endpoint and app resources.
+The process has a 30-second deadline and a 128 MiB JavaScript heap limit.
+The fast gate checks the TypeScript fixture with its compiler, ESLint, Biome, and rejecting tests.
+The [historical dependency boundary](legacy-client-dependency-scope.md) scopes the legacy client's advisory and license checks.
 The scenario compares empty channel lists, configured endpoints, static and dynamic routing availability, technology-name case handling, app subscriptions, and missing-resource errors.
 The test normalizes endpoint list order by resource name.
 The test compares endpoint detail queries and error messages without normalization.
 
 The resource scenario doesn't certify call or audio compatibility.
-SIPp scenarios, existing JavaScript clients, calls, received audio, and browser comparisons still require integration work.
+SIPp scenarios, calls, received audio, and browser comparisons still require integration work.
 The capability response keeps `call_verified=false` until the required call and audio comparisons pass.

@@ -61,6 +61,7 @@ Forced process termination and storage fault campaigns still require integration
 
 The local `just check` gate covers formatting, source policy, Rust 1.89 core tests, strict Clippy, type checking, workspace tests, and generated interface contracts.
 The local `just security` gate checks advisories, dependency policy, licenses, sources, and secrets.
+The private historical JavaScript fixture uses a [scoped dependency assessment](legacy-client-dependency-scope.md) that reports its known advisories and rejects unreviewed changes.
 Datagram tests compare received audio through actual sockets and bridges, including peer hold, resume, and mixed packet durations.
 The local `just interop` gate compares endpoint resources, routing availability, app subscriptions, and resource errors with Asterisk 22.9.0.
 The reference distinguishes case-sensitive technology lists from case-insensitive endpoint detail queries.
