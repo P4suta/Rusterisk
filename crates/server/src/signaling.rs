@@ -17,6 +17,7 @@ use tokio::io::ReadBuf;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
+mod recording;
 
 struct Listener {
     name: String,
@@ -65,6 +66,7 @@ pub struct Signaling {
     calls: BTreeMap<CallKey, Active>,
     storage: Option<StoragePort>,
     playbacks: JoinSet<(MediaOwner, MediaTaskToken, Result<(), ControlError>)>,
+    recordings: JoinSet<recording::Completion>,
 }
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -152,6 +154,7 @@ impl Signaling {
             calls: BTreeMap::new(),
             storage: None,
             playbacks: JoinSet::new(),
+            recordings: JoinSet::new(),
         })
     }
 
@@ -459,17 +462,8 @@ impl Signaling {
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
-            Effect::RecordMedia {
-                owner,
-                token,
-                name: _,
-            } => {
-                self.notify(Signal::RecordingAdmitted {
-                    owner,
-                    token,
-                    result: Err(ControlError::Unsupported),
-                })
-                .await?;
+            Effect::RecordMedia { owner, token, name } => {
+                self.start_recording(owner, token, name, now).await?;
             }
             Effect::ControlRecording { token, operation } => {
                 if let Err(error) = self.media.control_recording(token, operation).await {
@@ -839,6 +833,10 @@ impl Signaling {
                     };
                     self.notify(Signal::MediaPlaybackFinished { owner, token, completion }).await?;
                 },
+                result = self.recordings.join_next(), if !self.recordings.is_empty() => {
+                    let completed = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
+                    self.recording_completed(completed).await?;
+                },
                 _instant = tick.tick() => {
                     let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
                     for listener in 0..self.listeners.len() {
@@ -886,6 +884,10 @@ impl Signaling {
                     cleanup = Err(failure(error));
                 }
             }
+        }
+        if let Err(error) = self.finish_recordings().await {
+            tracing::error!(%error, "recording shutdown failed");
+            cleanup = Err(error);
         }
         match (result, cleanup) {
             (Ok(()), Ok(())) => Ok(()),

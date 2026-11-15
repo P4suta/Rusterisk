@@ -1,0 +1,171 @@
+use super::{failure, Signaling};
+use crate::media::{RecordingEnd, RecordingTarget};
+use crate::storage::WorkerError;
+use crate::{ControlError, MediaOwner, Signal};
+use rusterisk_api::ChannelId;
+use rusterisk_core::MediaTaskToken;
+use rusterisk_storage::StorageError;
+use std::time::Duration;
+
+pub(super) struct Completion {
+    owner: MediaOwner,
+    token: MediaTaskToken,
+    result: JobResult,
+}
+
+enum JobResult {
+    Rejected(ControlError),
+    Finished(Result<(), ControlError>),
+}
+
+fn storage_error(error: WorkerError) -> ControlError {
+    if matches!(&error, WorkerError::Storage(StorageError::Exists)) {
+        ControlError::Conflict("Recording already exists")
+    } else if matches!(
+        &error,
+        WorkerError::Capacity | WorkerError::Storage(StorageError::Capacity)
+    ) {
+        ControlError::Capacity
+    } else {
+        failure(error)
+    }
+}
+
+impl Signaling {
+    pub(super) async fn start_recording(
+        &mut self,
+        owner: MediaOwner,
+        token: MediaTaskToken,
+        name: ChannelId,
+        now: u64,
+    ) -> Result<(), ControlError> {
+        let admitted = async {
+            let storage = self.storage.clone().ok_or(ControlError::Unsupported)?;
+            if self.recordings.len() >= 64 {
+                return Err(ControlError::Capacity);
+            }
+            let target = match &owner {
+                MediaOwner::Channel(key) => {
+                    self.answer(key, now).await?;
+                    RecordingTarget::Channel(key.clone())
+                }
+                MediaOwner::Bridge { generation, .. } => RecordingTarget::Bridge(*generation),
+            };
+            let completed = self
+                .media
+                .reserve_recording(target, token)
+                .await
+                .map_err(failure)?;
+            Ok((storage, completed))
+        }
+        .await;
+        let (storage, completed) = match admitted {
+            Ok(admitted) => admitted,
+            Err(error) => {
+                self.notify(Signal::RecordingAdmitted {
+                    owner,
+                    token,
+                    result: Err(error),
+                })
+                .await?;
+                return Ok(());
+            }
+        };
+        let media = self.media.clone();
+        let controller = self.controller.clone();
+        self.recordings.spawn(async move {
+            let admission = async {
+                let sink = storage.record(name, 8000).await.map_err(storage_error)?;
+                media.attach_recording(token, sink).await.map_err(failure)?;
+                if !controller.is_stopping() { controller.signal(Signal::RecordingAdmitted { owner: owner.clone(), token, result: Ok(()) }).await?; }
+                Ok(())
+            }.await;
+            let result = match admission {
+                Ok(()) => JobResult::Finished(completed.await.map_err(failure).and_then(|result| result.map_err(storage_error))),
+                Err(error) => {
+                    if let Err(cleanup) = media.stop_recording(token, RecordingEnd::Cancel) { tracing::warn!(?owner, ?token, %cleanup, "recording admission cleanup deferred"); }
+                    JobResult::Rejected(error)
+                }
+            };
+            Completion { owner, token, result }
+        });
+        Ok(())
+    }
+
+    pub(super) async fn recording_completed(
+        &self,
+        completed: Completion,
+    ) -> Result<(), ControlError> {
+        let Completion {
+            owner,
+            token,
+            result,
+        } = completed;
+        match result {
+            JobResult::Rejected(error) => {
+                tracing::warn!(?owner, ?token, %error, "recording admission failed");
+                self.notify(Signal::RecordingAdmitted {
+                    owner,
+                    token,
+                    result: Err(error),
+                })
+                .await
+            }
+            JobResult::Finished(result) => {
+                if let Err(error) = &result {
+                    tracing::warn!(?owner, ?token, %error, "recording storage failed");
+                }
+                self.notify(Signal::RecordingFinished {
+                    owner,
+                    token,
+                    result,
+                })
+                .await
+            }
+        }
+    }
+
+    pub(super) async fn finish_recordings(&mut self) -> Result<(), ControlError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut failure_result = Ok(());
+        while !self.recordings.is_empty() {
+            match tokio::time::timeout_at(deadline, self.recordings.join_next()).await {
+                Ok(Some(Ok(Completion {
+                    owner,
+                    token,
+                    result,
+                }))) => match result {
+                    JobResult::Finished(Ok(())) => {}
+                    JobResult::Rejected(error) => {
+                        tracing::debug!(?owner, ?token, %error, "recording admission ended during shutdown")
+                    }
+                    JobResult::Finished(Err(error)) => {
+                        tracing::error!(?owner, ?token, %error, "recording failed before shutdown");
+                        if failure_result.is_ok() {
+                            failure_result = Err(error);
+                        }
+                    }
+                },
+                Ok(None) => {}
+                Ok(Some(Err(error))) => {
+                    if failure_result.is_ok() {
+                        failure_result = Err(failure(error));
+                    }
+                }
+                Err(error) => {
+                    self.recordings.abort_all();
+                    while let Some(result) = self.recordings.join_next().await {
+                        match result {
+                            Ok(_) => {}
+                            Err(error) => {
+                                tracing::debug!(%error, "recording task cancelled during shutdown")
+                            }
+                        }
+                    }
+                    return Err(failure(error));
+                }
+            }
+        }
+        failure_result
+    }
+}
