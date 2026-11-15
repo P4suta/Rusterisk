@@ -11,3 +11,10 @@ item = "EventKind"
 lint = "clippy::large_enum_variant"
 adr = "docs/adr/keep-related-channel-snapshots-in-owned-events.md"
 rationale = "Keep related channel snapshots inline."
+
+[[exceptions]]
+path = "crates/server/src/media_websocket/buffer.rs"
+item = "BufferItem"
+lint = "clippy::large_enum_variant"
+adr = "docs/adr/bound-websocket-media-queues-by-message-admission.md"
+rationale = "Keep bounded frames inline with ordered markers."

@@ -6,6 +6,7 @@ pub mod http;
 pub mod listener;
 pub mod media;
 pub mod media_link;
+pub mod media_websocket;
 pub mod rtp;
 mod runner;
 pub mod runtime;
