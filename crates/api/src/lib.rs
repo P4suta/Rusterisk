@@ -2,8 +2,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 mod media_uri;
+mod recording_policy;
 mod swagger;
 pub use media_uri::{InvalidMediaUri, MediaUri};
+pub use recording_policy::{InvalidRecordingIfExists, RecordingIfExists};
 pub use swagger::SwaggerError;
 
 pub const REFERENCE_VERSION: &str = "22.9.0";
@@ -994,17 +996,25 @@ fn path_parameters(path: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-fn parameters(operation: &Operation, legacy: bool) -> Vec<Value> {
+fn parameters(operation: &Operation, format: Option<DiscoveryFormat>) -> Vec<Value> {
     let paths = path_parameters(operation.path).map(|name| (name, true, "path"));
     let queries = operation
         .parameters
         .iter()
         .map(|name| (name.trim_end_matches('!'), name.ends_with('!'), "query"));
-    paths.chain(queries).filter(|(name, _, _)| legacy || *name != "variables").map(|(name, required, location)| {
+    paths.chain(queries).filter(|(name, _, _)| format.is_some() || *name != "variables").map(|(name, required, location)| {
         let location = if name == "variables" { "body" } else { location };
-        if legacy {
-            json!({"name": name, "paramType": location, "required": required, "allowMultiple": false, "dataType": if name == "variables" { "containers" } else { "string" }, "type": "string", "description": name})
-        } else { json!({"name": name, "in": location, "required": required, "schema": {"type": "string"}}) }
+        let schema = if name == "ifExists" { schemars::schema_for!(RecordingIfExists).to_value() } else { json!({"type": "string"}) };
+        if let Some(format) = format {
+            let mut parameter = json!({"name": name, "paramType": location, "required": required, "allowMultiple": false, "dataType": if name == "variables" { "containers" } else { "string" }, "type": "string", "description": name});
+            if let Some(values) = schema.get("enum") {
+                match format {
+                    DiscoveryFormat::Asterisk => parameter["allowableValues"] = json!({"valueType": "LIST", "values": values}),
+                    DiscoveryFormat::Standard => parameter["enum"] = values.clone(),
+                }
+            }
+            parameter
+        } else { json!({"name": name, "in": location, "required": required, "schema": schema}) }
     }).collect()
 }
 
@@ -1020,7 +1030,7 @@ pub fn openapi() -> Value {
         responses.insert(operation.success_status.to_string(), response);
         let entry = paths.entry(operation.path).or_insert_with(|| json!({}));
         let security = json_array([json!({"basicAuth": []})]);
-        entry[operation.method.as_str()] = json!({"operationId": operation.id, "parameters": parameters(operation, false), "responses": responses, "security": security});
+        entry[operation.method.as_str()] = json!({"operationId": operation.id, "parameters": parameters(operation, None), "responses": responses, "security": security});
         if operation.parameters.contains(&"variables") {
             entry[operation.method.as_str()]["requestBody"] = json!({"content": {"application/json": {"schema": {"type": "object", "properties": {"variables": {"type": "object", "additionalProperties": {"type": "string"}}}}}}});
         }
@@ -1085,7 +1095,7 @@ pub fn swagger_for(resource: &str, format: DiscoveryFormat) -> Result<Value, Swa
             error
         })
         .collect();
-        let mut definition = json!({"nickname": operation.nickname, "summary": operation.nickname, "parameters": parameters(operation, true)});
+        let mut definition = json!({"nickname": operation.nickname, "summary": operation.nickname, "parameters": parameters(operation, Some(format))});
         match format {
             DiscoveryFormat::Asterisk => {
                 definition["httpMethod"] = Value::String(operation.method.upper().into());
