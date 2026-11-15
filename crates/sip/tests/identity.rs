@@ -81,6 +81,75 @@ fn reauthenticate(wire: &str, count: u32) -> Result<String, SipError> {
 }
 
 #[test]
+fn reordered_via_parameters_replay_the_same_transaction_without_another_call(
+) -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (incoming, wire, _) = authenticated_invite(&mut engine)?;
+    let id = incoming_id(&incoming)?;
+    let repeated = wire.replace(";branch=z9hG4bK-2;rport", ";rport;branch=z9hG4bK-2");
+    let replayed = engine.receive(repeated.as_bytes(), peer, 2)?;
+    assert_eq!(replayed.datagrams[0].bytes, incoming.datagrams[0].bytes);
+    assert!(replayed.events.is_empty());
+    let answered = engine.answer(&id, 7, "127.0.0.1:10000".parse()?, 3)?;
+    let replayed = engine.receive(repeated.as_bytes(), peer, 4)?;
+    assert_eq!(replayed.datagrams[0].bytes, answered.datagrams[0].bytes);
+    assert!(replayed.events.is_empty());
+    Ok(())
+}
+
+#[test]
+fn method_case_does_not_alias_a_cached_invitation() -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (incoming, wire, _) = authenticated_invite(&mut engine)?;
+    let id = incoming_id(&incoming)?;
+    let changed = wire
+        .replacen("INVITE", "invite", 1)
+        .replace("CSeq: 2 INVITE", "CSeq: 2 invite");
+    assert!(engine
+        .receive(
+            wire.replace("CSeq: 2 INVITE", "CSeq: 2 invite").as_bytes(),
+            peer,
+            2
+        )
+        .is_err());
+    let unsupported = engine.receive(changed.as_bytes(), peer, 2)?;
+    assert!(unsupported.datagrams[0].bytes.starts_with(b"SIP/2.0 501"));
+    assert!(unsupported.events.is_empty());
+    assert!(engine.pending(&id).is_some());
+    assert_eq!(
+        engine.receive(wire.as_bytes(), peer, 3)?.datagrams[0].bytes,
+        incoming.datagrams[0].bytes
+    );
+    Ok(())
+}
+
+#[test]
+fn cached_transactions_still_require_complete_request_headers() -> Result<(), SipError> {
+    let mut engine = Engine::new(config()?, [7; 32]);
+    let peer = "127.0.0.1:5061".parse()?;
+    let (incoming, wire, _) = authenticated_invite(&mut engine)?;
+    let id = incoming_id(&incoming)?;
+    for header in ["From:", "To:", "Call-ID:", "CSeq:", "Via:", "Max-Forwards:"] {
+        let malformed: String = wire
+            .split_inclusive("\r\n")
+            .filter(|line| !line.starts_with(header))
+            .collect();
+        assert!(
+            engine.receive(malformed.as_bytes(), peer, 2).is_err(),
+            "{header}"
+        );
+    }
+    assert!(engine.pending(&id).is_some());
+    assert_eq!(
+        engine.receive(wire.as_bytes(), peer, 3)?.datagrams[0].bytes,
+        incoming.datagrams[0].bytes
+    );
+    Ok(())
+}
+
+#[test]
 fn independent_dialogs_with_the_same_call_identifier_preserve_their_invitations_and_cleanup(
 ) -> Result<(), SipError> {
     let mut engine = Engine::new(config()?, [7; 32]);

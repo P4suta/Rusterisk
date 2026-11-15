@@ -16,10 +16,12 @@ use subtle::ConstantTimeEq;
 mod incoming;
 mod info;
 mod outgoing;
+mod request_identity;
 mod telephone;
 mod transactions;
 pub use incoming::RejectReason;
 pub use outgoing::Outbound;
+use request_identity::RequestIdentity;
 pub use telephone::DtmfFormat;
 
 pub const MAX_MESSAGE: usize = 16384;
@@ -396,7 +398,7 @@ pub struct Engine {
     seed: [u8; 32],
     serial: u64,
     nonces: BTreeMap<String, Nonce>,
-    cache: BTreeMap<String, Cached>,
+    cache: BTreeMap<RequestIdentity, Cached>,
     pending: BTreeMap<String, PendingInvite>,
     contacts: BTreeMap<String, (SocketAddr, u64)>,
     outgoing: BTreeMap<String, outgoing::Outgoing>,
@@ -577,7 +579,7 @@ impl Engine {
         self.cache
             .retain(|_, value| value.expires.is_none_or(|expires| expires > now));
         self.contacts.retain(|_, (_, expires)| *expires > now);
-        let request = match SipMessage::try_from(bytes)? {
+        let mut request = match SipMessage::try_from(bytes)? {
             SipMessage::Request(request) => request,
             SipMessage::Response(response) => {
                 if self.transactions.receive(&response, peer, now)? {
@@ -589,8 +591,8 @@ impl Engine {
                 return self.receive_response(response, peer, now);
             }
         };
+        request_identity::prepare_request(&mut request, bytes)?;
         if request.headers.iter().count() > 64
-            || request.cseq_header()?.typed()?.method != request.method
             || request
                 .headers
                 .iter()
@@ -606,14 +608,9 @@ impl Engine {
                 events: Vec::new(),
             });
         }
-        let key = format!(
-            "{peer}:{}:{}:{}",
-            request.call_id_header()?.value(),
-            request.cseq_header()?.value(),
-            request.top_via_header()?.value()
-        );
+        let key = RequestIdentity::new(&request, peer)?;
         if let Some(cached) = self.cache.get(&key) {
-            if cached.request == request && cached.peer == peer {
+            if key.accepts(cached, &request) {
                 return Ok(Output::response(peer, cached.bytes.clone()));
             }
             return Ok(Output::response(
@@ -823,7 +820,8 @@ impl Engine {
             return Ok(false);
         }
         for cached in self.cache.values() {
-            if cached.request.call_id_header()?.value() == request.call_id_header()?.value()
+            if cached.request.method == request.method
+                && cached.request.call_id_header()?.value() == request.call_id_header()?.value()
                 && cached.request.from_header()?.typed()?.tag()
                     == request.from_header()?.typed()?.tag()
                 && cached.request.cseq_header()?.typed()? == request.cseq_header()?.typed()?
@@ -836,7 +834,7 @@ impl Engine {
 
     fn cache_reply(
         &mut self,
-        key: String,
+        key: RequestIdentity,
         request: Request,
         peer: SocketAddr,
         now: u64,

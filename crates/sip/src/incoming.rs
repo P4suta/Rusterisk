@@ -1,5 +1,6 @@
 use crate::{
-    response, Datagram, DialogReply, Engine, Output, PendingInvite, Session, SipError, SipEvent,
+    response, Datagram, DialogReply, Engine, Output, PendingInvite, RequestIdentity, Session,
+    SipError, SipEvent,
 };
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, Request, SipMessage};
 use std::net::SocketAddr;
@@ -192,7 +193,7 @@ impl Engine {
 
     pub(crate) fn incoming_cancel(
         &mut self,
-        key: String,
+        key: RequestIdentity,
         request: Request,
         peer: SocketAddr,
         now: u64,
