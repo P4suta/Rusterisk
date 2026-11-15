@@ -456,7 +456,38 @@ pub struct Operation {
     pub parameters: &'static [&'static str],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParameterKind {
+    String,
+    Integer,
+    Boolean,
+    StringList,
+    Variables,
+    Filter,
+}
+
 impl Operation {
+    pub fn parameter_kind(&self, name: &str) -> Option<ParameterKind> {
+        if !self
+            .parameters
+            .iter()
+            .any(|parameter| parameter.trim_end_matches('!') == name)
+        {
+            return None;
+        }
+        Some(match name {
+            "timeout" | "priority" | "before" | "between" | "duration" | "after"
+            | "maxDurationSeconds" | "maxSilenceSeconds" | "offsetms" | "skipms" => {
+                ParameterKind::Integer
+            }
+            "beep" | "subscribeAll" => ParameterKind::Boolean,
+            "channel" | "eventSource" | "media" => ParameterKind::StringList,
+            "variables" => ParameterKind::Variables,
+            "filter" => ParameterKind::Filter,
+            _ => ParameterKind::String,
+        })
+    }
+
     pub fn matches(&self, method: &str, path: &str) -> bool {
         if self.method.upper() != method {
             return false;
@@ -1116,6 +1147,28 @@ fn path_parameters(path: &str) -> impl Iterator<Item = &str> {
     })
 }
 
+fn parameter_schema(name: &str, kind: ParameterKind) -> Value {
+    match name {
+        "ifExists" => schemars::schema_for!(RecordingIfExists).to_value(),
+        "maxDurationSeconds" | "maxSilenceSeconds" => {
+            schemars::schema_for!(RecordingSeconds).to_value()
+        }
+        "terminateOn" => schemars::schema_for!(RecordingTermination).to_value(),
+        _ => match kind {
+            ParameterKind::String => json!({"type": "string"}),
+            ParameterKind::Integer => json!({"type": "integer", "format": "int64"}),
+            ParameterKind::Boolean => json!({"type": "boolean"}),
+            ParameterKind::StringList => {
+                json!({"type": "array", "items": {"type": "string"}, "maxItems": 32})
+            }
+            ParameterKind::Variables => {
+                json!({"type": "object", "additionalProperties": {"type": "string"}, "maxProperties": 128})
+            }
+            ParameterKind::Filter => json!({"type": "object"}),
+        },
+    }
+}
+
 fn parameters(operation: &Operation, format: Option<DiscoveryFormat>) -> Vec<Value> {
     let paths = path_parameters(operation.path).map(|name| (name, true, "path"));
     let queries = operation
@@ -1124,19 +1177,13 @@ fn parameters(operation: &Operation, format: Option<DiscoveryFormat>) -> Vec<Val
         .map(|name| (name.trim_end_matches('!'), name.ends_with('!'), "query"));
     paths.chain(queries).filter(|(name, _, _)| format.is_some() || !matches!(*name, "variables" | "filter")).map(|(name, required, location)| {
         let location = if matches!(name, "variables" | "filter") { "body" } else { location };
-        let schema = match name {
-            "ifExists" => schemars::schema_for!(RecordingIfExists).to_value(),
-            "maxDurationSeconds" | "maxSilenceSeconds" => schemars::schema_for!(RecordingSeconds).to_value(),
-            "terminateOn" => schemars::schema_for!(RecordingTermination).to_value(),
-            "beep" => schemars::schema_for!(bool).to_value(),
-            "filter" => json!({"type": "object"}),
-            "eventSource" => json!({"type": "array", "items": {"type": "string"}, "maxItems": 32}),
-            _ => json!({"type": "string"}),
-        };
+        let parameter_kind = operation.parameter_kind(name).unwrap_or(ParameterKind::String);
+        let multiple = parameter_kind == ParameterKind::StringList;
+        let schema = parameter_schema(name, parameter_kind);
         if let Some(format) = format {
-            let kind = if name == "eventSource" && format == DiscoveryFormat::Asterisk { "string" } else { schema["type"].as_str().unwrap_or("string") };
+            let kind = if multiple && format == DiscoveryFormat::Asterisk { "string" } else { schema["type"].as_str().unwrap_or("string") };
             let data_type = if name == "variables" { "containers" } else if kind == "integer" && format == DiscoveryFormat::Asterisk { "int" } else { kind };
-            let mut parameter = json!({"name": name, "paramType": location, "required": required, "allowMultiple": name == "eventSource", "dataType": data_type, "type": kind, "description": name});
+            let mut parameter = json!({"name": name, "paramType": location, "required": required, "allowMultiple": multiple, "dataType": data_type, "type": kind, "description": name});
             for field in ["format", "minimum", "maximum", "items", "maxItems"] {
                 if let Some(value) = schema.get(field) { parameter[field] = value.clone(); }
             }
@@ -1146,11 +1193,11 @@ fn parameters(operation: &Operation, format: Option<DiscoveryFormat>) -> Vec<Val
                     DiscoveryFormat::Standard => parameter["enum"] = values.clone(),
                 }
             }
-            if name == "eventSource" && format == DiscoveryFormat::Standard { parameter["collectionFormat"] = "csv".into(); }
+            if multiple && format == DiscoveryFormat::Standard { parameter["collectionFormat"] = "csv".into(); }
             parameter
         } else {
             let mut parameter = json!({"name": name, "in": location, "required": required, "schema": schema});
-            if name == "eventSource" { parameter["style"] = "form".into(); parameter["explode"] = false.into(); }
+            if multiple { parameter["style"] = "form".into(); parameter["explode"] = false.into(); }
             parameter
         }
     }).collect()
@@ -1171,8 +1218,23 @@ pub fn openapi() -> Value {
         let entry = paths.entry(operation.path).or_insert_with(|| json!({}));
         let security = json_array([json!({"basicAuth": []})]);
         entry[operation.method.as_str()] = json!({"operationId": operation.id, "parameters": parameters(operation, None), "responses": responses, "security": security});
-        if operation.parameters.contains(&"variables") {
-            entry[operation.method.as_str()]["requestBody"] = json!({"content": {"application/json": {"schema": {"type": "object", "properties": {"variables": {"type": "object", "additionalProperties": {"type": "string"}}}}}}});
+        if !operation.parameters.is_empty()
+            && matches!(
+                operation.method,
+                Method::Post | Method::Put | Method::Delete
+            )
+        {
+            let properties: Map<String, Value> = operation
+                .parameters
+                .iter()
+                .filter_map(|name| {
+                    let name = name.trim_end_matches('!');
+                    operation
+                        .parameter_kind(name)
+                        .map(|kind| (name.to_owned(), parameter_schema(name, kind)))
+                })
+                .collect();
+            entry[operation.method.as_str()]["requestBody"] = json!({"content": {"application/json": {"schema": {"type": "object", "properties": properties}}}});
         }
         if operation.parameters.contains(&"filter") {
             entry[operation.method.as_str()]["requestBody"] = json!({"content": {"application/json": {"schema": {"$ref": "#/components/schemas/EventFilterRequest"}}}});
