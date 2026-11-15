@@ -1,10 +1,10 @@
-use super::{CallKey, Control, ControlError, Effect, Outcome, VariableAccess};
+use super::{CallKey, Control, ControlError, Effect, Outcome, PlaybackCompletion, VariableAccess};
 use rusterisk_api::{ChannelId, ChannelState, EventKind};
 use rusterisk_config::{expand_variables, Application, Dialplan, ExpansionError};
 use rusterisk_core::{
     AnswerProgress, AnswerStatus, CallState, DialForkOutcome, DialplanContinuation,
     DialplanDispatch, DialplanError, DialplanInstruction, DialplanMachine, DialplanState,
-    DialplanToken, StasisMembership,
+    DialplanToken, MediaTaskKind, MediaTaskToken, StasisMembership,
 };
 
 pub(super) struct DialplanFrame {
@@ -12,6 +12,18 @@ pub(super) struct DialplanFrame {
     machine: Option<DialplanMachine>,
     answer: Option<AnswerProgress>,
     pub(super) dial: Option<super::dial::DialBranches>,
+    playback: Option<PlaybackWait>,
+}
+
+enum PlaybackWait {
+    Answering {
+        token: DialplanToken,
+        name: String,
+    },
+    Playing {
+        token: DialplanToken,
+        media: MediaTaskToken,
+    },
 }
 
 impl DialplanFrame {
@@ -33,6 +45,7 @@ impl DialplanFrame {
             machine: None,
             answer: None,
             dial: None,
+            playback: None,
         }
     }
 }
@@ -56,6 +69,74 @@ fn position(program: &Dialplan, context: &str, extension: &str, priority: u16) -
 }
 
 impl Control {
+    pub(super) fn finish_dialplan_playback(
+        &mut self,
+        key: &CallKey,
+        media: MediaTaskToken,
+        completion: PlaybackCompletion,
+    ) -> Result<Outcome, ControlError> {
+        let Some(entry) = self
+            .channels
+            .get_mut(&key.id)
+            .filter(|entry| entry.call.generation() == key.generation)
+        else {
+            return Ok(Outcome::empty());
+        };
+        let Some(frame) = &mut entry.dialplan else {
+            return Ok(Outcome::empty());
+        };
+        let Some(PlaybackWait::Playing {
+            token,
+            media: expected,
+        }) = &frame.playback
+        else {
+            return Ok(Outcome::empty());
+        };
+        if *expected != media {
+            return Ok(Outcome::empty());
+        }
+        if !entry.media_tasks.finish(media)
+            || !frame
+                .machine
+                .as_mut()
+                .is_some_and(|machine| machine.complete(*token, DialplanContinuation::Advance))
+        {
+            return Err(ControlError::Conflict("Playback completion changed"));
+        }
+        frame.playback = None;
+        let status = match completion {
+            PlaybackCompletion::Completed => "SUCCESS",
+            PlaybackCompletion::Failed => "FAILED",
+        };
+        entry
+            .variables
+            .insert("PLAYBACKSTATUS".into(), status.into());
+        Ok(Outcome::empty())
+    }
+
+    fn queue_dialplan_playback(
+        &mut self,
+        key: &CallKey,
+        token: DialplanToken,
+        name: String,
+        outcome: &mut Outcome,
+    ) -> Result<PlaybackWait, ControlError> {
+        let entry = self
+            .channels
+            .get_mut(&key.id)
+            .ok_or(ControlError::NotFound("Channel not found"))?;
+        let media = entry.media_tasks.reserve(MediaTaskKind::Playback)?;
+        if let Err(error) = entry.media_tasks.start(media) {
+            let _released = entry.media_tasks.finish(media);
+            return Err(error.into());
+        }
+        outcome.effects.push(Effect::Playback {
+            key: key.clone(),
+            token: media,
+            media: name,
+        });
+        Ok(PlaybackWait::Playing { token, media })
+    }
     pub(super) fn continue_dialplan(
         &mut self,
         id: &ChannelId,
@@ -228,6 +309,7 @@ impl Control {
             machine: Some(machine),
             answer: None,
             dial: None,
+            playback: None,
         });
         self.advance_dialplan(key, now, timestamp)
     }
@@ -348,6 +430,20 @@ impl Control {
                 {
                     AnswerStatus::Pending => return Ok(()),
                     AnswerStatus::Ready => {
+                        if let Some(playback) = frame.playback.take() {
+                            match playback {
+                                PlaybackWait::Answering { token, name } => {
+                                    frame.playback = Some(
+                                        self.queue_dialplan_playback(key, token, name, outcome)?,
+                                    );
+                                    frame.answer = None;
+                                    return Ok(());
+                                }
+                                PlaybackWait::Playing { .. } => {
+                                    return Err(ControlError::Conflict("Playback answer changed"))
+                                }
+                            }
+                        }
                         let DialplanState::Awaiting { token, .. } = machine.state() else {
                             return Err(ControlError::Conflict(
                                 "Answer lost its dialplan operation",
@@ -562,7 +658,30 @@ impl Control {
                         Err(error) => return Err(error),
                     }
                 }
-                Application::Playback(_) => return Err(ControlError::Unsupported),
+                Application::Playback(name) => {
+                    let name = self.expand(key, &name)?;
+                    self.set_dialplan_location(key, "Playback", name.clone())?;
+                    let entry = self
+                        .channels
+                        .get(&key.id)
+                        .ok_or(ControlError::NotFound("Channel not found"))?;
+                    if entry.call.state() == CallState::Up {
+                        frame.playback = Some(self.queue_dialplan_playback(
+                            key,
+                            execution.token,
+                            name,
+                            outcome,
+                        )?);
+                    } else {
+                        frame.playback = Some(PlaybackWait::Answering {
+                            token: execution.token,
+                            name,
+                        });
+                        frame.answer = Some(AnswerProgress::new());
+                        outcome.effects.push(Effect::Answer { key: key.clone() });
+                    }
+                    return Ok(());
+                }
             }
             if !machine.complete(execution.token, DialplanContinuation::Advance) {
                 return Err(ControlError::Conflict("Dialplan completion changed"));

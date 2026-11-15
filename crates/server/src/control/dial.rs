@@ -459,6 +459,7 @@ impl Control {
                     dialplan: Some(super::dialplan::DialplanFrame::dormant(
                         self.dialplan_program.clone(),
                     )),
+                    media_tasks: rusterisk_core::MediaTasks::new(generation),
                 },
             );
             outcome.effects.push(Effect::Start {

@@ -1,8 +1,8 @@
 use rusterisk_api::{Bridge, Caller, Channel, ChannelId, ChannelState, Dialplan, Event, EventKind};
 use rusterisk_core::{
     AudioGate, Call, CallEvent, CallState, DtmfCommand, DtmfDigit, DtmfError, DtmfOutbox,
-    DtmfTiming, DtmfToken, MediaConnection, MediaState, MuteDirection, StasisApplication,
-    StasisMembership, Transition,
+    DtmfTiming, DtmfToken, MediaConnection, MediaState, MediaTaskError, MediaTaskToken, MediaTasks,
+    MuteDirection, StasisApplication, StasisMembership, Transition,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -77,6 +77,18 @@ impl From<DtmfError> for ControlError {
             DtmfError::Clock => Self::Adapter("Digit timer overflow".into()),
             DtmfError::Unsupported => Self::Unsupported,
             DtmfError::Ended => Self::InvalidState("Channel in invalid state"),
+        }
+    }
+}
+impl From<MediaTaskError> for ControlError {
+    fn from(error: MediaTaskError) -> Self {
+        match error {
+            MediaTaskError::Capacity => Self::Capacity,
+            MediaTaskError::Ended => Self::InvalidState("Media owner ended"),
+            MediaTaskError::Unknown
+            | MediaTaskError::Order
+            | MediaTaskError::State
+            | MediaTaskError::Recording => Self::Conflict("Media task in invalid state"),
         }
     }
 }
@@ -233,6 +245,11 @@ impl Action {
 
 #[derive(Clone, Debug)]
 pub enum Effect {
+    Playback {
+        key: CallKey,
+        token: MediaTaskToken,
+        media: String,
+    },
     Dtmf {
         key: CallKey,
         command: DtmfCommand,
@@ -276,6 +293,11 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
+    PlaybackFinished {
+        key: CallKey,
+        token: MediaTaskToken,
+        completion: PlaybackCompletion,
+    },
     DtmfReady {
         key: CallKey,
         events: u16,
@@ -297,6 +319,12 @@ pub enum Signal {
         key: CallKey,
         cause: u16,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaybackCompletion {
+    Completed,
+    Failed,
 }
 
 #[derive(Debug)]
@@ -351,6 +379,7 @@ struct ChannelEntry {
     variables: BTreeMap<String, String>,
     dtmf: Option<DtmfOutbox>,
     dialplan: Option<DialplanFrame>,
+    media_tasks: MediaTasks,
 }
 
 impl ChannelEntry {
@@ -564,6 +593,7 @@ impl Control {
                 variables: BTreeMap::new(),
                 dtmf: None,
                 dialplan: Some(DialplanFrame::dormant(self.dialplan_program.clone())),
+                media_tasks: MediaTasks::new(call.generation()),
             },
         );
         Ok(outcome)
@@ -804,6 +834,7 @@ impl Control {
                         variables: BTreeMap::new(),
                         dtmf: None,
                         dialplan: Some(DialplanFrame::dormant(self.dialplan_program.clone())),
+                        media_tasks: MediaTasks::new(generation),
                     },
                 );
                 Ok(outcome)
@@ -1038,13 +1069,15 @@ impl Control {
             .ok_or(ControlError::NotFound("Channel not found"))?;
         access.check(entry.call.stasis())?;
         if let Some(value) = &value {
-            let system_variables = ["STASISSTATUS", "DIALSTATUS"]
+            let system_variables = ["STASISSTATUS", "DIALSTATUS", "PLAYBACKSTATUS"]
                 .into_iter()
                 .filter(|name| entry.variables.contains_key(*name))
                 .count();
             let user_variables = entry.variables.len() - system_variables;
-            if !matches!(variable.as_str(), "STASISSTATUS" | "DIALSTATUS")
-                && user_variables >= 64
+            if !matches!(
+                variable.as_str(),
+                "STASISSTATUS" | "DIALSTATUS" | "PLAYBACKSTATUS"
+            ) && user_variables >= 64
                 && !entry.variables.contains_key(&variable)
             {
                 return Err(ControlError::Capacity);
@@ -1186,6 +1219,8 @@ impl Control {
             }
         }
         entry.call = entry.call.apply(CallEvent::Hangup).call();
+        let released = entry.media_tasks.cancel();
+        tracing::debug!(channel = %id, generation = entry.call.generation(), tasks = released.iter().flatten().count(), "channel media tasks released");
         if let Some(outbox) = &mut entry.dtmf {
             outbox.cancel();
         }
@@ -1295,6 +1330,11 @@ impl Control {
         now: u64,
     ) -> Result<Outcome, ControlError> {
         match signal {
+            Signal::PlaybackFinished {
+                key,
+                token,
+                completion,
+            } => self.finish_dialplan_playback(&key, token, completion),
             Signal::DtmfReady { key, events } => {
                 if let Some(entry) = self
                     .channels

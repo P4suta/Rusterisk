@@ -155,6 +155,84 @@ fn assignments_expand_current_values_and_keep_variables_with_their_call() -> Res
 }
 
 #[test]
+fn playback_answers_then_waits_for_its_own_completion_before_resuming() -> Result<(), ControlError>
+{
+    use rusterisk_server::{Milestone, PlaybackCompletion, Signal};
+    for completion in [PlaybackCompletion::Completed, PlaybackCompletion::Failed] {
+        let mut control = Control::new(4);
+        control.subscribe("calls")?;
+        let key = incoming(&mut control, "playback")?;
+        let program = Dialplan::parse("[internal]\nexten => 200,1,Playback(welcome)\nsame => n,Stasis(calls,${PLAYBACKSTATUS})\n").map_err(failure)?;
+        let started = control.start_dialplan(&key, program, 0, "now")?;
+        assert!(
+            matches!(&started.effects[..], [Effect::Answer { key: answered }] if answered == &key)
+        );
+        for milestone in [Milestone::Answered, Milestone::MediaConnected] {
+            control.signal(
+                Signal::Milestone {
+                    key: key.clone(),
+                    milestone,
+                },
+                "later",
+            )?;
+        }
+        let playing = control.tick_dialplans(10, "later")?;
+        let [Effect::Playback {
+            key: target,
+            token,
+            media,
+        }] = &playing.effects[..]
+        else {
+            return Err(ControlError::Unsupported);
+        };
+        assert_eq!(target, &key);
+        assert_eq!(media, "welcome");
+        let token = *token;
+        assert!(control.tick_dialplans(1000, "later")?.effects.is_empty());
+        control.signal(
+            Signal::PlaybackFinished {
+                key: key.clone(),
+                token,
+                completion,
+            },
+            "later",
+        )?;
+        let resumed = control.tick_dialplans(1001, "later")?;
+        let status = match completion {
+            PlaybackCompletion::Completed => "SUCCESS",
+            PlaybackCompletion::Failed => "FAILED",
+        };
+        assert!(
+            matches!(&resumed.events[1].kind, EventKind::StasisStart { args, .. } if args == &[status])
+        );
+        assert!(control
+            .signal(
+                Signal::PlaybackFinished {
+                    key: key.clone(),
+                    token,
+                    completion
+                },
+                "later"
+            )?
+            .events
+            .is_empty());
+        control.apply(Action::Hangup(key.id.clone()), "later", 1002)?;
+        assert!(control
+            .signal(
+                Signal::PlaybackFinished {
+                    key,
+                    token,
+                    completion
+                },
+                "later"
+            )?
+            .effects
+            .is_empty());
+    }
+    Ok(())
+}
+
+#[test]
 fn answer_suspends_until_the_response_and_media_or_its_deadline() -> Result<(), ControlError> {
     for receive_media in [false, true] {
         let mut control = Control::new(4);

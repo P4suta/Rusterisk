@@ -540,6 +540,15 @@ impl Signaling {
                     self.notify(Signal::Terminated { key, cause: 21 }).await?;
                 }
             }
+            Effect::Playback { key, token, media } => {
+                tracing::warn!(channel = %key.id, generation = key.generation, ?token, media, "playback storage is unavailable");
+                self.notify(Signal::PlaybackFinished {
+                    key,
+                    token,
+                    completion: crate::PlaybackCompletion::Failed,
+                })
+                .await?;
+            }
             Effect::Release { key } => {
                 if let Some(call) = self.calls.remove(&key) {
                     let output = self.terminate(call.listener, &key, now).map_err(failure)?;
