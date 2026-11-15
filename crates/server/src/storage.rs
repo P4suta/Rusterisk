@@ -9,11 +9,13 @@ mod history;
 mod playback;
 pub use history::HistoryReceipt;
 mod recording;
+mod stored;
 use playback::PlaybackSet;
 pub use playback::{PlaybackMedia, PlaybackSource};
 pub use recording::RecordingSink;
 use recording::{RecordingKey, RecordingSet};
 use rusterisk_media::Frame;
+use stored::StoredCommand;
 
 #[derive(Debug)]
 pub enum WorkerError {
@@ -80,17 +82,6 @@ enum Command {
         id: ChannelId,
         reply: oneshot::Sender<Result<CallOutcome, StorageError>>,
     },
-    Recordings {
-        reply: oneshot::Sender<Result<Vec<StoredRecording>, StorageError>>,
-    },
-    Recording {
-        name: ChannelId,
-        reply: oneshot::Sender<Result<StoredRecording, StorageError>>,
-    },
-    DeleteRecording {
-        name: ChannelId,
-        reply: oneshot::Sender<Result<(), StorageError>>,
-    },
     Record {
         name: ChannelId,
         rate: u32,
@@ -113,6 +104,7 @@ enum Command {
 #[derive(Clone)]
 pub struct StoragePort {
     commands: mpsc::Sender<Command>,
+    stored: mpsc::Sender<StoredCommand>,
     stop: watch::Receiver<bool>,
     wake: mpsc::Sender<()>,
 }
@@ -179,19 +171,19 @@ impl StoragePort {
 
     pub async fn recordings(&self) -> Result<Vec<StoredRecording>, WorkerError> {
         let (reply, response) = oneshot::channel();
-        self.send(Command::Recordings { reply })?;
+        self.send_stored(StoredCommand::List { reply })?;
         receive(response).await
     }
 
     pub async fn recording(&self, name: ChannelId) -> Result<StoredRecording, WorkerError> {
         let (reply, response) = oneshot::channel();
-        self.send(Command::Recording { name, reply })?;
+        self.send_stored(StoredCommand::Get { name, reply })?;
         receive(response).await
     }
 
     pub async fn delete_recording(&self, name: ChannelId) -> Result<(), WorkerError> {
         let (reply, response) = oneshot::channel();
-        self.send(Command::DeleteRecording { name, reply })?;
+        self.send_stored(StoredCommand::Delete { name, reply })?;
         receive(response).await
     }
 }
@@ -267,21 +259,6 @@ fn command(
                 respond(reply, store.call_outcome(id.as_str()));
             }
         }
-        Command::Recordings { reply } => {
-            if !reply.is_closed() {
-                respond(reply, store.recordings());
-            }
-        }
-        Command::Recording { name, reply } => {
-            if !reply.is_closed() {
-                respond(reply, store.recording(name.as_str()));
-            }
-        }
-        Command::DeleteRecording { name, reply } => {
-            if !reply.is_closed() {
-                respond(reply, store.delete_recording(name.as_str()));
-            }
-        }
         Command::Record {
             name,
             rate,
@@ -314,10 +291,33 @@ fn command(
     }
 }
 
+fn drain_commands(
+    store: &mut Store,
+    recordings: &mut RecordingSet,
+    playbacks: &mut PlaybackSet,
+    commands: &mut mpsc::Receiver<Command>,
+) {
+    for _ in 0..64 {
+        match commands.try_recv() {
+            Ok(next) => {
+                recordings.pump();
+                playbacks.pump();
+                command(store, recordings, playbacks, next);
+                recordings.pump();
+                playbacks.pump();
+            }
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                break
+            }
+        }
+    }
+}
+
 fn serve(
     mut store: Store,
     root: PathBuf,
     mut commands: mpsc::Receiver<Command>,
+    mut stored: mpsc::Receiver<StoredCommand>,
     mut wakes: mpsc::Receiver<()>,
     stop: watch::Receiver<bool>,
 ) {
@@ -326,10 +326,12 @@ fn serve(
     loop {
         if *stop.borrow() {
             commands.close();
-            while let Ok(next) = commands.try_recv() {
+            stored.close();
+            drain_commands(&mut store, &mut recordings, &mut playbacks, &mut commands);
+            while let Ok(next) = stored.try_recv() {
                 recordings.pump();
                 playbacks.pump();
-                command(&mut store, &mut recordings, &mut playbacks, next);
+                stored::execute(&mut store, next);
             }
             recordings.pump();
             playbacks.pump();
@@ -338,12 +340,14 @@ fn serve(
         if !recordings.is_preparing() && wakes.blocking_recv().is_none() {
             break;
         }
-        for _ in 0..64 {
-            match commands.try_recv() {
+        drain_commands(&mut store, &mut recordings, &mut playbacks, &mut commands);
+        for _ in 0..16 {
+            drain_commands(&mut store, &mut recordings, &mut playbacks, &mut commands);
+            match stored.try_recv() {
                 Ok(next) => {
                     recordings.pump();
                     playbacks.pump();
-                    command(&mut store, &mut recordings, &mut playbacks, next);
+                    stored::execute(&mut store, next);
                     recordings.pump();
                     playbacks.pump();
                 }
@@ -370,12 +374,14 @@ impl StorageWorker {
             return Err(WorkerError::Invalid);
         }
         let (commands, receiver) = mpsc::channel(64);
+        let (stored, stored_receiver) = mpsc::channel(16);
         let (wake, wakes) = mpsc::channel(1);
         let (stop, stopped) = watch::channel(false);
         let (ready, startup) = oneshot::channel();
         let (completed, completion) = oneshot::channel();
         let port = StoragePort {
             commands: commands.clone(),
+            stored,
             stop: stopped.clone(),
             wake: wake.clone(),
         };
@@ -385,7 +391,7 @@ impl StorageWorker {
                 match Store::open(&root) {
                     Ok(store) => {
                         if ready.send(Ok(())).is_ok() {
-                            serve(store, root, receiver, wakes, stopped);
+                            serve(store, root, receiver, stored_receiver, wakes, stopped);
                         }
                     }
                     Err(error) => {
@@ -457,20 +463,111 @@ impl Drop for StorageWorker {
 
 #[cfg(test)]
 mod tests {
-    use super::{Command, StoragePort, StorageWorker, WorkerError};
+    use super::{serve, Command, StoragePort, StorageWorker, StoredCommand, WorkerError};
     use rusterisk_api::ChannelId;
     use rusterisk_storage::Store;
     use std::time::Duration;
     use tokio::sync::{mpsc, watch};
 
     #[test]
+    fn call_admission_precedes_stored_deletion_during_service_and_shutdown(
+    ) -> Result<(), WorkerError> {
+        for stopping in [false, true] {
+            let directory = tempfile::tempdir()?;
+            let path =
+                rusterisk_storage::Recorder::create(directory.path(), "saved", 8000)?.finish()?;
+            let store = Store::open(directory.path())?;
+            let (commands, receiver) = mpsc::channel(64);
+            let (stored, stored_receiver) = mpsc::channel(16);
+            let (wake, wakes) = mpsc::channel(1);
+            let (_stop, stopped) = watch::channel(stopping);
+            let (deleted, deletion) = tokio::sync::oneshot::channel();
+            let name = ChannelId::try_from("saved".to_owned()).map_err(|_| WorkerError::Invalid)?;
+            stored
+                .try_send(StoredCommand::Delete {
+                    name: name.clone(),
+                    reply: deleted,
+                })
+                .map_err(|_| WorkerError::Capacity)?;
+            let (_frames, input) = mpsc::channel(3);
+            let (_lifetime, lifetime) = tokio::sync::oneshot::channel();
+            let (reply, admission) = tokio::sync::oneshot::channel();
+            commands
+                .try_send(Command::Record {
+                    name,
+                    rate: 8000,
+                    policy: rusterisk_api::RecordingIfExists::Fail,
+                    input,
+                    lifetime,
+                    reply,
+                })
+                .map_err(|_| WorkerError::Capacity)?;
+            wake.try_send(()).map_err(|_| WorkerError::Capacity)?;
+            drop(commands);
+            drop(stored);
+            drop(wake);
+            serve(
+                store,
+                directory.path().to_owned(),
+                receiver,
+                stored_receiver,
+                wakes,
+                stopped,
+            );
+            assert!(matches!(
+                admission.blocking_recv().map_err(|_| WorkerError::Closed)?,
+                Err(rusterisk_storage::StorageError::Exists)
+            ));
+            deletion
+                .blocking_recv()
+                .map_err(|_| WorkerError::Closed)??;
+            assert!(!path.exists());
+            assert!(!directory.path().join("recordings/saved.partial").exists());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stored_recording_requests_preserve_all_call_storage_command_slots() -> Result<(), WorkerError>
+    {
+        let (commands, receiver) = mpsc::channel(64);
+        let (stored, stored_receiver) = mpsc::channel(16);
+        let (_stop, stopped) = watch::channel(false);
+        let (wake, _notifications) = mpsc::channel(1);
+        let port = StoragePort {
+            commands: commands.clone(),
+            stored,
+            stop: stopped,
+            wake,
+        };
+        let mut responses = Vec::new();
+        for _ in 0..16 {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            port.send_stored(StoredCommand::List { reply })?;
+            responses.push(response);
+        }
+        assert_eq!(commands.capacity(), 64);
+        assert!(receiver.is_empty());
+        assert_eq!(stored_receiver.len(), 16);
+        let (reply, _response) = tokio::sync::oneshot::channel();
+        assert!(matches!(
+            port.send_stored(StoredCommand::List { reply }),
+            Err(WorkerError::Capacity)
+        ));
+        assert_eq!(responses.len(), 16);
+        Ok(())
+    }
+
+    #[test]
     fn audio_wake_notifications_do_not_consume_storage_command_capacity() -> Result<(), WorkerError>
     {
         let (commands, receiver) = mpsc::channel(64);
+        let (stored, _stored_receiver) = mpsc::channel(16);
         let (_stop, stopped) = watch::channel(false);
         let (wake, notifications) = mpsc::channel(1);
         let port = StoragePort {
             commands,
+            stored,
             stop: stopped,
             wake,
         };
@@ -480,7 +577,11 @@ mod tests {
         assert_eq!(receiver.len(), 0);
         assert_eq!(notifications.len(), 1);
         let (reply, _response) = tokio::sync::oneshot::channel();
-        port.send(Command::Recordings { reply })?;
+        port.send(Command::Start {
+            id: ChannelId::try_from("call".to_owned()).map_err(|_| WorkerError::Invalid)?,
+            timestamp: "start".into(),
+            reply,
+        })?;
         assert_eq!(receiver.len(), 1);
         Ok(())
     }
@@ -489,17 +590,23 @@ mod tests {
     async fn queued_storage_work_is_bounded_before_the_worker_accepts_more(
     ) -> Result<(), WorkerError> {
         let (commands, receiver) = mpsc::channel(64);
+        let (stored, _stored_receiver) = mpsc::channel(16);
         let (stop, stopped) = watch::channel(false);
         let (wake, _notifications) = mpsc::channel(1);
         let port = StoragePort {
             commands: commands.clone(),
+            stored,
             stop: stopped,
             wake,
         };
         for _ in 0..64 {
             let (reply, _response) = tokio::sync::oneshot::channel();
             commands
-                .try_send(Command::Recordings { reply })
+                .try_send(Command::Start {
+                    id: ChannelId::try_from("call".to_owned()).map_err(|_| WorkerError::Invalid)?,
+                    timestamp: "start".into(),
+                    reply,
+                })
                 .map_err(|_| WorkerError::Capacity)?;
         }
         let id = ChannelId::try_from("refused".to_owned()).map_err(|_| WorkerError::Invalid)?;

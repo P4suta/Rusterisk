@@ -421,10 +421,12 @@ mod tests {
     async fn an_overflow_is_terminal_even_when_audio_capacity_becomes_available(
     ) -> Result<(), WorkerError> {
         let (commands, _receiver) = mpsc::channel(64);
+        let (stored, _stored_receiver) = mpsc::channel(16);
         let (_stop, stopped) = watch::channel(false);
         let (wake, _notifications) = mpsc::channel(1);
         let port = StoragePort {
             commands,
+            stored,
             stop: stopped,
             wake,
         };
