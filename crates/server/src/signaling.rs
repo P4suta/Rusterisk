@@ -9,7 +9,7 @@ use rusterisk_config::{Codec, Config, Dtmf, Protocol};
 use rusterisk_core::{AudioGate, DtmfCommand, MediaTaskToken, PeerMediaDirection};
 use rusterisk_media::{AudioFormat, AudioTarget, Gate, TelephoneFormat};
 use rusterisk_sip::{Datagram, Engine, Outbound, Output, RejectReason, SipEvent, MAX_MESSAGE};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::task::Poll;
 use std::time::{Duration, Instant};
@@ -17,6 +17,7 @@ use tokio::io::ReadBuf;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
+mod external_media;
 #[cfg(test)]
 mod negotiation_tests;
 mod recording;
@@ -72,6 +73,7 @@ pub struct Signaling {
     notices: mpsc::Receiver<MediaNotice>,
     listeners: Vec<Listener>,
     calls: BTreeMap<CallKey, Active>,
+    external_media: BTreeSet<CallKey>,
     storage: Option<StoragePort>,
     playbacks: JoinSet<(MediaOwner, MediaTaskToken, Result<(), ControlError>)>,
     recordings: JoinSet<recording::Completion>,
@@ -169,6 +171,7 @@ impl Signaling {
             notices,
             listeners,
             calls: BTreeMap::new(),
+            external_media: BTreeSet::new(),
             storage: None,
             playbacks: JoinSet::new(),
             recordings: JoinSet::new(),
@@ -460,7 +463,7 @@ impl Signaling {
     }
 
     async fn admit(&mut self, listener: usize, incoming: IncomingCall) -> Result<(), ControlError> {
-        if self.calls.len() >= 64 {
+        if self.calls.len() + self.external_media.len() >= 64 {
             return Err(ControlError::Capacity);
         }
         let dtmf = self
@@ -491,7 +494,7 @@ impl Signaling {
         timeout: Option<u32>,
         now: u64,
     ) -> Result<(), ControlError> {
-        if self.calls.len() >= 64 {
+        if self.calls.len() + self.external_media.len() >= 64 {
             return Err(ControlError::Capacity);
         }
         let name = endpoint
@@ -554,12 +557,27 @@ impl Signaling {
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
-            Effect::ConnectExternalRtp { key, .. } => {
+            Effect::ConnectExternalRtp { key, target } => {
+                let result = self.connect_external_rtp(key.clone(), target).await;
+                if let Err(operation) = &result {
+                    self.external_media.remove(&key);
+                    if let Err(cleanup) = self.media.release(key.clone()) {
+                        return Err(ControlError::Adapter(format!("External media admission failed: {operation}, cleanup failed: {cleanup}")));
+                    }
+                }
+                let admitted = result.is_ok();
                 self.notify(Signal::ExternalRtpAdmitted {
-                    key,
-                    result: Err(ControlError::Unsupported),
+                    key: key.clone(),
+                    result,
                 })
-                .await?
+                .await?;
+                if admitted {
+                    self.notify(Signal::Milestone {
+                        key,
+                        milestone: Milestone::Answered,
+                    })
+                    .await?;
+                }
             }
             Effect::RecordMedia {
                 owner,
@@ -718,6 +736,7 @@ impl Signaling {
                 .control_playback(token, operation)
                 .map_err(failure)?,
             Effect::Release { key } => {
+                self.external_media.remove(&key);
                 if let Some(call) = self.calls.remove(&key) {
                     let output = self.terminate(call.listener, &key, now).map_err(failure)?;
                     self.transmit(call.listener, output.datagrams).await?;
@@ -757,7 +776,9 @@ impl Signaling {
         media: Result<PlaybackMedia, ControlError>,
     ) -> Result<(), ControlError> {
         let available = match &owner {
-            MediaOwner::Channel(key) => self.calls.contains_key(key),
+            MediaOwner::Channel(key) => {
+                self.calls.contains_key(key) || self.external_media.contains(key)
+            }
             MediaOwner::Bridge { .. } => true,
         };
         match &self.storage {
@@ -825,6 +846,9 @@ impl Signaling {
     }
 
     async fn answer(&mut self, key: &CallKey, now: u64) -> Result<(), ControlError> {
+        if self.external_media.contains(key) {
+            return Ok(());
+        }
         let call = self
             .calls
             .get(key)
@@ -955,6 +979,7 @@ impl Signaling {
                     Some(MediaNotice::Dtmf { key, tone }) => self.notify(Signal::DtmfReceived { key, digit: tone.digit, duration_ms: tone.duration_ms }).await?,
                     Some(MediaNotice::Connected { key }) => self.notify(Signal::Milestone { key, milestone: Milestone::MediaConnected }).await?,
                     Some(MediaNotice::Stopped { key, result }) => {
+                        self.external_media.remove(&key);
                         if let Err(error) = result { tracing::warn!(channel = %key.id.as_str(), generation = key.generation, %error, "media stopped"); }
                         self.notify(Signal::Terminated { key, cause: 16 }).await?;
                     }
