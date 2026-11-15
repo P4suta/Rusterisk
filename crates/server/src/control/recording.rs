@@ -1,8 +1,6 @@
 use super::{application_name, CallKey, Control, ControlError, Effect, MediaOwner, Outcome};
 use crate::media::RecordingEnd;
-use rusterisk_api::{
-    ChannelId, EventKind, LiveRecording, RecordingOptions, RecordingState, RecordingTermination,
-};
+use rusterisk_api::{ChannelId, EventKind, LiveRecording, RecordingOptions, RecordingState};
 use rusterisk_core::{
     MediaTaskKind, MediaTaskToken, RecordingControl, RecordingGate, StasisApplication,
     StasisMembership,
@@ -151,10 +149,7 @@ impl Control {
         options: RecordingOptions,
         application: Option<StasisApplication>,
     ) -> Result<Outcome, ControlError> {
-        if options.beep
-            || options.max_silence_seconds.seconds() != 0
-            || options.terminate_on != RecordingTermination::None
-        {
+        if options.beep || options.max_silence_seconds.seconds() != 0 {
             return Err(ControlError::Unsupported);
         }
         if self.recordings.contains_key(&name) {
