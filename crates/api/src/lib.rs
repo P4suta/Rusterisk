@@ -745,7 +745,7 @@ pub const OPERATIONS: &[Operation] = &[
         Post,
         "/channels/{channelId}/play",
         "Playback",
-        ["media!", "lang", "playbackId"],
+        ["media!", "lang", "offsetms", "skipms", "playbackId"],
         201
     ),
     operation!(
@@ -754,7 +754,7 @@ pub const OPERATIONS: &[Operation] = &[
         Post,
         "/channels/{channelId}/play/{playbackId}",
         "Playback",
-        ["media!", "lang"],
+        ["media!", "lang", "offsetms", "skipms"],
         201
     ),
     operation!(
@@ -849,7 +849,7 @@ pub const OPERATIONS: &[Operation] = &[
         Post,
         "/bridges/{bridgeId}/play",
         "Playback",
-        ["media!", "playbackId", "lang"],
+        ["media!", "playbackId", "lang", "offsetms", "skipms"],
         201
     ),
     operation!(
@@ -858,7 +858,7 @@ pub const OPERATIONS: &[Operation] = &[
         Post,
         "/bridges/{bridgeId}/play/{playbackId}",
         "Playback",
-        ["media!", "lang"],
+        ["media!", "lang", "offsetms", "skipms"],
         201
     ),
     operation!(
@@ -1200,6 +1200,10 @@ fn parameter_schema(name: &str, kind: ParameterKind) -> Value {
             json!({"type": "array", "items": schemars::schema_for!(InfoSection).to_value(), "maxItems": 32})
         }
         "ifExists" => schemars::schema_for!(RecordingIfExists).to_value(),
+        "offsetms" | "skipms" => json!({
+            "type": "integer", "format": "int32", "minimum": 0, "maximum": i32::MAX,
+            "default": if name == "offsetms" { 0 } else { 3000 },
+        }),
         "maxDurationSeconds" | "maxSilenceSeconds" => {
             schemars::schema_for!(RecordingSeconds).to_value()
         }
@@ -1237,6 +1241,7 @@ fn parameters(operation: &Operation, format: Option<DiscoveryFormat>) -> Vec<Val
             for field in ["format", "minimum", "maximum", "items", "maxItems"] {
                 if let Some(value) = schema.get(field) { parameter[field] = value.clone(); }
             }
+            if let Some(value) = schema.get("default") { parameter["defaultValue"] = value.clone(); }
             if let Some(values) = schema.get("enum").or_else(|| {
                 (multiple && format == DiscoveryFormat::Asterisk)
                     .then(|| schema.get("items").and_then(|items| items.get("enum")))
