@@ -13,6 +13,7 @@ RUN apt-get update \
         libspeex-dev=1.2.1-3 libspeexdsp-dev=1.2.1-3 libopus-dev=1.5.2-2 \
         libspandsp-dev=0.0.6+dfsg-2.2 libgsm1-dev=1.0.22-1+b2 \
         libsndfile1-dev=1.2.2-2+deb13u1 libncurses-dev=6.5+20250216-2 python3=3.13.5-1 \
+        cmake=3.31.6-2 libgtest-dev=1.16.0-1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /usr/src
@@ -21,6 +22,20 @@ RUN curl --fail --location --max-time 120 --output asterisk.tar.gz \
     && printf '%s  %s\n' 5fd0e623d7415faa5999c1d5797721a3ab8992cbe33d49faac7d948635df94cc asterisk.tar.gz | sha256sum --check --strict \
     && tar --extract --gzip --file asterisk.tar.gz \
     && rm asterisk.tar.gz
+
+RUN curl --fail --location --max-time 120 --output sipp.tar.gz \
+        https://github.com/SIPp/sipp/releases/download/v3.8.0/sipp-3.8.0.tar.gz \
+    && printf '%s  %s\n' a3e3993bf9369caaae1f5366507d429acb9669dcf678cfacfd01c907102f74c3 sipp.tar.gz | sha256sum --check --strict \
+    && tar --extract --gzip --file sipp.tar.gz \
+    && cmake -S /usr/src/sipp-3.8.0 -B /usr/src/sipp-build \
+        -DCMAKE_BUILD_TYPE=Release -DUSE_SCTP=OFF -DUSE_PCAP=OFF -DUSE_GSL=OFF \
+        -DUSE_LUA=OFF -DUSE_SYSTEM_PUGIXML=OFF -DUSE_SYSTEM_GTEST=ON \
+    && timeout 300 cmake --build /usr/src/sipp-build --parallel 2 --target sipp sipp_unittest \
+    && timeout 120 ctest --test-dir /usr/src/sipp-build --output-on-failure --timeout 30 \
+    && install -m 755 /usr/src/sipp-build/sipp /usr/local/bin/sipp \
+    && if /usr/local/bin/sipp -v > /tmp/sipp-version.txt; then false; else test "$?" -eq 99; fi \
+    && grep --fixed-strings --line-regexp ' SIPp v3.8.0-TLS.' /tmp/sipp-version.txt \
+    && rm -rf /usr/src/sipp-3.8.0 /usr/src/sipp-build /usr/src/sipp.tar.gz /tmp/sipp-version.txt
 
 WORKDIR /usr/src/asterisk-22.9.0
 RUN timeout 300 ./configure --prefix=/usr --sbindir=/usr/sbin --sysconfdir=/etc --localstatedir=/var \
