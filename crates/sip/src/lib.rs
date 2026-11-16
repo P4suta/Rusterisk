@@ -16,6 +16,7 @@ mod media_direction;
 mod outgoing;
 mod peer_lifetime;
 mod registrar;
+mod registration_client;
 mod request_identity;
 mod session_description;
 mod stream_framing;
@@ -30,6 +31,9 @@ pub use contact::{
 pub use destination::{Destination, StaticTarget, TargetHost};
 pub use incoming::RejectReason;
 pub use outgoing::Outbound;
+pub use registration_client::{
+    RegistrationIdentity, RegistrationTransaction, RegistrationTransactionEvent,
+};
 use request_identity::RequestIdentity;
 pub use session_description::{DtlsSetup, SessionSecurity, WebRtcDescription};
 pub use stream_framing::{SipStreamDecoder, StreamFramingError, StreamItem};
