@@ -1,5 +1,5 @@
 use super::{AssuranceTreeError, CapturedAssuranceTree};
-use crate::core_assurance::CapturedAssurance;
+use crate::core_assurance::{CapturedAssurance, FieldMutation};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -181,4 +181,82 @@ fn shared_tree_rejects_linked_working_files_directories_and_input_roots() -> io:
         ));
         Ok(())
     })
+}
+
+#[test]
+fn field_trees_change_only_the_authoritative_selected_assignment() -> io::Result<()> {
+    for mutation in FieldMutation::ALL {
+        using_fixture(|fixture| {
+            let tree = CapturedAssuranceTree::read(&fixture.project).map_err(io::Error::other)?;
+            tree.write(&fixture.original, &fixture.working)
+                .map_err(io::Error::other)?;
+            let field = fixture.working.with_file_name(mutation.label());
+            tree.write_field(&field, mutation)
+                .map_err(io::Error::other)?;
+            let source = CapturedAssurance::read(&fixture.project.join("crates/core"))
+                .map_err(io::Error::other)?;
+            for (path, bytes) in source.inputs() {
+                if path == Path::new("src/lib.rs") {
+                    let original = std::str::from_utf8(bytes).map_err(io::Error::other)?;
+                    assert_eq!(
+                        fs::read(field.join(path))?,
+                        mutation
+                            .apply(original)
+                            .map_err(io::Error::other)?
+                            .as_bytes()
+                    );
+                } else if path.starts_with("src") || path.starts_with("tests") {
+                    assert_eq!(fs::read(field.join(path))?, bytes);
+                }
+            }
+            for path in ["Cargo.toml", "Cargo.lock"] {
+                assert_eq!(
+                    fs::read(field.join(path))?,
+                    fs::read(fixture.working.join(path))?
+                );
+            }
+            tree.check_field(&fixture.original, &field, mutation)
+                .map_err(io::Error::other)?;
+            assert!(tree.check(&fixture.original, &field).is_err());
+            for other in FieldMutation::ALL {
+                if other != mutation {
+                    assert!(tree.check_field(&fixture.original, &field, other).is_err());
+                }
+            }
+            fs::write(field.join("Cargo.toml"), b"changed")?;
+            assert!(tree
+                .check_field(&fixture.original, &field, mutation)
+                .is_err());
+            fs::write(field.join("Cargo.toml"), source.normalized())?;
+            let path = field.join("src/unexpected.rs");
+            fs::write(&path, b" ")?;
+            assert!(tree
+                .check_field(&fixture.original, &field, mutation)
+                .is_err());
+            fs::remove_file(path)?;
+            fs::remove_file(field.join("Cargo.lock"))?;
+            assert!(tree
+                .check_field(&fixture.original, &field, mutation)
+                .is_err());
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn field_trees_reject_selector_drift_before_writing_a_variant() -> io::Result<()> {
+    for mutation in FieldMutation::ALL {
+        using_fixture(|fixture| {
+            let path = fixture.project.join("crates/core/src/lib.rs");
+            let original = fs::read_to_string(&path)?;
+            fs::write(&path, original.replace(mutation.original(), ""))?;
+            let tree = CapturedAssuranceTree::read(&fixture.project).map_err(io::Error::other)?;
+            let field = fixture.working;
+            assert!(tree.write_field(&field, mutation).is_err());
+            assert!(!field.exists());
+            Ok(())
+        })?;
+    }
+    Ok(())
 }

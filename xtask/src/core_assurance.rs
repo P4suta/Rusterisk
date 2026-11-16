@@ -20,6 +20,14 @@ pub use miri::{
 pub use mutation::{validate_mutation_inventory, validate_mutation_outcomes, MutationInventory};
 pub use runner::{execute, Task};
 
+pub(crate) fn validate_mutation_campaign(
+    bytes: &[u8],
+    inventory: &MutationInventory,
+    assignments: &[FieldMutation],
+) -> Result<(), AssuranceError> {
+    mutation::validate_mutation_campaign(bytes, inventory, assignments)
+}
+
 pub const NIGHTLY: &str = "nightly-2026-08-21";
 pub const MUTATION_FILTER: &str = "(Call::(apply|claim_connection|reserve_stasis|enter_stasis|move_stasis|leave_stasis|join|leave)|MediaTasks::(reserve|index|cancel|finish)|ResourceSubscriptions.*::(subscribe|unsubscribe|expire)|Transfer::(begin|finish|participant_ended)|AttendedTransfer::(begin|finish|participant_ended)|OwnedCallPair::(new|participant_ended|retire))\\b";
 

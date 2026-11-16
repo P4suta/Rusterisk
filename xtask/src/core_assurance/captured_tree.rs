@@ -1,4 +1,4 @@
-use super::{AssuranceError, CapturedAssurance};
+use super::{AssuranceError, CapturedAssurance, FieldMutation};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -114,8 +114,38 @@ impl CapturedAssuranceTree {
         for (path, bytes) in self.inputs() {
             write(original, path, bytes)?;
         }
+        self.write_working(working, None)
+    }
+    fn field_source(&self, mutation: FieldMutation) -> Result<String, AssuranceTreeError> {
+        let bytes = self
+            .snapshot
+            .inputs()
+            .find(|(path, _)| *path == Path::new("src/lib.rs"))
+            .map(|(_, bytes)| bytes)
+            .ok_or(AssuranceTreeError::Plan)?;
+        let source = std::str::from_utf8(bytes).map_err(|_| AssuranceTreeError::Plan)?;
+        Ok(mutation.apply(source)?)
+    }
+    pub(crate) fn write_field(
+        &self,
+        working: &Path,
+        mutation: FieldMutation,
+    ) -> Result<(), AssuranceTreeError> {
+        let field = self.field_source(mutation)?;
+        self.write_working(working, Some(field.as_bytes()))
+    }
+    fn write_working(
+        &self,
+        working: &Path,
+        field: Option<&[u8]>,
+    ) -> Result<(), AssuranceTreeError> {
         for (path, bytes) in self.snapshot.inputs() {
             if path.starts_with("src") || path.starts_with("tests") {
+                let bytes = if path == Path::new("src/lib.rs") {
+                    field.unwrap_or(bytes)
+                } else {
+                    bytes
+                };
                 write(working, path, bytes)?;
             }
         }
@@ -127,6 +157,20 @@ impl CapturedAssuranceTree {
         write(working, Path::new("Cargo.lock"), self.lock()?)
     }
     pub(crate) fn check(&self, original: &Path, working: &Path) -> Result<(), AssuranceTreeError> {
+        self.check_original(original)?;
+        self.check_working(working, None)
+    }
+    pub(crate) fn check_field(
+        &self,
+        original: &Path,
+        working: &Path,
+        mutation: FieldMutation,
+    ) -> Result<(), AssuranceTreeError> {
+        self.check_original(original)?;
+        let field = self.field_source(mutation)?;
+        self.check_working(working, Some(field.as_bytes()))
+    }
+    fn check_original(&self, original: &Path) -> Result<(), AssuranceTreeError> {
         let actual = Self::read(original)?;
         if !actual.inputs().eq(self.inputs())
             || actual.snapshot.normalized() != self.snapshot.normalized()
@@ -135,12 +179,22 @@ impl CapturedAssuranceTree {
         {
             return Err(AssuranceTreeError::Changed);
         }
+        Ok(())
+    }
+    fn check_working(
+        &self,
+        working: &Path,
+        field: Option<&[u8]>,
+    ) -> Result<(), AssuranceTreeError> {
         let mut expected: BTreeMap<_, _> = self
             .snapshot
             .inputs()
             .filter(|(path, _)| path.starts_with("src") || path.starts_with("tests"))
             .map(|(path, bytes)| (path.to_owned(), bytes))
             .collect();
+        if let Some(field) = field {
+            expected.insert("src/lib.rs".into(), field);
+        }
         expected.insert("Cargo.toml".into(), self.snapshot.normalized().as_bytes());
         expected.insert("Cargo.lock".into(), self.lock()?);
         check_tree(working, Path::new(""), 0, &mut expected)?;
