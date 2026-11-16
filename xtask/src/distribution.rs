@@ -7,3 +7,5 @@ pub use dependency_paths::{
     check_dependency_paths, check_dependency_paths_with, validate_dependency_manifest,
     DependencyPathError,
 };
+mod snapshot;
+pub use snapshot::{SnapshotError, SourceSnapshot};
