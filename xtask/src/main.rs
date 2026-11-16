@@ -205,6 +205,7 @@ fn execute() -> Result<(), TaskError> {
         [task] if task == "distribution-check" => distribution_check(),
         [task, scope, operation] if task == "distribution" && scope == "sdk" && operation == "plan" => xtask::distribution::plan_sdk(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string())),
         [task, scope, operation] if task == "distribution" && scope == "sdk" && operation == "build" => distribution_sdk_build(),
+        [task, scope, operation, flag, candidate] if task == "distribution" && scope == "sdk" && operation == "check-content" && flag == "--candidate" => distribution_sdk_content(Path::new(candidate)),
         [task] if task == "check" => {
             distribution_check()?;
             xtask::vendor::check(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string()))?;
@@ -249,7 +250,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|check-content --candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
         )),
     }
 }
@@ -282,6 +283,17 @@ fn distribution_sdk_build() -> Result<(), TaskError> {
             "{operation}; SDK supervisor cleanup failed: {cleanup}"
         ))),
     }
+}
+
+fn distribution_sdk_content(candidate: &Path) -> Result<(), TaskError> {
+    let contents = xtask::distribution::SdkContents::read(candidate)
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
+    println!(
+        "distribution: SDK candidate contents verified source={} version={}",
+        contents.source_digest(),
+        contents.version(),
+    );
+    Ok(())
 }
 
 fn node_check() -> Result<(), TaskError> {
