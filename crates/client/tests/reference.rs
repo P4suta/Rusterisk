@@ -492,6 +492,9 @@ async fn compare_resources(
         );
         compare_external_admission(&actual, &mut actual_session, app.as_str()).await?;
         compare_external_admission(&reference, &mut reference_session, app.as_str()).await?;
+        request_bodies::originate_with_id(&actual, &format!("http://{address}"), app.as_str())
+            .await?;
+        request_bodies::originate_with_id(&reference, &reference_address, app.as_str()).await?;
         request_bodies::initial_variables(&actual, &format!("http://{address}"), app.as_str())
             .await?;
         request_bodies::initial_variables(&reference, &reference_address, app.as_str()).await?;

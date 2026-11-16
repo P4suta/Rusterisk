@@ -1,5 +1,5 @@
 use rusterisk_client::{
-    api::{Bridge, BridgeVideoMode, Channel, MediaControlFormat, MediaEvent},
+    api::{Bridge, BridgeVideoMode, Channel, ChannelId, MediaControlFormat, MediaEvent},
     Client, Error,
 };
 use std::time::Duration;
@@ -98,6 +98,58 @@ pub async fn initial_variables(
         assert_eq!(client.variable(&channel.id, name).await?.value, expected);
     }
     client.hangup(&channel.id).await
+}
+
+pub async fn originate_with_id(
+    client: &Client,
+    address: &str,
+    application: &str,
+) -> Result<(), Error> {
+    let id = ChannelId::try_from("path-originated".to_owned())?;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()?;
+    let operation = async {
+        let response = http
+            .post(format!(
+                "{address}/ari/channels/{id}?channelId=query-originated"
+            ))
+            .basic_auth("app", Some("test-password"))
+            .json(&serde_json::json!({
+                "endpoint":"PJSIP/phone-extra",
+                "app":application,
+                "channelId":"body-originated",
+                "callerId":"Path caller <101>",
+                "timeout":2,
+                "variables":{"INITIAL_TAG":"path value"}
+            }))
+            .send()
+            .await?;
+        if response.status() != reqwest::StatusCode::OK {
+            return Err(Error::Invalid("originateWithId admission response"));
+        }
+        let channel: Channel = response.json().await?;
+        if channel.id != id
+            || channel.caller.number != "101"
+            || channel.caller.name != "Path caller"
+        {
+            return Err(Error::Invalid("originateWithId channel identity"));
+        }
+        Ok(())
+    }
+    .await;
+    let cleanup = match client.hangup(&id).await {
+        Ok(()) | Err(Error::Api { status: 404, .. }) => Ok(()),
+        Err(error) => Err(error),
+    };
+    match (operation, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(operation), Err(cleanup)) => Err(Error::Cleanup(format!(
+            "{operation}; originate cleanup failed: {cleanup}"
+        ))),
+    }
 }
 
 pub async fn websocket_variables(
