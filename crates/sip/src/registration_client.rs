@@ -1,6 +1,8 @@
 use crate::{Datagram, SipError, MAX_MESSAGE};
 use rusterisk_config::{Protocol, Registration};
 use std::net::SocketAddr;
+mod response;
+pub use response::RegistrationResponse;
 
 const TIMEOUT: u64 = 32_000;
 const INITIAL_RETRY: u64 = 500;
@@ -33,6 +35,8 @@ impl RegistrationIdentity {
 
 pub enum RegistrationTransactionEvent {
     Transmit(Datagram),
+    Provisional(u16),
+    Response(RegistrationResponse),
     TimedOut,
 }
 
@@ -46,6 +50,8 @@ enum Retransmission {
 enum State {
     Ready { at: u64 },
     Trying(Retransmission),
+    Proceeding(Retransmission),
+    Completed { until: u64 },
     Terminated,
 }
 
@@ -93,8 +99,11 @@ impl RegistrationTransaction {
     pub fn next_deadline(&self) -> Option<u64> {
         match self.state {
             State::Ready { at } => Some(at),
-            State::Trying(Retransmission::Reliable) => Some(self.expires),
-            State::Trying(Retransmission::Datagram { at, .. }) => Some(at.min(self.expires)),
+            State::Trying(Retransmission::Reliable)
+            | State::Proceeding(Retransmission::Reliable) => Some(self.expires),
+            State::Trying(Retransmission::Datagram { at, .. })
+            | State::Proceeding(Retransmission::Datagram { at, .. }) => Some(at.min(self.expires)),
+            State::Completed { until } => Some(until),
             State::Terminated => None,
         }
     }
@@ -112,6 +121,12 @@ impl RegistrationTransaction {
             return Err(SipError::InvalidPacket);
         }
         self.observed = now;
+        if let State::Completed { until } = self.state {
+            if now >= until {
+                self.cancel();
+            }
+            return Ok(None);
+        }
         if now >= self.expires {
             self.cancel();
             return Ok(Some(RegistrationTransactionEvent::TimedOut));
@@ -132,7 +147,15 @@ impl RegistrationTransaction {
                     interval,
                 })
             }
+            State::Proceeding(Retransmission::Datagram { at, .. }) if now >= at => {
+                State::Proceeding(Retransmission::Datagram {
+                    at: self.retry_at(now, MAX_RETRY),
+                    interval: MAX_RETRY,
+                })
+            }
             State::Trying(Retransmission::Reliable | Retransmission::Datagram { .. })
+            | State::Proceeding(Retransmission::Reliable | Retransmission::Datagram { .. })
+            | State::Completed { .. }
             | State::Terminated => return Ok(None),
         };
         Ok(Some(RegistrationTransactionEvent::Transmit(Datagram {

@@ -32,7 +32,8 @@ pub use destination::{Destination, StaticTarget, TargetHost};
 pub use incoming::RejectReason;
 pub use outgoing::Outbound;
 pub use registration_client::{
-    RegistrationIdentity, RegistrationTransaction, RegistrationTransactionEvent,
+    RegistrationIdentity, RegistrationResponse, RegistrationTransaction,
+    RegistrationTransactionEvent,
 };
 use request_identity::RequestIdentity;
 pub use session_description::{DtlsSetup, SessionSecurity, WebRtcDescription};

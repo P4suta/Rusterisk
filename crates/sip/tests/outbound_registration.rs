@@ -2,6 +2,8 @@ use rusterisk_config::{Config, Registration};
 use rusterisk_sip::{
     Datagram, RegistrationIdentity, RegistrationTransaction, RegistrationTransactionEvent, SipError,
 };
+#[path = "outbound_registration/responses.rs"]
+mod responses;
 
 fn settings(protocol: &str, extra: &str) -> Result<Registration, SipError> {
     let tls = if protocol == "tls" {
@@ -42,7 +44,12 @@ fn transaction(protocol: &str, now: u64) -> Result<RegistrationTransaction, SipE
 fn transmitted(event: Option<RegistrationTransactionEvent>) -> Result<Datagram, SipError> {
     match event {
         Some(RegistrationTransactionEvent::Transmit(packet)) => Ok(packet),
-        Some(RegistrationTransactionEvent::TimedOut) | None => Err(SipError::InvalidPacket),
+        Some(
+            RegistrationTransactionEvent::TimedOut
+            | RegistrationTransactionEvent::Provisional(_)
+            | RegistrationTransactionEvent::Response(_),
+        )
+        | None => Err(SipError::InvalidPacket),
     }
 }
 
