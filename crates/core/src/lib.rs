@@ -9,6 +9,7 @@ mod digit_admission;
 mod digit_sequence;
 mod digits;
 mod media_tasks;
+mod owned_call_pair;
 mod owned_progress;
 mod peer_media;
 #[cfg(kani)]
@@ -32,6 +33,7 @@ pub use digit_admission::{DtmfCommand, DtmfOutbox, DtmfToken};
 pub use digit_sequence::{DtmfError, DtmfSequence, DtmfTiming, DtmfTone};
 pub use digits::DtmfDigit;
 pub use media_tasks::{MediaTaskError, MediaTaskKind, MediaTaskState, MediaTaskToken, MediaTasks};
+pub use owned_call_pair::{CallPairDecision, CallPairError, CallPairState, OwnedCallPair};
 pub use owned_progress::{CallCompletion, CallMilestone, OwnedCallProgress};
 pub use peer_media::PeerMediaDirection;
 pub use recording_clock::RecordingClock;
