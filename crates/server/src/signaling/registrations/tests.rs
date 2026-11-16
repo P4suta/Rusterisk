@@ -3,6 +3,7 @@ use crate::ControlError;
 use rusterisk_config::{Config, MAX_REGISTRATIONS};
 mod dns;
 mod generations;
+mod minimum_expiration;
 mod reuse;
 mod reuse_capacity;
 mod stream;

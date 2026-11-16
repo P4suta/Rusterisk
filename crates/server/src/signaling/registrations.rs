@@ -39,6 +39,7 @@ struct Client {
     listener: usize,
     target: StaticTarget,
     settings: Registration,
+    requested_expiration: u32,
     auth: Auth,
     state: State,
 }
@@ -206,6 +207,7 @@ impl Registrations {
                 listener,
                 target,
                 settings: settings.clone(),
+                requested_expiration: settings.expiration,
                 auth,
                 state,
             });
@@ -277,9 +279,11 @@ impl Registrations {
         let transaction = match &client.state {
             State::Ready { route, .. } => {
                 self.identity = self.identity.advance(random()?).map_err(failure)?;
+                let mut settings = client.settings.clone();
+                settings.expiration = client.requested_expiration;
                 Some((
                     RegistrationTransaction::new(
-                        &client.settings,
+                        &settings,
                         local,
                         route.peer(),
                         self.identity,
@@ -298,7 +302,7 @@ impl Registrations {
                         .refresh(
                             std::slice::from_ref(&client.auth),
                             self.identity,
-                            NonZeroU32::new(client.settings.expiration).ok_or(
+                            NonZeroU32::new(client.requested_expiration).ok_or(
                                 ControlError::Invalid("Refresh lifetime must be positive"),
                             )?,
                             now,
@@ -368,6 +372,19 @@ impl Registrations {
                     route,
                 },
                 RegistrationGrant::Removed => State::Stopped,
+            },
+            423 => match response.minimum_expiration().map_err(failure)? {
+                Some(expiration) => {
+                    let identity = self.identity.advance(random()?).map_err(failure)?;
+                    let transaction = response
+                        .minimum_expiration_retry(std::slice::from_ref(&client.auth), identity, now)
+                        .map_err(failure)?
+                        .ok_or(ControlError::Invalid("Missing registration correction"))?;
+                    self.identity = identity;
+                    client.requested_expiration = expiration.get();
+                    State::Trying { transaction, route }
+                }
+                None => State::Stopped,
             },
             _ => State::Stopped,
         };
