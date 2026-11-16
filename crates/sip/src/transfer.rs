@@ -1,4 +1,5 @@
 use rsipstack::sip::Request;
+mod attended;
 mod authority;
 mod delivery;
 pub(crate) mod dialog;
@@ -9,6 +10,7 @@ mod replaces;
 mod request;
 mod subscribe;
 pub(crate) mod wire;
+pub use attended::AttendedRefer;
 pub use authority::ReferAuthority;
 pub use delivery::ReferIdentity;
 pub use replaces::Replaces;

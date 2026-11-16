@@ -1,8 +1,30 @@
-use super::{BlindRefer, ReferError, ReferSubscription};
+use super::{AttendedRefer, BlindRefer, ReferError, ReferSubscription, Replaces};
 use rsipstack::sip::{headers::typed::Contact, uri::Host, Method, Request, Uri};
 use std::collections::BTreeSet;
 
 pub(super) fn parse(request: &Request) -> Result<BlindRefer, ReferError> {
+    let parsed = parse_request(request, UriPurpose::Refer)?;
+    Ok(BlindRefer {
+        extension: parsed.target.user,
+        subscription: parsed.subscription,
+    })
+}
+
+pub(super) fn parse_attended(request: &Request) -> Result<AttendedRefer, ReferError> {
+    let parsed = parse_request(request, UriPurpose::Attended)?;
+    Ok(AttendedRefer {
+        uri: parsed.target.uri,
+        replaces: parsed.target.replaces.ok_or(ReferError::Invalid)?,
+        subscription: parsed.subscription,
+    })
+}
+
+struct ParsedRequest {
+    target: CheckedUri,
+    subscription: ReferSubscription,
+}
+
+fn parse_request(request: &Request, role: UriPurpose) -> Result<ParsedRequest, ReferError> {
     if request.method != Method::Refer {
         return Err(ReferError::Invalid);
     }
@@ -31,7 +53,7 @@ pub(super) fn parse(request: &Request) -> Result<BlindRefer, ReferError> {
     let target = target.ok_or(ReferError::Invalid)?;
     let (prefix, uri, parameters) = address(target)?;
     generic_parameters(parameters)?;
-    let extension = extension(uri)?;
+    let target = uri_user(uri, role)?;
     Contact::parse(prefix).map_err(|_| ReferError::Invalid)?;
     let subscription = match subscription {
         Some(value) => {
@@ -56,8 +78,8 @@ pub(super) fn parse(request: &Request) -> Result<BlindRefer, ReferError> {
         }
         None => ReferSubscription::Notify,
     };
-    Ok(BlindRefer {
-        extension,
+    Ok(ParsedRequest {
+        target,
         subscription,
     })
 }
@@ -103,10 +125,6 @@ fn address(source: &str) -> Result<(&str, &str, &str), ReferError> {
     Ok((uri, uri, parameters))
 }
 
-fn extension(source: &str) -> Result<String, ReferError> {
-    uri_user(source, UriPurpose::Refer)
-}
-
 pub(super) fn validate_dialog_target(source: &str) -> Result<(), ReferError> {
     uri_user(source, UriPurpose::Dialog).map(|_| ())
 }
@@ -114,12 +132,31 @@ pub(super) fn validate_dialog_target(source: &str) -> Result<(), ReferError> {
 #[derive(Clone, Copy)]
 enum UriPurpose {
     Refer,
+    Attended,
     Dialog,
 }
 
-fn uri_purpose(name: &str, value: Option<&str>, role: UriPurpose) -> Result<(), ReferError> {
+struct CheckedUri {
+    user: String,
+    uri: Uri,
+    replaces: Option<Replaces>,
+}
+
+fn uri_purpose(
+    name: &str,
+    value: Option<&str>,
+    role: UriPurpose,
+    replaces: &mut Option<Replaces>,
+) -> Result<(), ReferError> {
     match role {
-        UriPurpose::Refer => purpose(name, value),
+        UriPurpose::Attended if name.eq_ignore_ascii_case("Replaces") => {
+            if replaces.is_some() {
+                return Err(ReferError::Invalid);
+            }
+            *replaces = Some(Replaces::parse(value.ok_or(ReferError::Invalid)?)?);
+            Ok(())
+        }
+        UriPurpose::Refer | UriPurpose::Attended => purpose(name, value),
         UriPurpose::Dialog
             if name.eq_ignore_ascii_case("method") || name.eq_ignore_ascii_case("Replaces") =>
         {
@@ -129,7 +166,7 @@ fn uri_purpose(name: &str, value: Option<&str>, role: UriPurpose) -> Result<(), 
     }
 }
 
-fn uri_user(source: &str, role: UriPurpose) -> Result<String, ReferError> {
+fn uri_user(source: &str, role: UriPurpose) -> Result<CheckedUri, ReferError> {
     if source
         .bytes()
         .any(|byte| !byte.is_ascii_graphic() || b"<>\"\\#".contains(&byte))
@@ -162,6 +199,7 @@ fn uri_user(source: &str, role: UriPurpose) -> Result<String, ReferError> {
         .map_or((authority, None), |(host, parameters)| {
             (host, Some(parameters))
         });
+    let mut replaces = None;
     if let Some(parameters) = parameters {
         let mut names = BTreeSet::new();
         for (index, entry) in parameters.split(';').enumerate() {
@@ -181,7 +219,10 @@ fn uri_user(source: &str, role: UriPurpose) -> Result<String, ReferError> {
             if value.as_deref() == Some("") {
                 return Err(ReferError::Invalid);
             }
-            uri_purpose(&name, value.as_deref(), role)?;
+            if name.eq_ignore_ascii_case("Replaces") {
+                return Err(ReferError::Unsupported);
+            }
+            uri_purpose(&name, value.as_deref(), role, &mut replaces)?;
         }
     }
     if let Some(headers) = headers {
@@ -198,12 +239,16 @@ fn uri_user(source: &str, role: UriPurpose) -> Result<String, ReferError> {
             if name.is_empty() {
                 return Err(ReferError::Invalid);
             }
-            purpose(&name, Some(&value))?;
+            uri_purpose(&name, Some(&value), role, &mut replaces)?;
         }
     }
     let uri = Uri::try_from(source).map_err(|_| ReferError::Invalid)?;
     validate_host(host, &uri)?;
-    Ok(user)
+    Ok(CheckedUri {
+        user,
+        uri,
+        replaces,
+    })
 }
 
 fn purpose(name: &str, value: Option<&str>) -> Result<(), ReferError> {
