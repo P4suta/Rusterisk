@@ -1,4 +1,6 @@
 use std::fmt;
+mod binary_target;
+pub use binary_target::{check_binary_target_header, BinaryTargetError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {
