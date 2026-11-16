@@ -49,7 +49,8 @@ impl std::fmt::Display for SnapshotError {
             Self::Changed => formatter.write_str("captured distribution source changed"),
             Self::Limits { files, bytes } => write!(
                 formatter,
-                "distribution source has {files} files and {bytes} bytes; limits are 1024 files and 41943040 bytes"
+                "distribution source has {files} files and {bytes} bytes; limits are {} files and 41943040 bytes",
+                crate::browser::SourceSnapshot::MAX_FILES
             ),
         }
     }
@@ -140,7 +141,7 @@ impl SourceSnapshot {
                 return Err(SnapshotError::Invalid);
             }
             total += bytes.len();
-            if paths.len() > 1024 || total > 40 * 1024 * 1024 {
+            if paths.len() > crate::browser::SourceSnapshot::MAX_FILES || total > 40 * 1024 * 1024 {
                 return Err(SnapshotError::Limits {
                     files: paths.len(),
                     bytes: total,

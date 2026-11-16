@@ -149,16 +149,19 @@ fn distribution_snapshot_combines_the_project_and_package_file_count_limits(
 ) -> Result<(), std::io::Error> {
     using_project("files", |root, _| {
         let initial = SourceSnapshot::read(root).map_err(std::io::Error::other)?;
-        let extra = 1025usize
+        let extra = 2048usize
             .checked_sub(initial.files().count())
             .ok_or_else(|| std::io::Error::other("fixture file inventory too large"))?;
         for index in 0..extra {
             write(root, &format!("xtask/src/input-{index}.rs"), b"x")?;
         }
+        let boundary = SourceSnapshot::read(root).map_err(std::io::Error::other)?;
+        assert_eq!(boundary.files().count(), 2048);
+        write(root, "xtask/src/excess.rs", b"x")?;
         let error = SourceSnapshot::read(root)
             .err()
             .ok_or_else(|| std::io::Error::other("oversize file inventory passed"))?;
-        assert!(error.to_string().contains("1025"), "{error}");
+        assert!(error.to_string().contains("2049"), "{error}");
         assert!(error.to_string().contains("files"), "{error}");
         Ok(())
     })

@@ -4,6 +4,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+const MAX_SOURCE_FILES: usize = 2048;
+
 const BROWSER_FILES: [&str; 13] = [
     "package.json",
     "package-lock.json",
@@ -123,7 +125,7 @@ fn add_file(
     files: &mut Vec<File>,
     bounds: FileBounds,
 ) -> Result<(), SourceError> {
-    if !normal(relative) || files.len() >= 1024 {
+    if !normal(relative) || files.len() >= MAX_SOURCE_FILES {
         return Err(SourceError::Invalid);
     }
     let limit = match bounds {
@@ -254,6 +256,8 @@ fn browser(path: &Path, files: &mut Vec<File>) -> Result<(), SourceError> {
 }
 
 impl SourceSnapshot {
+    pub const MAX_FILES: usize = MAX_SOURCE_FILES;
+
     pub fn files(&self) -> impl ExactSizeIterator<Item = (&Path, &[u8])> {
         self.files
             .iter()
