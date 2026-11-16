@@ -2,6 +2,8 @@ use rsipstack::sip::{HeadersExt, Request, SipMessage};
 use rusterisk_config::Config;
 use rusterisk_sip::{Engine, Outbound, Output, SipError, SipEvent};
 use sha2::{Digest, Sha256, Sha512_256};
+#[path = "digest_challenges/identity.rs"]
+mod identity;
 #[path = "digest_challenges/utf8.rs"]
 mod utf8;
 
