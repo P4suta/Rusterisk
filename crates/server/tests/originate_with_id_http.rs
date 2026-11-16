@@ -55,12 +55,12 @@ async fn originate_with_id_preserves_the_path_and_validated_body_fields() -> Res
         ).await?;
         let app = router(controller.clone());
         let path = "/ari/channels/path-call?endpoint=PJSIP/query&app=query&channelId=query-call";
-        let body = r#"{"endpoint":"PJSIP/phone","app":"calls","channelId":"body-call","callerId":"101","variables":{"MARK":"from body"}}"#;
+        let body = r#"{"endpoint":"PJSIP/phone","app":"calls","channelId":"body-call","callerId":"Path caller <101>","variables":{"MARK":"from body"}}"#;
         let (status, channel) = request(&app, "POST", path, body).await?;
         if status != 200 {
             return Err(failure(format!("originateWithId returned {status}: {channel}")));
         }
-        if channel["id"] != "path-call" || channel["caller"]["number"] != "101" {
+        if channel["id"] != "path-call" || channel["caller"]["number"] != "101" || channel["caller"]["name"] != "Path caller" {
             return Err(failure("originateWithId changed its path or caller"));
         }
         let effect = effects.recv().await.ok_or_else(|| failure("missing originate effect"))?;

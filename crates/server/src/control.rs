@@ -1066,10 +1066,7 @@ impl Control {
             return Err(ControlError::Unsupported);
         }
         let caller = if let Action::Originate { caller, .. } = &action {
-            Caller {
-                name: String::new(),
-                number: caller.clone(),
-            }
+            initial_variables::caller_value(Caller::default(), CallerField::All, caller)?
         } else {
             Caller::default()
         };
@@ -1295,7 +1292,7 @@ impl Control {
                 endpoint,
                 app,
                 args,
-                caller,
+                caller: _,
                 timeout,
             } => {
                 if self.channels.contains_key(&id) {
@@ -1314,7 +1311,6 @@ impl Control {
                 if endpoint.len() > 256
                     || !endpoint.starts_with("PJSIP/")
                     || endpoint.len() <= 6
-                    || caller.len() > 128
                     || timeout == 0
                     || timeout > 3600
                     || args.len() > 32
