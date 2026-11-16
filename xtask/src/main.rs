@@ -237,6 +237,7 @@ fn execute() -> Result<(), TaskError> {
         [task, scope, operation, candidate_flag, candidate, target_flag, target] if task == "distribution" && scope == "server" && operation == "check-startup" && candidate_flag == "--candidate" && target_flag == "--target" => distribution_server_startup_target(Path::new(candidate), Some(target), false),
         [task, scope, operation, candidate_flag, candidate, target_flag, target, translation] if task == "distribution" && scope == "server" && operation == "check-startup" && candidate_flag == "--candidate" && target_flag == "--target" && translation == "--rosetta" => distribution_server_startup_target(Path::new(candidate), Some(target), true),
         [task, scope, operation, candidate_flag, candidate, sdk_flag, sdk] if task == "distribution" && scope == "server" && operation == "verify" && candidate_flag == "--candidate" && sdk_flag == "--sdk-candidate" => distribution_server_sdk(Path::new(candidate), Path::new(sdk)),
+        [task, scope, operation, candidate_flag, candidate, target_flag, target, archive_flag, archive, sdk_flag, sdk] if task == "distribution" && scope == "server" && operation == "verify-oci" && candidate_flag == "--candidate" && target_flag == "--target" && archive_flag == "--archive" && sdk_flag == "--sdk-candidate" => distribution_server_oci_sdk(Path::new(candidate), target, Path::new(archive), Path::new(sdk)),
         [task, scope, operation, candidate_flag, candidate, target_flag, target] if task == "distribution" && scope == "server" && operation == "check-content" && candidate_flag == "--candidate" && target_flag == "--target" => {
             let target = xtask::server_distribution::ServerTarget::parse(target).map_err(|error| TaskError::Contract(error.to_string()))?;
             let candidate = xtask::server_distribution::ServerCandidate::read(Path::new(candidate), target)?;
@@ -288,7 +289,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|(check-content|verify) --candidate <path>>|distribution server <<plan|build> --target <triple>|<plan-container|build-container> --target <triple> --image <digest>|<check-content|export-oci> --candidate <path> --target <triple>|check-startup --candidate <path> [--target <triple> [--rosetta]]|verify --candidate <path> --sdk-candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|(check-content|verify) --candidate <path>>|distribution server <<plan|build> --target <triple>|<plan-container|build-container> --target <triple> --image <digest>|<check-content|export-oci> --candidate <path> --target <triple>|check-startup --candidate <path> [--target <triple> [--rosetta]]|verify --candidate <path> --sdk-candidate <path>|verify-oci --candidate <path> --target <triple> --archive <path> --sdk-candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
         )),
     }
 }
@@ -383,6 +384,45 @@ fn distribution_server_sdk(candidate: &Path, sdk: &Path) -> Result<(), TaskError
 
 fn distribution_server_startup(candidate: &Path) -> Result<(), TaskError> {
     distribution_server_startup_target(candidate, None, false)
+}
+
+fn distribution_server_oci_sdk(
+    candidate: &Path,
+    target: &str,
+    archive: &Path,
+    sdk: &Path,
+) -> Result<(), TaskError> {
+    let target = xtask::server_distribution::ServerTarget::parse(target)
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
+    #[cfg(unix)]
+    {
+        let mut supervisor =
+            xtask::process::CommandSupervisor::new().map_err(TaskError::Process)?;
+        let operation = xtask::server_distribution::verify_server_oci_sdk_with(
+            &std::env::current_dir()?,
+            candidate,
+            target,
+            archive,
+            sdk,
+            &mut supervisor,
+        )
+        .map(|_| ())
+        .map_err(TaskError::Io);
+        match (operation, supervisor.finish()) {
+            (operation, Ok(())) => operation,
+            (Ok(()), Err(error)) => Err(TaskError::Process(error)),
+            (Err(operation), Err(cleanup)) => Err(TaskError::Contract(format!(
+                "{operation}; OCI server and SDK supervisor cleanup failed: {cleanup}"
+            ))),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (candidate, target, archive, sdk);
+        Err(TaskError::Process(
+            xtask::process::ProcessError::UnsupportedSupervision,
+        ))
+    }
 }
 
 fn distribution_server_startup_target(

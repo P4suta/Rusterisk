@@ -48,6 +48,9 @@ distribution-server-build-container target image:
 distribution-server-export-oci candidate target:
     cargo run --locked --target-dir target/xtask --package xtask -- distribution server export-oci --candidate {{ quote(candidate) }} --target {{ quote(target) }}
 
+distribution-server-verify-oci candidate target archive sdk_candidate:
+    cargo run --locked --target-dir target/xtask --package xtask -- distribution server verify-oci --candidate {{ quote(candidate) }} --target {{ quote(target) }} --archive {{ quote(archive) }} --sdk-candidate {{ quote(sdk_candidate) }}
+
 distribution-server-check-content candidate target:
     cargo run --locked --target-dir target/xtask --package xtask -- distribution server check-content --candidate {{ quote(candidate) }} --target {{ quote(target) }}
 

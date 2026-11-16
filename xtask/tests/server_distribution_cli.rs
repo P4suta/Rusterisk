@@ -259,6 +259,46 @@ fn image_exports_require_verified_linux_candidates_before_creating_state(
 
 #[cfg(unix)]
 #[test]
+fn image_sdk_checks_require_all_inputs_before_creating_execution_state(
+) -> Result<(), SdkCandidateBuildError> {
+    using_project("server-oci-sdk-cli", |root, _| {
+        let arguments = [
+            "distribution",
+            "server",
+            "verify-oci",
+            "--candidate",
+            "missing-server",
+            "--target",
+            "aarch64-unknown-linux-gnu",
+            "--archive",
+            "missing-image",
+            "--sdk-candidate",
+            "missing-sdk",
+        ];
+        let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args(arguments)
+            .current_dir(root)
+            .env("PATH", "")
+            .output()?;
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("usage:"));
+        assert!(output.stdout.is_empty());
+        assert!(!root.join(".cache").exists());
+        let extra = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args(arguments)
+            .arg("unexpected")
+            .current_dir(root)
+            .env("PATH", "")
+            .output()?;
+        assert!(!extra.status.success());
+        assert!(String::from_utf8_lossy(&extra.stderr).contains("usage:"));
+        assert!(!root.join(".cache").exists());
+        Ok(())
+    })
+}
+
+#[cfg(unix)]
+#[test]
 fn explicit_startup_targets_require_candidate_bytes_and_never_accept_extra_arguments(
 ) -> Result<(), SdkCandidateBuildError> {
     using_project("server-target-startup-cli", |root, _| {
