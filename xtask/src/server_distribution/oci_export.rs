@@ -225,6 +225,14 @@ pub fn export_server_candidate_oci_with(
     );
     io::stdout().flush()?;
     let archive = export_server_oci_with(&candidate, &execution, &artifacts, perform)?;
-    println!("server OCI archive exported: {}", archive.display());
+    let contents = candidate.check_oci(&archive)?;
+    println!(
+        "server OCI content passed: {} manifest={} config={} application={} attestations={}",
+        archive.display(),
+        contents.manifest_digest(),
+        contents.config_digest(),
+        contents.application_layer_digest(),
+        contents.attestation_count(),
+    );
     Ok(archive)
 }

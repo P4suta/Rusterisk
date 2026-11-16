@@ -9,8 +9,8 @@ use xtask::{
     distribution::SdkCandidateBuildError,
     process::ProcessError,
     server_distribution::{
-        export_server_oci_with, CapturedServer, ServerBuildCommandMode, ServerCandidate,
-        ServerTarget,
+        export_server_candidate_oci_with, export_server_oci_with, CapturedServer,
+        ServerBuildCommandMode, ServerCandidate, ServerTarget,
     },
 };
 
@@ -130,6 +130,43 @@ fn successful_status_cannot_replace_exported_bytes_or_unchanged_contexts(
             assert!(!execution.exists());
             assert!(!artifacts.join("SHA256SUMS").exists());
         }
+        Ok(())
+    })
+}
+
+#[test]
+fn candidate_exports_reject_nonempty_archives_with_invalid_image_contents(
+) -> Result<(), SdkCandidateBuildError> {
+    using_project("oci-export-invalid-content", |root, parent| {
+        let _candidate = candidate(root, parent)?;
+        let mut cleanup = 0;
+        let result = export_server_candidate_oci_with(
+            root,
+            &parent.join("candidate"),
+            ServerTarget::LinuxArm64,
+            |command, _, mode| {
+                match mode {
+                    ServerBuildCommandMode::Cleanup => cleanup += 1,
+                    ServerBuildCommandMode::Work => {
+                        for argument in command.get_args() {
+                            if let Some(output) = argument
+                                .to_str()
+                                .and_then(|arg| arg.strip_prefix("type=oci,dest="))
+                            {
+                                let destination = output
+                                    .split(',')
+                                    .next()
+                                    .ok_or(ProcessError::InvalidOutput)?;
+                                std::fs::write(destination, b"invalid OCI archive")?;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(cleanup, 1);
         Ok(())
     })
 }
