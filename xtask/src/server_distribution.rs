@@ -35,6 +35,8 @@ mod sdk_interop;
 pub use sdk_interop::verify_server_sdk_with;
 mod oci_profile;
 pub use oci_profile::{ServerOciProfile, OCI_RUNTIME};
+mod container_build;
+pub use container_build::{ServerBuildCommandMode, ServerContainerBuildPlan};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {
