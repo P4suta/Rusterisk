@@ -66,7 +66,8 @@ impl Runner {
                         "Recording ended before admission".into(),
                     ))),
             )),
-            Signal::BlindTransferRequested { .. }
+            Signal::AttendedTransferRequested { .. }
+            | Signal::BlindTransferRequested { .. }
             | Signal::MediaPlaybackStarted { .. }
             | Signal::MediaPlaybackFinished { .. }
             | Signal::PlaybackStarted { .. }

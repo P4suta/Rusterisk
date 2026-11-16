@@ -191,6 +191,14 @@ impl Control {
                 .bridge()
                 .is_some_and(|token| self.bridges.values().any(|bridge| bridge.token == token));
             effects += 1 + usize::from(managed_bridge) + self.transfer_terminal_effects(&key);
+            if let Some(peer) = self.paired_peer(&key) {
+                effects += 1;
+                if self.key(&peer.id).is_ok_and(|current| current == peer)
+                    && discovered.insert(peer.clone())
+                {
+                    pending.push(peer);
+                }
+            }
             if let Some(dial) = entry
                 .dialplan
                 .as_ref()

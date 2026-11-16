@@ -11,6 +11,8 @@ use rusterisk_core::{
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+mod attended;
+mod call_pairs;
 mod dial;
 mod dialplan;
 mod endpoints;
@@ -516,6 +518,11 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
+    AttendedTransferRequested {
+        key: CallKey,
+        refer: rusterisk_sip::AttendedReferSource,
+        consultation: rusterisk_sip::ReplacementDialog,
+    },
     BlindTransferRequested {
         key: CallKey,
         refer: rusterisk_sip::DialogRefer,
@@ -804,6 +811,7 @@ pub struct Control {
     media_connections: BTreeMap<ChannelId, (CallKey, crate::media_websocket::MediaLinkOptions)>,
     websocket: rusterisk_config::WebSocketConfig,
     transfers: BTreeMap<rusterisk_core::TransferToken, transfer::ActiveTransfer>,
+    call_pairs: BTreeMap<u64, call_pairs::ActivePair>,
 }
 
 impl Control {
@@ -968,6 +976,7 @@ impl Control {
             media_connections: BTreeMap::new(),
             websocket: rusterisk_config::WebSocketConfig::default(),
             transfers: BTreeMap::new(),
+            call_pairs: BTreeMap::new(),
         }
     }
 
@@ -1742,6 +1751,15 @@ impl Control {
             timestamp,
             &mut outcome,
         );
+        outcome.append(self.end_paired_call(
+            &CallKey {
+                id: id.clone(),
+                generation: entry.call.generation(),
+            },
+            entry.call.bridge(),
+            timestamp,
+            now,
+        )?);
         outcome.append(self.end_transfer_participant(&CallKey {
             id: id.clone(),
             generation: entry.call.generation(),
@@ -1917,6 +1935,11 @@ impl Control {
         now: u64,
     ) -> Result<Outcome, ControlError> {
         match signal {
+            Signal::AttendedTransferRequested {
+                key,
+                refer,
+                consultation,
+            } => self.attended_transfer(key, refer, consultation, now, timestamp),
             Signal::BlindTransferRequested { key, refer } => {
                 self.blind_transfer(key, refer, now, timestamp)
             }
