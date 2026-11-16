@@ -21,6 +21,8 @@ mod read;
 pub use read::ServerCandidate;
 mod extraction;
 pub use extraction::ExtractedServer;
+mod runtime_config;
+pub use runtime_config::ServerRuntimeConfig;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {
