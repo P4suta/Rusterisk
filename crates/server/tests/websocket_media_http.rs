@@ -49,6 +49,13 @@ async fn incoming_media_upgrades_bind_one_channel_and_clean_up_after_disconnect(
         let refused = tokio_tungstenite::connect_async(request.clone()).await;
         assert!(matches!(refused, Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status() == 403));
         request.headers_mut().insert("Origin", HeaderValue::from_static("https://accepted.example"));
+        for protocol in ["unsupported".to_owned(), format!("media,{}", "x".repeat(251))] {
+            let mut rejected = request.clone();
+            rejected.headers_mut().insert("Sec-WebSocket-Protocol", HeaderValue::from_str(&protocol).map_err(failure)?);
+            if !matches!(tokio_tungstenite::connect_async(rejected).await, Err(tokio_tungstenite::tungstenite::Error::Http(response)) if response.status() == 400) {
+                return Err(ControlError::Invalid("Expected media protocol rejection"));
+            }
+        }
         let (mut peer, response) = tokio_tungstenite::connect_async(request.clone()).await.map_err(failure)?;
         assert_eq!(response.headers()["Sec-WebSocket-Protocol"], "media");
         let duplicate = tokio_tungstenite::connect_async(request).await;

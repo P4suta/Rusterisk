@@ -20,11 +20,13 @@ pub(crate) async fn upgrade(
             .map(|value| value.to_str().map(str::to_owned))
             .transpose()
             .map_err(|_| ControlError::Forbidden)?;
-        let protocol = headers
-            .get("Sec-WebSocket-Protocol")
-            .and_then(|value| value.to_str().ok())
-            .filter(|value| value.len() <= 256)
-            .is_some_and(|value| value.split(',').any(|protocol| protocol.trim() == "media"));
+        let protocol = headers.get("Sec-WebSocket-Protocol").is_none_or(|value| {
+            value
+                .to_str()
+                .ok()
+                .filter(|value| value.len() <= 256)
+                .is_some_and(|value| value.split(',').any(|protocol| protocol.trim() == "media"))
+        });
         if !protocol {
             return Err(ControlError::Invalid("Media WebSocket protocol required"));
         }

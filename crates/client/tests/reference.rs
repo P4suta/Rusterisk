@@ -16,6 +16,8 @@ mod external_streams;
 mod external_websocket_clients;
 #[path = "reference/external_websockets.rs"]
 mod external_websockets;
+#[path = "home_telephone_media/scenario.rs"]
+mod home_telephone_media;
 #[path = "reference/playback_position.rs"]
 mod playback_position;
 #[path = "reference/recording_audio.rs"]
@@ -593,6 +595,8 @@ async fn compare_resources(
             app.as_str(),
         )
         .await?;
+        home_telephone_media::compare(&reference_address).await?;
+        home_telephone_media::compare(&format!("http://{address}")).await?;
         external_opus::compare(
             &reference,
             &reference_address,
