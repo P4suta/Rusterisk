@@ -37,6 +37,9 @@ The response preserves process identity, startup time, and the bounded channel l
 Registered JSON body parameters override query values while path identifiers remain authoritative.
 Body values follow the public operation's declared types and bounded conversion rules.
 Channel creation validates initial variables together and applies them before publishing creation events.
+Origination accepts an explicit channel identifier in either the query or the resource path.
+The path identifier takes precedence over query and JSON fields.
+Caller ID parsing separates the display name and number before applying initial variables.
 Playback provides start, pause, resume, stop, restart, forward, and reverse.
 Forward and reverse use a three-second step from the current playback position by default.
 Playback requests accept an initial `offsetms` and a `skipms` step between zero and 2,147,483,647 milliseconds.
