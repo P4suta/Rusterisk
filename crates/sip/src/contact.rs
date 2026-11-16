@@ -1,5 +1,7 @@
 use rsipstack::sip::{headers::typed::Contact, uri::Scheme, Uri};
 mod identity;
+mod routes;
+pub(super) use routes::parse_paths;
 
 const MAX_ENTRIES: usize = 32;
 

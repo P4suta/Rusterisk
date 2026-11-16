@@ -4,6 +4,7 @@ use rusterisk_config::{Aor, Config, Endpoint};
 use rusterisk_core::ContactPresence;
 use std::net::SocketAddr;
 mod bindings;
+mod security;
 pub(super) use bindings::Bindings;
 
 pub(super) enum Rejection {
@@ -109,6 +110,7 @@ impl Engine {
                     .map(|header| header.value()),
                 expiration,
             )?;
+            security::validate(request, &contacts)?;
             let sequence = request
                 .cseq_header()
                 .map_err(|_| Rejection::Invalid)?

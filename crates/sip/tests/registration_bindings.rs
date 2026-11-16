@@ -417,7 +417,7 @@ fn ambiguous_identity_duplicates_and_insecure_contacts_leave_existing_bindings_u
     for (headers, expected) in [
         ("Contact: <sip:first@one.invalid>;expires=0\r\n", 400),
         ("Contact: <sip:first@one.invalid;security=on>;expires=0, <sip:new@new.invalid>, <sip:%6Eew@NEW.invalid>\r\n", 400),
-        ("Contact: <sip:first@one.invalid;security=on>;expires=0, <sips:secure@new.invalid>\r\n", 403),
+        ("Contact: <sip:first@one.invalid;security=on>;expires=0, <sips:secure@new.invalid>\r\n", 400),
     ] {
         let refused = registrar.request(peer, "phone", headers, None, 10)?;
         assert_eq!(response(&refused)?.status_code.code(), expected);
