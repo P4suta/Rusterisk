@@ -531,6 +531,11 @@ mod tests {
 
 enum Start {
     Originate(Originate),
+    Rtp {
+        target: api::ExternalRtpTarget,
+        data: String,
+    },
+    AudioSocket(api::AudioSocketTarget),
     WebSocket {
         options: api::WebSocketMediaOptions,
         data: String,
@@ -581,6 +586,31 @@ pub(crate) async fn external_websocket(
         },
     )
     .await
+}
+
+pub(crate) async fn external_rtp(
+    commands: &mpsc::Sender<Command>,
+    target: api::ExternalRtpTarget,
+    data: &str,
+) -> Result<OwnedCall, Error> {
+    if data.len() > 4096 || data.chars().any(char::is_control) {
+        return Err(Error::Invalid("invalid media app data"));
+    }
+    start(
+        commands,
+        Start::Rtp {
+            target,
+            data: data.into(),
+        },
+    )
+    .await
+}
+
+pub(crate) async fn external_audio_socket(
+    commands: &mpsc::Sender<Command>,
+    target: api::AudioSocketTarget,
+) -> Result<OwnedCall, Error> {
+    start(commands, Start::AudioSocket(target)).await
 }
 
 async fn start(commands: &mpsc::Sender<Command>, options: Start) -> Result<OwnedCall, Error> {
@@ -736,6 +766,16 @@ impl Calls {
                 Start::WebSocket { options, data } => {
                     client
                         .external_websocket(&id, application.as_str(), options, &data)
+                        .await
+                }
+                Start::Rtp { target, data } => {
+                    client
+                        .external_rtp(&id, application.as_str(), target, &data)
+                        .await
+                }
+                Start::AudioSocket(target) => {
+                    client
+                        .external_audio_socket(&id, application.as_str(), target)
                         .await
                 }
             };

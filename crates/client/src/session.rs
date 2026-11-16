@@ -37,6 +37,19 @@ impl Session {
     ) -> Result<OwnedCall, Error> {
         owned_call::external_websocket(&self.commands, options, data).await
     }
+    pub async fn external_rtp(
+        &self,
+        target: api::ExternalRtpTarget,
+        data: &str,
+    ) -> Result<OwnedCall, Error> {
+        owned_call::external_rtp(&self.commands, target, data).await
+    }
+    pub async fn external_audio_socket(
+        &self,
+        target: api::AudioSocketTarget,
+    ) -> Result<OwnedCall, Error> {
+        owned_call::external_audio_socket(&self.commands, target).await
+    }
     pub async fn next_event(&mut self) -> Result<api::Event, Error> {
         match self.events.recv().await {
             Ok(event) => Ok(event),
