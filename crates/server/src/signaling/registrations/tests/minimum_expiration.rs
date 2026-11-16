@@ -9,6 +9,7 @@ use rusterisk_config::{Protocol, RegistrarUri};
 use sha2::{Digest, Sha256};
 use std::{net::SocketAddr, time::Duration};
 use tokio::net::UdpSocket;
+mod stream;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
