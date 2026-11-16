@@ -44,11 +44,7 @@ impl AttendedTransfer {
         }
         let first = transferor.bridge().ok_or(TransferError::Bridge)?;
         let second = consultation.bridge().ok_or(TransferError::Bridge)?;
-        if first == second
-            || transferee.bridge() != Some(first)
-            || target.bridge() != Some(second)
-            || [first, second].contains(&bridge)
-        {
+        if first == second || [first, second].contains(&bridge) {
             return Err(TransferError::Bridge);
         }
         let transferor = transferor.leave(first).map_err(|_| TransferError::Bridge)?;
