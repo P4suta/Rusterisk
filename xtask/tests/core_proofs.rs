@@ -3,6 +3,26 @@ use xtask::core_proofs::{
 };
 
 const IMAGE: &str = "registry.example/core-proofs@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const TRANSFER_HARNESSES: [&str; 3] = [
+    "proofs::transfer_completion_is_absorbing",
+    "proofs::transfer_observations_stay_in_their_generation",
+    "proofs::transfer_detachment_preserves_live_calls",
+];
+
+#[test]
+fn the_native_plan_selects_every_transfer_contract() -> Result<(), ProofError> {
+    let plan = CoreProofPlan::new("fixture", "/project/core", "/project/results", IMAGE)?;
+    for harness in TRANSFER_HARNESSES {
+        assert!(
+            plan.run()
+                .arguments
+                .iter()
+                .any(|argument| argument == harness),
+            "{harness}"
+        );
+    }
+    Ok(())
+}
 
 #[test]
 fn core_proofs_pin_the_source_image_scope_and_resource_limits() -> Result<(), ProofError> {
@@ -80,6 +100,26 @@ fn complete() -> serde_json::Value {
         })
         .collect();
     serde_json::json!({"metadata":{"version":"1.0", "kani_version":"0.68.0"}, "tools":{"kani":"0.68.0", "cbmc":"6.11.0"}, "verification_results":{"summary":{"total_harnesses":HARNESSES.len(), "executed":HARNESSES.len(), "successful":HARNESSES.len(), "failed":0, "status":"completed"}, "results":results}})
+}
+
+#[test]
+fn results_for_only_the_original_six_contracts_are_rejected() -> Result<(), ProofError> {
+    let mut old = complete();
+    let results = old["verification_results"]["results"]
+        .as_array_mut()
+        .ok_or(ProofError::Results)?;
+    results.retain(|result| {
+        result["harness_id"]
+            .as_str()
+            .is_some_and(|name| !TRANSFER_HARNESSES.contains(&name))
+    });
+    let count = results.len();
+    for field in ["total_harnesses", "executed", "successful"] {
+        old["verification_results"]["summary"][field] = serde_json::json!(count);
+    }
+    assert_eq!(count, 6);
+    assert!(validate_results(&serde_json::to_vec(&old).map_err(ProofError::Json)?).is_err());
+    Ok(())
 }
 
 #[test]

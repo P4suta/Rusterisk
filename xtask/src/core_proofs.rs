@@ -4,13 +4,16 @@ use std::time::Duration;
 mod runner;
 pub use runner::{execute, Execution};
 
-pub const HARNESSES: [&str; 6] = [
+pub const HARNESSES: [&str; 9] = [
     "proofs::terminal_release_is_absorbing",
     "proofs::connection_claims_are_exclusive",
     "proofs::stasis_tracks_the_current_app",
     "proofs::bridge_membership_is_exclusive",
     "proofs::cancellation_releases_every_media_slot",
     "proofs::media_tokens_do_not_cross_generations",
+    "proofs::transfer_completion_is_absorbing",
+    "proofs::transfer_observations_stay_in_their_generation",
+    "proofs::transfer_detachment_preserves_live_calls",
 ];
 
 #[derive(Deserialize)]

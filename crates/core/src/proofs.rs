@@ -1,7 +1,8 @@
 use crate::{
     AudioGate, Call, CallEvent, CallState, ConnectionClaim, CoreError, MediaConnection, MediaState,
     MediaTaskError, MediaTaskKind, MediaTaskState, MediaTasks, MuteDirection, PeerMediaDirection,
-    StasisApplication, StasisMembership, Transition,
+    StasisApplication, StasisMembership, Transfer, TransferDecision, TransferError,
+    TransferOutcome, TransferState, TransferToken, Transition,
 };
 
 #[derive(Clone, Copy, kani::Arbitrary)]
@@ -294,4 +295,249 @@ fn media_tokens_do_not_cross_generations() {
     assert!(!current.finish(new));
     kani::cover!(recording);
     kani::cover!(!recording);
+}
+
+#[derive(Clone, Copy, kani::Arbitrary)]
+enum TransferObservation {
+    Succeeded,
+    Failed,
+    Cancelled,
+    TransferorEnded,
+    TransfereeEnded,
+    ObservedResult,
+}
+
+#[derive(Clone, Copy, kani::Arbitrary)]
+enum TransferCallState {
+    Down,
+    Ringing,
+    Up,
+    Ended,
+}
+
+fn transfer_proof_call(
+    generation: u64,
+    state: TransferCallState,
+    bridge: Option<u64>,
+    flags: [bool; 5],
+) -> Result<Call, CoreError> {
+    let mut call = Call::outgoing(generation);
+    call = match state {
+        TransferCallState::Down => call,
+        TransferCallState::Ringing => call.apply(CallEvent::Ring).call(),
+        TransferCallState::Up => call.apply(CallEvent::Answer).call(),
+        TransferCallState::Ended => call.apply(CallEvent::Hangup).call(),
+    };
+    if call.state() == CallState::Up {
+        if flags[0] {
+            call = call.connect_media().call();
+        }
+        if flags[1] {
+            call = call.hold()?;
+        }
+        if flags[2] {
+            call = call.mute(MuteDirection::Both)?;
+        }
+        if flags[3] {
+            call = call.enter_stasis(StasisApplication::new(generation))?;
+        }
+        if flags[4] {
+            call = call.claim_connection()?;
+        }
+        if let Some(bridge) = bridge {
+            call = call.join(bridge)?;
+        }
+    }
+    Ok(call)
+}
+
+#[kani::proof]
+#[kani::unwind(12)]
+fn transfer_completion_is_absorbing() {
+    let generation: u64 = kani::any();
+    let other_generation: u64 = kani::any();
+    let token = TransferToken::new(kani::any());
+    let other = TransferToken::new(kani::any());
+    let Ok(left) = transfer_proof_call(generation, TransferCallState::Up, Some(1), [false; 5])
+    else {
+        assert!(false, "transferor construction failed");
+        return;
+    };
+    let Ok(right) =
+        transfer_proof_call(other_generation, TransferCallState::Up, Some(1), [false; 5])
+    else {
+        assert!(false, "transferee construction failed");
+        return;
+    };
+    let started = Transfer::begin(token, left, right);
+    kani::cover!(generation == other_generation);
+    if generation == other_generation {
+        assert_eq!(started, Err(TransferError::Participants));
+        return;
+    }
+    let Ok(start) = started else {
+        assert!(false, "valid transfer was rejected");
+        return;
+    };
+    let mut transfer = start.transfer;
+    let mut released = 0;
+    let mut terminal = None;
+    for observation in kani::any::<[TransferObservation; 4]>() {
+        let decision = match observation {
+            TransferObservation::Succeeded => transfer.finish(token, TransferOutcome::Succeeded),
+            TransferObservation::Failed => transfer.finish(token, TransferOutcome::Failed),
+            TransferObservation::Cancelled => transfer.finish(token, TransferOutcome::Cancelled),
+            TransferObservation::TransferorEnded => transfer.participant_ended(token, generation),
+            TransferObservation::TransfereeEnded => {
+                transfer.participant_ended(token, other_generation)
+            }
+            TransferObservation::ObservedResult => {
+                transfer.finish(other, TransferOutcome::Succeeded)
+            }
+        };
+        match decision {
+            TransferDecision::Ignore => {}
+            TransferDecision::Finished { outcome, release } => {
+                assert_eq!(release, token);
+                assert!(terminal.is_none());
+                released += 1;
+                terminal = Some(outcome);
+            }
+        }
+        assert!(released <= 1);
+        assert_eq!(
+            transfer.state(),
+            terminal.map_or(TransferState::Proceeding, TransferState::Finished)
+        );
+    }
+    kani::cover!(released == 0);
+    kani::cover!(token == other);
+    kani::cover!(token != other);
+    kani::cover!(terminal == Some(TransferOutcome::Succeeded));
+    kani::cover!(terminal == Some(TransferOutcome::Failed));
+    kani::cover!(terminal == Some(TransferOutcome::Cancelled));
+}
+
+#[kani::proof]
+#[kani::unwind(12)]
+fn transfer_observations_stay_in_their_generation() {
+    let generation: u64 = kani::any();
+    let other_generation: u64 = kani::any();
+    let token = TransferToken::new(kani::any());
+    let other = TransferToken::new(kani::any());
+    let Ok(left) = transfer_proof_call(generation, TransferCallState::Up, Some(1), [false; 5])
+    else {
+        assert!(false, "transferor construction failed");
+        return;
+    };
+    let Ok(right) =
+        transfer_proof_call(other_generation, TransferCallState::Up, Some(1), [false; 5])
+    else {
+        assert!(false, "transferee construction failed");
+        return;
+    };
+    let started = Transfer::begin(token, left, right);
+    kani::cover!(generation == other_generation);
+    if generation == other_generation {
+        assert_eq!(started, Err(TransferError::Participants));
+        return;
+    }
+    let Ok(start) = started else {
+        assert!(false, "valid transfer was rejected");
+        return;
+    };
+    let mut transfer = start.transfer;
+    let finished: bool = kani::any();
+    if finished {
+        assert_eq!(
+            transfer.finish(token, TransferOutcome::Succeeded),
+            TransferDecision::Finished {
+                outcome: TransferOutcome::Succeeded,
+                release: token
+            }
+        );
+    }
+    kani::cover!(token == other && finished);
+    kani::cover!(token == other && !finished);
+    kani::cover!(token != other && finished);
+    kani::cover!(token != other && !finished);
+    if token == other {
+        let decision = transfer.finish(other, TransferOutcome::Succeeded);
+        let expected = if finished {
+            TransferDecision::Ignore
+        } else {
+            TransferDecision::Finished {
+                outcome: TransferOutcome::Succeeded,
+                release: token,
+            }
+        };
+        assert_eq!(decision, expected);
+        assert_eq!(
+            transfer.state(),
+            TransferState::Finished(TransferOutcome::Succeeded)
+        );
+        assert_eq!(
+            transfer.participant_ended(other, other_generation),
+            TransferDecision::Ignore
+        );
+        return;
+    }
+    let before = transfer;
+    assert_eq!(
+        transfer.finish(other, TransferOutcome::Succeeded),
+        TransferDecision::Ignore
+    );
+    assert_eq!(
+        transfer.participant_ended(other, other_generation),
+        TransferDecision::Ignore
+    );
+    assert_eq!(
+        transfer.participant_ended(token, generation),
+        TransferDecision::Ignore
+    );
+    assert_eq!(transfer, before);
+    kani::cover!(finished);
+    kani::cover!(!finished);
+}
+
+#[kani::proof]
+#[kani::unwind(12)]
+fn transfer_detachment_preserves_live_calls() {
+    let token = TransferToken::new(kani::any());
+    let Ok(left) = transfer_proof_call(kani::any(), kani::any(), kani::any(), kani::any()) else {
+        assert!(false, "transferor construction failed");
+        return;
+    };
+    let Ok(right) = transfer_proof_call(kani::any(), kani::any(), kani::any(), kani::any()) else {
+        assert!(false, "transferee construction failed");
+        return;
+    };
+    let valid = left.generation() != right.generation()
+        && left.state() == CallState::Up
+        && right.state() == CallState::Up
+        && left.bridge().is_some()
+        && left.bridge() == right.bridge();
+    match Transfer::begin(token, left, right) {
+        Ok(start) => {
+            assert!(valid);
+            assert_eq!(Some(start.release_bridge), left.bridge());
+            for (before, after) in [(left, start.transferor), (right, start.transferee)] {
+                assert_eq!(after.generation(), before.generation());
+                assert_eq!(after.state(), CallState::Up);
+                assert_eq!(after.bridge(), None);
+                assert_eq!(after.media(), before.media());
+                assert_eq!(after.media_connection(), before.media_connection());
+                assert_eq!(after.connection_claim(), before.connection_claim());
+                assert_eq!(after.audio_gate(), before.audio_gate());
+                assert_eq!(after.peer_direction(), before.peer_direction());
+                assert_eq!(after.stasis(), before.stasis());
+            }
+            assert_eq!(start.transfer.state(), TransferState::Proceeding);
+        }
+        Err(TransferError::Participants | TransferError::NotAnswered | TransferError::Bridge) => {
+            assert!(!valid);
+        }
+    }
+    kani::cover!(valid);
+    kani::cover!(!valid);
 }
