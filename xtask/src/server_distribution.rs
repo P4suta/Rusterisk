@@ -23,6 +23,8 @@ mod extraction;
 pub use extraction::ExtractedServer;
 mod runtime_config;
 pub use runtime_config::ServerRuntimeConfig;
+mod ready;
+pub use ready::check_server_ready_log;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {
