@@ -1,4 +1,4 @@
-use super::{SdkConsumerPlan, SdkConsumerScope, SdkPackage};
+use super::{SdkConsumerPlan, SdkConsumerScope, SdkPackage, SdkRuntimeIdentity};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -52,6 +52,9 @@ struct Dependency {
     path: Option<PathBuf>,
     kind: Option<String>,
     target: Option<String>,
+    #[serde(default)]
+    features: Vec<String>,
+    uses_default_features: Option<bool>,
 }
 #[derive(Deserialize)]
 struct Target {
@@ -68,6 +71,8 @@ struct Node {
     id: String,
     dependencies: Vec<String>,
     deps: Vec<Edge>,
+    #[serde(default)]
+    features: Vec<String>,
 }
 #[derive(Deserialize)]
 struct Edge {
@@ -224,6 +229,8 @@ fn check_package(
                 .target
                 .as_deref()
                 .is_some_and(|target| !string(target))
+            || dependency.features.len() > 256
+            || dependency.features.iter().any(|feature| !string(feature))
         {
             return Err(fail("dependency source"));
         }
@@ -263,11 +270,12 @@ fn declared(package: &Package, sdk: SdkPackage, requirement: &semver::VersionReq
         })
 }
 
-pub fn check_sdk_consumer_metadata(
+fn check(
     plan: &SdkConsumerPlan,
     scope: SdkConsumerScope,
     version: &str,
     bytes: &[u8],
+    runtime: Option<&SdkRuntimeIdentity>,
 ) -> Result<(), SdkMetadataError> {
     if bytes.is_empty() || bytes.len() > 8 * 1024 * 1024 {
         return Err(SdkMetadataError::Size);
@@ -325,6 +333,8 @@ pub fn check_sdk_consumer_metadata(
             || nodes.insert(node.id.as_str(), node).is_some()
             || node.dependencies.len() > 256
             || node.deps.len() > 256
+            || node.features.len() > 256
+            || node.features.iter().any(|feature| !string(feature))
         {
             return Err(fail("resolved package graph"));
         }
@@ -357,6 +367,13 @@ pub fn check_sdk_consumer_metadata(
     let root = nodes
         .get(consumer.id.as_str())
         .ok_or_else(|| fail("consumer node"))?;
+    let expected = selected(scope).len() + usize::from(runtime.is_some());
+    if consumer.dependencies.len() != expected
+        || root.dependencies.len() != expected
+        || root.deps.len() != expected
+    {
+        return Err(fail("consumer direct dependency set"));
+    }
     let exact =
         semver::VersionReq::parse(&format!("={version}")).map_err(|_| fail("candidate version"))?;
     for selected in selected(scope) {
@@ -394,5 +411,65 @@ pub fn check_sdk_consumer_metadata(
             }
         }
     }
+    if let Some(runtime) = runtime {
+        let mut candidates = metadata
+            .packages
+            .iter()
+            .filter(|package| package.name == "tokio");
+        let package = candidates.next().ok_or_else(|| fail("candidate runtime"))?;
+        if candidates.next().is_some()
+            || package.version != runtime.version()
+            || package.source.as_deref() != Some(runtime.source())
+            || !normal_edge(root, package)
+        {
+            return Err(fail("candidate runtime identity"));
+        }
+        let declaration = consumer
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.name == "tokio")
+            .ok_or_else(|| fail("runtime declaration"))?;
+        let exact = semver::VersionReq::parse(&format!("={}", runtime.version()))
+            .map_err(|_| fail("runtime version"))?;
+        let features: BTreeSet<_> = declaration.features.iter().map(String::as_str).collect();
+        if declaration.kind.is_some()
+            || declaration.target.is_some()
+            || declaration.source.as_deref() != Some(runtime.source())
+            || declaration.uses_default_features != Some(false)
+            || declaration.features.len() != 3
+            || features != BTreeSet::from(["net", "rt", "time"])
+            || !semver::VersionReq::parse(&declaration.req)
+                .is_ok_and(|requirement| requirement == exact)
+        {
+            return Err(fail("runtime dependency contract"));
+        }
+        let node = nodes
+            .get(package.id.as_str())
+            .ok_or_else(|| fail("runtime node"))?;
+        if ["net", "rt", "time"]
+            .iter()
+            .any(|feature| !node.features.iter().any(|actual| actual == feature))
+        {
+            return Err(fail("resolved runtime features"));
+        }
+    }
     Ok(())
+}
+
+pub fn check_sdk_consumer_metadata(
+    plan: &SdkConsumerPlan,
+    scope: SdkConsumerScope,
+    version: &str,
+    bytes: &[u8],
+) -> Result<(), SdkMetadataError> {
+    check(plan, scope, version, bytes, None)
+}
+
+pub fn check_sdk_http_metadata(
+    plan: &SdkConsumerPlan,
+    version: &str,
+    runtime: &SdkRuntimeIdentity,
+    bytes: &[u8],
+) -> Result<(), SdkMetadataError> {
+    check(plan, SdkConsumerScope::Sdk, version, bytes, Some(runtime))
 }

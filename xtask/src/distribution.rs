@@ -26,7 +26,9 @@ pub use sdk_consumer_plan::{
     SdkConsumerAction, SdkConsumerPhase, SdkConsumerPlan, SdkConsumerScope,
 };
 mod sdk_consumer_metadata;
-pub use sdk_consumer_metadata::{check_sdk_consumer_metadata, SdkMetadataError};
+pub use sdk_consumer_metadata::{
+    check_sdk_consumer_metadata, check_sdk_http_metadata, SdkMetadataError,
+};
 mod sdk_consumer_lock;
 pub use sdk_consumer_lock::{check_sdk_consumer_lock, SdkConsumerLockError};
 mod sdk_consumer_workspace;
