@@ -10,7 +10,11 @@ members = [
   "crates/sip",
   "xtask",
 ]
+exclude = ["vendor/str0m"]
 resolver = "2"
+
+[patch.crates-io]
+str0m = { path = "vendor/str0m" }
 
 [workspace.package]
 version = "0.1.0"

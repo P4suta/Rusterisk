@@ -56,6 +56,9 @@ required-features = ["fuzz", "media"]
 
 [workspace]
 
+[patch.crates-io]
+str0m = { path = "../../vendor/str0m" }
+
 [lints.rust]
 unsafe_code = "forbid"
 unused_must_use = "deny"
