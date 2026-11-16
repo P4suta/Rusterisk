@@ -5,12 +5,14 @@ mod field_runner;
 mod manifest;
 pub use field_mutations::FieldMutation;
 mod captured;
+mod captured_tree;
 mod miri;
 mod mutation;
 mod runner;
 mod snapshot;
 pub use crate::core_proofs::Execution;
 pub(crate) use captured::CapturedAssurance;
+pub(crate) use captured_tree::{AssuranceTreeError, CapturedAssuranceTree};
 pub use manifest::normalize_manifest;
 pub use miri::{
     validate_field_execution, validate_miri_discovery, validate_miri_execution, MiriInventory,
