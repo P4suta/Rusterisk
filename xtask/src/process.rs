@@ -1,6 +1,9 @@
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
+mod request;
+pub use request::{CommandField, CommandRequestError, CommandStream, SupervisedCommand};
+
 #[derive(Debug)]
 pub enum ProcessError {
     Io(std::io::Error),
