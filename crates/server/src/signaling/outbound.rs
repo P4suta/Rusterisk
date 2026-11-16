@@ -328,32 +328,44 @@ impl Signaling {
     }
 
     pub(super) async fn finish_native(&mut self) -> Result<(), ControlError> {
-        for (_, pending) in std::mem::take(&mut self.native_pending) {
+        let pending = std::mem::take(&mut self.native_pending);
+        let mut setups = Vec::with_capacity(pending.len());
+        for pending in pending.into_values() {
             pending.cancel.send_replace(true);
             self.network.cancel_setup(pending.setup);
+            setups.push(pending.setup);
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut outcome = Ok(());
         while !self.native_jobs.is_empty() {
             match tokio::time::timeout_at(deadline, self.native_jobs.join_next()).await {
                 Ok(Some(Ok(completed))) => {
                     self.network.finish_resolution(completed.setup);
                 }
-                Ok(Some(Err(error))) => return Err(failure(error)),
+                Ok(Some(Err(error))) => {
+                    outcome = super::cleanup::combine(outcome, Err(failure(error)));
+                }
                 Ok(None) => break,
                 Err(error) => {
                     self.native_jobs.abort_all();
                     while let Some(result) = self.native_jobs.join_next().await {
-                        if let Err(error) = result {
-                            if !error.is_cancelled() {
-                                return Err(failure(error));
+                        match result {
+                            Ok(completed) => self.network.finish_resolution(completed.setup),
+                            Err(error) if error.is_cancelled() => {}
+                            Err(error) => {
+                                outcome = super::cleanup::combine(outcome, Err(failure(error)));
                             }
                         }
                     }
-                    return Err(failure(error));
+                    outcome = super::cleanup::combine(outcome, Err(failure(error)));
+                    break;
                 }
             }
         }
-        Ok(())
+        for setup in setups {
+            self.network.finish_resolution(setup);
+        }
+        outcome
     }
 }
 

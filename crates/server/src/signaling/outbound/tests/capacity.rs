@@ -31,10 +31,53 @@ impl Fixture {
 
     async fn finish(mut self) -> Result<(), ControlError> {
         let primary = self.signaling.finish_native().await;
-        let cleanup = self.signaling.network.close().await;
+        self.signaling.native_jobs.abort_all();
+        let mut cleanup = Ok(());
+        while let Some(completed) = self.signaling.native_jobs.join_next().await {
+            let result = match completed {
+                Ok(completed) => self.signaling.native_completed(completed, 1).await,
+                Err(error) if error.is_cancelled() => Ok(()),
+                Err(error) => Err(failure(error)),
+            };
+            cleanup = crate::signaling::cleanup::combine(cleanup, result);
+        }
+        cleanup = crate::signaling::cleanup::combine(cleanup, self.signaling.network.close().await);
         drop((self.runner, self.hub));
         crate::signaling::cleanup::combine(primary, cleanup)
     }
+}
+
+#[tokio::test]
+async fn native_shutdown_drains_every_failed_job_and_recovers_known_setup_slots(
+) -> Result<(), ControlError> {
+    let mut fixture = Fixture::new().await?;
+    let primary: Result<(), ControlError> = async {
+        for generation in 1..=16 {
+            fixture.signaling.queue_native(
+                key(&format!("aborted-{generation}"), generation)?,
+                "PJSIP/phone".into(),
+                "100".into(),
+                Some(30),
+                0,
+            )?;
+        }
+        fixture.signaling.native_jobs.abort_all();
+        if fixture.signaling.finish_native().await.is_ok() {
+            return Err(ControlError::Invalid("Native shutdown lost task failures"));
+        }
+        if !fixture.signaling.native_jobs.is_empty() || !fixture.signaling.native_pending.is_empty()
+        {
+            return Err(ControlError::Invalid(
+                "Native shutdown left failed jobs unjoined",
+            ));
+        }
+        let recovered = fixture.signaling.network.reserve_setup(0)?;
+        fixture.signaling.network.finish_resolution(recovered);
+        Ok(())
+    }
+    .await;
+    let cleanup = fixture.finish().await;
+    crate::signaling::cleanup::combine(primary, cleanup)
 }
 
 async fn registered_fixture() -> Result<Fixture, ControlError> {
