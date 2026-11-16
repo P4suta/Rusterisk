@@ -4,9 +4,11 @@ use std::path::Path;
 mod expansion;
 mod ini_comments;
 mod registration;
+mod registration_uri;
 mod wait_duration;
 mod websocket;
 pub use expansion::{expand_variables, ExpansionError};
+pub use registration_uri::{RegistrarUri, RegistrationAddress, RegistrationUriError};
 pub use wait_duration::{InvalidWaitDuration, WaitDuration};
 pub use websocket::{WebSocketClient, WebSocketConfig, WebSocketControlFormat};
 
@@ -350,8 +352,8 @@ pub struct Registration {
     pub name: String,
     pub transport: String,
     pub outbound_auth: String,
-    pub server_uri: String,
-    pub client_uri: String,
+    pub server_uri: RegistrarUri,
+    pub client_uri: RegistrationAddress,
     pub expiration: u32,
     pub contact_user: String,
     pub retry_interval: u32,
@@ -582,8 +584,16 @@ impl Config {
                 "at least one user is required",
             ));
         }
-        for section in Ini::parse_signaling("pjsip.conf", sip)?.sections {
-            config.sip_section(section)?;
+        let signaling = Ini::parse_signaling("pjsip.conf", sip)?;
+        for section in &signaling.sections {
+            if section.value("type") != Some("registration") {
+                config.sip_section(section)?;
+            }
+        }
+        for section in &signaling.sections {
+            if section.value("type") == Some("registration") {
+                config.sip_section(section)?;
+            }
         }
         config.validate_references()?;
         for section in Ini::parse("rtp.conf", rtp)?.sections {
@@ -629,7 +639,7 @@ impl Config {
         Ok(config)
     }
 
-    fn sip_section(&mut self, section: Section) -> Result<(), ConfigError> {
+    fn sip_section(&mut self, section: &Section) -> Result<(), ConfigError> {
         let file = "pjsip.conf";
         match section.required(file, "type")? {
             "transport" => {
@@ -739,7 +749,7 @@ impl Config {
                     })
                     .transpose()?;
                 self.transports.push(Transport {
-                    name: section.name,
+                    name: section.name.clone(),
                     protocol,
                     bind,
                     external_media_address,
@@ -885,33 +895,12 @@ impl Config {
                         "registration client limit is 16",
                     ));
                 }
-                self.registrations.push(Registration {
-                    name: section.name.clone(),
-                    transport: section.required(file, "transport")?.into(),
-                    outbound_auth: section.required(file, "outbound_auth")?.into(),
-                    server_uri: section.required(file, "server_uri")?.into(),
-                    client_uri: section.required(file, "client_uri")?.into(),
-                    expiration: section.number(file, "expiration", 3600)?,
-                    contact_user: registration::contact_user(file, &section)?,
-                    retry_interval: section.number(file, "retry_interval", 60)?,
-                    forbidden_retry_interval: section.number(
-                        file,
-                        "forbidden_retry_interval",
-                        0,
-                    )?,
-                    fatal_retry_interval: section.number(file, "fatal_retry_interval", 0)?,
-                    max_retries: section.number(file, "max_retries", 10)?,
-                    max_random_initial_delay: section.number(
-                        file,
-                        "max_random_initial_delay",
-                        10,
-                    )?,
-                    auth_rejection_permanent: section.flag(
-                        file,
-                        "auth_rejection_permanent",
-                        true,
-                    )?,
-                });
+                self.registrations.push(registration::parse(
+                    file,
+                    section,
+                    &self.transports,
+                    &self.auth,
+                )?);
             }
             "identify" => {
                 section.check(file, &["type", "endpoint", "match"])?;
