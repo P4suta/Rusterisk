@@ -1,6 +1,6 @@
 use std::{io::Read, path::Path};
 
-const MAX_INPUT: usize = 65536;
+pub(super) const MAX_INPUT: usize = 65536;
 const README: &str = "docs/rust-sdk.md";
 
 #[derive(Debug)]
@@ -104,7 +104,7 @@ fn text<'a>(path: &str, bytes: &'a [u8]) -> Result<&'a str, SdkInputError> {
     })
 }
 
-fn manifest(path: &str, bytes: &[u8]) -> Result<toml::Value, SdkInputError> {
+pub(super) fn manifest(path: &str, bytes: &[u8]) -> Result<toml::Value, SdkInputError> {
     toml::from_str(text(path, bytes)?).map_err(|source| SdkInputError::Manifest {
         path: path.to_owned(),
         source,
@@ -146,7 +146,7 @@ fn check_metadata(package: SdkPackage, source: &toml::Value) -> Result<(), SdkIn
     Ok(())
 }
 
-fn read(root: &Path, path: &str) -> Result<Vec<u8>, SdkInputError> {
+pub(super) fn read(root: &Path, path: &str) -> Result<Vec<u8>, SdkInputError> {
     let io_error = |source| SdkInputError::Input {
         path: path.to_owned(),
         source,
