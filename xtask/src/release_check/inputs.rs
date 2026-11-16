@@ -46,6 +46,7 @@ fn relative(path: &Path) -> Result<String, InputError> {
     let raw = path.to_str().ok_or(InputError::Path)?;
     if raw.is_empty()
         || raw.len() > 4096
+        || matches!(raw.as_bytes(), [drive, b':', ..] if drive.is_ascii_alphabetic())
         || raw
             .split(['/', '\\'])
             .any(|part| matches!(part, "." | ".."))

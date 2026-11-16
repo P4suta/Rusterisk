@@ -69,6 +69,19 @@ fn empty_duplicate_and_escaping_input_paths_are_rejected() {
 }
 
 #[test]
+fn windows_drive_prefixes_are_refused_on_every_host() {
+    for path in ["C:/escape", "C:relative", "c:\\escape", "Z:"] {
+        assert!(
+            matches!(
+                SourceInputs::new([(Path::new(path), b"data".as_slice())].into_iter()),
+                Err(InputError::Path)
+            ),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn source_collections_stop_at_the_first_excess_file_and_bound_the_total_bytes() -> io::Result<()> {
     let names: Vec<_> = (0..=SourceInputs::MAX_FILES)
         .map(|index| format!("src/file{index}.rs"))
