@@ -18,6 +18,7 @@ mod peer_lifetime;
 mod registrar;
 mod registration_client;
 mod request_identity;
+mod required_options;
 mod session_description;
 mod stream_framing;
 mod telephone;
@@ -701,6 +702,37 @@ impl Engine {
             Method::Invite | Method::Register => {
                 if let Some(index) = self.authorize(&request, peer, now)? {
                     let endpoint = self.config.endpoints[index].clone();
+                    if request.method == Method::Invite {
+                        let rejected = match required_options::unsupported(&request) {
+                            Ok(None) => None,
+                            Ok(Some(options)) => match self.render_response(
+                                &request,
+                                420,
+                                "Bad Extension",
+                                options.response_headers(),
+                                "",
+                            ) {
+                                Ok(reply) => Some(reply),
+                                Err(SipError::Capacity) => Some(self.render_response(
+                                    &request,
+                                    513,
+                                    "Message Too Large",
+                                    "",
+                                    "",
+                                )?),
+                                Err(error) => return Err(error),
+                            },
+                            Err(required_options::RequiredOptionsError::Malformed) => {
+                                Some(self.render_response(&request, 400, "Bad Request", "", "")?)
+                            }
+                            Err(required_options::RequiredOptionsError::Capacity) => Some(
+                                self.render_response(&request, 513, "Message Too Large", "", "")?,
+                            ),
+                        };
+                        if let Some(reply) = rejected {
+                            return self.cache_reply(key, request, peer, now, reply, events);
+                        }
+                    }
                     if request.method == Method::Register {
                         self.register(&request, &endpoint, peer, now, &mut events)?
                     } else if self.pending.len() + self.incoming.len() >= 64 {

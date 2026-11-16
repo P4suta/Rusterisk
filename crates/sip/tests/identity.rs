@@ -11,6 +11,11 @@ use rsipstack::sip::{HeadersExt, SipMessage};
 use rusterisk_config::Config;
 use rusterisk_sip::{Engine, Session, SipError, SipEvent};
 
+#[path = "identity/required_options.rs"]
+mod required_options;
+#[path = "identity/required_options_capacity.rs"]
+mod required_options_capacity;
+
 fn config() -> Result<Config, SipError> {
     Ok(Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:5060\n[a]\ntype=auth\nusername=phone\npassword=password\n[aor]\ntype=aor\n[phone]\ntype=endpoint\ntransport=udp\nauth=a\naors=aor\ncontext=internal\nallow=ulaw,alaw,opus\n", "", "")?)
 }
@@ -23,8 +28,22 @@ fn invite(authorization: &str, sequence: u32) -> String {
 fn authenticated_invite(
     engine: &mut Engine,
 ) -> Result<(rusterisk_sip::Output, String, String), SipError> {
+    authenticated_invite_with_headers(engine, "")
+}
+
+fn authenticated_invite_with_headers(
+    engine: &mut Engine,
+    headers: &str,
+) -> Result<(rusterisk_sip::Output, String, String), SipError> {
+    let packet = |authorization, sequence| {
+        invite(authorization, sequence).replacen(
+            "Content-Type: ",
+            &format!("{headers}Content-Type: "),
+            1,
+        )
+    };
     let peer = "127.0.0.1:5061".parse()?;
-    let challenged = engine.receive(invite("", 1).as_bytes(), peer, 0)?;
+    let challenged = engine.receive(packet("", 1).as_bytes(), peer, 0)?;
     assert!(challenged.events.is_empty());
     let response = std::str::from_utf8(&challenged.datagrams[0].bytes)?;
     assert!(response.starts_with("SIP/2.0 401"));
@@ -53,7 +72,7 @@ fn authenticated_invite(
     }
     .compute();
     let auth = format!("Authorization: Digest username=\"phone\", realm=\"{}\", nonce=\"{}\", uri=\"sip:100@localhost\", response=\"{digest}\", algorithm=MD5, qop=auth, cnonce=\"test-client\", nc=00000001\r\n", challenge.realm, challenge.nonce);
-    let wire = invite(&auth, 2);
+    let wire = packet(&auth, 2);
     let accepted = engine.receive(wire.as_bytes(), peer, 1)?;
     Ok((accepted, wire, auth))
 }
