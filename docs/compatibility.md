@@ -86,7 +86,9 @@ The adapter confirms direction changes before sending the negotiated answer.
 Unsupported media changes return `488`.
 Native `DTLS-SRTP` session tests exchange known audio with `PCMU`, `PCMA`, and Opus.
 A `PCMU` integration test checks both directions through the audio bridge and port release.
-Blind transfer, attended transfer, browser call integration, and legacy hold through an unspecified connection address remain pending.
+Blind and attended transfer comparisons verify received audio with Asterisk 22.9.0, including fresh signals after retirement of the source dialog.
+The [transfer profile](blind-transfer.md) records remaining authorization, topology, and termination-timing boundaries.
+Legacy hold through an unspecified connection address remains pending.
 External media supports bidirectional unicast datagrams with numeric destinations and `ulaw` or `alaw` formats.
 Creation returns bound transport variables after socket admission.
 Stasis participation and received audio remain independent milestones.

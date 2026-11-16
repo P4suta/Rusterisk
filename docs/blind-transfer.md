@@ -22,6 +22,14 @@ Wire termination timing remains an open compatibility difference.
 Run `mise x -- just interop` to execute the named reference case explicitly.
 The command rejects missing or skipped execution, restores copied configuration, and removes its isolated container.
 Native fixtures also verify task shutdown and reuse of User Datagram Protocol (UDP) ports.
-Attended transfer, `Replaces`, out-of-dialog `REFER`, authorization for dialogs derived from `sips` sessions, and bridges with three or more channels remain unfinished.
+
+The successful attended transfer profile also passes a shared native and Asterisk received-audio fixture.
+The fixture establishes source and consultation calls before an in-dialog `REFER` containing `Replaces`.
+The surviving participants exchange known audio while the source and consultation transferor dialogs end.
+After confirming termination, the fixture changes both signals and requires fresh matching audio in both directions.
+Separate native cases end either surviving participant.
+Another case checks known audio and source routes across distinct signaling listeners.
+
+Direct `INVITE` replacement, out-of-dialog `REFER`, authorization for dialogs derived from `sips` sessions, and bridges with three or more channels remain unfinished.
 Received-audio comparisons for denied, failed, and cancelled transfers remain open.
 The [transfer decision](adr/keep-transfer-progress-independent-of-call-teardown.md) remains proposed.
