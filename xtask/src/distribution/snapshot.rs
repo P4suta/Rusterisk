@@ -33,6 +33,7 @@ pub enum SnapshotError {
     Project(crate::browser::SourceError),
     Input(SdkInputError),
     Invalid,
+    Limits { files: usize, bytes: usize },
     Changed,
 }
 
@@ -46,6 +47,10 @@ impl std::fmt::Display for SnapshotError {
                 "distribution source requires bounded regular project and package inputs",
             ),
             Self::Changed => formatter.write_str("captured distribution source changed"),
+            Self::Limits { files, bytes } => write!(
+                formatter,
+                "distribution source has {files} files and {bytes} bytes; limits are 1024 files and 41943040 bytes"
+            ),
         }
     }
 }
@@ -136,7 +141,10 @@ impl SourceSnapshot {
             }
             total += bytes.len();
             if paths.len() > 1024 || total > 40 * 1024 * 1024 {
-                return Err(SnapshotError::Invalid);
+                return Err(SnapshotError::Limits {
+                    files: paths.len(),
+                    bytes: total,
+                });
             }
         }
         Ok(snapshot)

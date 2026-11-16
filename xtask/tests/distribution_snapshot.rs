@@ -155,7 +155,11 @@ fn distribution_snapshot_combines_the_project_and_package_file_count_limits(
         for index in 0..extra {
             write(root, &format!("xtask/src/input-{index}.rs"), b"x")?;
         }
-        assert!(SourceSnapshot::read(root).is_err());
+        let error = SourceSnapshot::read(root)
+            .err()
+            .ok_or_else(|| std::io::Error::other("oversize file inventory passed"))?;
+        assert!(error.to_string().contains("1025"), "{error}");
+        assert!(error.to_string().contains("files"), "{error}");
         Ok(())
     })
 }
