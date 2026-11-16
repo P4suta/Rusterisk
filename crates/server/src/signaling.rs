@@ -1059,11 +1059,14 @@ impl Signaling {
                 packet = self.network.next() => {
                     let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
                     match packet? {
-                        transport::Input::Packet(packet) => match self.listeners[packet.listener].engine.receive(&packet.bytes, packet.peer, now) {
+                        transport::Input::Packet(packet) => {
+                            if self.registration_received(&packet, now) { continue; }
+                            match self.listeners[packet.listener].engine.receive(&packet.bytes, packet.peer, now) {
                             Ok(output) => self.output(packet.listener, output, now).await?,
                             Err(error) => {
                                 self.network.refuse(packet.listener, packet.peer);
                                 tracing::debug!(transport = %self.listeners[packet.listener].name, %error, "signaling input refused");
+                            }
                             }
                         },
                         transport::Input::Closed { key, result } => {

@@ -4,6 +4,8 @@ use rusterisk_server::{media::MediaHub, signaling::Signaling, ControlError, Cont
 use std::{net::SocketAddr, time::Duration};
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
+#[path = "outbound_registration/authentication.rs"]
+mod authentication;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())

@@ -1,11 +1,11 @@
-use super::{failure, media, Signaling};
+use super::{failure, media, Received, Signaling};
 use crate::ControlError;
-use rusterisk_config::{Config, Protocol, Registration, MAX_REGISTRATIONS};
+use rusterisk_config::{Auth, Config, Protocol, Registration, MAX_REGISTRATIONS};
 use rusterisk_sip::{
-    Datagram, RegistrationIdentity, RegistrationTransaction, RegistrationTransactionEvent,
-    StaticTarget, TargetHost,
+    Datagram, RegistrationGrant, RegistrationIdentity, RegistrationResponse,
+    RegistrationTransaction, RegistrationTransactionEvent, StaticTarget, TargetHost,
 };
-use std::net::SocketAddr;
+use std::{net::SocketAddr, num::NonZeroU32};
 #[cfg(test)]
 mod tests;
 
@@ -19,12 +19,19 @@ struct Client {
     listener: usize,
     peer: SocketAddr,
     settings: Registration,
+    auth: Auth,
     state: State,
 }
 
 enum State {
-    Waiting { at: u64 },
+    Waiting {
+        at: u64,
+    },
     Trying(RegistrationTransaction),
+    Registered {
+        response: RegistrationResponse,
+        refresh_at: u64,
+    },
     Stopped,
 }
 
@@ -68,10 +75,17 @@ impl Registrations {
                 random()? % u128::from(settings.max_random_initial_delay)
             };
             let at = (u64::try_from(delay).map_err(failure)? + 1) * 1000;
+            let auth = config
+                .auth
+                .iter()
+                .find(|auth| auth.name == settings.outbound_auth)
+                .ok_or(ControlError::NotFound("Registration credentials not found"))?
+                .clone();
             clients.push(Client {
                 listener,
                 peer,
                 settings: settings.clone(),
+                auth,
                 state: State::Waiting { at },
             });
         }
@@ -89,7 +103,7 @@ impl Registrations {
             self.cursor = (self.cursor + 1) % self.clients.len();
             let client = &self.clients[index];
             let due = match &client.state {
-                State::Waiting { at } => {
+                State::Waiting { at } | State::Registered { refresh_at: at, .. } => {
                     now >= *at
                         && !self.clients.iter().any(|other| {
                             other.peer == client.peer && matches!(other.state, State::Trying(_))
@@ -114,18 +128,39 @@ impl Registrations {
         now: u64,
     ) -> Result<Option<Datagram>, ControlError> {
         let client = self.clients.get_mut(index).ok_or(ControlError::Capacity)?;
-        if let State::Waiting { .. } = client.state {
-            self.identity = self.identity.advance(random()?).map_err(failure)?;
-            client.state = State::Trying(
-                RegistrationTransaction::new(
-                    &client.settings,
-                    local,
-                    client.peer,
-                    self.identity,
-                    now,
+        let transaction = match &client.state {
+            State::Waiting { .. } => {
+                self.identity = self.identity.advance(random()?).map_err(failure)?;
+                Some(
+                    RegistrationTransaction::new(
+                        &client.settings,
+                        local,
+                        client.peer,
+                        self.identity,
+                        now,
+                    )
+                    .map_err(failure)?,
                 )
-                .map_err(failure)?,
-            );
+            }
+            State::Registered { response, .. } => {
+                self.identity = self.identity.advance(random()?).map_err(failure)?;
+                Some(
+                    response
+                        .refresh(
+                            std::slice::from_ref(&client.auth),
+                            self.identity,
+                            NonZeroU32::new(client.settings.expiration).ok_or(
+                                ControlError::Invalid("Refresh lifetime must be positive"),
+                            )?,
+                            now,
+                        )
+                        .map_err(failure)?,
+                )
+            }
+            State::Trying(_) | State::Stopped => None,
+        };
+        if let Some(transaction) = transaction {
+            client.state = State::Trying(transaction);
         }
         let State::Trying(transaction) = &mut client.state else {
             return Ok(None);
@@ -144,6 +179,42 @@ impl Registrations {
         }
     }
 
+    fn response(
+        &mut self,
+        index: usize,
+        response: RegistrationResponse,
+        now: u64,
+    ) -> Result<(), ControlError> {
+        let client = self.clients.get_mut(index).ok_or(ControlError::Capacity)?;
+        client.state = match response.status() {
+            401 | 407 => {
+                self.identity = self.identity.advance(random()?).map_err(failure)?;
+                match response
+                    .authenticated_retry(
+                        std::slice::from_ref(&client.auth),
+                        self.identity,
+                        &format!("{:032x}", random()?),
+                        1,
+                        now,
+                    )
+                    .map_err(failure)?
+                {
+                    Some(transaction) => State::Trying(transaction),
+                    None => return Err(ControlError::Unsupported),
+                }
+            }
+            200..=299 => match response.grant().map_err(failure)? {
+                RegistrationGrant::Active { refresh_at, .. } => State::Registered {
+                    response,
+                    refresh_at,
+                },
+                RegistrationGrant::Removed => State::Stopped,
+            },
+            _ => State::Stopped,
+        };
+        Ok(())
+    }
+
     pub(super) fn cancel(&mut self) {
         for client in &mut self.clients {
             if let State::Trying(transaction) = &mut client.state {
@@ -155,6 +226,40 @@ impl Registrations {
 }
 
 impl Signaling {
+    pub(super) fn registration_received(&mut self, packet: &Received, now: u64) -> bool {
+        let Some(index) = self.registrations.clients.iter().position(|client| {
+            client.listener == packet.listener
+                && client.peer == packet.peer
+                && matches!(client.state, State::Trying(_))
+        }) else {
+            return false;
+        };
+        let State::Trying(transaction) = &mut self.registrations.clients[index].state else {
+            return false;
+        };
+        let event = match transaction.receive(&packet.bytes, packet.peer, now) {
+            Ok(event) => event,
+            Err(error) => {
+                tracing::debug!(%error, "registration response refused");
+                return true;
+            }
+        };
+        let response = match event {
+            Some(RegistrationTransactionEvent::Response(response)) => response,
+            Some(RegistrationTransactionEvent::Provisional(_)) => return true,
+            Some(
+                RegistrationTransactionEvent::Transmit(_) | RegistrationTransactionEvent::TimedOut,
+            )
+            | None => return false,
+        };
+        if let Err(error) = self.registrations.response(index, response, now) {
+            let client = &mut self.registrations.clients[index];
+            client.state = State::Stopped;
+            tracing::debug!(registration = %client.settings.name, %error, "outbound registration stopped");
+        }
+        true
+    }
+
     pub(super) async fn registration_tick(&mut self, now: u64) -> Result<(), ControlError> {
         let Some(index) = self.registrations.select(now) else {
             return Ok(());
