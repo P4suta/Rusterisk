@@ -29,8 +29,11 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tower::ServiceExt;
 
+#[path = "sip_transfer/acknowledgements.rs"]
+mod acknowledgements;
 #[path = "sip_transfer/blind.rs"]
 mod blind_transfer;
+use acknowledgements::AckIdentity;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
@@ -68,6 +71,20 @@ async fn answer_dialog(
     signal: &UdpSocket,
     audio: &SocketPair,
 ) -> Result<(SocketAddr, String), ControlError> {
+    answer_dialog_at(
+        signal,
+        signal.local_addr().map_err(failure)?,
+        audio.local_addr().map_err(failure)?,
+    )
+    .await
+    .map(|(media, ack, _identity)| (media, ack))
+}
+
+async fn answer_dialog_at(
+    signal: &UdpSocket,
+    contact: SocketAddr,
+    audio: SocketAddr,
+) -> Result<(SocketAddr, String, AckIdentity), ControlError> {
     let mut bytes = [0; 16385];
     let (size, peer) = tokio::time::timeout(Duration::from_secs(2), signal.recv_from(&mut bytes))
         .await
@@ -77,21 +94,24 @@ async fn answer_dialog(
         SipMessage::Request(request) => request,
         SipMessage::Response(_) => return Err(ControlError::Invalid("Expected an invitation")),
     };
+    let tagged_to = format!(
+        "{};tag=phone",
+        request.to_header().map_err(failure)?.value()
+    );
+    let acknowledgement = AckIdentity::for_invitation(&request, peer, tagged_to.clone())?;
     let offered = Session::parse(
         std::str::from_utf8(&request.body).map_err(failure)?,
         &[Codec::Pcmu],
     )
     .map_err(failure)?;
-    let body = offered
-        .answer(audio.local_addr().map_err(failure)?, 1)
-        .map_err(failure)?;
-    let reply = format!("SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=phone\r\nCall-ID: {}\r\nCSeq: {}\r\nContact: <sip:phone@{}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", request.top_via_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.to_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value(), request.cseq_header().map_err(failure)?.value(), signal.local_addr().map_err(failure)?, body.len());
+    let body = offered.answer(audio, 1).map_err(failure)?;
+    let reply = format!("SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {tagged_to}\r\nCall-ID: {}\r\nCSeq: {}\r\nContact: <sip:phone@{contact}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", request.top_via_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value(), request.cseq_header().map_err(failure)?.value(), body.len());
     signal
         .send_to(reply.as_bytes(), peer)
         .await
         .map_err(failure)?;
     let ack = format!("ACK sip:rusterisk@{peer} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-ack;rport\r\nFrom: {};tag=phone\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", signal.local_addr().map_err(failure)?, request.to_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value());
-    Ok((offered.remote, ack))
+    Ok((offered.remote, ack, acknowledgement))
 }
 
 async fn receive_audio(peer: &SocketPair, expected: i32) -> Result<(), ControlError> {
@@ -584,17 +604,51 @@ async fn invite(
     target: SocketAddr,
     audio: &SocketPair,
 ) -> Result<(), ControlError> {
+    invite_at(
+        signal,
+        target,
+        signal.local_addr().map_err(failure)?,
+        audio.local_addr().map_err(failure)?,
+    )
+    .await?;
+    if response(signal).await?.status_code.code() != 100 {
+        return Err(ControlError::Invalid(
+            "Missing authenticated invitation progress",
+        ));
+    }
+    Ok(())
+}
+
+async fn final_response(signal: &UdpSocket) -> Result<rsipstack::sip::Response, ControlError> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        for _ in 0..8 {
+            let response = response(signal).await?;
+            if response.status_code.code() >= 200 {
+                return Ok(response);
+            }
+        }
+        Err(ControlError::Capacity)
+    })
+    .await
+    .map_err(failure)?
+}
+
+async fn invite_at(
+    signal: &UdpSocket,
+    target: SocketAddr,
+    local: SocketAddr,
+    audio: SocketAddr,
+) -> Result<(), ControlError> {
     let uri = Uri::try_from(format!("sip:100@{target}")).map_err(failure)?;
-    let local = signal.local_addr().map_err(failure)?;
     let body = Session {
-        remote: audio.local_addr().map_err(failure)?,
+        remote: audio,
         codec: Codec::Pcmu,
         payload_type: 0,
         telephone: Some(DtmfFormat::new(101, 8000).map_err(failure)?),
         direction: Direction::SendRecv,
         security: rusterisk_sip::SessionSecurity::Rtp,
     }
-    .answer(audio.local_addr().map_err(failure)?, 1)
+    .answer(audio, 1)
     .map_err(failure)?;
     let packet = |sequence: u32, authorization: &str| {
         format!("INVITE {uri} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK-incoming-{sequence};rport\r\nFrom: <sip:spoofed@localhost>;tag=caller\r\nTo: <{uri}>\r\nCall-ID: incoming-test\r\nCSeq: {sequence} INVITE\r\nContact: <sip:phone@{local}>\r\nMax-Forwards: 70\r\n{authorization}Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", body.len())
@@ -603,8 +657,12 @@ async fn invite(
         .send_to(packet(1, "").as_bytes(), target)
         .await
         .map_err(failure)?;
-    let challenge = response(signal).await?;
-    assert_eq!(challenge.status_code.code(), 401);
+    let challenge = final_response(signal).await?;
+    if challenge.status_code.code() != 401 {
+        return Err(ControlError::Invalid(
+            "Missing invitation authentication challenge",
+        ));
+    }
     let ack = format!("ACK {uri} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK-incoming-1;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 1 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", challenge.from_header().map_err(failure)?.value(), challenge.to_header().map_err(failure)?.value(), challenge.call_id_header().map_err(failure)?.value());
     signal
         .send_to(ack.as_bytes(), target)
@@ -637,7 +695,6 @@ async fn invite(
         .send_to(packet(2, &authorization).as_bytes(), target)
         .await
         .map_err(failure)?;
-    assert_eq!(response(signal).await?.status_code.code(), 100);
     Ok(())
 }
 
