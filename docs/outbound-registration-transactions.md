@@ -23,4 +23,11 @@ Timer K absorbs duplicate final responses for five seconds on UDP.
 Reliable transactions finish when the final response arrives.
 
 Matched receipts support [authentication retries](outbound-registration-authentication.md) and [Contact grant interpretation](outbound-registration-grants.md).
-Refresh transmission, retry policy, and network scheduling remain pending.
+`minimum_expiration_retry` handles a validated increase from a 423 response.
+`retry_after` validates a complete Retry-After value and returns a positive delay.
+Absent and zero values return `None`.
+`retry_after_failure` constructs another transaction from a failed receipt while renewing existing authorization counters.
+Successful grants require `refresh`, and 423 responses require `minimum_expiration_retry`.
+The caller assigns the request identity when dispatching, preserving ordering across waiting registrations.
+Native authentication, grants, refresh, and 423 correction use the [startup driver](outbound-registration-startup.md).
+Delayed failure scheduling and configuration replacement remain pending.

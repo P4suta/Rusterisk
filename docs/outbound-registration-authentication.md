@@ -1,6 +1,8 @@
 # Outbound registration authentication
 
 `RegistrationResponse::authenticated_retry` consumes a matched challenge receipt and returns at most one new transaction.
+`authenticate` returns either `RegistrationAuthentication::Retry` or the owned receipt in `RegistrationAuthentication::Rejected`.
+The existing convenience method returns `None` and drops rejected receipts.
 The caller supplies a later sequence under the same boot identifier, a validated client nonce and nonzero nonce count, and a monotonic timestamp.
 The generation manager remains responsible for global request ordering and authentication session counters.
 
@@ -16,5 +18,6 @@ Another challenge for the same authorization scope requires a changed server non
 Each attempt chain permits at most four authentication retries.
 
 Matched successful receipts support [Contact grant interpretation](outbound-registration-grants.md).
-Native registration authentication, refresh, configuration replacement, and network scheduling remain pending.
+Native registration authentication and refresh use the [startup driver](outbound-registration-startup.md).
+Delayed failure scheduling and configuration replacement remain pending.
 The [generation decision](adr/own-outbound-registrations-by-configuration-generation.md) describes their required ownership.
