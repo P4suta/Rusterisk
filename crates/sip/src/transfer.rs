@@ -5,11 +5,13 @@ pub(crate) mod dialog;
 pub(crate) mod notify;
 pub(crate) mod owners;
 mod progress;
+mod replaces;
 mod request;
 mod subscribe;
 pub(crate) mod wire;
 pub use authority::ReferAuthority;
 pub use delivery::ReferIdentity;
+pub use replaces::Replaces;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ReferKey(u64);

@@ -43,7 +43,7 @@ pub use stream_framing::{SipStreamDecoder, StreamFramingError, StreamItem};
 pub use telephone::DtmfFormat;
 pub use transfer::{
     BlindRefer, DialogRefer, ReferAuthority, ReferError, ReferFailure, ReferIdentity, ReferKey,
-    ReferProgress, ReferSubscription,
+    ReferProgress, ReferSubscription, Replaces,
 };
 pub use websocket_framing::validate_websocket_message;
 
