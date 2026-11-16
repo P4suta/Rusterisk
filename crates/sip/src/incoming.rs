@@ -1,6 +1,6 @@
 use crate::{
-    response, Datagram, DialogReply, Engine, Output, PendingInvite, RequestIdentity, Session,
-    SipError, SipEvent,
+    dialog_target::DialogTarget, response, Datagram, DialogReply, Engine, Output, PendingInvite,
+    RequestIdentity, Session, SipError, SipEvent,
 };
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, Request, SipMessage};
 use std::net::SocketAddr;
@@ -29,7 +29,7 @@ pub(crate) struct Incoming {
     answer_version: u64,
     local_security: crate::SessionSecurity,
     offer: Vec<u8>,
-    remote_target: rsipstack::sip::Uri,
+    remote_target: DialogTarget,
 }
 
 impl Incoming {
@@ -49,7 +49,7 @@ impl Incoming {
             .filter(|sequence| *sequence < 1 << 31)
             .ok_or(SipError::Capacity)?;
         let invite = tagged(&self.invite.request, &self.invite.local_tag)?;
-        let target = &self.remote_target;
+        let target = self.remote_target.uri();
         let transport = crate::transport::token(self.invite.protocol);
         let packet = format!(
             "{method} {target} SIP/2.0\r\nVia: SIP/2.0/{transport} {};branch=z9hG4bK-{}-{method}-{};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {} {method}\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
@@ -127,13 +127,22 @@ impl Engine {
         else {
             return Ok(None);
         };
+        let target = target
+            .map(|target| {
+                DialogTarget::from_uri(
+                    dialog.invite.protocol,
+                    dialog.invite.uri_security,
+                    target.uri(),
+                )
+            })
+            .transpose()?;
         let mut request = dialog.request(Method::Notify)?;
-        if let Some(target) = target {
+        if let Some(target) = &target {
             request.uri = target.uri().clone();
         }
         let bytes = crate::transfer::notify::encode(request, contact, notification)?;
         if let Some(target) = target {
-            dialog.remote_target = target.uri().clone();
+            dialog.remote_target = target;
         }
         Ok(Some(Datagram::new(dialog.invite.peer, bytes)))
     }
@@ -388,7 +397,7 @@ impl Engine {
             &body,
         )?;
         let sequence = invite.request.cseq_header()?.typed()?.seq;
-        let remote_target = invite.request.contact_header()?.typed()?.uri;
+        let remote_target = invite.remote_target.clone();
         let offer = invite.request.body.clone();
         let mut invite = self.pending.remove(&key).ok_or(SipError::InvalidPacket)?;
         invite.session.telephone = telephone;
@@ -506,6 +515,22 @@ impl Engine {
                 }
                 State::Established => {}
             }
+            let target = match DialogTarget::from_request(
+                dialog.invite.protocol,
+                dialog.invite.uri_security,
+                request,
+            ) {
+                Ok(Some(target)) => target,
+                Ok(None) | Err(_) => {
+                    return Ok(Some(DialogReply::response(response(
+                        request,
+                        400,
+                        "Bad Request",
+                        "",
+                        "",
+                    )?)));
+                }
+            };
             let updated = match crate::media_direction::update(
                 &dialog.offer,
                 &request.body,
@@ -523,13 +548,6 @@ impl Engine {
                     )?)));
                 }
             };
-            let target = request
-                .headers
-                .iter()
-                .find(|header| header.name().eq_ignore_ascii_case("Contact"))
-                .map(|header| rsipstack::sip::headers::typed::Contact::parse(header.value()))
-                .transpose()?
-                .map(|contact| contact.uri);
             let changed = updated.direction != dialog.invite.session.direction;
             let version = if changed {
                 dialog
@@ -576,9 +594,7 @@ impl Engine {
             dialog.offer = request.body.clone();
             dialog.answer_version = version;
             dialog.remote_cseq = sequence;
-            if let Some(target) = target {
-                dialog.remote_target = target;
-            }
+            dialog.remote_target = target;
             dialog.bytes = bytes.clone();
             dialog.state = State::AwaitingAck {
                 sequence,

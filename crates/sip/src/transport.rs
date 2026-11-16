@@ -1,4 +1,4 @@
-use crate::{ContactError, RegistrationContacts, SipError};
+use crate::{dialog_target::DialogTarget, ContactError, RegistrationContacts, SipError};
 use rsipstack::sip::{
     uri::{Param, Scheme},
     Request, Transport, Uri,
@@ -10,6 +10,11 @@ use std::net::SocketAddr;
 pub(super) enum UriSecurity {
     Sip,
     Sips,
+}
+
+pub(super) struct IncomingTarget {
+    pub(super) security: UriSecurity,
+    pub(super) target: DialogTarget,
 }
 
 pub(super) enum IncomingSecurityError {
@@ -47,6 +52,14 @@ impl UriSecurity {
 
     pub(super) fn target(protocol: Protocol, uri: &Uri) -> Result<Self, SipError> {
         let security = Self::address(uri)?.transport(protocol)?;
+        if !uri.headers.is_empty()
+            || uri
+                .auth
+                .as_ref()
+                .is_some_and(|auth| auth.password.is_some())
+        {
+            return Err(SipError::Unsupported);
+        }
         for parameter in &uri.params {
             let allowed = match parameter {
                 Param::Transport(value) => matches!(
@@ -69,10 +82,15 @@ impl UriSecurity {
                         )
                     })
                 }
+                Param::Other(name, _)
+                    if ["method", "maddr", "ttl"].iter().any(|parameter| {
+                        crate::contact::parameter_eq(&name.to_string(), parameter)
+                    }) =>
+                {
+                    false
+                }
+                Param::Method(_) | Param::Ttl(_) | Param::Maddr(_) => false,
                 Param::User(_)
-                | Param::Method(_)
-                | Param::Ttl(_)
-                | Param::Maddr(_)
                 | Param::Lr
                 | Param::Ob
                 | Param::Rport(_)
@@ -93,7 +111,7 @@ impl UriSecurity {
     pub(super) fn incoming(
         protocol: Protocol,
         request: &Request,
-    ) -> Result<Self, IncomingSecurityError> {
+    ) -> Result<IncomingTarget, IncomingSecurityError> {
         let target =
             Self::address(&request.uri).map_err(|_| IncomingSecurityError::UnsupportedScheme)?;
         let contacts = crate::parse_registration_contacts(
@@ -110,8 +128,9 @@ impl UriSecurity {
         let [contact] = contacts.as_slice() else {
             return Err(IncomingSecurityError::Invalid);
         };
-        let contact = Self::address(contact.uri()).map_err(|_| IncomingSecurityError::Invalid)?;
-        if target == Self::Sips && contact != Self::Sips {
+        let contact_security =
+            Self::address(contact.uri()).map_err(|_| IncomingSecurityError::Invalid)?;
+        if target == Self::Sips && contact_security != Self::Sips {
             return Err(IncomingSecurityError::Invalid);
         }
         let routes = crate::parse_registration_contacts(
@@ -123,7 +142,7 @@ impl UriSecurity {
             None,
         )?;
         let route = match &routes {
-            RegistrationContacts::Query => contact,
+            RegistrationContacts::Query => contact_security,
             RegistrationContacts::Bindings(routes) => Self::address(
                 routes
                     .as_slice()
@@ -134,13 +153,16 @@ impl UriSecurity {
             .map_err(|_| IncomingSecurityError::Invalid)?,
             RegistrationContacts::RemoveAll => return Err(IncomingSecurityError::Invalid),
         };
-        if target == Self::Sips || route == Self::Sips {
+        let security = if target == Self::Sips || route == Self::Sips {
             Self::Sips
                 .transport(protocol)
-                .map_err(|_| IncomingSecurityError::SecureTransportRequired)
+                .map_err(|_| IncomingSecurityError::SecureTransportRequired)?
         } else {
-            Ok(Self::Sip)
-        }
+            Self::Sip
+        };
+        let target = DialogTarget::new(protocol, security, contact)
+            .map_err(|_| IncomingSecurityError::Invalid)?;
+        Ok(IncomingTarget { security, target })
     }
 }
 

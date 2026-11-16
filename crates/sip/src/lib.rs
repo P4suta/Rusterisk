@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 mod contact;
 mod destination;
+mod dialog_target;
 mod digest;
 mod incoming;
 mod info;
@@ -453,6 +454,7 @@ pub struct PendingInvite {
     local: SocketAddr,
     protocol: Protocol,
     uri_security: transport::UriSecurity,
+    remote_target: dialog_target::DialogTarget,
     authority: ReferAuthority,
 }
 
@@ -733,9 +735,9 @@ impl Engine {
                 self.render_response(&request, 503, "Service Unavailable", "", "")?,
             ));
         }
-        let uri_security = if request.method == Method::Invite {
+        let incoming_target = if request.method == Method::Invite {
             match transport::UriSecurity::incoming(self.protocol, &request) {
-                Ok(security) => Some(security),
+                Ok(target) => Some(target),
                 Err(error) => {
                     let (code, reason, extra) = match error {
                         transport::IncomingSecurityError::Invalid => (400, "Bad Request", ""),
@@ -859,6 +861,7 @@ impl Engine {
                             .find(|transport| transport.name == endpoint.transport)
                             .ok_or(SipError::InvalidPacket)?
                             .bind;
+                        let incoming_target = incoming_target.ok_or(SipError::InvalidPacket)?;
                         events.push(SipEvent::Incoming {
                             id: id.clone(),
                             endpoint: endpoint.name,
@@ -878,7 +881,8 @@ impl Engine {
                                 local_tag,
                                 local,
                                 protocol: self.protocol,
-                                uri_security: uri_security.ok_or(SipError::InvalidPacket)?,
+                                uri_security: incoming_target.security,
+                                remote_target: incoming_target.target,
                                 authority,
                             },
                         );
