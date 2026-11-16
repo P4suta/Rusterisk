@@ -8,6 +8,7 @@ pub mod input_fuzz;
 pub mod legacy_audit;
 pub mod process;
 pub mod reference;
+pub mod regular_archive;
 pub const WORKSPACE_FORMAT_CHECK: &[&str] = &["fmt", "--", "--check"];
 mod sip_domain_policy;
 mod tls_client_policy;
