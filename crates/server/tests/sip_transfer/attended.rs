@@ -95,13 +95,19 @@ enum Survivor {
     Charlie,
 }
 
+enum CallListeners {
+    Shared,
+    Separate,
+}
+
 async fn exercise(
     peers: [Peer; 4],
-    target: SocketAddr,
+    targets: [SocketAddr; 2],
     media_ports: mpsc::Sender<SocketAddr>,
     operation: Exercise,
 ) -> Result<(), ControlError> {
     let [first, bob, second, charlie] = peers;
+    let [target, consultation_target] = targets;
     let initial = connect(
         &first,
         &bob,
@@ -130,7 +136,7 @@ async fn exercise(
     let consultation = connect(
         &second,
         &charlie,
-        target,
+        consultation_target,
         Invitation {
             extension: "200",
             call_id: "attended-consultation",
@@ -220,8 +226,10 @@ async fn exercise(
         .await
         .map_err(|error| failure(format!("attended REFER acceptance: {error}")))?;
     let consultation_dialog = consultation.callee;
-    let mut consultation =
-        TransferSignals::new(&consultation.answer, RequestRoute::Direct(target))?;
+    let mut consultation = TransferSignals::new(
+        &consultation.answer,
+        RequestRoute::Direct(consultation_target),
+    )?;
     let source_ended = async {
         source
             .settled(&first.signal, target)
@@ -230,7 +238,7 @@ async fn exercise(
     };
     let consultation_ended = async {
         consultation
-            .consultation_ended(&second.signal, target)
+            .consultation_ended(&second.signal, consultation_target)
             .await
             .map_err(|error| failure(format!("consultation termination: {error}")))
     };
@@ -248,7 +256,7 @@ async fn exercise(
                 &initial.callee,
                 &charlie,
                 &consultation_dialog,
-                target,
+                targets,
             )
             .await
         }
@@ -258,7 +266,7 @@ async fn exercise(
                 &consultation_dialog,
                 &bob,
                 &initial.callee,
-                target,
+                [consultation_target, target],
             )
             .await
         }
@@ -266,6 +274,10 @@ async fn exercise(
 }
 
 async fn native(operation: Exercise) -> Result<(), ControlError> {
+    native_on(operation, CallListeners::Shared).await
+}
+
+async fn native_on(operation: Exercise, layout: CallListeners) -> Result<(), ControlError> {
     let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let first = Peer::bind(ip, ip).await?;
     let bob = Peer::bind(ip, ip).await?;
@@ -279,14 +291,56 @@ async fn native(operation: Exercise) -> Result<(), ControlError> {
         "",
         "[internal]\nexten => 100,1,Dial(PJSIP/bob,5)\nsame => n,Hangup()\nexten => 200,1,Dial(PJSIP/charlie,5)\nsame => n,Hangup()\n",
     ).map_err(failure)?;
+    if matches!(layout, CallListeners::Separate) {
+        let mut transport = config
+            .transports
+            .iter()
+            .find(|transport| transport.name == "udp")
+            .ok_or(ControlError::Invalid("Missing source transport"))?
+            .clone();
+        transport.name = "consultation-udp".into();
+        config.transports.push(transport);
+        let mut endpoint = config
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.name == "alice")
+            .ok_or(ControlError::Invalid("Missing source endpoint"))?
+            .clone();
+        endpoint.name = "consultation".into();
+        endpoint.transport = "consultation-udp".into();
+        config.endpoints.push(endpoint);
+        config
+            .endpoints
+            .iter_mut()
+            .find(|endpoint| endpoint.name == "charlie")
+            .ok_or(ControlError::Invalid("Missing consultation target"))?
+            .transport = "consultation-udp".into();
+    }
     config.rtp.start = 0;
     config.rtp.end = 0;
     let (controller, runner, effects) = Controller::new(config.clone(), 8);
     let (media, hub, notices) = MediaHub::new(8);
     let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
-    let target = signaling.listeners()?[0].1;
-    let mut addresses = Vec::with_capacity(21);
-    addresses.push(target);
+    let listeners = signaling.listeners()?;
+    let target = listeners
+        .iter()
+        .find(|(name, _)| name == "udp")
+        .ok_or(ControlError::Invalid("Missing source listener"))?
+        .1;
+    let consultation = match layout {
+        CallListeners::Shared => target,
+        CallListeners::Separate => {
+            let consultation = listeners
+                .iter()
+                .find(|(name, _)| name == "consultation-udp")
+                .ok_or(ControlError::Invalid("Missing consultation listener"))?
+                .1;
+            assert_ne!(consultation, target);
+            consultation
+        }
+    };
+    let mut addresses = Vec::with_capacity(20 + listeners.len());
+    addresses.extend(listeners.into_iter().map(|(_, address)| address));
     for peer in [&first, &bob, &second, &charlie] {
         addresses.extend(peer.addresses()?);
     }
@@ -296,7 +350,7 @@ async fn native(operation: Exercise) -> Result<(), ControlError> {
     let (media_ports, mut server_ports) = mpsc::channel(4);
     let worker = tokio::spawn(exercise(
         [first, bob, second, charlie],
-        target,
+        [target, consultation],
         media_ports,
         operation,
     ));
@@ -358,4 +412,10 @@ async fn ending_either_surviving_dialog_releases_its_peer_after_attended_audio(
         native(Exercise::PeerEnded(peer)).await?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn attended_consultation_on_another_listener_preserves_known_audio_and_source_routes(
+) -> Result<(), ControlError> {
+    native_on(Exercise::Transfer, CallListeners::Separate).await
 }

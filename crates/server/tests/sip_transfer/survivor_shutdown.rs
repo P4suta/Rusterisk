@@ -45,8 +45,9 @@ pub(super) async fn end(
     local: &Request,
     survivor: &Peer,
     surviving_dialog: &Request,
-    target: SocketAddr,
+    targets: [SocketAddr; 2],
 ) -> Result<(), ControlError> {
+    let [target, survivor_target] = targets;
     let bye = format!("BYE {} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-survivor-bye;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 3 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", local.uri, ending.contact()?, local.from_header().map_err(failure)?.value(), local.to_header().map_err(failure)?.value(), local.call_id_header().map_err(failure)?.value());
     ending
         .signal
@@ -72,7 +73,7 @@ pub(super) async fn end(
             }
         };
         let peer_ended = async {
-            let message = receive(survivor, target).await?;
+            let message = receive(survivor, survivor_target).await?;
             if !same_dialog(&message, surviving_dialog)? {
                 return Err(ControlError::Invalid("Surviving peer changed its dialog"));
             }
@@ -86,7 +87,7 @@ pub(super) async fn end(
                 return Err(ControlError::Invalid("Surviving BYE changed its method"));
             }
             let response = format!("SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n", request.top_via_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.to_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value(), request.cseq_header().map_err(failure)?.value());
-            survivor.signal.send_to(response.as_bytes(), target).await.map_err(failure)?;
+            survivor.signal.send_to(response.as_bytes(), survivor_target).await.map_err(failure)?;
             Ok::<(), ControlError>(())
         };
         tokio::try_join!(response, peer_ended)?;
