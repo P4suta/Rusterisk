@@ -89,6 +89,43 @@ fn one_release_source_contains_each_runner_projection_and_its_governing_inputs()
 }
 
 #[test]
+fn captured_release_inputs_supply_every_registered_policy_decision() -> io::Result<()> {
+    using_source("policy-decisions", |_captured, source| {
+        let exceptions: xtask::Exceptions = toml::from_str(&std::fs::read_to_string(
+            source.join("api/policy-exceptions.toml"),
+        )?)
+        .map_err(io::Error::other)?;
+        if exceptions.exceptions.is_empty() {
+            return Err(io::Error::other("policy decision fixture is empty"));
+        }
+        for exception in exceptions.exceptions {
+            let path = source.join(&exception.adr);
+            if !path.is_file() {
+                return Err(io::Error::other(format!(
+                    "captured policy decision missing: {}",
+                    exception.adr
+                )));
+            }
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn captured_release_inputs_supply_every_server_target_projection() -> io::Result<()> {
+    using_source("server-projections", |captured, source| {
+        let cohort = captured.inputs().map_err(io::Error::other)?;
+        for target in xtask::server_distribution::ServerTarget::ALL {
+            let server = xtask::server_distribution::CapturedServer::read(source, target)
+                .map_err(io::Error::other)?;
+            let projection = SourceInputs::new(server.files()).map_err(io::Error::other)?;
+            cohort.bind(&projection).map_err(io::Error::other)?;
+        }
+        Ok(())
+    })
+}
+
+#[test]
 fn changed_or_added_verification_inputs_cannot_bind_to_an_earlier_capture() -> io::Result<()> {
     using_source("changes", |captured, source| {
         let cohort = captured.inputs().map_err(io::Error::other)?;

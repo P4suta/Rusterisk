@@ -6,19 +6,21 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const FILES: [&str; 6] = [
+const FILES: [&str; 7] = [
     "rust-toolchain.toml",
     "clippy.toml",
     "deny.toml",
     "justfile",
     "crates/core/proofs/Cargo.lock",
     "crates/core/assurance/Cargo.lock",
+    "docs/server-distribution.md",
 ];
-const DIRECTORIES: [&str; 4] = [
+const DIRECTORIES: [&str; 5] = [
     "api",
     "containers",
     ".github/workflows",
     "tests/interop/node-ari-client",
+    "docs/adr",
 ];
 
 #[derive(Debug)]
