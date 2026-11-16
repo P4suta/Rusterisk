@@ -54,7 +54,11 @@ impl Notification {
     }
 
     pub fn same_subscription(&self, other: &Self) -> bool {
-        self.dialog == other.dialog && self.refer == other.refer
+        self.for_subscription(&other.dialog, other.refer)
+    }
+
+    pub fn for_subscription(&self, dialog: &Dialog, sequence: u32) -> bool {
+        self.dialog == *dialog && self.refer == sequence
     }
 }
 

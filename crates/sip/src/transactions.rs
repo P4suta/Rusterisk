@@ -168,6 +168,21 @@ impl Transactions {
         });
     }
 
+    pub(crate) fn cancel_refer(
+        &mut self,
+        dialog: &crate::transfer::wire::Dialog,
+        sequence: u32,
+        peer: SocketAddr,
+    ) {
+        self.requests.retain(|_, pending| {
+            pending.peer != peer
+                || !pending
+                    .notification
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.for_subscription(dialog, sequence))
+        });
+    }
+
     pub fn expire(&mut self, now: u64) -> Vec<NotificationReceipt> {
         let expired: Vec<_> = self
             .requests
