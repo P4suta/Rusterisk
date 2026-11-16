@@ -8,6 +8,14 @@ use tokio::{
     sync::mpsc,
 };
 
+#[cfg(test)]
+mod shutdown_tests;
+
+enum LinkTermination {
+    Local(LinkStats),
+    Peer(LinkStats),
+}
+
 pub struct AudioSocketLink {
     socket: TcpStream,
     channels: Channels,
@@ -39,7 +47,7 @@ impl AudioSocketLink {
         })
     }
 
-    async fn serve(&mut self) -> Result<LinkStats, MediaError> {
+    async fn serve(&mut self) -> Result<LinkTermination, MediaError> {
         let mut stats = LinkStats::default();
         let mut input = [0; 1923];
         let period = Duration::from_millis(20);
@@ -47,7 +55,7 @@ impl AudioSocketLink {
         let mut tick = tokio::time::interval_at(started + period, period);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut active: Option<DigitCommand> = None;
-        'link: loop {
+        loop {
             if *self.channels.stop.borrow() || self.channels.incoming.is_closed() {
                 break;
             }
@@ -61,7 +69,7 @@ impl AudioSocketLink {
                     let size = size.map_err(failure)?;
                     if size == 0 {
                         if !self.decoder.is_empty() { return Err(MediaError::InvalidPacket); }
-                        break;
+                        return Ok(LinkTermination::Peer(stats));
                     }
                     let mut offset = 0;
                     while offset < size {
@@ -70,7 +78,7 @@ impl AudioSocketLink {
                         if let Some(message) = message {
                             stats.packets_received += 1;
                             match message {
-                                AudioSocket::Terminate => break 'link,
+                                AudioSocket::Terminate => return Ok(LinkTermination::Peer(stats)),
                                 AudioSocket::Uuid(_) => return Err(MediaError::InvalidPacket),
                                 AudioSocket::Audio(frame) => {
                                     if frame.rate() != self.rate { return Err(MediaError::InvalidFrame); }
@@ -123,11 +131,15 @@ impl AudioSocketLink {
                 }
             }
         }
-        Ok(stats)
+        Ok(LinkTermination::Local(stats))
     }
 
     pub async fn run(mut self) -> Result<LinkStats, MediaError> {
-        let result = self.serve().await;
+        let result = match self.serve().await {
+            Ok(LinkTermination::Peer(stats)) => return Ok(stats),
+            Ok(LinkTermination::Local(stats)) => Ok(stats),
+            Err(error) => Err(error),
+        };
         let cleanup = send(&mut self.socket, AudioSocket::Terminate).await;
         match (result, cleanup) {
             (Ok(stats), Ok(())) => Ok(stats),
