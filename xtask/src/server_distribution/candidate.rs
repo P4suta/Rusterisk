@@ -1,6 +1,7 @@
 use super::{
     check_server_tar_gzip, check_server_zip, write_server_tar_gzip, write_server_zip,
-    ArchiveFormat, CapturedServer, ServerBuildPhase, ServerBuildPlan, ServerPayload,
+    ArchiveFormat, CapturedServer, ServerBuildCommandMode, ServerBuildPhase, ServerBuildPlan,
+    ServerContainerBuildPlan, ServerPayload,
 };
 use crate::process::ProcessError;
 use sha2::{Digest, Sha256};
@@ -85,6 +86,38 @@ impl CapturedServer {
         destination: &Path,
         mut perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
     ) -> io::Result<()> {
+        self.build_using(destination, None, |command, budget, _| {
+            perform(command, budget)
+        })
+    }
+
+    pub fn build_in_container_with(
+        &self,
+        destination: &Path,
+        image: &str,
+        perform: impl FnMut(&mut Command, Duration, ServerBuildCommandMode) -> Result<(), ProcessError>,
+    ) -> io::Result<()> {
+        let temporary = std::env::temp_dir();
+        ServerContainerBuildPlan::new(
+            "validation",
+            &temporary.join("source"),
+            &temporary.join("state"),
+            self.name().target(),
+            image,
+        )?;
+        self.build_using(destination, Some(image), perform)
+    }
+
+    fn build_using(
+        &self,
+        destination: &Path,
+        image: Option<&str>,
+        mut perform: impl FnMut(
+            &mut Command,
+            Duration,
+            ServerBuildCommandMode,
+        ) -> Result<(), ProcessError>,
+    ) -> io::Result<()> {
         std::fs::create_dir(destination)?;
         self.write(
             &destination.join("source"),
@@ -108,13 +141,44 @@ impl CapturedServer {
         let operation = (|| {
             self.write(&source, &state)?;
             let plan = ServerBuildPlan::new(&source, &state, self.name().target())?;
+            let container = image
+                .map(|image| {
+                    ServerContainerBuildPlan::new(
+                        &format!("{}-{stamp}", std::process::id()),
+                        &source,
+                        &state,
+                        self.name().target(),
+                        image,
+                    )
+                })
+                .transpose()?;
+            if container.is_some() {
+                for directory in ["cargo", "tmp"] {
+                    std::fs::create_dir(state.join(directory))?;
+                }
+            }
             for phase in ServerBuildPhase::ALL {
-                let output = std::fs::OpenOptions::new()
+                let mut output = std::fs::OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .open(state.join(format!("{}.txt", phase.label())))?;
-                let step = plan.step(phase);
-                let mut command = Command::new("cargo");
+                if let Some(image) = image {
+                    writeln!(
+                        output,
+                        "server build image={image} target={}",
+                        self.name().target().triple()
+                    )?;
+                    output.flush()?;
+                }
+                let step = match &container {
+                    Some(container) => container.step(phase),
+                    None => plan.step(phase),
+                };
+                let mut command = Command::new(if container.is_some() {
+                    "docker"
+                } else {
+                    "cargo"
+                });
                 command
                     .args(step.arguments)
                     .current_dir(&source)
@@ -132,7 +196,24 @@ impl CapturedServer {
                     .stdout(output.try_clone()?)
                     .stderr(output);
                 let started = std::time::Instant::now();
-                let result = perform(&mut command, step.budget).map_err(io::Error::other);
+                let result = perform(&mut command, step.budget, ServerBuildCommandMode::Work);
+                let cleanup = match (&container, &result) {
+                    (Some(container), Err(_)) => {
+                        let cleanup = container.cleanup(phase);
+                        perform(
+                            Command::new("docker").args(cleanup.arguments),
+                            cleanup.budget,
+                            ServerBuildCommandMode::Cleanup,
+                        )
+                        .map_err(io::Error::other)
+                    }
+                    (Some(_), Ok(())) | (None, _) => Ok(()),
+                };
+                let result = combine(
+                    result.map_err(io::Error::other),
+                    cleanup,
+                    "server container cleanup failed",
+                );
                 println!(
                     "server phase={} elapsed={:.3}s",
                     phase.label(),
