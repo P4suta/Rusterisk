@@ -16,6 +16,9 @@ pub(super) fn descriptor<'a>(
     store: &'a Store,
     descriptor: &Descriptor,
 ) -> Result<&'a [u8], OciArchiveError> {
+    if !model::untagged(&descriptor.annotations) {
+        return Err(OciArchiveError::Layout);
+    }
     if model::sha256(&descriptor.digest).is_none()
         || descriptor.data.is_some()
         || descriptor.urls.is_some()
@@ -52,6 +55,9 @@ fn walk(
     depth: usize,
     state: &mut Walk,
 ) -> Result<(), OciArchiveError> {
+    if !model::untagged(&index.annotations) {
+        return Err(OciArchiveError::Layout);
+    }
     state.remaining = state
         .remaining
         .checked_sub(1)
@@ -79,6 +85,9 @@ fn walk(
             )?,
             model::MANIFEST => {
                 let manifest: Manifest = model::parse(bytes, limits)?;
+                if !model::untagged(&manifest.annotations) {
+                    return Err(OciArchiveError::Layout);
+                }
                 if manifest.schema_version != 2
                     || manifest
                         .media_type

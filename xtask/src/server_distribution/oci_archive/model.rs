@@ -35,6 +35,8 @@ pub(super) struct Index {
     pub schema_version: u32,
     pub media_type: Option<String>,
     pub manifests: Vec<Descriptor>,
+    #[serde(default, deserialize_with = "unique_map")]
+    pub annotations: BTreeMap<String, String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +47,8 @@ pub(super) struct Manifest {
     pub config: Descriptor,
     pub layers: Vec<Descriptor>,
     pub subject: Option<Descriptor>,
+    #[serde(default, deserialize_with = "unique_map")]
+    pub annotations: BTreeMap<String, String>,
 }
 #[derive(Deserialize)]
 pub(super) struct Configuration {
@@ -136,6 +140,10 @@ pub(super) fn sha256(value: &str) -> Option<&str> {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
     .then_some(hex)
+}
+pub(super) fn untagged(annotations: &BTreeMap<String, String>) -> bool {
+    !annotations.contains_key("org.opencontainers.image.ref.name")
+        && !annotations.contains_key("io.containerd.image.name")
 }
 pub(super) fn platform(platform: &Platform, profile: &ServerOciProfile) -> bool {
     platform.os == "linux"

@@ -6,6 +6,58 @@ use xtask::server_distribution::{
 #[path = "oci_archive/fixture.rs"]
 mod fixture;
 use fixture::{Attestation, Entry, Image};
+
+#[test]
+fn image_metadata_cannot_restore_shared_names_when_loaded() -> io::Result<()> {
+    let patches: [fn(&mut serde_json::Value); 4] = [
+        |value| {
+            value["annotations"]["org.opencontainers.image.ref.name"] = "unrelated:latest".into()
+        },
+        |value| value["annotations"]["io.containerd.image.name"] = "unrelated:latest".into(),
+        |value| {
+            value["manifests"][0]["annotations"]["org.opencontainers.image.ref.name"] =
+                "unrelated:latest".into()
+        },
+        |value| {
+            value["manifests"][0]["annotations"]["io.containerd.image.name"] =
+                "unrelated:latest".into()
+        },
+    ];
+    for patch in patches {
+        for nested in [false, true] {
+            let mut image = Image::new(ServerTarget::LinuxArm64)?;
+            image.nested = nested;
+            image.index_patch = Some(patch);
+            assert!(check(&image, &image.bytes()?, OciArchiveLimits::SERVER).is_err());
+        }
+    }
+    for patch in [
+        (|value: &mut serde_json::Value| {
+            value["annotations"]["org.opencontainers.image.ref.name"] = "unrelated:latest".into()
+        }) as fn(&mut serde_json::Value),
+        |value| value["annotations"]["io.containerd.image.name"] = "unrelated:latest".into(),
+    ] {
+        let mut image = Image::new(ServerTarget::LinuxArm64)?;
+        image.manifest_patch = Some(patch);
+        assert!(check(&image, &image.bytes()?, OciArchiveLimits::SERVER).is_err());
+    }
+    let image = Image::new(ServerTarget::LinuxArm64)?;
+    for name in [
+        "org.opencontainers.image.ref.name",
+        "io.containerd.image.name",
+    ] {
+        let mut entries = image.entries()?;
+        let index = entries
+            .iter_mut()
+            .find(|entry| entry.path == "index.json")
+            .ok_or_else(|| io::Error::other("fixture index"))?;
+        let mut value: serde_json::Value = serde_json::from_slice(&index.bytes)?;
+        value["annotations"][name] = "unrelated:latest".into();
+        index.bytes = serde_json::to_vec(&value)?;
+        assert!(check(&image, &fixture::tar(&entries)?, OciArchiveLimits::SERVER).is_err());
+    }
+    Ok(())
+}
 #[path = "sdk_candidate_build/fixture.rs"]
 mod project;
 
