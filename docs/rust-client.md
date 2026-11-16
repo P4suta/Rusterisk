@@ -83,6 +83,15 @@ Await explicit cleanup before shutting down the runtime.
 
 ## Exchange external audio
 
+Use `Session::external_rtp` or `Session::external_audio_socket` with a typed target to create an owned external channel after event subscription.
+The Real-time Transport Protocol (RTP) adapter uses the User Datagram Protocol (UDP).
+Bind the app's UDP sockets or TCP listener before requesting the channel.
+An accepted RTP channel exposes `UNICASTRTP_LOCAL_ADDRESS` and `UNICASTRTP_LOCAL_PORT` in its channel variables.
+Early events preserve the accepted response's transport variables, while later event values take precedence.
+The app owns its local sockets and audio framing.
+Closing the call ends the server's transport and removes the channel.
+Native tests connect an owned RTP channel to an owned AudioSocket channel, compare received samples in both directions, and check transport cleanup.
+
 Use `Session::external_websocket` with `WebSocketMediaOptions` to create an owned incoming media channel after event subscription.
 Wait for `Accepted`, read its channel snapshot, and pass the channel to `Client::connect_media` with the selected `MediaControlFormat`.
 The connection uses the channel's bearer identifier and negotiates the `media` subprotocol.
