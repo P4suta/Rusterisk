@@ -13,6 +13,9 @@ fn failure(error: impl std::fmt::Display) -> Error {
 pub async fn prepare(configuration: &Path) -> Result<(StoragePort, StorageWorker), Error> {
     let data = configuration.join("native-data");
     std::fs::create_dir(&data)?;
+    for root in [data.as_path(), configuration] {
+        super::playback_position::prepare(root)?;
+    }
     let (storage, worker) = StorageWorker::start(data.clone()).await.map_err(failure)?;
     let prepared = async {
         for (language, name, sample) in [
@@ -83,10 +86,10 @@ fn missing(result: Result<impl Sized, Error>, expected: &str) -> Result<(), Erro
 
 pub async fn compare(actual: &Client, reference: &Client) -> Result<(), Error> {
     for (language, format, count) in [
-        (None, None, 2),
-        (Some("en"), None, 2),
+        (None, None, 3),
+        (Some("en"), None, 3),
         (Some("ja"), Some("slin"), 1),
-        (Some(""), Some(""), 2),
+        (Some(""), Some(""), 3),
     ] {
         let observed = normalized(actual.sounds(language, format).await?);
         let expected = normalized(reference.sounds(language, format).await?);
