@@ -1,8 +1,8 @@
 use crate::{
-    AudioGate, Call, CallEvent, CallState, ConnectionClaim, CoreError, MediaConnection, MediaState,
-    MediaTaskError, MediaTaskKind, MediaTaskState, MediaTasks, MuteDirection, PeerMediaDirection,
-    StasisApplication, StasisMembership, Transfer, TransferDecision, TransferError,
-    TransferOutcome, TransferState, TransferToken, Transition,
+    AttendedStart, AttendedTransfer, AudioGate, Call, CallEvent, CallState, ConnectionClaim,
+    CoreError, MediaConnection, MediaState, MediaTaskError, MediaTaskKind, MediaTaskState,
+    MediaTasks, MuteDirection, PeerMediaDirection, StasisApplication, StasisMembership, Transfer,
+    TransferDecision, TransferError, TransferOutcome, TransferState, TransferToken, Transition,
 };
 
 #[derive(Clone, Copy, kani::Arbitrary)]
@@ -540,4 +540,295 @@ fn transfer_detachment_preserves_live_calls() {
     }
     kani::cover!(valid);
     kani::cover!(!valid);
+}
+
+fn attended_arbitrary_call() -> Call {
+    let application = StasisApplication::new(kani::any());
+    Call {
+        generation: kani::any(),
+        state: match kani::any::<u8>() {
+            0 => CallState::Down,
+            1 => CallState::Ringing,
+            2 => CallState::Up,
+            _ => CallState::Ended,
+        },
+        media: match kani::any::<u8>() {
+            0 => MediaState::Waiting,
+            1 => MediaState::Active,
+            2 => MediaState::Held,
+            _ => MediaState::Released,
+        },
+        connection: match kani::any::<u8>() {
+            0 => MediaConnection::Pending,
+            1 => MediaConnection::Connected,
+            _ => MediaConnection::Released,
+        },
+        connection_claim: match kani::any::<u8>() {
+            0 => ConnectionClaim::Available,
+            1 => ConnectionClaim::Claimed,
+            _ => ConnectionClaim::Released,
+        },
+        mute: match kani::any::<u8>() {
+            0 => AudioGate::Open,
+            1 => AudioGate::IncomingMuted,
+            2 => AudioGate::OutgoingMuted,
+            _ => AudioGate::Closed,
+        },
+        peer_direction: match kani::any::<u8>() {
+            0 => PeerMediaDirection::SendReceive,
+            1 => PeerMediaDirection::SendOnly,
+            2 => PeerMediaDirection::ReceiveOnly,
+            _ => PeerMediaDirection::Inactive,
+        },
+        bridge: kani::any(),
+        stasis: match kani::any::<u8>() {
+            0 => StasisMembership::Outside,
+            1 => StasisMembership::Pending(application),
+            2 => StasisMembership::Entered(application),
+            _ => StasisMembership::Released,
+        },
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(12)]
+fn attended_handoff_preserves_calls_and_bridge_ownership() {
+    let transferor = attended_arbitrary_call();
+    let transferee = attended_arbitrary_call();
+    let consultation = attended_arbitrary_call();
+    let target = attended_arbitrary_call();
+    let bridge = kani::any();
+    let token = TransferToken::new(kani::any());
+    let distinct = transferor.generation() != transferee.generation()
+        && transferor.generation() != consultation.generation()
+        && transferor.generation() != target.generation()
+        && transferee.generation() != consultation.generation()
+        && transferee.generation() != target.generation()
+        && consultation.generation() != target.generation();
+    let answered = transferor.state() == CallState::Up
+        && transferee.state() == CallState::Up
+        && consultation.state() == CallState::Up
+        && target.state() == CallState::Up;
+    let bridges = transferor.bridge().is_some()
+        && consultation.bridge().is_some()
+        && transferor.bridge() == transferee.bridge()
+        && consultation.bridge() == target.bridge()
+        && transferor.bridge() != consultation.bridge()
+        && Some(bridge) != transferor.bridge()
+        && Some(bridge) != consultation.bridge();
+    let result =
+        AttendedTransfer::begin(token, bridge, transferor, transferee, consultation, target);
+    match result {
+        Ok(start) => {
+            assert!(distinct && answered && bridges);
+            assert_eq!(Some(start.release_bridges[0]), transferor.bridge());
+            assert_eq!(Some(start.release_bridges[1]), consultation.bridge());
+            assert_eq!(
+                start.transferor,
+                Call {
+                    bridge: None,
+                    ..transferor
+                }
+            );
+            assert_eq!(
+                start.consultation,
+                Call {
+                    bridge: None,
+                    ..consultation
+                }
+            );
+            assert_eq!(
+                start.transferee,
+                Call {
+                    bridge: Some(bridge),
+                    ..transferee
+                }
+            );
+            assert_eq!(
+                start.target,
+                Call {
+                    bridge: Some(bridge),
+                    ..target
+                }
+            );
+            assert_eq!(start.transfer.state(), TransferState::Proceeding);
+        }
+        Err(TransferError::Participants) => assert!(!distinct),
+        Err(TransferError::NotAnswered) => assert!(distinct && !answered),
+        Err(TransferError::Bridge) => assert!(distinct && answered && !bridges),
+    }
+    kani::cover!(result.is_ok());
+    kani::cover!(result == Err(TransferError::Participants));
+    kani::cover!(result == Err(TransferError::NotAnswered));
+    kani::cover!(result == Err(TransferError::Bridge));
+}
+
+fn attended_proof_start(
+    generations: [u64; 4],
+    token: TransferToken,
+) -> Result<AttendedStart, TransferError> {
+    let call = |generation, bridge| Call {
+        state: CallState::Up,
+        bridge: Some(bridge),
+        ..Call::outgoing(generation)
+    };
+    AttendedTransfer::begin(
+        token,
+        3,
+        call(generations[0], 1),
+        call(generations[1], 1),
+        call(generations[2], 2),
+        call(generations[3], 2),
+    )
+}
+
+#[derive(Clone, Copy, kani::Arbitrary)]
+enum AttendedOutcome {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl AttendedOutcome {
+    const fn value(self) -> TransferOutcome {
+        match self {
+            Self::Succeeded => TransferOutcome::Succeeded,
+            Self::Failed => TransferOutcome::Failed,
+            Self::Cancelled => TransferOutcome::Cancelled,
+        }
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(12)]
+fn attended_progress_stays_in_the_current_generation() {
+    let generations: [u64; 4] = kani::any();
+    let token = TransferToken::new(kani::any());
+    let observed = TransferToken::new(kani::any());
+    let result = attended_proof_start(generations, token);
+    let Ok(start) = result else {
+        assert_eq!(result, Err(TransferError::Participants));
+        return;
+    };
+    let outcome = kani::any::<AttendedOutcome>().value();
+    let mut terminal = start.transfer;
+    let decision = terminal.finish(observed, outcome);
+    if observed == token {
+        assert_eq!(
+            decision,
+            TransferDecision::Finished {
+                outcome,
+                release: token
+            }
+        );
+        assert_eq!(terminal.state(), TransferState::Finished(outcome));
+    } else {
+        assert_eq!(decision, TransferDecision::Ignore);
+        assert_eq!(terminal, start.transfer);
+    }
+    let generation = kani::any();
+    let mut participant = start.transfer;
+    let decision = participant.participant_ended(observed, generation);
+    if observed == token && (generation == generations[1] || generation == generations[3]) {
+        assert_eq!(
+            decision,
+            TransferDecision::Finished {
+                outcome: TransferOutcome::Cancelled,
+                release: token
+            },
+        );
+        assert_eq!(
+            participant.state(),
+            TransferState::Finished(TransferOutcome::Cancelled)
+        );
+    } else {
+        assert_eq!(decision, TransferDecision::Ignore);
+        assert_eq!(participant, start.transfer);
+    }
+    kani::cover!(observed == token);
+    kani::cover!(observed != token);
+    kani::cover!(observed == token && generation == generations[0]);
+    kani::cover!(observed == token && generation == generations[1]);
+    kani::cover!(observed == token && generation == generations[2]);
+    kani::cover!(observed == token && generation == generations[3]);
+}
+
+#[derive(Clone, Copy, kani::Arbitrary)]
+enum AttendedObservation {
+    Result {
+        token: u64,
+        outcome: AttendedOutcome,
+    },
+    End {
+        token: u64,
+        generation: u64,
+    },
+}
+
+#[kani::proof]
+#[kani::unwind(12)]
+fn attended_completion_is_absorbing() {
+    let generations: [u64; 4] = kani::any();
+    let token = TransferToken::new(kani::any());
+    let result = attended_proof_start(generations, token);
+    let Ok(start) = result else {
+        assert_eq!(result, Err(TransferError::Participants));
+        return;
+    };
+    let mut transfer = start.transfer;
+    let mut finished = None;
+    let mut releases = 0;
+    let mut foreign = false;
+    for observation in kani::any::<[AttendedObservation; 4]>() {
+        let (observed, outcome, decision) = match observation {
+            AttendedObservation::Result {
+                token: observed,
+                outcome,
+            } => {
+                let observed = TransferToken::new(observed);
+                let outcome = outcome.value();
+                (observed, Some(outcome), transfer.finish(observed, outcome))
+            }
+            AttendedObservation::End {
+                token: observed,
+                generation,
+            } => {
+                let observed = TransferToken::new(observed);
+                let outcome = if generation == generations[1] || generation == generations[3] {
+                    Some(TransferOutcome::Cancelled)
+                } else {
+                    None
+                };
+                (
+                    observed,
+                    outcome,
+                    transfer.participant_ended(observed, generation),
+                )
+            }
+        };
+        foreign |= observed != token;
+        if let Some(outcome) = outcome.filter(|_| finished.is_none() && observed == token) {
+            assert_eq!(
+                decision,
+                TransferDecision::Finished {
+                    outcome,
+                    release: token
+                }
+            );
+            finished = Some(outcome);
+            releases += 1;
+        } else {
+            assert_eq!(decision, TransferDecision::Ignore);
+        }
+        assert_eq!(
+            transfer.state(),
+            finished.map_or(TransferState::Proceeding, TransferState::Finished)
+        );
+        assert!(releases <= 1);
+    }
+    assert_eq!(releases, usize::from(finished.is_some()));
+    kani::cover!(finished == Some(TransferOutcome::Succeeded));
+    kani::cover!(finished == Some(TransferOutcome::Failed));
+    kani::cover!(finished == Some(TransferOutcome::Cancelled));
+    kani::cover!(foreign);
 }
