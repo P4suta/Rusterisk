@@ -39,6 +39,8 @@ mod oci_profile;
 pub use oci_profile::{ServerOciProfile, OCI_RUNTIME};
 mod oci_context;
 pub use oci_context::ServerOciContext;
+mod oci_build;
+pub use oci_build::{ServerOciBuildPhase, ServerOciBuildPlan};
 mod container_build;
 pub use container_build::{ServerBuildCommandMode, ServerContainerBuildPlan};
 

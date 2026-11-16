@@ -120,12 +120,31 @@ impl ReferenceBuild {
 }
 
 pub(crate) fn build_steps(name: &str, tag: &str, context: &str, seconds: u64) -> Vec<Step> {
+    builder_steps(name)
+        .into_iter()
+        .chain(std::iter::once(step(
+            &[
+                "buildx",
+                "build",
+                "--builder",
+                name,
+                "--load",
+                "--progress=plain",
+                "--tag",
+                tag,
+                context,
+            ],
+            seconds,
+        )))
+        .collect()
+}
+
+pub(crate) fn builder_steps(name: &str) -> [Step; 3] {
     [
         step(&["buildx", "create", "--name", name, "--driver", "docker-container", "--driver-opt", "memory=2g,memory-swap=2g,cpu-quota=200000,cpu-period=100000,restart-policy=no,image=moby/buildkit@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe"], 30),
         step(&["buildx", "inspect", "--bootstrap", name], 180),
         step(&["update", "--pids-limit=256", &format!("buildx_buildkit_{name}0")], 30),
-        step(&["buildx", "build", "--builder", name, "--load", "--progress=plain", "--tag", tag, context], seconds),
-    ].into_iter().collect()
+    ]
 }
 
 impl VerificationBuild {
