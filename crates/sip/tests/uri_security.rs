@@ -37,6 +37,26 @@ fn configuration(protocol: Protocol, target: &str) -> Result<Config, SipError> {
 
 fn originate(protocol: Protocol, target: &str) -> Result<(String, std::net::SocketAddr), SipError> {
     let config = configuration(protocol, target)?;
+    originate_config(protocol, config)
+}
+
+fn originate_mutated_target(
+    protocol: Protocol,
+    target: &str,
+) -> Result<(String, std::net::SocketAddr), SipError> {
+    let mut config = configuration(protocol, "sip:phone@127.0.0.2:5070")?;
+    config
+        .aors
+        .first_mut()
+        .ok_or(SipError::InvalidPacket)?
+        .contact = Some(target.into());
+    originate_config(protocol, config)
+}
+
+fn originate_config(
+    protocol: Protocol,
+    config: Config,
+) -> Result<(String, std::net::SocketAddr), SipError> {
     let local = config
         .transports
         .first()
@@ -107,7 +127,7 @@ fn sips_contacts_preserve_address_security_over_tls_and_secure_websockets() -> R
 fn sips_targets_never_generate_requests_over_unencrypted_transports() -> Result<(), SipError> {
     for protocol in [Protocol::Udp, Protocol::Tcp, Protocol::Ws] {
         assert!(matches!(
-            originate(protocol, "sips:phone@127.0.0.2:5070"),
+            originate_mutated_target(protocol, "sips:phone@127.0.0.2:5070"),
             Err(SipError::Unsupported)
         ));
     }
@@ -128,7 +148,7 @@ fn legacy_transport_parameters_remain_parseable_without_becoming_generated_targe
     };
     assert_eq!(contact.source_uri(), legacy);
     assert!(matches!(
-        originate(Protocol::Tls, legacy),
+        originate_mutated_target(Protocol::Tls, legacy),
         Err(SipError::Unsupported)
     ));
     Ok(())

@@ -36,21 +36,7 @@ impl RegistrarUri {
             return Err(RegistrationUriError::Unsupported);
         }
         let profile = profile(source, Role::Registrar)?;
-        if profile.secure && protocol != Protocol::Tls {
-            return Err(RegistrationUriError::TransportConflict);
-        }
-        if let Some(selected) = profile.transport {
-            if selected == Transport::Tls {
-                return Err(RegistrationUriError::Unsupported);
-            }
-            let matching = matches!(
-                (protocol, selected),
-                (Protocol::Udp, Transport::Udp) | (Protocol::Tcp | Protocol::Tls, Transport::Tcp)
-            );
-            if !matching {
-                return Err(RegistrationUriError::TransportConflict);
-            }
-        }
+        profile.for_transport(protocol)?;
         Ok(Self {
             source: source.into(),
             protocol,
@@ -95,15 +81,57 @@ impl RegistrationAddress {
     }
 }
 
+pub(crate) struct ContactTarget(Profile);
+
+impl ContactTarget {
+    pub(crate) fn parse(source: &str) -> Result<Self, RegistrationUriError> {
+        let profile = profile(source, Role::Contact)?;
+        if !matches!(
+            profile.transport,
+            None | Some(Transport::Udp | Transport::Tcp | Transport::Ws)
+        ) {
+            return Err(RegistrationUriError::Unsupported);
+        }
+        Ok(Self(profile))
+    }
+
+    pub(crate) fn for_transport(&self, protocol: Protocol) -> Result<(), RegistrationUriError> {
+        self.0.for_transport(protocol)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Role {
     Registrar,
     Address,
+    Contact,
 }
 
 struct Profile {
     secure: bool,
     transport: Option<Transport>,
+}
+
+impl Profile {
+    fn for_transport(&self, protocol: Protocol) -> Result<(), RegistrationUriError> {
+        if self.secure && !matches!(protocol, Protocol::Tls | Protocol::Wss) {
+            return Err(RegistrationUriError::TransportConflict);
+        }
+        if let Some(selected) = self.transport {
+            if selected == Transport::Tls {
+                return Err(RegistrationUriError::Unsupported);
+            }
+            if !matches!(
+                (protocol, selected),
+                (Protocol::Udp, Transport::Udp)
+                    | (Protocol::Tcp | Protocol::Tls, Transport::Tcp)
+                    | (Protocol::Ws | Protocol::Wss, Transport::Ws)
+            ) {
+                return Err(RegistrationUriError::TransportConflict);
+            }
+        }
+        Ok(())
+    }
 }
 
 fn profile(source: &str, role: Role) -> Result<Profile, RegistrationUriError> {
@@ -164,7 +192,7 @@ fn validate_host(source: &str, uri: &Uri, role: Role) -> Result<(), Registration
             if source.starts_with('[') != address.is_ipv6() {
                 return Err(RegistrationUriError::Invalid);
             }
-            if matches!(role, Role::Registrar)
+            if matches!(role, Role::Registrar | Role::Contact)
                 && (address.is_unspecified() || address.is_multicast())
             {
                 return Err(RegistrationUriError::Invalid);
@@ -232,7 +260,7 @@ fn validate_parameters(
         let name: String = name.into_iter().map(|(_, byte)| char::from(byte)).collect();
         match name.as_str() {
             "transport" => match role {
-                Role::Registrar => {
+                Role::Registrar | Role::Contact => {
                     transport = Some(
                         value
                             .ok_or(RegistrationUriError::Invalid)?

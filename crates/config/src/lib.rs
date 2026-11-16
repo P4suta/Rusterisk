@@ -598,6 +598,7 @@ impl Config {
             }
         }
         config.validate_references()?;
+        config.validate_contacts(&signaling)?;
         for section in Ini::parse("rtp.conf", rtp)?.sections {
             if section.name != "general" {
                 return Err(ConfigError::at(
@@ -923,6 +924,47 @@ impl Config {
                     section.line,
                     "unsupported object type",
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_contacts(&self, signaling: &Ini) -> Result<(), ConfigError> {
+        for section in &signaling.sections {
+            if section.value("type") != Some("aor") {
+                continue;
+            }
+            let Some(source) = section.value("contact") else {
+                continue;
+            };
+            let error = |error| {
+                ConfigError::at(
+                    "pjsip.conf",
+                    section.position("contact"),
+                    match error {
+                        RegistrationUriError::Invalid => "invalid static Contact URI",
+                        RegistrationUriError::Unsupported => {
+                            "unsupported static Contact URI component or transport"
+                        }
+                        RegistrationUriError::TransportConflict => {
+                            "static Contact URI conflicts with an endpoint transport"
+                        }
+                        RegistrationUriError::Capacity => "static Contact URI exceeds 2048 bytes",
+                    },
+                )
+            };
+            let target = registration_uri::ContactTarget::parse(source).map_err(error)?;
+            for endpoint in self
+                .endpoints
+                .iter()
+                .filter(|endpoint| endpoint.aors.contains(&section.name))
+            {
+                let transport = self
+                    .transports
+                    .iter()
+                    .find(|transport| transport.name == endpoint.transport)
+                    .ok_or_else(|| error(RegistrationUriError::TransportConflict))?;
+                target.for_transport(transport.protocol).map_err(error)?;
             }
         }
         Ok(())
