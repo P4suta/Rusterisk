@@ -8,6 +8,37 @@ struct MoveRequest<'a> {
 }
 
 impl Client {
+    pub async fn continue_in_dialplan(
+        &self,
+        channel: &api::ChannelId,
+        context: Option<&str>,
+        extension: Option<&str>,
+        priority: Option<u16>,
+    ) -> Result<(), Error> {
+        if context
+            .into_iter()
+            .chain(extension)
+            .any(|value| value.len() > 128 || value.chars().any(char::is_control))
+        {
+            return Err(Error::Invalid("invalid dialplan location"));
+        }
+        let priority = priority.map(|value| value.to_string());
+        let query: Vec<(&str, &str)> = [
+            ("context", context),
+            ("extension", extension),
+            ("priority", priority.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| value.map(|value| (name, value)))
+        .collect();
+        self.request(
+            "channels.continue",
+            &[("channelId", channel.as_str())],
+            &query,
+        )
+        .await
+    }
+
     pub async fn move_channel(
         &self,
         channel: &api::ChannelId,
