@@ -605,6 +605,10 @@ impl WaveReader {
         u64::from(self.length - self.remaining) / 2
     }
 
+    pub fn metadata(&self) -> Result<std::fs::Metadata, StorageError> {
+        self.file.metadata().map_err(StorageError::from)
+    }
+
     pub fn seek_sample(&mut self, sample: u64) -> Result<u64, StorageError> {
         let sample = sample.min(u64::from(self.length) / 2);
         let bytes = u32::try_from(sample * 2).map_err(|_| StorageError::Capacity)?;
@@ -614,7 +618,11 @@ impl WaveReader {
     }
 
     pub fn open(path: &Path) -> Result<Self, StorageError> {
-        let mut file = File::open(path)?;
+        Self::from_file(File::open(path)?)
+    }
+
+    pub fn from_file(mut file: File) -> Result<Self, StorageError> {
+        file.seek(SeekFrom::Start(0))?;
         let (rate, remaining) = read_header(&mut file)?;
         if u64::from(remaining) + 44 != file.metadata()?.len() || !remaining.is_multiple_of(2) {
             return Err(StorageError::InvalidWave);
