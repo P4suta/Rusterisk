@@ -977,6 +977,7 @@ dependencies = [
  "base64",
  "getrandom 0.4.3",
  "hmac 0.13.0",
+ "md-5",
  "rsipstack",
  "rusterisk-config",
  "rusterisk-core",
