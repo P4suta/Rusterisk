@@ -28,6 +28,12 @@ async fn playback_queries_and_controls_preserve_wire_operations_and_errors() -> 
         client.resume_playback(&id).await?;
         assert_eq!(commands.recv().await.as_deref(),Some("pause"));
         assert_eq!(commands.recv().await.as_deref(),Some("unpause"));
+        client.restart_playback(&id).await?;
+        if commands.recv().await.as_deref() != Some("restart") { return Err(Error::Invalid("incorrect restart request")); }
+        client.forward_playback(&id).await?;
+        if commands.recv().await.as_deref() != Some("forward") { return Err(Error::Invalid("incorrect forward request")); }
+        client.reverse_playback(&id).await?;
+        if commands.recv().await.as_deref() != Some("reverse") { return Err(Error::Invalid("incorrect reverse request")); }
         client.stop_playback(&id).await?;
         assert!(matches!(client.playback(&ChannelId::try_from("missing".to_owned())?).await, Err(Error::Api { status:404, message }) if message.message == "Playback not found"));
         Ok(())

@@ -19,6 +19,18 @@ impl Client {
         self.playback_control(id, "unpause").await
     }
 
+    pub async fn restart_playback(&self, id: &api::ChannelId) -> Result<(), Error> {
+        self.playback_control(id, "restart").await
+    }
+
+    pub async fn forward_playback(&self, id: &api::ChannelId) -> Result<(), Error> {
+        self.playback_control(id, "forward").await
+    }
+
+    pub async fn reverse_playback(&self, id: &api::ChannelId) -> Result<(), Error> {
+        self.playback_control(id, "reverse").await
+    }
+
     async fn playback_control(&self, id: &api::ChannelId, operation: &str) -> Result<(), Error> {
         self.request(
             "playbacks.control",
