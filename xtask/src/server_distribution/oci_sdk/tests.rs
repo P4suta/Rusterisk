@@ -144,7 +144,7 @@ fn runtime_case(case: &str) -> io::Result<()> {
                     .env("RUSTERISK_OCI_FIXTURE_STDOUT", stdout)
                     .env("RUSTERISK_OCI_FIXTURE_STDERR", stderr)
                     .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
+                    .stderr(std::process::Stdio::inherit());
                 Ok(command)
             },
             |service, address| {
@@ -199,7 +199,10 @@ fn runtime_case(case: &str) -> io::Result<()> {
                     .err()
                     .ok_or_else(|| io::Error::other("failed runtime passed"))?;
                 if matches!(case, "client-failure" | "combined-failure") {
-                    assert!(error.to_string().contains("requested client failure"));
+                    assert!(
+                        error.to_string().contains("requested client failure"),
+                        "{case}: {error}"
+                    );
                 }
                 if matches!(case, "foreign-cleanup" | "combined-failure") {
                     assert!(error.to_string().contains("ownership"), "{error}");

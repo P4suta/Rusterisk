@@ -153,6 +153,7 @@ fn serve(root: &Path, args: &[String], stdout: &Path, case: &str) -> io::Result<
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
+                stream.set_nonblocking(false)?;
                 stream.set_read_timeout(Some(Duration::from_secs(1)))?;
                 stream.set_write_timeout(Some(Duration::from_secs(1)))?;
                 let mut request = [0];

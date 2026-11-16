@@ -36,6 +36,7 @@ fn stop_service_fixture() -> io::Result<()> {
     loop {
         match listener.accept() {
             Ok((mut stream, _)) => {
+                stream.set_nonblocking(false)?;
                 stream.set_read_timeout(Some(Duration::from_secs(1)))?;
                 let mut request = [0; 1];
                 stream.read_exact(&mut request)?;
