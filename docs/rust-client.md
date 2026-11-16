@@ -54,6 +54,10 @@ Omit the context, extension, and priority to continue after the current step.
 Context and extension values accept at most 128 bytes without control characters.
 Priorities range from 0 through 65535, with zero selecting the server's default position.
 
+Use `Client::ring` and `Client::stop_ringing` for ringing requests.
+Both methods preserve the selected server's HTTP errors.
+Rusterisk returns `501` for `Client::stop_ringing`.
+
 `MediaConnected` observes Rusterisk's `RUSTERISK_MEDIA_CONNECTED` channel variable event.
 The milestone means the server received an audio frame.
 Checking received audio remains necessary to verify the intended signal.
