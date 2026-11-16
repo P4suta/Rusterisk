@@ -21,3 +21,7 @@ mod sdk_content;
 pub use sdk_content::{check_sdk_content, SdkContentError};
 mod sdk_contents;
 pub use sdk_contents::{SdkContents, SdkContentsError};
+mod sdk_consumer_plan;
+pub use sdk_consumer_plan::{
+    SdkConsumerAction, SdkConsumerPhase, SdkConsumerPlan, SdkConsumerScope,
+};
