@@ -6,6 +6,8 @@ use rsipstack::sip::{
 use rusterisk_server::ControlError;
 use std::{net::SocketAddr, time::Duration};
 use tokio::net::UdpSocket;
+#[path = "observations.rs"]
+mod observation_tests;
 #[path = "routes.rs"]
 mod route_tests;
 
@@ -51,6 +53,16 @@ enum Notice {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Observation {
+    refer_response: Option<u16>,
+    event: Option<ReferEvent>,
+    initial_notify: bool,
+    final_notify: bool,
+    server_bye: bool,
+    transferor_bye_response: bool,
+}
+
 pub(super) struct TransferSignals {
     from: String,
     to: String,
@@ -66,6 +78,17 @@ pub(super) struct TransferSignals {
 }
 
 impl TransferSignals {
+    pub(super) const fn observed(&self) -> Observation {
+        Observation {
+            refer_response: self.response,
+            event: self.event,
+            initial_notify: self.initial,
+            final_notify: self.completed,
+            server_bye: self.ended,
+            transferor_bye_response: self.bye_response,
+        }
+    }
+
     pub(super) fn new(answer: &Response, requests: RequestRoute) -> Result<Self, ControlError> {
         Ok(Self {
             from: answer.to_header().map_err(failure)?.value().into(),

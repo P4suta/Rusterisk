@@ -243,12 +243,21 @@ async fn exercise(
             .await
             .map_err(|error| failure(format!("consultation termination: {error}")))
     };
+    let mut handoff_audio_verified = false;
     let received_audio = async {
         exchange(&mut bob_voice, &mut charlie_voice, (9000, -7000))
             .await
-            .map_err(|error| failure(format!("attended received audio: {error}")))
+            .map_err(|error| failure(format!("attended received audio: {error}")))?;
+        handoff_audio_verified = true;
+        Ok::<(), ControlError>(())
     };
-    tokio::try_join!(source_ended, consultation_ended, received_audio)?;
+    if let Err(error) = tokio::try_join!(source_ended, consultation_ended, received_audio) {
+        return Err(failure(format!(
+            "{error}; source={:?}; consultation={:?}; handoff_audio_verified={handoff_audio_verified}",
+            source.observed(),
+            consultation.observed()
+        )));
+    }
     println!("Observed attended transfer event={:?}", source.event()?);
     match operation {
         Exercise::Consultation | Exercise::Transfer => Ok(()),
