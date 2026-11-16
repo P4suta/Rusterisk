@@ -14,6 +14,7 @@ mod build;
 pub use build::{ServerBuildPhase, ServerBuildPlan};
 mod capture;
 pub use capture::CapturedServer;
+mod candidate;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {
