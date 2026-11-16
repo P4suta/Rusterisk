@@ -160,6 +160,7 @@ fn phase(
     command
         .args(&step.arguments)
         .current_dir(source)
+        .env("MISE_TRUSTED_CONFIG_PATHS", source)
         .stdout(capture.try_clone()?)
         .stderr(capture);
     let started = std::time::Instant::now();

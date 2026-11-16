@@ -23,6 +23,12 @@ fn native_capture_uses_owned_input_preserves_failure_logs_and_cleans_execution_s
                 .ok_or(ProcessError::InvalidOutput)?;
             assert_ne!(source, root);
             assert_eq!(
+                command
+                    .get_envs()
+                    .find_map(|(key, value)| (key == "MISE_TRUSTED_CONFIG_PATHS").then_some(value)),
+                Some(Some(source.as_os_str()))
+            );
+            assert_eq!(
                 std::fs::read(source.join("crates/core/src/lib.rs"))?,
                 b"fixture"
             );
