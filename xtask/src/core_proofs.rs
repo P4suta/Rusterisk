@@ -1,8 +1,10 @@
 use crate::{process::ProcessError, reference::Step};
 use serde::Deserialize;
 use std::time::Duration;
+mod capture;
 mod runner;
-pub use runner::{execute, Execution};
+pub use capture::CapturedCoreProofs;
+pub use runner::{execute, plan, CoreProofOutcome, Execution};
 
 pub const HARNESSES: [&str; 14] = [
     "proofs::terminal_release_is_absorbing",
@@ -58,6 +60,12 @@ pub enum ProofError {
         operation: String,
         cleanup: ProcessError,
     },
+    SourceChanged,
+    FollowUp {
+        operation: String,
+        context: &'static str,
+        follow_up: String,
+    },
 }
 
 impl std::fmt::Display for ProofError {
@@ -75,6 +83,8 @@ impl std::fmt::Display for ProofError {
             Self::Cleanup { operation, cleanup } => {
                 write!(formatter, "{operation}; proof cleanup failed: {cleanup}")
             }
+            Self::SourceChanged => formatter.write_str("captured core proof inputs changed"),
+            Self::FollowUp { operation, context, follow_up } => write!(formatter,"{operation}; {context}: {follow_up}"),
         }
     }
 }
@@ -98,6 +108,10 @@ pub struct CoreProofPlan {
 }
 
 impl CoreProofPlan {
+    pub fn image(&self) -> &str {
+        self.image.as_str()
+    }
+
     pub fn new(
         identity: &str,
         source: &str,
