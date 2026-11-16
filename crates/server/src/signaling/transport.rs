@@ -24,7 +24,9 @@ mod setup;
 #[cfg(test)]
 mod tests;
 mod websocket;
-pub(super) use setup::{ConnectionSetup, Prepared, RegisteredRoute, SetupKey, SetupLifetime};
+pub(super) use setup::{
+    ConnectionAdmission, ConnectionSetup, Prepared, RegisteredRoute, SetupKey, SetupLifetime,
+};
 
 enum ListenerSocket {
     Datagram(UdpSocket),

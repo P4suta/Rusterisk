@@ -13,6 +13,7 @@ use tokio::{
     net::TcpListener,
     task::JoinHandle,
 };
+mod fallback;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())

@@ -2,7 +2,8 @@ use super::{
     failure,
     resolver::{DestinationResolver, ResolvedTarget},
     transport::{
-        ConnectionKey, ConnectionSetup, Prepared, RegisteredRoute, SetupKey, SetupLifetime,
+        ConnectionAdmission, ConnectionKey, ConnectionSetup, Prepared, RegisteredRoute, SetupKey,
+        SetupLifetime,
     },
     Signaling,
 };
@@ -290,7 +291,8 @@ impl Signaling {
             }
         }
         let connection = match self.network.admit_prepared(prepared) {
-            Ok(connection) => connection,
+            Ok(ConnectionAdmission::Continue) => return Ok(()),
+            Ok(ConnectionAdmission::Ready(connection)) => connection,
             Err(error) => {
                 self.cancel_native(&key);
                 return self.native_failed(key, error).await;

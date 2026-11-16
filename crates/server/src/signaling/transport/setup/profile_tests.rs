@@ -1,4 +1,7 @@
-use super::{Network, Phase, Prepared, SetupEvent};
+use super::{
+    CandidateDecision, ConnectionAdmission, Network, Phase, Prepared, PreparedReply, Reserved,
+    SetupEvent,
+};
 use crate::{encryption::TlsClientContext, signaling::cleanup, ControlError};
 use hickory_resolver::proto::rr::Name;
 use rusterisk_config::{Config, Protocol, RegistrarUri, RegistrationAddress, RegistrationUriError};
@@ -66,13 +69,42 @@ enum Case {
     DifferentDomain,
     Unverified,
     ClosedReceiver,
+    ClosedReply,
     Stopped,
     Closing,
     Cancelled,
     Stale,
 }
 
-async fn admission(case: Case) -> Result<(), ControlError> {
+const CASES: [Case; 14] = [
+    Case::Matching,
+    Case::EquivalentDomain,
+    Case::MultipleRootDots,
+    Case::CapturedBeforeReplacement,
+    Case::ChangedRoots,
+    Case::ChangedGeneration,
+    Case::DifferentDomain,
+    Case::Unverified,
+    Case::ClosedReceiver,
+    Case::ClosedReply,
+    Case::Stopped,
+    Case::Closing,
+    Case::Cancelled,
+    Case::Stale,
+];
+
+#[derive(Clone, Copy)]
+enum AdmissionKind {
+    Candidate,
+    Connected,
+}
+
+enum ReplyReceiver {
+    Candidate(tokio::sync::oneshot::Receiver<CandidateDecision>),
+    Connected(tokio::sync::oneshot::Receiver<Reserved>),
+}
+
+async fn admission(case: Case, kind: AdmissionKind) -> Result<(), ControlError> {
     let mut fixture = Fixture::new().await?;
     let primary: Result<(), ControlError> = async {
         let first = fixture.network.reserve_setup(0, NonZeroU64::MIN)?;
@@ -112,6 +144,7 @@ async fn admission(case: Case) -> Result<(), ControlError> {
             | Case::ChangedRoots
             | Case::ChangedGeneration
             | Case::ClosedReceiver
+            | Case::ClosedReply
             | Case::Closing
             | Case::Cancelled
             | Case::Stale
@@ -144,7 +177,8 @@ async fn admission(case: Case) -> Result<(), ControlError> {
             | Case::ChangedRoots
             | Case::ChangedGeneration
             | Case::DifferentDomain
-            | Case::Unverified => {}
+            | Case::Unverified
+            | Case::ClosedReply => {}
             Case::ClosedReceiver => drop(owners.take()),
             Case::Closing => {
                 fixture
@@ -181,7 +215,26 @@ async fn admission(case: Case) -> Result<(), ControlError> {
                 }
             }
         }
-        let (reply, _reserved) = tokio::sync::oneshot::channel();
+        let (reply, receiver) = match kind {
+            AdmissionKind::Candidate => {
+                let (reply, receiver) = tokio::sync::oneshot::channel();
+                (
+                    PreparedReply::Candidate(reply),
+                    ReplyReceiver::Candidate(receiver),
+                )
+            }
+            AdmissionKind::Connected => {
+                let (reply, receiver) = tokio::sync::oneshot::channel();
+                (
+                    PreparedReply::Connected(reply),
+                    ReplyReceiver::Connected(receiver),
+                )
+            }
+        };
+        let mut receiver = Some(receiver);
+        if matches!(case, Case::ClosedReply) {
+            drop(receiver.take());
+        }
         let result = fixture.network.admit_prepared(Prepared {
             key: setup,
             peer,
@@ -192,7 +245,7 @@ async fn admission(case: Case) -> Result<(), ControlError> {
             Case::Matching | Case::EquivalentDomain | Case::CapturedBeforeReplacement
         );
         match result {
-            Ok(key) if matches && key == existing => {}
+            Ok(ConnectionAdmission::Ready(key)) if matches && key == existing => {}
             Err(ControlError::Conflict(_)) if !matches => {}
             Ok(key) => {
                 return Err(ControlError::Adapter(format!(
@@ -203,6 +256,28 @@ async fn admission(case: Case) -> Result<(), ControlError> {
                 return Err(ControlError::Adapter(format!(
                     "TLS profile {case:?} rejected its valid snapshot: {error}"
                 )))
+            }
+        }
+        if matches {
+            match receiver.as_mut().ok_or(ControlError::Capacity)? {
+                ReplyReceiver::Candidate(receiver) => match receiver.try_recv().map_err(failure)? {
+                    CandidateDecision::Reuse => {}
+                    CandidateDecision::Connect => {
+                        return Err(ControlError::Invalid(
+                            "Matching candidate opened another flow",
+                        ));
+                    }
+                },
+                ReplyReceiver::Connected(receiver) => {
+                    if !matches!(
+                        receiver.try_recv(),
+                        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                    ) {
+                        return Err(ControlError::Invalid(
+                            "Matching connection received another reservation",
+                        ));
+                    }
+                }
             }
         }
         let port = fixture
@@ -224,24 +299,53 @@ async fn admission(case: Case) -> Result<(), ControlError> {
 #[tokio::test]
 async fn prepared_tls_profiles_reject_replaced_settings_and_preserve_admitted_flow_ownership(
 ) -> Result<(), ControlError> {
-    for case in [
-        Case::Matching,
-        Case::EquivalentDomain,
-        Case::MultipleRootDots,
-        Case::CapturedBeforeReplacement,
-        Case::ChangedRoots,
-        Case::ChangedGeneration,
-        Case::DifferentDomain,
-        Case::Unverified,
-        Case::ClosedReceiver,
-        Case::Stopped,
-        Case::Closing,
-        Case::Cancelled,
-        Case::Stale,
-    ] {
-        admission(case).await?;
+    for case in CASES {
+        admission(case, AdmissionKind::Connected).await?;
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn candidate_tls_profiles_reject_stale_owners_before_publishing_reuse(
+) -> Result<(), ControlError> {
+    for case in CASES {
+        admission(case, AdmissionKind::Candidate).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn fresh_candidates_keep_their_setup_slot_until_the_owned_job_finishes(
+) -> Result<(), ControlError> {
+    let mut fixture = Fixture::new().await?;
+    let primary = async {
+        let setup = fixture.network.reserve_setup(0, NonZeroU64::MIN)?;
+        let preparation = fixture.network.preparations.get_mut(&setup).ok_or(ControlError::Capacity)?;
+        preparation.phase = Phase::Connecting;
+        preparation.identity = Some("provider.test".into());
+        let (reply, mut decision) = tokio::sync::oneshot::channel();
+        let result = fixture.network.admit_prepared(Prepared {
+            key: setup,
+            peer: "127.0.0.1:5071".parse().map_err(failure)?,
+            reply: PreparedReply::Candidate(reply),
+        })?;
+        if result != ConnectionAdmission::Continue
+            || !matches!(decision.try_recv().map_err(failure)?, CandidateDecision::Connect)
+            || fixture.network.setups.len() != 1
+            || fixture.network.connection_slots() != 1
+            || !fixture.network.ports.is_empty()
+        {
+            return Err(ControlError::Invalid("Candidate permission changed its reserved ownership"));
+        }
+        if !matches!(fixture.network.prepared_event(SetupEvent::Finished { key: setup, result: Ok(()) }), Some(super::super::Input::SetupFinished { key, result: Ok(()) }) if key == setup)
+            || !fixture.network.setups.is_empty()
+            || fixture.network.connection_slots() != 0
+        {
+            return Err(ControlError::Invalid("Candidate job completion retained setup capacity"));
+        }
+        Ok(())
+    }.await;
+    fixture.finish(primary).await
 }
 
 #[test]

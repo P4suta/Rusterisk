@@ -1,6 +1,9 @@
 use super::{
     cleanup, failure, media,
-    transport::{ConnectionKey, ConnectionSetup, DeliveryRoute, Prepared, SetupKey, SetupLifetime},
+    transport::{
+        ConnectionAdmission, ConnectionKey, ConnectionSetup, DeliveryRoute, Prepared, SetupKey,
+        SetupLifetime,
+    },
     Received, Signaling,
 };
 use crate::ControlError;
@@ -631,7 +634,8 @@ impl Signaling {
         }
         let setup = prepared.key;
         match self.network.admit_prepared(prepared) {
-            Ok(connection) => {
+            Ok(ConnectionAdmission::Continue) => {}
+            Ok(ConnectionAdmission::Ready(connection)) => {
                 let route = self.network.capture(connection.listener, connection.peer)?;
                 client.state = State::Ready {
                     at: now,

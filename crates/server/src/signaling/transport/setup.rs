@@ -4,6 +4,7 @@ use super::{
 };
 use crate::signaling::{registrations::ConfigurationLease, resolver::ResolvedTarget};
 use crate::{encryption::TlsClientContext, runner::CallLease};
+use candidate::{CandidateDecision, PreparedReply};
 use std::{future::Future, net::SocketAddr, num::NonZeroU64, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -11,6 +12,7 @@ use tokio::{
     sync::{mpsc, oneshot, watch},
 };
 use tokio_rustls::rustls::pki_types::ServerName;
+mod candidate;
 #[cfg(test)]
 mod profile_tests;
 #[cfg(test)]
@@ -26,6 +28,12 @@ pub(crate) struct SetupKey {
 pub(in crate::signaling) enum ConnectionSetup {
     Reused(ConnectionKey),
     Connecting,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::signaling) enum ConnectionAdmission {
+    Continue,
+    Ready(ConnectionKey),
 }
 
 #[derive(Clone, Copy)]
@@ -90,7 +98,7 @@ impl Preparation {
 pub(crate) struct Prepared {
     pub(crate) key: SetupKey,
     peer: SocketAddr,
-    reply: oneshot::Sender<Reserved>,
+    reply: PreparedReply,
 }
 
 pub(super) enum SetupEvent {
@@ -108,6 +116,11 @@ struct SetupJob {
     sender: mpsc::Sender<StreamPacket>,
     stop: watch::Receiver<bool>,
     deadline: tokio::time::Instant,
+}
+
+enum Opened<S> {
+    Stream { peer: SocketAddr, stream: S },
+    Reused,
 }
 
 pub(in crate::signaling) enum SetupLifetime {
@@ -346,12 +359,12 @@ impl Network {
     pub(in crate::signaling) fn admit_prepared(
         &mut self,
         prepared: Prepared,
-    ) -> Result<ConnectionKey, ControlError> {
+    ) -> Result<ConnectionAdmission, ControlError> {
         let preparation = self
             .preparations
             .get(&prepared.key)
             .ok_or(ControlError::Conflict("Signaling setup ended"))?;
-        if *preparation.stop.borrow() {
+        if *preparation.stop.borrow() || prepared.reply.is_closed() {
             return Err(ControlError::Conflict("Signaling setup cancelled"));
         }
         if let Some(port) = self.ports.get(&(prepared.key.listener, prepared.peer)) {
@@ -360,8 +373,24 @@ impl Network {
                     "Signaling peer belongs to a different flow identity",
                 ));
             }
-            return Ok(port.key);
+            let key = port.key;
+            match prepared.reply {
+                PreparedReply::Candidate(reply) => reply
+                    .send(CandidateDecision::Reuse)
+                    .map_err(|_| ControlError::Conflict("Signaling candidate owner closed"))?,
+                PreparedReply::Connected(reply) => drop(reply),
+            }
+            return Ok(ConnectionAdmission::Ready(key));
         }
+        let reply = match prepared.reply {
+            PreparedReply::Candidate(reply) => {
+                reply
+                    .send(CandidateDecision::Connect)
+                    .map_err(|_| ControlError::Conflict("Signaling candidate owner closed"))?;
+                return Ok(ConnectionAdmission::Continue);
+            }
+            PreparedReply::Connected(reply) => reply,
+        };
         let preparation = self
             .preparations
             .remove(&prepared.key)
@@ -384,8 +413,7 @@ impl Network {
                 tls_profile: preparation.tls_profile,
             },
         );
-        if prepared
-            .reply
+        if reply
             .send(Reserved {
                 key,
                 packets: receiver,
@@ -397,7 +425,7 @@ impl Network {
             return Err(ControlError::Conflict("Signaling setup owner closed"));
         }
         self.setups.remove(&prepared.key);
-        Ok(key)
+        Ok(ConnectionAdmission::Ready(key))
     }
 
     pub(super) fn prepared_event(&mut self, event: SetupEvent) -> Option<super::Input> {
@@ -455,10 +483,11 @@ where
         biased;
         _changed = job.stop.changed() => Err(ControlError::Conflict("Signaling setup cancelled")),
         _released = job.lease.released() => Err(ControlError::Conflict("Signaling setup owner ended")),
-        result = tokio::time::timeout_at(job.deadline, open(local, &resolved, connector, &job.lease, stopped)) => result.map_err(failure).and_then(|result| result),
+        result = tokio::time::timeout_at(job.deadline, open(local, &resolved, connector, &job.lease, stopped, &job.setup_sender, job.key)) => result.map_err(failure).and_then(|result| result),
     };
     match connected {
-        Ok((peer, stream)) => admission(stream, peer, job).await,
+        Ok(Opened::Stream { peer, stream }) => admission(stream, peer, job).await,
+        Ok(Opened::Reused) => setup_finished(&job.setup_sender, job.key, Ok(())).await,
         Err(error) => setup_finished(&job.setup_sender, job.key, Err(error)).await,
     }
 }
@@ -469,19 +498,31 @@ async fn open<S, F, C>(
     mut connector: F,
     lease: &SetupLifetime,
     stopped: watch::Receiver<bool>,
-) -> Result<(SocketAddr, S), ControlError>
+    sender: &mpsc::Sender<SetupEvent>,
+    key: SetupKey,
+) -> Result<Opened<S>, ControlError>
 where
     F: FnMut(TcpStream, ServerName<'static>) -> C,
     C: Future<Output = Result<S, ControlError>>,
 {
     let mut last = ControlError::NotFound("No usable signaling address");
-    for peer in resolved.peers() {
+    for (index, peer) in resolved
+        .peers()
+        .filter(|peer| peer.is_ipv4() == local.is_ipv4())
+        .enumerate()
+    {
         let cancelled = *stopped.borrow() || lease.is_released();
         if cancelled {
             return Err(ControlError::Conflict("Signaling setup owner ended"));
         }
-        if peer.is_ipv4() != local.is_ipv4() {
-            continue;
+        if index != 0 {
+            match candidate::inspect(sender, key, peer).await? {
+                CandidateDecision::Reuse => return Ok(Opened::Reused),
+                CandidateDecision::Connect => {}
+            }
+            if *stopped.borrow() || lease.is_released() {
+                return Err(ControlError::Conflict("Signaling setup owner ended"));
+            }
         }
         let socket = if peer.is_ipv4() {
             TcpSocket::new_v4()
@@ -509,7 +550,7 @@ where
         }
         let name = ServerName::try_from(resolved.identity().to_owned()).map_err(failure)?;
         match connector(stream, name).await {
-            Ok(stream) => return Ok((peer, stream)),
+            Ok(stream) => return Ok(Opened::Stream { peer, stream }),
             Err(error) => last = error,
         }
     }
@@ -548,7 +589,7 @@ async fn admission<S: AsyncRead + AsyncWrite + Unpin>(
             .send(SetupEvent::Ready(Prepared {
                 key: job.key,
                 peer,
-                reply,
+                reply: PreparedReply::Connected(reply),
             }))
             .await
             .map_err(failure)?;
