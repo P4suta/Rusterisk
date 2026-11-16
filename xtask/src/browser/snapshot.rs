@@ -254,6 +254,12 @@ fn browser(path: &Path, files: &mut Vec<File>) -> Result<(), SourceError> {
 }
 
 impl SourceSnapshot {
+    pub fn files(&self) -> impl ExactSizeIterator<Item = (&Path, &[u8])> {
+        self.files
+            .iter()
+            .map(|file| (file.path.as_path(), file.bytes.as_slice()))
+    }
+
     pub fn read(root: &Path) -> Result<Self, SourceError> {
         directory(root)?;
         let mut files = Vec::new();
