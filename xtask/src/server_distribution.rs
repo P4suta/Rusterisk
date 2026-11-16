@@ -10,6 +10,8 @@ mod zip;
 pub use zip::write_server_zip;
 mod zip_read;
 pub use zip_read::check_server_zip;
+mod build;
+pub use build::{ServerBuildPhase, ServerBuildPlan};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {
