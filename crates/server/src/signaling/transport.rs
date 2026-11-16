@@ -13,6 +13,8 @@ use tokio::{
     sync::{mpsc, watch},
     task::JoinSet,
 };
+#[cfg(test)]
+mod refer_tests;
 mod setup;
 #[cfg(test)]
 mod tests;
@@ -192,6 +194,20 @@ async fn listen(listeners: &[ListenerSocket]) -> Result<ListenerInput, ControlEr
 }
 
 impl Network {
+    pub(super) fn current(&self, route: DeliveryRoute) -> bool {
+        match route.0 {
+            Route::Datagram { listener, .. } => matches!(
+                self.listeners.get(listener),
+                Some(ListenerSocket::Datagram(_))
+            ),
+            Route::Stream(key) => self
+                .ports
+                .get(&(key.listener, key.peer))
+                .is_some_and(|port| port.key == key && matches!(port.state, ConnectionState::Open)),
+            Route::Closed { .. } => false,
+        }
+    }
+
     pub(super) fn capture(
         &self,
         listener: usize,
@@ -247,20 +263,8 @@ impl Network {
         if packet.peer != route.peer() {
             return Err(ControlError::Invalid("Delivery peer changed"));
         }
-        match route.0 {
-            Route::Stream(key) => {
-                if !self
-                    .ports
-                    .get(&(key.listener, key.peer))
-                    .is_some_and(|port| {
-                        port.key == key && matches!(port.state, ConnectionState::Open)
-                    })
-                {
-                    return Ok(false);
-                }
-            }
-            Route::Closed { .. } => return Ok(false),
-            Route::Datagram { .. } => {}
+        if !self.current(route) {
+            return Ok(false);
         }
         self.send(route.listener(), packet).await?;
         Ok(true)

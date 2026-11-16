@@ -8,12 +8,13 @@ use rusterisk_api::{ChannelId, MediaUri};
 use rusterisk_config::{Config, Dtmf};
 use rusterisk_core::{AudioGate, DtmfCommand, MediaTaskToken, PeerMediaDirection};
 use rusterisk_media::{AudioTarget, Gate};
-use rusterisk_sip::{Datagram, Engine, Outbound, Output, RejectReason, SipEvent};
+use rusterisk_sip::{Datagram, DatagramOrigin, Engine, Outbound, Output, RejectReason, SipEvent};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
+mod cleanup;
 mod external_media;
 mod media;
 use media::{PendingMedia, PendingWebRtc};
@@ -21,6 +22,7 @@ use media::{PendingMedia, PendingWebRtc};
 mod negotiation_tests;
 mod outbound;
 mod recording;
+mod refer_routes;
 mod registrations;
 mod resolver;
 pub(crate) mod sip_websocket;
@@ -88,6 +90,7 @@ pub struct Signaling {
     resolver: Result<resolver::DestinationResolver, ControlError>,
     resolution_cache: resolver::ResolutionCache,
     calls: BTreeMap<CallKey, Active>,
+    refer_routes: BTreeMap<(usize, rusterisk_sip::ReferKey), refer_routes::ReferRoute>,
     external_media: BTreeSet<CallKey>,
     stream_admissions: BTreeMap<CallKey, external_media::PendingStream>,
     stream_jobs: JoinSet<external_media::StreamCompletion>,
@@ -168,6 +171,7 @@ impl Signaling {
             resolver: resolver::DestinationResolver::system(),
             resolution_cache: resolver::ResolutionCache::default(),
             calls: BTreeMap::new(),
+            refer_routes: BTreeMap::new(),
             external_media: BTreeSet::new(),
             stream_admissions: BTreeMap::new(),
             stream_jobs: JoinSet::new(),
@@ -194,7 +198,17 @@ impl Signaling {
         datagrams: Vec<Datagram>,
     ) -> Result<(), ControlError> {
         for packet in datagrams {
-            self.network.send(listener, packet).await?;
+            match packet.origin() {
+                DatagramOrigin::Direct => self.network.send(listener, packet).await?,
+                DatagramOrigin::Refer(reference) => {
+                    if let Some(route) = self.refer_delivery(listener, reference) {
+                        if self.network.send_on(route, packet).await? {
+                            continue;
+                        }
+                    }
+                    self.cancel_refer_wire(listener, reference)?;
+                }
+            }
         }
         Ok(())
     }
@@ -212,6 +226,7 @@ impl Signaling {
         output: Output,
         now: u64,
     ) -> Result<(), ControlError> {
+        self.prune_refer_routes(listener, now)?;
         let mut datagrams = output.datagrams;
         for event in &output.events {
             if let SipEvent::PeerDirection {
@@ -246,20 +261,15 @@ impl Signaling {
         self.transmit(listener, datagrams).await?;
         for event in output.events {
             match event {
-                SipEvent::BlindTransferRequested { refer, .. } => {
-                    let rejected = self.listeners[listener]
-                        .engine
-                        .refer_progress(
-                            refer.key(),
-                            rusterisk_sip::ReferProgress::Rejected(
-                                rusterisk_sip::ReferFailure::Unsupported,
-                            ),
-                            now,
-                        )
-                        .map_err(failure)?;
-                    self.transmit(listener, rejected.datagrams).await?;
+                SipEvent::BlindTransferRequested {
+                    id,
+                    generation,
+                    refer,
+                } => {
+                    self.admit_refer(listener, id, generation, refer, now)
+                        .await?;
                 }
-                SipEvent::ReferSubscriptionEnded { .. } => {}
+                SipEvent::ReferSubscriptionEnded { refer } => self.settle_refer(listener, refer),
                 SipEvent::EndpointContact {
                     endpoint,
                     generation,
@@ -572,8 +582,19 @@ impl Signaling {
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
-            Effect::RejectRefer { .. } | Effect::ReferProgress { .. } => {
-                return Err(ControlError::Unsupported)
+            Effect::RejectRefer {
+                source,
+                refer,
+                failure,
+            } => self.reject_refer(&source, refer, failure, now).await?,
+            Effect::ReferProgress {
+                source,
+                refer,
+                token,
+                progress,
+            } => {
+                self.progress_refer(&source, refer, token, progress, now)
+                    .await?
             }
             Effect::ConnectWebSocket {
                 key,
@@ -1168,28 +1189,22 @@ impl Signaling {
         let started = Instant::now();
         let result = self.serve(&mut stop, started).await;
         self.registrations.cancel();
-        let mut cleanup = Ok(());
         let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
-        if let Err(error) = self.finish_native().await {
-            cleanup = Err(error);
-        }
-        if let Err(error) = self.finish_streams().await {
-            cleanup = Err(error);
-        }
-        if let Err(error) = self.finish_websockets().await {
-            cleanup = Err(error);
-        }
+        let mut cleanup = self.close_refer_routes(now);
+        cleanup = cleanup::combine(cleanup, self.finish_native().await);
+        cleanup = cleanup::combine(cleanup, self.finish_streams().await);
+        cleanup = cleanup::combine(cleanup, self.finish_websockets().await);
         for (key, call) in std::mem::take(&mut self.calls) {
             match self.terminate(call.listener, &key, now) {
                 Ok(output) => {
                     if let Err(error) = self.transmit(call.listener, output.datagrams).await {
                         tracing::error!(%error, "signaling cleanup failed");
-                        cleanup = Err(error);
+                        cleanup = cleanup::combine(cleanup, Err(error));
                     }
                 }
                 Err(error) => {
                     tracing::error!(%error, "dialog cleanup failed");
-                    cleanup = Err(failure(error));
+                    cleanup = cleanup::combine(cleanup, Err(failure(error)));
                 }
             }
         }
@@ -1205,17 +1220,17 @@ impl Signaling {
                 }
                 Err(error) => {
                     tracing::error!(%error, "playback task failed during shutdown");
-                    cleanup = Err(failure(error));
+                    cleanup = cleanup::combine(cleanup, Err(failure(error)));
                 }
             }
         }
         if let Err(error) = self.finish_recordings().await {
             tracing::error!(%error, "recording shutdown failed");
-            cleanup = Err(error);
+            cleanup = cleanup::combine(cleanup, Err(error));
         }
         if let Err(error) = self.network.close().await {
             tracing::error!(%error, "signaling stream shutdown failed");
-            cleanup = Err(error);
+            cleanup = cleanup::combine(cleanup, Err(error));
         }
         match (result, cleanup) {
             (Ok(()), Ok(())) => Ok(()),
