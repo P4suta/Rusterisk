@@ -1,4 +1,5 @@
 use super::failure;
+use crate::transfer_transactions::Branch;
 use crate::AckIdentity;
 use crate::BranchNamespace;
 use rsipstack::sip::{
@@ -9,6 +10,8 @@ use std::{net::SocketAddr, time::Duration};
 use tokio::net::UdpSocket;
 #[path = "observations.rs"]
 mod observation_tests;
+#[path = "retirement.rs"]
+mod retirement_tests;
 #[path = "routes.rs"]
 mod route_tests;
 
@@ -64,6 +67,11 @@ pub(super) struct Observation {
     transferor_bye_response: bool,
 }
 
+struct TransferorBye {
+    branch: Branch,
+    sent_by: SocketAddr,
+}
+
 pub(super) struct TransferSignals {
     from: String,
     to: String,
@@ -76,6 +84,7 @@ pub(super) struct TransferSignals {
     ended: bool,
     completed: bool,
     bye_response: bool,
+    bye_transaction: Option<TransferorBye>,
 }
 
 impl TransferSignals {
@@ -108,6 +117,7 @@ impl TransferSignals {
             ended: false,
             completed: false,
             bye_response: false,
+            bye_transaction: None,
         })
     }
 
@@ -157,6 +167,23 @@ impl TransferSignals {
             SipMessage::Response(response)
                 if response.cseq_header().map_err(failure)?.value() == "4 BYE" =>
             {
+                let expected = self
+                    .bye_transaction
+                    .as_ref()
+                    .ok_or(ControlError::Invalid("Unsolicited transferor BYE response"))?;
+                let via = response
+                    .top_via_header()
+                    .map_err(failure)?
+                    .typed()
+                    .map_err(failure)?;
+                let branch = expected.branch.to_string();
+                if via.branch().map(|branch| branch.value()) != Some(branch.as_str())
+                    || via.sent_by() != &expected.sent_by.into()
+                {
+                    return Err(ControlError::Invalid(
+                        "Transferor BYE response changed its transaction",
+                    ));
+                }
                 let code = response.status_code.code();
                 if code != 200 {
                     return Err(failure(format!(
@@ -336,24 +363,49 @@ impl TransferSignals {
         Ok(())
     }
 
-    pub(super) async fn transferor_ended(
+    async fn send_transferor_bye(
         &mut self,
         socket: &UdpSocket,
         target: SocketAddr,
         local: SocketAddr,
     ) -> Result<(), ControlError> {
         let branch = BranchNamespace::random()?.branch(0);
+        self.bye_transaction = Some(TransferorBye {
+            branch,
+            sent_by: local,
+        });
         let request = format!("BYE {} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch={branch};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 4 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", self.remote, self.to, self.from, self.call_id);
         socket
             .send_to(request.as_bytes(), target)
             .await
             .map_err(failure)?;
-        self.until(socket, target, |state| state.bye_response)
-            .await?;
+        self.until(socket, target, |state| state.bye_response).await
+    }
+
+    pub(super) async fn transferor_ended(
+        &mut self,
+        socket: &UdpSocket,
+        target: SocketAddr,
+        local: SocketAddr,
+    ) -> Result<(), ControlError> {
+        self.send_transferor_bye(socket, target, local).await?;
         if self.completed {
             return Err(ControlError::Invalid(
                 "Transfer completed before its target answered",
             ));
+        }
+        Ok(())
+    }
+
+    pub(super) async fn retire_source(
+        &mut self,
+        socket: &UdpSocket,
+        target: SocketAddr,
+        local: SocketAddr,
+    ) -> Result<(), ControlError> {
+        self.completed(socket, target).await?;
+        if !self.ended && !self.bye_response {
+            self.send_transferor_bye(socket, target, local).await?;
         }
         Ok(())
     }

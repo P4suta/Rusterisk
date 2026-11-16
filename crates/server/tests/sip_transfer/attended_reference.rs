@@ -59,7 +59,7 @@ pub(super) async fn compare() -> Result<(), ControlError> {
                 [first, bob, second, charlie],
                 [target, target],
                 media_ports,
-                Exercise::Transfer,
+                Exercise::RetireSource,
                 [
                     RequestRoute::CallbackPending { server: target },
                     RequestRoute::CallbackPending { server: target },

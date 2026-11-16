@@ -12,7 +12,7 @@ enum Notice {
     Bye,
 }
 
-fn answer() -> Result<Response, ControlError> {
+pub(super) fn answer() -> Result<Response, ControlError> {
     let wire = "SIP/2.0 200 OK\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-invite\r\nFrom: <sip:private-caller@localhost>;tag=private-remote\r\nTo: <sip:private-target@localhost>;tag=private-local\r\nCall-ID: private-dialog\r\nCSeq: 2 INVITE\r\nContact: <sip:private-contact@127.0.0.1:5060>\r\nContent-Length: 0\r\n\r\n";
     match SipMessage::try_from(wire).map_err(failure)? {
         SipMessage::Response(response) => Ok(response),

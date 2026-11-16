@@ -89,6 +89,7 @@ async fn connect(
 enum Exercise {
     Consultation,
     Transfer,
+    RetireSource,
     PeerEnded(Survivor),
 }
 
@@ -234,10 +235,17 @@ async fn exercise(
     let consultation_dialog = consultation.callee;
     let mut consultation = TransferSignals::new(&consultation.answer, consultation_requests)?;
     let source_ended = async {
-        source
-            .settled(&first.signal, target)
-            .await
-            .map_err(|error| failure(format!("attended source termination: {error}")))
+        let result = match operation {
+            Exercise::RetireSource => {
+                source
+                    .retire_source(&first.signal, target, first.contact()?)
+                    .await
+            }
+            Exercise::Consultation | Exercise::Transfer | Exercise::PeerEnded(_) => {
+                source.settled(&first.signal, target).await
+            }
+        };
+        result.map_err(|error| failure(format!("attended source termination: {error}")))
     };
     let consultation_ended = async {
         consultation
@@ -260,9 +268,22 @@ async fn exercise(
             consultation.observed()
         )));
     }
+    if matches!(operation, Exercise::RetireSource) {
+        bob_voice.sample = -5000;
+        charlie_voice.sample = 10000;
+        exchange(&mut bob_voice, &mut charlie_voice, (10000, -5000))
+            .await
+            .map_err(|error| {
+                failure(format!(
+                    "post-retirement received audio: {error}; source={:?}; consultation={:?}",
+                    source.observed(),
+                    consultation.observed()
+                ))
+            })?;
+    }
     println!("Observed attended transfer event={:?}", source.event()?);
     match operation {
-        Exercise::Consultation | Exercise::Transfer => Ok(()),
+        Exercise::Consultation | Exercise::Transfer | Exercise::RetireSource => Ok(()),
         Exercise::PeerEnded(Survivor::Bob) => {
             survivor_shutdown::end(
                 &bob,
@@ -423,6 +444,12 @@ async fn attended_refer_reuses_consultation_audio_and_retires_both_source_dialog
 }
 
 #[tokio::test]
+async fn completed_attended_source_retirement_preserves_both_surviving_audio_streams(
+) -> Result<(), ControlError> {
+    native(Exercise::RetireSource).await
+}
+
+#[tokio::test]
 async fn ending_either_surviving_dialog_releases_its_peer_after_attended_audio(
 ) -> Result<(), ControlError> {
     for peer in [Survivor::Bob, Survivor::Charlie] {
@@ -441,7 +468,7 @@ async fn attended_consultation_on_another_listener_preserves_known_audio_and_sou
 #[ignore = "Requires the isolated Asterisk 22.9.0 reference."]
 async fn reference_attended_transfer_matches_native_received_audio() -> Result<(), ControlError> {
     println!("Comparing attended transfer against the native server");
-    native(Exercise::Transfer)
+    native(Exercise::RetireSource)
         .await
         .map_err(|error| failure(format!("native attended transfer: {error}")))?;
     println!("Comparing attended transfer against Asterisk 22.9.0");
