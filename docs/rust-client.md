@@ -154,12 +154,15 @@ The driver then aborts and joins any remaining workers.
 ## Control playback
 
 Use `play_channel` or `play_bridge` to start a named playback from a typed `MediaUri`.
+Use `play_channel_with_options` or `play_bridge_with_options` with `PlaybackOptions` to select an initial offset and position-control step.
+Construct each `PlaybackMilliseconds` with `TryFrom<u32>` to check the signed 32-bit range before sending.
+The default offset is zero, and a zero step selects three seconds.
 Use `pause_playback`, `resume_playback`, and `stop_playback` to control its lifetime.
 Use `restart_playback`, `forward_playback`, and `reverse_playback` to request position changes through the [Asterisk playback controls](https://docs.asterisk.org/Asterisk_22_Documentation/API_Documentation/Asterisk_REST_Interface/Playbacks_REST_API/).
 The client preserves the server's 404 and 409 errors.
 Successful requests acknowledge acceptance.
 Playback events report progress and completion.
-The native playback comparison and `just interop` exercise the same client operations on channel and bridge audio.
+The native playback comparison and `just interop` exercise the same client operations, initial offsets, and configurable steps on channel and bridge audio.
 The received-audio check requires eighty milliseconds of matching samples from consecutive packets of one source.
 
 ## Download stored audio

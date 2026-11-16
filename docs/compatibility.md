@@ -38,12 +38,15 @@ Registered JSON body parameters override query values while path identifiers rem
 Body values follow the public operation's declared types and bounded conversion rules.
 Channel creation validates initial variables together and applies them before publishing creation events.
 Playback provides start, pause, resume, stop, restart, forward, and reverse.
-Forward and reverse use a three-second step from the current playback position.
+Forward and reverse use a three-second step from the current playback position by default.
+Playback requests accept an initial `offsetms` and a `skipms` step between zero and 2,147,483,647 milliseconds.
+A zero `skipms` selects the default step.
 Paused and stopping playbacks reject position changes.
 Queued restart preserves the original request.
 The same Rust client compares channel and bridge position changes with Asterisk 22.9.0 using received audio.
-The comparison also checks paused-state rejection, resume, stop, and completion events.
-Initial offsets, configurable steps, and media lists remain unsupported.
+The comparison also checks an initial seven-second offset, one-second position changes, paused-state rejection, resume, stop, and completion events.
+Restart returns to the beginning even when the request supplied an initial offset.
+Media lists remain unsupported.
 Live recording duration statistics remain absent.
 
 ## Signaling and audio
