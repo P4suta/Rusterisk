@@ -10,6 +10,7 @@ pub mod native_sanitizers;
 pub mod process;
 pub mod reference;
 pub mod regular_archive;
+pub mod release_check;
 pub mod server_distribution;
 pub const WORKSPACE_FORMAT_CHECK: &[&str] = &["fmt", "--", "--check"];
 mod sip_domain_policy;
