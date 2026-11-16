@@ -12,4 +12,6 @@ pub use snapshot::{SnapshotError, SourceSnapshot};
 mod sdk_build;
 pub use sdk_build::{SdkBuildError, SdkBuildPhase, SdkBuildPlan};
 mod sdk_candidate_build;
-pub use sdk_candidate_build::{build_sdk, plan_sdk, CapturedSdk, SdkCandidateBuildError};
+pub use sdk_candidate_build::{
+    build_sdk, build_sdk_with, plan_sdk, CapturedSdk, SdkCandidateBuildError,
+};

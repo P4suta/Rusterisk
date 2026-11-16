@@ -320,7 +320,10 @@ fn ensure_directory(path: &Path) -> Result<(), std::io::Error> {
     }
 }
 
-pub fn build_sdk(root: &Path) -> Result<PathBuf, SdkCandidateBuildError> {
+pub fn build_sdk_with(
+    root: &Path,
+    perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+) -> Result<PathBuf, SdkCandidateBuildError> {
     let capture = CapturedSdk::read(root)?;
     println!(
         "distribution: captured SDK source {}",
@@ -338,7 +341,11 @@ pub fn build_sdk(root: &Path) -> Result<PathBuf, SdkCandidateBuildError> {
         .as_nanos();
     let candidate = parent.join(format!("{}-{stamp}", std::process::id()));
     println!("SDK candidate: {}", candidate.display());
-    capture.build(&candidate)?;
+    capture.build_with(&candidate, perform)?;
     println!("SDK candidate packages created");
     Ok(candidate)
+}
+
+pub fn build_sdk(root: &Path) -> Result<PathBuf, SdkCandidateBuildError> {
+    build_sdk_with(root, run)
 }

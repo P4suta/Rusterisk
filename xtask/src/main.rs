@@ -204,7 +204,7 @@ fn execute() -> Result<(), TaskError> {
         [task] if task == "browser-check" => xtask::browser::check(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string())),
         [task] if task == "distribution-check" => distribution_check(),
         [task, scope, operation] if task == "distribution" && scope == "sdk" && operation == "plan" => xtask::distribution::plan_sdk(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string())),
-        [task, scope, operation] if task == "distribution" && scope == "sdk" && operation == "build" => xtask::distribution::build_sdk(&std::env::current_dir()?).map(|_| ()).map_err(|error| TaskError::Contract(error.to_string())),
+        [task, scope, operation] if task == "distribution" && scope == "sdk" && operation == "build" => distribution_sdk_build(),
         [task] if task == "check" => {
             distribution_check()?;
             xtask::vendor::check(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string()))?;
@@ -264,6 +264,24 @@ fn distribution_check() -> Result<(), TaskError> {
         .map_err(|error| TaskError::Contract(error.to_string()))?;
     println!("distribution: SDK package inputs verified");
     Ok(())
+}
+
+fn distribution_sdk_build() -> Result<(), TaskError> {
+    let root = std::env::current_dir()?;
+    let mut supervisor = xtask::process::CommandSupervisor::new().map_err(TaskError::Process)?;
+    let operation = xtask::distribution::build_sdk_with(&root, |command, budget| {
+        supervisor.run(command, budget)
+    })
+    .map(|_| ())
+    .map_err(|error| TaskError::Contract(error.to_string()));
+    let cleanup = supervisor.finish();
+    match (operation, cleanup) {
+        (operation, Ok(())) => operation,
+        (Ok(()), Err(error)) => Err(TaskError::Process(error)),
+        (Err(operation), Err(cleanup)) => Err(TaskError::Contract(format!(
+            "{operation}; SDK supervisor cleanup failed: {cleanup}"
+        ))),
+    }
 }
 
 fn node_check() -> Result<(), TaskError> {
