@@ -45,6 +45,9 @@ distribution-server-plan-container target image:
 distribution-server-build-container target image:
     cargo run --locked --target-dir target/xtask --package xtask -- distribution server build-container --target {{ quote(target) }} --image {{ quote(image) }}
 
+distribution-server-export-oci candidate target:
+    cargo run --locked --target-dir target/xtask --package xtask -- distribution server export-oci --candidate {{ quote(candidate) }} --target {{ quote(target) }}
+
 distribution-server-check-content candidate target:
     cargo run --locked --target-dir target/xtask --package xtask -- distribution server check-content --candidate {{ quote(candidate) }} --target {{ quote(target) }}
 

@@ -202,3 +202,28 @@ fn container_builds_and_plans_require_immutable_images_before_creating_state(
         Ok(())
     })
 }
+
+#[test]
+fn image_exports_require_verified_linux_candidates_before_creating_state(
+) -> Result<(), SdkCandidateBuildError> {
+    using_project("server-oci-cli", |root, _| {
+        let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args([
+                "distribution",
+                "server",
+                "export-oci",
+                "--candidate",
+                "missing-server",
+                "--target",
+                "aarch64-unknown-linux-gnu",
+            ])
+            .current_dir(root)
+            .env("PATH", "")
+            .output()?;
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("usage:"));
+        assert!(output.stdout.is_empty());
+        assert!(!root.join(".cache").exists());
+        Ok(())
+    })
+}

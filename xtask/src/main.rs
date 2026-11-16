@@ -233,6 +233,7 @@ fn execute() -> Result<(), TaskError> {
             println!("server candidate contents passed source={} target={}", candidate.source_digest(), candidate.name().target().triple());
             Ok(())
         },
+        [task, scope, operation, candidate_flag, candidate, target_flag, target] if task == "distribution" && scope == "server" && operation == "export-oci" && candidate_flag == "--candidate" && target_flag == "--target" => distribution_server_oci_export(Path::new(candidate), target),
         [task] if task == "check" => {
             distribution_check()?;
             xtask::vendor::check(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string()))?;
@@ -277,7 +278,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|(check-content|verify) --candidate <path>>|distribution server <<plan|build> --target <triple>|check-content --candidate <path> --target <triple>|check-startup --candidate <path>|verify --candidate <path> --sdk-candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|(check-content|verify) --candidate <path>>|distribution server <<plan|build> --target <triple>|<plan-container|build-container> --target <triple> --image <digest>|<check-content|export-oci> --candidate <path> --target <triple>|check-startup --candidate <path>|verify --candidate <path> --sdk-candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
         )),
     }
 }
@@ -293,7 +294,6 @@ fn distribution_check() -> Result<(), TaskError> {
     println!("distribution: SDK package inputs verified");
     Ok(())
 }
-
 fn distribution_sdk_build() -> Result<(), TaskError> {
     let root = std::env::current_dir()?;
     let mut supervisor = xtask::process::CommandSupervisor::new().map_err(TaskError::Process)?;
@@ -397,6 +397,35 @@ fn distribution_server_startup(candidate: &Path) -> Result<(), TaskError> {
         Err(TaskError::Process(
             xtask::process::ProcessError::UnsupportedSupervision,
         ))
+    }
+}
+
+fn distribution_server_oci_export(candidate: &Path, target: &str) -> Result<(), TaskError> {
+    let target = xtask::server_distribution::ServerTarget::parse(target)
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
+    let mut supervisor = xtask::process::CommandSupervisor::new().map_err(TaskError::Process)?;
+    let operation = xtask::server_distribution::export_server_candidate_oci_with(
+        &std::env::current_dir()?,
+        candidate,
+        target,
+        |command, budget, mode| match mode {
+            xtask::server_distribution::ServerBuildCommandMode::Work => {
+                supervisor.run(command, budget)
+            }
+            xtask::server_distribution::ServerBuildCommandMode::Cleanup => {
+                supervisor.run_cleanup(command, budget)
+            }
+        },
+    )
+    .map(|_| ())
+    .map_err(TaskError::Io);
+    let cleanup = supervisor.finish().map_err(TaskError::Process);
+    match (operation, cleanup) {
+        (operation, Ok(())) => operation,
+        (Ok(()), Err(error)) => Err(error),
+        (Err(operation), Err(cleanup)) => Err(TaskError::Contract(format!(
+            "{operation}; server OCI export supervisor cleanup failed: {cleanup}"
+        ))),
     }
 }
 
