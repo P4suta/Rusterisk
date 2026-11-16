@@ -9,7 +9,7 @@ status: proposed
 
 [RFC 3261](https://www.rfc-editor.org/rfc/rfc3261.html#section-12.2) uses received Contact URIs for later requests.
 [RFC 5630](https://www.rfc-editor.org/rfc/rfc5630.html#section-5.1.1) prohibits generated `transport=tls` parameters and security downgrades.
-Raw targets can reach request generation after partial state changes.
+Raw targets can cause partial state changes.
 
 ## Decision
 
@@ -20,6 +20,8 @@ Refuse unavailable capabilities under [Section 19.1.5](https://www.rfc-editor.or
 Capture physical transport and preserve the initiating dialog's URI security.
 Validate targets before sequence, state, or media changes.
 Generate dialog requests through checked targets.
+Own one final response and `ACK` for 32 seconds.
+Absorb unusable final targets for the same interval.
 
 ## Alternatives
 
@@ -31,8 +33,9 @@ Guessing a previous target for an unusable response risks sending requests to an
 
 Unsupported targets require typed failure and bounded cleanup.
 The mandatory `ACK` behavior for an unusable final response target remains unresolved.
+Forked dialogs remain outside the single-dialog repair.
 
 ## Confirmation
 
-Test forbidden generated parameters, target roles, transport mismatches, security preservation, and rejected-update atomicity.
+Test generated parameters, URI roles, transports, security, and update atomicity.
 Keep the decision proposed until review resolves `ACK` handling for final responses and reference tests pass.
