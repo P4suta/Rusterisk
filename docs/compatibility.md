@@ -41,7 +41,8 @@ Playback provides start, pause, resume, stop, restart, forward, and reverse.
 Forward and reverse use a three-second step from the current playback position.
 Paused and stopping playbacks reject position changes.
 Queued restart preserves the original request.
-Audio driver tests compare samples after position changes, and reference comparison of position changes remains pending.
+The same Rust client compares channel and bridge position changes with Asterisk 22.9.0 using received audio.
+The comparison also checks paused-state rejection, resume, stop, and completion events.
 Initial offsets, configurable steps, and media lists remain unsupported.
 Live recording duration statistics remain absent.
 

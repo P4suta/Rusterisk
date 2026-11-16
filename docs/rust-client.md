@@ -159,6 +159,8 @@ Use `restart_playback`, `forward_playback`, and `reverse_playback` to request po
 The client preserves the server's 404 and 409 errors.
 Successful requests acknowledge acceptance.
 Playback events report progress and completion.
+The native playback comparison and `just interop` exercise the same client operations on channel and bridge audio.
+The received-audio check requires eighty milliseconds of matching samples from consecutive packets of one source.
 
 ## Download stored audio
 
