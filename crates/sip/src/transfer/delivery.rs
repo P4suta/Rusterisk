@@ -108,3 +108,24 @@ impl Engine {
         }
     }
 }
+
+impl Engine {
+    pub fn refer_reply_deadline(&self, identity: &ReferIdentity) -> Result<Option<u64>, SipError> {
+        let mut deadline = None;
+        for cached in self.cache.values() {
+            if cached.peer != identity.peer || cached.request.method != Method::Refer {
+                continue;
+            }
+            let sequence = cached.request.cseq_header()?.typed()?;
+            if sequence.method != Method::Refer
+                || sequence.seq != identity.sequence
+                || wire::Dialog::remote(&cached.request)? != identity.dialog
+            {
+                continue;
+            }
+            let expires = cached.expires.ok_or(SipError::InvalidPacket)?;
+            deadline = Some(deadline.map_or(expires, |previous: u64| previous.max(expires)));
+        }
+        Ok(deadline)
+    }
+}
