@@ -17,6 +17,10 @@ pub struct VerificationBuild {
     name: String,
 }
 
+pub struct CoreProofBuild {
+    name: String,
+}
+
 pub(crate) struct ImageIdentity(String);
 
 impl ImageIdentity {
@@ -132,6 +136,30 @@ impl VerificationBuild {
             &self.name,
             "rusterisk-input-verification:rust-1.99.0",
             "containers/input-verification",
+            900,
+        )
+    }
+
+    pub fn cleanup(&self) -> Step {
+        step(&["buildx", "rm", "--force", &self.name], 60)
+    }
+}
+
+impl CoreProofBuild {
+    pub fn new(identity: &str) -> Result<Self, ReferenceError> {
+        if !valid_identity(identity) {
+            return Err(ReferenceError::InvalidIdentity);
+        }
+        Ok(Self {
+            name: format!("rusterisk-core-proofs-{identity}"),
+        })
+    }
+
+    pub fn steps(&self) -> Vec<Step> {
+        build_steps(
+            &self.name,
+            "rusterisk-core-proofs:kani-0.68.0",
+            "containers/core-proofs",
             900,
         )
     }
