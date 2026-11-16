@@ -11,6 +11,12 @@ use std::{
     process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+mod execution_directory;
+use execution_directory::BuildDirectory;
+
+#[cfg(test)]
+#[path = "candidate/execution_directory_tests.rs"]
+mod execution_directory_tests;
 
 fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
@@ -131,11 +137,11 @@ impl CapturedServer {
             .duration_since(UNIX_EPOCH)
             .map_err(io::Error::other)?
             .as_nanos();
-        let directory = std::fs::canonicalize(std::env::temp_dir())?.join(format!(
-            "rusterisk-server-package-{}-{stamp}",
-            std::process::id()
-        ));
-        std::fs::create_dir(&directory)?;
+        let temporary = BuildDirectory::reserve(
+            &std::fs::canonicalize(std::env::temp_dir())?,
+            &format!("{}-{stamp}", std::process::id()),
+        )?;
+        let directory = temporary.path()?.to_owned();
         let source = directory.join("source");
         let state = directory.join("state");
         let operation = (|| {
@@ -144,7 +150,7 @@ impl CapturedServer {
             let container = image
                 .map(|image| {
                     ServerContainerBuildPlan::new(
-                        &format!("{}-{stamp}", std::process::id()),
+                        temporary.identity(),
                         &source,
                         &state,
                         self.name().target(),
@@ -230,7 +236,7 @@ impl CapturedServer {
         );
         combine(
             operation,
-            std::fs::remove_dir_all(&directory),
+            temporary.close(),
             "server execution directory cleanup failed",
         )
     }
