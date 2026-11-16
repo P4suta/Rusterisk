@@ -593,6 +593,10 @@ pub struct WaveReader {
 }
 
 impl WaveReader {
+    pub fn sample_count(&self) -> u64 {
+        u64::from(self.length) / 2
+    }
+
     pub fn rate(&self) -> u32 {
         self.rate
     }

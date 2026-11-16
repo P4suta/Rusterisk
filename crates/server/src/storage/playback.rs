@@ -14,21 +14,98 @@ pub enum PlaybackMedia {
     LocalizedSound { name: SoundId, language: ChannelId },
 }
 
+pub(super) struct Packet {
+    epoch: u64,
+    frame: Option<Frame>,
+}
+
+pub(super) struct Seek {
+    epoch: u64,
+    sample: u64,
+}
+
+pub(super) struct Metadata {
+    rate: u32,
+    samples: u64,
+}
+
 enum State {
     Active,
     Ended,
     Failed,
 }
 
-pub struct PlaybackSource {
-    frames: mpsc::Receiver<Frame>,
-    completed: oneshot::Receiver<Result<(), StorageError>>,
+struct Lease {
     lifetime: Option<oneshot::Sender<()>>,
-    state: State,
     port: StoragePort,
 }
 
+impl Drop for Lease {
+    fn drop(&mut self) {
+        drop(self.lifetime.take());
+        self.port.wake();
+    }
+}
+
+pub struct PlaybackSource {
+    frames: mpsc::Receiver<Packet>,
+    seeks: mpsc::Sender<Seek>,
+    completed: oneshot::Receiver<Result<(), StorageError>>,
+    state: State,
+    lease: Lease,
+    metadata: Metadata,
+    epoch: u64,
+    position: u64,
+}
+
 impl PlaybackSource {
+    pub fn rate(&self) -> u32 {
+        self.metadata.rate
+    }
+
+    pub fn sample_count(&self) -> u64 {
+        self.metadata.samples
+    }
+
+    pub fn sample_position(&self) -> u64 {
+        self.position
+    }
+
+    pub fn seek_sample(&mut self, sample: u64) -> Result<(), WorkerError> {
+        if !matches!(self.state, State::Active) || *self.lease.port.stop.borrow() {
+            return Err(WorkerError::Closed);
+        }
+        let epoch = self.epoch.checked_add(1).ok_or(WorkerError::Capacity)?;
+        let sample = sample.min(self.metadata.samples);
+        self.seeks
+            .try_send(Seek { epoch, sample })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => WorkerError::Capacity,
+                mpsc::error::TrySendError::Closed(_) => WorkerError::Closed,
+            })?;
+        self.epoch = epoch;
+        self.position = sample;
+        self.lease.port.wake();
+        Ok(())
+    }
+
+    fn packet(&mut self, packet: Packet) -> Option<Option<Frame>> {
+        self.lease.port.wake();
+        if packet.epoch != self.epoch {
+            return None;
+        }
+        match packet.frame {
+            Some(frame) => {
+                self.position += frame.samples().len() as u64;
+                Some(Some(frame))
+            }
+            None => {
+                self.state = State::Ended;
+                Some(None)
+            }
+        }
+    }
+
     fn complete(&mut self, result: Result<(), WorkerError>) -> Result<Option<Frame>, WorkerError> {
         self.state = if result.is_ok() {
             State::Ended
@@ -44,21 +121,25 @@ impl PlaybackSource {
             State::Failed => return Err(WorkerError::Closed),
             State::Active => {}
         }
-        match self.frames.try_recv() {
-            Ok(frame) => {
-                self.port.wake();
-                Ok(Poll::Ready(Some(frame)))
-            }
-            Err(mpsc::error::TryRecvError::Empty) => Ok(Poll::Pending),
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                let result = match self.completed.try_recv() {
-                    Ok(result) => result.map_err(WorkerError::Storage),
-                    Err(oneshot::error::TryRecvError::Empty) => return Ok(Poll::Pending),
-                    Err(oneshot::error::TryRecvError::Closed) => Err(WorkerError::Closed),
-                };
-                self.complete(result).map(Poll::Ready)
+        for _ in 0..3 {
+            match self.frames.try_recv() {
+                Ok(packet) => {
+                    if let Some(frame) = self.packet(packet) {
+                        return Ok(Poll::Ready(frame));
+                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => return Ok(Poll::Pending),
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    let result = match self.completed.try_recv() {
+                        Ok(result) => result.map_err(WorkerError::Storage),
+                        Err(oneshot::error::TryRecvError::Empty) => return Ok(Poll::Pending),
+                        Err(oneshot::error::TryRecvError::Closed) => Err(WorkerError::Closed),
+                    };
+                    return self.complete(result).map(Poll::Ready);
+                }
             }
         }
+        Ok(Poll::Pending)
     }
 
     pub async fn read(&mut self) -> Result<Option<Frame>, WorkerError> {
@@ -66,62 +147,96 @@ impl PlaybackSource {
             Poll::Ready(frame) => return Ok(frame),
             Poll::Pending => {}
         }
-        let frame = tokio::time::timeout(Duration::from_secs(5), self.frames.recv())
-            .await
-            .map_err(|_| WorkerError::Timeout)?;
-        self.port.wake();
-        match frame {
-            Some(frame) => Ok(Some(frame)),
-            None => {
-                let result = tokio::time::timeout(Duration::from_secs(5), &mut self.completed)
-                    .await
-                    .map_err(|_| WorkerError::Timeout)?
-                    .map_err(|_| WorkerError::Closed)?
-                    .map_err(WorkerError::Storage);
-                self.complete(result)
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match self.frames.recv().await {
+                    Some(packet) => {
+                        if let Some(frame) = self.packet(packet) {
+                            return Ok(frame);
+                        }
+                    }
+                    None => {
+                        let result = (&mut self.completed)
+                            .await
+                            .map_err(|_| WorkerError::Closed)?
+                            .map_err(WorkerError::Storage);
+                        return self.complete(result);
+                    }
+                }
             }
-        }
+        })
+        .await
+        .map_err(|_| WorkerError::Timeout)?
     }
 }
 
 impl Drop for PlaybackSource {
     fn drop(&mut self) {
         self.frames.close();
-        drop(self.lifetime.take());
-        self.port.wake();
     }
 }
 
 impl StoragePort {
     pub async fn play(&self, media: PlaybackMedia) -> Result<PlaybackSource, WorkerError> {
         let (output, frames) = mpsc::channel(3);
+        let (seek, seeks) = mpsc::channel(8);
         let (completed, completion) = oneshot::channel();
         let (lifetime, owner) = oneshot::channel();
-        let source = PlaybackSource {
-            frames,
-            completed: completion,
+        let lease = Lease {
             lifetime: Some(lifetime),
-            state: State::Active,
             port: self.clone(),
         };
         let (reply, response) = oneshot::channel();
         self.send(super::Command::Play {
             media,
             output,
+            seeks,
             lifetime: owner,
             completed,
             reply,
         })?;
-        receive(response).await?;
-        Ok(source)
+        let metadata = receive(response).await?;
+        Ok(PlaybackSource {
+            frames,
+            seeks: seek,
+            completed: completion,
+            state: State::Active,
+            lease,
+            metadata,
+            epoch: 0,
+            position: 0,
+        })
     }
 }
 
 struct Entry {
     reader: WaveReader,
-    output: mpsc::Sender<Frame>,
+    output: mpsc::Sender<Packet>,
+    seeks: mpsc::Receiver<Seek>,
+    epoch: u64,
+    ended: bool,
     lifetime: oneshot::Receiver<()>,
     completed: oneshot::Sender<Result<(), StorageError>>,
+}
+
+impl Entry {
+    fn seek(&mut self) -> Result<(), StorageError> {
+        for _ in 0..8 {
+            let command = match self.seeks.try_recv() {
+                Ok(command) => command,
+                Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                    break
+                }
+            };
+            if command.epoch <= self.epoch {
+                return Err(StorageError::InvalidState);
+            }
+            self.reader.seek_sample(command.sample)?;
+            self.epoch = command.epoch;
+            self.ended = false;
+        }
+        Ok(())
+    }
 }
 
 pub(super) struct PlaybackSet {
@@ -142,10 +257,11 @@ impl PlaybackSet {
     pub fn begin(
         &mut self,
         media: PlaybackMedia,
-        output: mpsc::Sender<Frame>,
+        output: mpsc::Sender<Packet>,
+        seeks: mpsc::Receiver<Seek>,
         lifetime: oneshot::Receiver<()>,
         completed: oneshot::Sender<Result<(), StorageError>>,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Metadata, StorageError> {
         if self.entries.len() >= 64 {
             return Err(StorageError::Capacity);
         }
@@ -170,17 +286,24 @@ impl PlaybackSet {
                 WaveReader::open(&path)?
             }
         };
+        let metadata = Metadata {
+            rate: reader.rate(),
+            samples: reader.sample_count(),
+        };
         self.entries.insert(
             generation,
             Entry {
                 reader,
                 output,
+                seeks,
+                epoch: 0,
+                ended: false,
                 lifetime,
                 completed,
             },
         );
         self.generation = generation;
-        Ok(())
+        Ok(metadata)
     }
 
     pub fn pump(&mut self) {
@@ -193,14 +316,30 @@ impl PlaybackSet {
                 }
                 Err(oneshot::error::TryRecvError::Empty) => {}
             }
+            if let Err(error) = entry.seek() {
+                finished.push((*key, Err(error)));
+                continue;
+            }
+            if entry.ended {
+                continue;
+            }
             for _ in 0..entry.output.capacity().min(3) {
                 let result = match entry.reader.read_frame() {
-                    Ok(Some(frame)) => match entry.output.try_send(frame) {
-                        Ok(()) => continue,
-                        Err(mpsc::error::TrySendError::Closed(_)) => Ok(()),
-                        Err(mpsc::error::TrySendError::Full(_)) => Err(StorageError::Capacity),
-                    },
-                    Ok(None) => Ok(()),
+                    Ok(frame) => {
+                        let ended = frame.is_none();
+                        match entry.output.try_send(Packet {
+                            epoch: entry.epoch,
+                            frame,
+                        }) {
+                            Ok(()) if ended => {
+                                entry.ended = true;
+                                break;
+                            }
+                            Ok(()) => continue,
+                            Err(mpsc::error::TrySendError::Closed(_)) => Ok(()),
+                            Err(mpsc::error::TrySendError::Full(_)) => Err(StorageError::Capacity),
+                        }
+                    }
                     Err(error) => {
                         tracing::warn!(playback = key, %error, "playback read failed");
                         Err(error)
@@ -217,5 +356,144 @@ impl PlaybackSet {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod seek_tests {
+    use super::{Metadata, Packet, PlaybackMedia, StoragePort, WorkerError};
+    use rusterisk_storage::StorageError;
+    use std::{
+        future::Future,
+        task::{Context, Poll, Waker},
+    };
+    use tokio::sync::{mpsc, watch};
+
+    #[tokio::test]
+    async fn cancelling_an_open_wakes_the_worker_after_its_previous_wake() -> Result<(), WorkerError>
+    {
+        let (commands, mut requests) = mpsc::channel(1);
+        let (stored, _stored) = mpsc::channel(1);
+        let (_stop, stop) = watch::channel(false);
+        let (wake, mut wakes) = mpsc::channel(1);
+        let port = StoragePort {
+            commands,
+            stored,
+            stop,
+            wake,
+        };
+        let id = rusterisk_api::ChannelId::try_from("cancelled".to_owned())
+            .map_err(|_| WorkerError::Invalid)?;
+        {
+            let mut opening = std::pin::pin!(port.play(PlaybackMedia::Recording(id)));
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(matches!(opening.as_mut().poll(&mut context), Poll::Pending));
+            wakes.try_recv().map_err(|_| WorkerError::Invalid)?;
+        }
+        let super::super::Command::Play {
+            mut lifetime,
+            output,
+            ..
+        } = requests.try_recv().map_err(|_| WorkerError::Invalid)?
+        else {
+            return Err(WorkerError::Invalid);
+        };
+        assert!(output.is_closed());
+        assert!(matches!(
+            lifetime.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+        assert!(wakes.try_recv().is_ok());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn seek_admission_preserves_state_and_stale_packets_cannot_end_the_current_epoch(
+    ) -> Result<(), WorkerError> {
+        let (commands, mut requests) = mpsc::channel(1);
+        let (stored, _stored) = mpsc::channel(1);
+        let (_stop, stop) = watch::channel(false);
+        let (wake, _wakes) = mpsc::channel(1);
+        let port = StoragePort {
+            commands,
+            stored,
+            stop,
+            wake,
+        };
+        let id = rusterisk_api::ChannelId::try_from("bounded".to_owned())
+            .map_err(|_| WorkerError::Invalid)?;
+        let mut opening = std::pin::pin!(port.play(PlaybackMedia::Recording(id)));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(opening.as_mut().poll(&mut context), Poll::Pending));
+        let super::super::Command::Play {
+            output,
+            mut seeks,
+            completed,
+            reply,
+            lifetime: _lifetime,
+            ..
+        } = requests.try_recv().map_err(|_| WorkerError::Invalid)?
+        else {
+            return Err(WorkerError::Invalid);
+        };
+        reply
+            .send(Ok(Metadata {
+                rate: 8000,
+                samples: 1600,
+            }))
+            .map_err(|_| WorkerError::Invalid)?;
+        let mut source = opening.await?;
+        for sample in 0..8 {
+            source.seek_sample(sample)?;
+        }
+        assert_eq!(source.sample_position(), 7);
+        assert!(matches!(source.seek_sample(99), Err(WorkerError::Capacity)));
+        assert_eq!(source.sample_position(), 7);
+        assert_eq!(source.epoch, 8);
+        for epoch in 1..=8 {
+            let command = seeks.try_recv().map_err(|_| WorkerError::Invalid)?;
+            assert_eq!(command.epoch, epoch);
+            assert_eq!(command.sample, epoch - 1);
+        }
+        for (epoch, frame) in [
+            (0, None),
+            (7, None),
+            (
+                0,
+                Some(rusterisk_media::Frame::new(&[1; 160], 8000).map_err(StorageError::from)?),
+            ),
+        ] {
+            output
+                .try_send(Packet { epoch, frame })
+                .map_err(|_| WorkerError::Invalid)?;
+        }
+        assert!(matches!(source.try_read()?, Poll::Pending));
+        output
+            .try_send(Packet {
+                epoch: 8,
+                frame: Some(
+                    rusterisk_media::Frame::new(&[3200; 160], 8000).map_err(StorageError::from)?,
+                ),
+            })
+            .map_err(|_| WorkerError::Invalid)?;
+        assert_eq!(
+            source.read().await?.ok_or(WorkerError::Invalid)?.samples(),
+            &[3200; 160]
+        );
+        assert_eq!(source.sample_position(), 167);
+        source.epoch = u64::MAX;
+        assert!(matches!(source.seek_sample(0), Err(WorkerError::Capacity)));
+        assert_eq!(source.sample_position(), 167);
+        assert!(seeks.try_recv().is_err());
+        completed
+            .send(Err(StorageError::InvalidWave))
+            .map_err(|_| WorkerError::Invalid)?;
+        drop(output);
+        assert!(matches!(
+            source.read().await,
+            Err(WorkerError::Storage(StorageError::InvalidWave))
+        ));
+        assert!(matches!(source.seek_sample(0), Err(WorkerError::Closed)));
+        Ok(())
     }
 }

@@ -67,10 +67,11 @@ enum Command {
     },
     Play {
         media: PlaybackMedia,
-        output: mpsc::Sender<Frame>,
+        output: mpsc::Sender<playback::Packet>,
+        seeks: mpsc::Receiver<playback::Seek>,
         lifetime: oneshot::Receiver<()>,
         completed: oneshot::Sender<Result<(), StorageError>>,
-        reply: oneshot::Sender<Result<(), StorageError>>,
+        reply: oneshot::Sender<Result<playback::Metadata, StorageError>>,
     },
     Start {
         id: ChannelId,
@@ -232,12 +233,16 @@ fn command(
         Command::Play {
             media,
             output,
+            seeks,
             lifetime,
             completed,
             reply,
         } => {
             if !reply.is_closed() {
-                respond(reply, playbacks.begin(media, output, lifetime, completed));
+                respond(
+                    reply,
+                    playbacks.begin(media, output, seeks, lifetime, completed),
+                );
             }
         }
         Command::Start {
