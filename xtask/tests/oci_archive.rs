@@ -81,6 +81,15 @@ fn complete_candidate_exports_accept_nested_indexes_and_both_attestation_formats
                 image.nested = nested;
                 let contents = check(&image, &image.bytes()?, OciArchiveLimits::SERVER)?;
                 assert!(contents.manifest_digest().starts_with("sha256:"));
+                let manifest_path = contents
+                    .manifest_digest()
+                    .replace("sha256:", "blobs/sha256/");
+                let entries = image.entries()?;
+                let manifest = entries
+                    .iter()
+                    .find(|entry| entry.path == manifest_path)
+                    .ok_or_else(|| io::Error::other("selected fixture manifest missing"))?;
+                assert_eq!(contents.manifest_size(), manifest.bytes.len() as u64);
                 assert!(contents.config_digest().starts_with("sha256:"));
                 assert!(contents.application_layer_digest().starts_with("sha256:"));
                 assert_eq!(

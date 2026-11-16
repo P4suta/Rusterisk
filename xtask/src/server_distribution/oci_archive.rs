@@ -136,6 +136,7 @@ impl OciArchiveLimits {
 #[derive(Debug)]
 pub struct ServerOciContents {
     manifest: String,
+    manifest_size: u64,
     config: String,
     application: String,
     attestations: usize,
@@ -143,6 +144,9 @@ pub struct ServerOciContents {
 impl ServerOciContents {
     pub fn manifest_digest(&self) -> &str {
         &self.manifest
+    }
+    pub const fn manifest_size(&self) -> u64 {
+        self.manifest_size
     }
     pub fn config_digest(&self) -> &str {
         &self.config
@@ -221,6 +225,7 @@ pub fn check_server_oci_archive<'a>(
         }
     }
     Ok(ServerOciContents {
+        manifest_size: selected.descriptor.size,
         manifest: selected.descriptor.digest,
         config: selected.manifest.config.digest,
         application: selected
