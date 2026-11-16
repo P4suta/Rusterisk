@@ -50,5 +50,15 @@ Corrections preserve the route, Contact, Call-ID, URI octets, and authentication
 Corrections advance CSeq and Digest counters.
 The driver keeps the learned value for refreshes without changing the starting settings.
 Malformed values, removal requests, and cancellation don't create corrections.
-Delayed retry policy and configuration replacement remain pending in the driver.
+
+Failed final responses and timeouts follow the [checked retry policy](adr/schedule-configured-registration-retries-after-checked-failures.md).
+Positive Retry-After values take precedence without consuming configured retry budget.
+Configured waits use fixed intervals and stop at `max_retries`.
+Successful grants reset the retry counter.
+Waiting attempts assign CSeq only when due and let another address of record progress.
+Cancellation drops pending retries without closing a shared flow.
+Retries from failed responses renew existing authorization on an open TCP or TLS connection.
+A closed flow preserves the retry deadline and resolves again when due.
+Old connection generations can't stop the replacement registration.
+Alternate servers, shared 503 suppression, and configuration replacement remain pending.
 The [pure transaction APIs](outbound-registration-transactions.md) and [generation decision](adr/own-outbound-registrations-by-configuration-generation.md) define the remaining integration boundaries.
