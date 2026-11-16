@@ -21,6 +21,12 @@ browser-check:
 distribution-check:
     cargo run --locked --target-dir target/xtask --package xtask -- distribution-check
 
+distribution-sdk-plan:
+    cargo run --locked --target-dir target/xtask --package xtask -- distribution sdk plan
+
+distribution-sdk-build:
+    cargo run --locked --target-dir target/xtask --package xtask -- distribution sdk build
+
 browser-example port="3000": browser-check
     cargo run --locked --package rusterisk-server --example browser -- "{{ port }}"
 
