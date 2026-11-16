@@ -135,6 +135,8 @@ The example also ends after one hour.
 ## Bound transport and event work
 
 A session holds at most 64 call handles and remembers at most 4096 issued identifiers.
+Each channel snapshot keeps at most 128 variables and one mebibyte of variable names and values.
+Excess metadata reports `Error::Capacity` and starts session cleanup while preserving Stasis exit responsibilities.
 At most eight originate and media state requests run together, with 16 request workers available for setup and cleanup.
 Foreground saturation rejects new originate commands with `Error::Capacity`.
 Pending cleanup stays in its call entry until a worker becomes available.
