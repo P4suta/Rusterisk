@@ -99,7 +99,34 @@ pub struct RtpLink {
     channels: RtpChannels,
     receiver: RtpReceiver,
     sender: RtpSender,
+    presentation: Option<PresentationClock>,
     telephone: Option<TelephoneTransport>,
+}
+
+#[derive(Clone, Copy)]
+struct PresentationClock {
+    observed: u64,
+    next: u64,
+}
+
+impl PresentationClock {
+    fn advance(previous: Option<Self>, now: u64) -> Result<(u64, Self), MediaError> {
+        if previous.is_some_and(|previous| now < previous.observed) {
+            return Err(MediaError::Transport(
+                "Audio presentation clock moved backwards".into(),
+            ));
+        }
+        let elapsed = now / 20 * 20;
+        let timestamp = previous.map_or(elapsed, |previous| elapsed.max(previous.next));
+        let next = timestamp.checked_add(20).ok_or(MediaError::Capacity)?;
+        Ok((
+            timestamp,
+            Self {
+                observed: now,
+                next,
+            },
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,10 +242,25 @@ impl RtpLink {
             telephone,
             receiver: RtpReceiver::new(session.format, session.payload_type)?,
             sender,
+            presentation: None,
             sockets,
             session,
             channels,
         })
+    }
+
+    fn audio_packet(
+        &mut self,
+        frame: rusterisk_media::Frame,
+        now: u64,
+    ) -> Result<RtpPacket, MediaError> {
+        if frame.samples().len() as u64 * 1000 != u64::from(frame.rate()) * 20 {
+            return Err(MediaError::InvalidFrame);
+        }
+        let (timestamp, clock) = PresentationClock::advance(self.presentation, now)?;
+        let packet = self.sender.packet_at(frame, timestamp)?;
+        self.presentation = Some(clock);
+        Ok(packet)
     }
 
     pub async fn run(self) -> Result<LinkStats, MediaError> {
@@ -283,7 +325,7 @@ impl RtpLink {
                     if !self.channels.direction.borrow().can_receive() { continue; }
                     let sampled = tokio::time::Instant::now();
                     let now = sampled.duration_since(started).as_millis() as u64;
-                    let packet = self.sender.packet_at(frame, now)?;
+                    let packet = self.audio_packet(frame, now)?;
                     send(&self.sockets.data, &packet.encode()?, self.session.remote).await?;
                     record(&mut sources, &packet, self.session.format.rate(), packet.timestamp(), sampled)?;
                     stats.packets_sent += 1;

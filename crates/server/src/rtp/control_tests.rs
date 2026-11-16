@@ -79,6 +79,61 @@ fn fixture(peer: &SocketPair) -> Result<Fixture, MediaError> {
 }
 
 #[tokio::test]
+async fn fixed_audio_frames_keep_their_sample_clock_across_transport_scheduling_jitter(
+) -> Result<(), MediaError> {
+    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let mut fixture = fixture(&peer)?;
+    fixture.link.sender = RtpSender::new(AudioFormat::Pcmu, 0, [255; 10])?;
+    let frame = Frame::new(&[4000; 160], 8000)?;
+    let first = fixture.link.audio_packet(frame, 0)?;
+    for (index, now) in [21, 39, 61, 80, 101].into_iter().enumerate() {
+        let packet = fixture.link.audio_packet(frame, now)?;
+        assert_eq!(packet.ssrc(), first.ssrc());
+        assert_eq!(
+            packet.sequence(),
+            first.sequence().wrapping_add(index as u16 + 1)
+        );
+        assert_eq!(
+            packet.timestamp(),
+            first.timestamp().wrapping_add(160 * (index as u32 + 1))
+        );
+    }
+    let resumed = fixture.link.audio_packet(frame, 1001)?;
+    assert_eq!(resumed.timestamp(), first.timestamp().wrapping_add(8000));
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejected_audio_frames_and_clock_inputs_do_not_advance_output_packets(
+) -> Result<(), MediaError> {
+    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let mut fixture = fixture(&peer)?;
+    let frame = Frame::new(&[4000; 160], 8000)?;
+    let first = fixture.link.audio_packet(frame, 0)?;
+    assert!(matches!(
+        fixture
+            .link
+            .audio_packet(Frame::new(&[4000; 80], 8000)?, 20),
+        Err(MediaError::InvalidFrame)
+    ));
+    let next = fixture.link.audio_packet(frame, 20)?;
+    assert_eq!(next.sequence(), first.sequence().wrapping_add(1));
+    assert_eq!(next.timestamp(), first.timestamp().wrapping_add(160));
+    assert!(matches!(
+        fixture.link.audio_packet(frame, 19),
+        Err(MediaError::Transport(_))
+    ));
+    assert!(matches!(
+        fixture.link.audio_packet(frame, u64::MAX),
+        Err(MediaError::Capacity)
+    ));
+    let next = fixture.link.audio_packet(frame, 40)?;
+    assert_eq!(next.sequence(), first.sequence().wrapping_add(2));
+    assert_eq!(next.timestamp(), first.timestamp().wrapping_add(320));
+    Ok(())
+}
+
+#[tokio::test]
 async fn malformed_compound_packets_from_the_peer_leave_known_audio_running(
 ) -> Result<(), MediaError> {
     let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
