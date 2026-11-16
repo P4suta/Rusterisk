@@ -31,7 +31,9 @@ Initiated streams leave response waits to their transaction.
 Both roles keep five-second assembly deadlines for partial messages.
 More bytes don't extend an assembly deadline.
 
-TLS registrations with numeric addresses verify certificate chains and peer names through the shared encrypted transport.
+TLS registrations verify certificate chains and peer names through the shared encrypted transport.
+Service lookups preserve the original registrar domain for certificate checks and the TLS server name.
+URI-only domain certificates follow [RFC 5922](https://www.rfc-editor.org/rfc/rfc5922.html#section-7.3).
 Untrusted or mismatched peers receive no registration request.
 Authentication and refresh reuse the verified connection.
 TLS uses port 5061 when the registrar URI omits a port.
