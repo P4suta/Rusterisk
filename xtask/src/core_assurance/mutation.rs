@@ -12,10 +12,11 @@ enum Invariant {
     Subscriptions,
     Transfer,
     AttendedTransfer,
+    OwnedCallPair,
 }
 
 impl Invariant {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Terminal,
         Self::Connection,
         Self::Stasis,
@@ -24,6 +25,7 @@ impl Invariant {
         Self::Subscriptions,
         Self::Transfer,
         Self::AttendedTransfer,
+        Self::OwnedCallPair,
     ];
 
     fn of(file: &str, function: &str) -> Option<Self> {
@@ -63,6 +65,10 @@ impl Invariant {
                 | "AttendedTransfer::finish"
                 | "AttendedTransfer::participant_ended",
             ) => Some(Self::AttendedTransfer),
+            (
+                "src/owned_call_pair.rs",
+                "OwnedCallPair::new" | "OwnedCallPair::participant_ended" | "OwnedCallPair::retire",
+            ) => Some(Self::OwnedCallPair),
             _ => None,
         }
     }
@@ -77,6 +83,7 @@ impl Invariant {
             Self::Subscriptions => "subscription bounds",
             Self::Transfer => "transfer ownership",
             Self::AttendedTransfer => "attended transfer ownership",
+            Self::OwnedCallPair => "paired call ownership",
         }
     }
 }

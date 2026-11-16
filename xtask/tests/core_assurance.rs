@@ -83,7 +83,8 @@ fn core_assurance_phases_bound_resources_and_own_cleanup() -> Result<(), Assuran
         "src/stasis.rs",
         "src/transfer.rs",
         "src/attended_transfer.rs",
-        "(Call::(apply|claim_connection|reserve_stasis|enter_stasis|move_stasis|leave_stasis|join|leave)|MediaTasks::(reserve|index|cancel|finish)|ResourceSubscriptions.*::(subscribe|unsubscribe|expire)|Transfer::(begin|finish|participant_ended)|AttendedTransfer::(begin|finish|participant_ended))\\b",
+        "src/owned_call_pair.rs",
+        "(Call::(apply|claim_connection|reserve_stasis|enter_stasis|move_stasis|leave_stasis|join|leave)|MediaTasks::(reserve|index|cancel|finish)|ResourceSubscriptions.*::(subscribe|unsubscribe|expire)|Transfer::(begin|finish|participant_ended)|AttendedTransfer::(begin|finish|participant_ended)|OwnedCallPair::(new|participant_ended|retire))\\b",
     ] {
         assert!(
             mutation
@@ -180,8 +181,75 @@ fn miri_requires_every_discovered_test_to_run_without_skips() -> Result<(), Assu
 }
 
 fn mutants() -> Vec<serde_json::Value> {
-    [("src/lib.rs", "Call::apply"), ("src/lib.rs", "Call::claim_connection"), ("src/stasis.rs", "Call::enter_stasis"), ("src/lib.rs", "Call::join"), ("src/media_tasks.rs", "MediaTasks::cancel"), ("src/resource_subscriptions.rs", "ResourceSubscriptions<N>::subscribe"), ("src/transfer.rs", "Transfer::begin"), ("src/transfer.rs", "Transfer::finish"), ("src/transfer.rs", "Transfer::participant_ended"), ("src/attended_transfer.rs", "AttendedTransfer::begin"), ("src/attended_transfer.rs", "AttendedTransfer::finish"), ("src/attended_transfer.rs", "AttendedTransfer::participant_ended")]
+    [("src/lib.rs", "Call::apply"), ("src/lib.rs", "Call::claim_connection"), ("src/stasis.rs", "Call::enter_stasis"), ("src/lib.rs", "Call::join"), ("src/media_tasks.rs", "MediaTasks::cancel"), ("src/resource_subscriptions.rs", "ResourceSubscriptions<N>::subscribe"), ("src/transfer.rs", "Transfer::begin"), ("src/transfer.rs", "Transfer::finish"), ("src/transfer.rs", "Transfer::participant_ended"), ("src/attended_transfer.rs", "AttendedTransfer::begin"), ("src/attended_transfer.rs", "AttendedTransfer::finish"), ("src/attended_transfer.rs", "AttendedTransfer::participant_ended"), ("src/owned_call_pair.rs", "OwnedCallPair::new"), ("src/owned_call_pair.rs", "OwnedCallPair::participant_ended"), ("src/owned_call_pair.rs", "OwnedCallPair::retire")]
         .into_iter().enumerate().map(|(index, (file, function))| serde_json::json!({"name":format!("{file}:{}:1: representative {function}", index + 1), "file":file, "function":{"function_name":function}, "replacement":"false"})).collect()
+}
+
+#[test]
+fn other_mutation_scopes_cannot_replace_owned_pair_coverage() -> Result<(), AssuranceError> {
+    let mut prior = mutants();
+    prior.retain(|mutant| mutant["file"] != "src/owned_call_pair.rs");
+    let error =
+        validate_mutation_inventory(&serde_json::to_vec(&prior).map_err(AssuranceError::Json)?)
+            .err()
+            .ok_or(AssuranceError::Inventory)?;
+    assert!(error.to_string().contains("paired call ownership"));
+    Ok(())
+}
+
+#[test]
+fn both_mutation_phases_select_the_owned_pair_file_and_all_three_methods(
+) -> Result<(), AssuranceError> {
+    let plan = CoreAssurancePlan::new("fixture", "/core", "/state", IMAGE)?;
+    for phase in [Phase::MutationInventory, Phase::Mutations] {
+        let step = plan.step(phase);
+        let selector = step
+            .arguments
+            .windows(2)
+            .find_map(|pair| (pair[0] == "--re").then_some(pair[1].as_str()))
+            .ok_or(AssuranceError::Plan)?;
+        assert!(selector.contains("OwnedCallPair::(new|participant_ended|retire)"));
+        assert!(step
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["--file", "src/owned_call_pair.rs"]));
+    }
+    Ok(())
+}
+
+#[test]
+fn every_owned_pair_mutation_selector_names_an_actual_nonconstant_method(
+) -> Result<(), AssuranceError> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../crates/core/src/owned_call_pair.rs");
+    let file = syn::parse_file(&std::fs::read_to_string(path)?).map_err(AssuranceError::Syntax)?;
+    let mut methods = std::collections::BTreeSet::new();
+    for item in file.items {
+        if let syn::Item::Impl(implementation) = item {
+            if matches!(&*implementation.self_ty, syn::Type::Path(path) if path.path.is_ident("OwnedCallPair"))
+            {
+                for item in implementation.items {
+                    if let syn::ImplItem::Fn(function) = item {
+                        if function.sig.constness.is_none() {
+                            methods.insert(format!("OwnedCallPair::{}", function.sig.ident));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let selected: std::collections::BTreeSet<String> = mutants()
+        .iter()
+        .filter(|mutant| mutant["file"] == "src/owned_call_pair.rs")
+        .map(|mutant| {
+            mutant["function"]["function_name"]
+                .as_str()
+                .map(str::to_owned)
+                .ok_or(AssuranceError::Inventory)
+        })
+        .collect::<Result<_, _>>()?;
+    assert_eq!(methods, selected);
+    Ok(())
 }
 
 #[test]
@@ -478,5 +546,33 @@ fn other_caught_scopes_cannot_replace_a_viable_attended_mutation() -> Result<(),
     .err()
     .ok_or(AssuranceError::Results)?;
     assert!(error.to_string().contains("attended transfer ownership"));
+    Ok(())
+}
+
+#[test]
+fn other_caught_scopes_cannot_replace_a_viable_owned_pair_mutation() -> Result<(), AssuranceError> {
+    let mutants = mutants();
+    let inventory =
+        validate_mutation_inventory(&serde_json::to_vec(&mutants).map_err(AssuranceError::Json)?)?;
+    let mut report = caught_report(&mutants);
+    let mut unviable = 0;
+    for (index, mutant) in mutants.iter().enumerate() {
+        if mutant["file"] == "src/owned_call_pair.rs" {
+            report["outcomes"][index + 1]["summary"] = serde_json::json!("Unviable");
+            report["outcomes"][index + 1]["phase_results"] = serde_json::Value::Array(
+                [serde_json::json!({"phase":"Build", "process_status":{"Failure":101}})].into(),
+            );
+            unviable += 1;
+        }
+    }
+    report["caught"] = serde_json::json!(mutants.len() - unviable);
+    report["unviable"] = serde_json::json!(unviable);
+    let error = validate_mutation_outcomes(
+        &serde_json::to_vec(&report).map_err(AssuranceError::Json)?,
+        &inventory,
+    )
+    .err()
+    .ok_or(AssuranceError::Results)?;
+    assert!(error.to_string().contains("paired call ownership"));
     Ok(())
 }

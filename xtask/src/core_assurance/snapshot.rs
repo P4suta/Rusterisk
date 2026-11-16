@@ -268,4 +268,10 @@ mod tests {
     ) -> Result<(), AssuranceError> {
         omission_is_rejected("tests/attended_transfer.rs")
     }
+
+    #[test]
+    fn miri_discovery_cannot_omit_owned_pair_tests_from_the_actual_source(
+    ) -> Result<(), AssuranceError> {
+        omission_is_rejected("tests/owned_call_pair.rs")
+    }
 }

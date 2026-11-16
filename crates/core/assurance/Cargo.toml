@@ -50,6 +50,10 @@ name = "media_tasks"
 path = "../tests/media_tasks.rs"
 
 [[test]]
+name = "owned_call_pair"
+path = "../tests/owned_call_pair.rs"
+
+[[test]]
 name = "owned_progress"
 path = "../tests/owned_progress.rs"
 
