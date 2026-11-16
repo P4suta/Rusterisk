@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE scenario SYSTEM "sipp.dtd">
+<scenario name="Authenticated registration and removal">
+  <send retrans="500">
+    <![CDATA[
+REGISTER sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch];rport
+From: "Displayed caller" <sip:phone@[remote_ip]>;tag=[pid]-[call_number]
+To: <sip:dynamic@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 1 REGISTER
+Contact: <sip:phone@[local_ip]:[local_port]>
+Expires: 120
+Max-Forwards: 70
+Content-Length: 0
+
+    ]]>
+  </send>
+  <recv response="401" auth="true" timeout="2000" />
+  <send retrans="500">
+    <![CDATA[
+REGISTER sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch];rport
+From: "Displayed caller" <sip:phone@[remote_ip]>;tag=[pid]-[call_number]
+To: <sip:dynamic@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 2 REGISTER
+Contact: <sip:phone@[local_ip]:[local_port]>
+Expires: 120
+Max-Forwards: 70
+[authentication]
+Content-Length: 0
+
+    ]]>
+  </send>
+  <recv response="200" timeout="2000" />
+  <send retrans="500">
+    <![CDATA[
+REGISTER sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch];rport
+From: "Displayed caller" <sip:phone@[remote_ip]>;tag=[pid]-[call_number]
+To: <sip:dynamic@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 3 REGISTER
+Contact: <sip:phone@[local_ip]:[local_port]>
+Expires: 0
+Max-Forwards: 70
+Content-Length: 0
+
+    ]]>
+  </send>
+  <recv response="401" auth="true" timeout="2000" />
+  <send retrans="500">
+    <![CDATA[
+REGISTER sip:[remote_ip]:[remote_port] SIP/2.0
+Via: SIP/2.0/UDP [local_ip]:[local_port];branch=[branch];rport
+From: "Displayed caller" <sip:phone@[remote_ip]>;tag=[pid]-[call_number]
+To: <sip:dynamic@[remote_ip]>
+Call-ID: [call_id]
+CSeq: 4 REGISTER
+Contact: <sip:phone@[local_ip]:[local_port]>
+Expires: 0
+Max-Forwards: 70
+[authentication]
+Content-Length: 0
+
+    ]]>
+  </send>
+  <recv response="200" timeout="2000" />
+</scenario>

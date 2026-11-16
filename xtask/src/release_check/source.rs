@@ -15,11 +15,12 @@ const FILES: [&str; 7] = [
     "crates/core/assurance/Cargo.lock",
     "docs/server-distribution.md",
 ];
-const DIRECTORIES: [&str; 5] = [
+const DIRECTORIES: [&str; 6] = [
     "api",
     "containers",
     ".github/workflows",
     "tests/interop/node-ari-client",
+    "tests/interop/sipp",
     "docs/adr",
 ];
 

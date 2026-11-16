@@ -136,6 +136,25 @@ fn captured_release_inputs_supply_the_actual_reference_configuration() -> io::Re
 }
 
 #[test]
+fn captured_release_inputs_supply_and_check_the_exact_sipp_scenario() -> io::Result<()> {
+    using_source("sipp-scenario", |captured, source| {
+        let path = Path::new("tests/interop/sipp/registration.xml");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .ok_or_else(|| io::Error::other("workspace missing"))?;
+        let original = std::fs::read(root.join(path))?;
+        assert_eq!(std::fs::read(source.join(path))?, original);
+        let projection = SourceInputs::new(std::iter::once((path, original.as_slice())))
+            .map_err(io::Error::other)?;
+        let cohort = captured.inputs().map_err(io::Error::other)?;
+        cohort.bind(&projection).map_err(io::Error::other)?;
+        std::fs::write(source.join(path), b"<scenario name=\"changed\" />\n")?;
+        assert!(captured.check(source).is_err());
+        Ok(())
+    })
+}
+
+#[test]
 fn changed_or_added_verification_inputs_cannot_bind_to_an_earlier_capture() -> io::Result<()> {
     using_source("changes", |captured, source| {
         let cohort = captured.inputs().map_err(io::Error::other)?;
