@@ -22,4 +22,5 @@ Provisional responses preserve the original timeout and select four-second UDP r
 Timer K absorbs duplicate final responses for five seconds on UDP.
 Reliable transactions finish when the final response arrives.
 
-Authentication, Contact grant interpretation, refresh, retry policy, and network scheduling remain pending.
+Matched receipts support [authentication retries](outbound-registration-authentication.md) and [Contact grant interpretation](outbound-registration-grants.md).
+Refresh transmission, retry policy, and network scheduling remain pending.

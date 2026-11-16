@@ -15,5 +15,6 @@ A retry renews the other scope's authorization with its existing client nonce an
 Another challenge for the same authorization scope requires a changed server nonce with `stale=true`.
 Each attempt chain permits at most four authentication retries.
 
-Native registration authentication, grant interpretation, refresh, configuration replacement, and network scheduling remain pending.
+Matched successful receipts support [Contact grant interpretation](outbound-registration-grants.md).
+Native registration authentication, refresh, configuration replacement, and network scheduling remain pending.
 The [generation decision](adr/own-outbound-registrations-by-configuration-generation.md) describes their required ownership.
