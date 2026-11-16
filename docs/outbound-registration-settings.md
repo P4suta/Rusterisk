@@ -10,6 +10,14 @@ Section names are unique within the registration object type.
 Each section requires all four settings.
 The parser admits at most 16 registration sections.
 
+`RegistrarUri` and `RegistrationAddress` preserve the original URI octets within 2048 ASCII bytes.
+The settings profile admits User Datagram Protocol (UDP), TCP, and TLS registrar targets.
+An explicit URI transport must match the named transport, and the `sips` scheme requires TLS.
+Registrar URIs exclude user information.
+Addresses of record exclude explicit ports and transport parameters, following the component roles in [RFC 3261](https://www.rfc-editor.org/rfc/rfc3261.html#section-19.1.2).
+The profile rejects passwords, URI headers, routing and method parameters, malformed escapes, and duplicate parameter names.
+It retains parser-supported extension parameters.
+
 `expiration` defaults to 3600 seconds, and `contact_user` defaults to `s`.
 Contact users follow Session Initiation Protocol (SIP) URI user syntax within 256 ASCII bytes.
 Percent escapes require two hexadecimal digits.
@@ -25,4 +33,5 @@ The defaults follow [Asterisk 22.9.0](https://github.com/asterisk/asterisk/blob/
 
 Timer values use unsigned 32-bit seconds.
 Invalid values and capacity overflow report their file and line.
-Complete registration URI validation remains pending.
+Reference lookup accepts later declarations and reports unresolved names at their option lines.
+Registration scheduling, network setup, and replacement publication remain pending.
