@@ -54,6 +54,12 @@ distribution-server-check-content candidate target:
 distribution-server-check-startup candidate:
     cargo run --locked --target-dir target/xtask --package xtask -- distribution server check-startup --candidate {{ quote(candidate) }}
 
+distribution-server-check-startup-target candidate target:
+    cargo run --locked --target-dir target/xtask --package xtask -- distribution server check-startup --candidate {{ quote(candidate) }} --target {{ quote(target) }}
+
+distribution-server-check-startup-rosetta candidate:
+    cargo run --locked --target-dir target/xtask --package xtask -- distribution server check-startup --candidate {{ quote(candidate) }} --target x86_64-apple-darwin --rosetta
+
 distribution-server-verify candidate sdk_candidate:
     cargo run --locked --target-dir target/xtask --package xtask -- distribution server verify --candidate {{ quote(candidate) }} --sdk-candidate {{ quote(sdk_candidate) }}
 

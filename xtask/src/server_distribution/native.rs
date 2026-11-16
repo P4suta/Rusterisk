@@ -20,7 +20,7 @@ pub(super) fn native_target() -> io::Result<ServerTarget> {
     }
 }
 
-fn read(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
+pub(super) fn read(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.len() > limit {
         return Err(io::Error::other(
@@ -39,14 +39,14 @@ fn read(path: &Path, limit: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn output(path: &Path) -> io::Result<std::fs::File> {
+pub(super) fn output(path: &Path) -> io::Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
 }
 
-fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(super) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = output(path)?;
     file.write_all(bytes)?;
     file.flush()
@@ -66,7 +66,7 @@ pub(super) fn combine(
     }
 }
 
-fn check_command(
+pub(super) fn check_command(
     supervisor: &mut CommandSupervisor,
     command: &mut Command,
     artifacts: &Path,
@@ -273,6 +273,16 @@ pub fn verify_server_native_with(
     client: impl FnOnce(&mut RunningCommand<'_>, SocketAddr) -> io::Result<()>,
 ) -> io::Result<()> {
     let candidate = ServerCandidate::read(candidate, native_target()?)?;
+    verify_loaded_server_with(&candidate, execution, artifacts, supervisor, client)
+}
+
+pub(super) fn verify_loaded_server_with(
+    candidate: &ServerCandidate,
+    execution: &Path,
+    artifacts: &Path,
+    supervisor: &mut CommandSupervisor,
+    client: impl FnOnce(&mut RunningCommand<'_>, SocketAddr) -> io::Result<()>,
+) -> io::Result<()> {
     if !execution.is_absolute()
         || !artifacts.is_absolute()
         || execution.starts_with(artifacts)
@@ -307,7 +317,7 @@ pub fn verify_server_native_with(
     )?;
     let extracted = candidate.extract(execution)?;
     let operation = startup(
-        &candidate,
+        candidate,
         extracted.directory()?,
         artifacts,
         supervisor,
@@ -321,7 +331,23 @@ pub fn check_server_startup_with(
     candidate: &Path,
     supervisor: &mut CommandSupervisor,
 ) -> io::Result<std::path::PathBuf> {
-    ServerCandidate::read(candidate, native_target()?)?;
+    check_server_startup_for_target_with(root, candidate, native_target()?, false, supervisor)
+}
+
+pub fn check_server_startup_for_target_with(
+    root: &Path,
+    candidate: &Path,
+    target: ServerTarget,
+    translation: bool,
+    supervisor: &mut CommandSupervisor,
+) -> io::Result<std::path::PathBuf> {
+    let mode = super::ServerExecutionMode::select(
+        target,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        translation,
+    )?;
+    let candidate = ServerCandidate::read(candidate, target)?;
     let mut parent = std::fs::canonicalize(root)?;
     for component in [".cache", "distributions", "server-startup"] {
         parent.push(component);
@@ -336,8 +362,19 @@ pub fn check_server_startup_with(
     let execution = std::fs::canonicalize(std::env::temp_dir())?
         .join(format!("rusterisk-server-startup-{identity}"));
     println!("server startup artifacts: {}", artifacts.display());
+    println!(
+        "server startup target={} execution={}",
+        target.triple(),
+        mode.label()
+    );
     io::stdout().flush()?;
-    verify_server_native_with(candidate, &execution, &artifacts, supervisor, |_, _| Ok(()))?;
+    verify_loaded_server_with(
+        &candidate,
+        &execution,
+        &artifacts,
+        supervisor,
+        |_, _| Ok(()),
+    )?;
     println!("server candidate startup passed");
     Ok(artifacts)
 }

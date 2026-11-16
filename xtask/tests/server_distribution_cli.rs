@@ -227,3 +227,47 @@ fn image_exports_require_verified_linux_candidates_before_creating_state(
         Ok(())
     })
 }
+
+#[cfg(unix)]
+#[test]
+fn explicit_startup_targets_require_candidate_bytes_and_never_accept_extra_arguments(
+) -> Result<(), SdkCandidateBuildError> {
+    using_project("server-target-startup-cli", |root, _| {
+        let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args([
+                "distribution",
+                "server",
+                "check-startup",
+                "--candidate",
+                "missing-server",
+                "--target",
+                "x86_64-apple-darwin",
+                "--rosetta",
+            ])
+            .current_dir(root)
+            .env("PATH", "")
+            .output()?;
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("usage:"));
+        assert!(output.stdout.is_empty());
+        assert!(!root.join(".cache").exists());
+        let extra = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args([
+                "distribution",
+                "server",
+                "check-startup",
+                "--candidate",
+                "missing-server",
+                "--target",
+                "x86_64-apple-darwin",
+                "--rosetta",
+                "unexpected",
+            ])
+            .current_dir(root)
+            .env("PATH", "")
+            .output()?;
+        assert!(!extra.status.success());
+        assert!(String::from_utf8_lossy(&extra.stderr).contains("usage:"));
+        Ok(())
+    })
+}

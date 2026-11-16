@@ -133,7 +133,7 @@ fn run(program: &str, arguments: &[&str]) -> Result<(), TaskError> {
 }
 
 fn execute() -> Result<(), TaskError> {
-    let arguments: Vec<String> = std::env::args().skip(1).take(8).collect();
+    let arguments: Vec<String> = std::env::args().skip(1).take(12).collect();
     match arguments.as_slice() {
         [task, flag, archive] if task == "vendor-patch" && flag == "--archive" => {
             let count = xtask::vendor::patch(&std::env::current_dir()?, Path::new(archive))
@@ -226,6 +226,8 @@ fn execute() -> Result<(), TaskError> {
         },
         [task, scope, operation, target_flag, target, image_flag, image] if task == "distribution" && scope == "server" && operation == "build-container" && target_flag == "--target" && image_flag == "--image" => distribution_server_container(target, image),
         [task, scope, operation, flag, candidate] if task == "distribution" && scope == "server" && operation == "check-startup" && flag == "--candidate" => distribution_server_startup(Path::new(candidate)),
+        [task, scope, operation, candidate_flag, candidate, target_flag, target] if task == "distribution" && scope == "server" && operation == "check-startup" && candidate_flag == "--candidate" && target_flag == "--target" => distribution_server_startup_target(Path::new(candidate), Some(target), false),
+        [task, scope, operation, candidate_flag, candidate, target_flag, target, translation] if task == "distribution" && scope == "server" && operation == "check-startup" && candidate_flag == "--candidate" && target_flag == "--target" && translation == "--rosetta" => distribution_server_startup_target(Path::new(candidate), Some(target), true),
         [task, scope, operation, candidate_flag, candidate, sdk_flag, sdk] if task == "distribution" && scope == "server" && operation == "verify" && candidate_flag == "--candidate" && sdk_flag == "--sdk-candidate" => distribution_server_sdk(Path::new(candidate), Path::new(sdk)),
         [task, scope, operation, candidate_flag, candidate, target_flag, target] if task == "distribution" && scope == "server" && operation == "check-content" && candidate_flag == "--candidate" && target_flag == "--target" => {
             let target = xtask::server_distribution::ServerTarget::parse(target).map_err(|error| TaskError::Contract(error.to_string()))?;
@@ -278,7 +280,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|(check-content|verify) --candidate <path>>|distribution server <<plan|build> --target <triple>|<plan-container|build-container> --target <triple> --image <digest>|<check-content|export-oci> --candidate <path> --target <triple>|check-startup --candidate <path>|verify --candidate <path> --sdk-candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|(check-content|verify) --candidate <path>>|distribution server <<plan|build> --target <triple>|<plan-container|build-container> --target <triple> --image <digest>|<check-content|export-oci> --candidate <path> --target <triple>|check-startup --candidate <path> [--target <triple> [--rosetta]]|verify --candidate <path> --sdk-candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
         )),
     }
 }
@@ -372,15 +374,37 @@ fn distribution_server_sdk(candidate: &Path, sdk: &Path) -> Result<(), TaskError
 }
 
 fn distribution_server_startup(candidate: &Path) -> Result<(), TaskError> {
+    distribution_server_startup_target(candidate, None, false)
+}
+
+fn distribution_server_startup_target(
+    candidate: &Path,
+    target: Option<&str>,
+    translation: bool,
+) -> Result<(), TaskError> {
     #[cfg(unix)]
     {
         let mut supervisor =
             xtask::process::CommandSupervisor::new().map_err(TaskError::Process)?;
-        let operation = xtask::server_distribution::check_server_startup_with(
-            &std::env::current_dir()?,
-            candidate,
-            &mut supervisor,
-        )
+        let root = std::env::current_dir()?;
+        let operation = match target {
+            Some(target) => {
+                let target = xtask::server_distribution::ServerTarget::parse(target)
+                    .map_err(|error| TaskError::Contract(error.to_string()))?;
+                xtask::server_distribution::check_server_startup_for_target_with(
+                    &root,
+                    candidate,
+                    target,
+                    translation,
+                    &mut supervisor,
+                )
+            }
+            None => xtask::server_distribution::check_server_startup_with(
+                &root,
+                candidate,
+                &mut supervisor,
+            ),
+        }
         .map(|_| ())
         .map_err(TaskError::Io);
         match (operation, supervisor.finish()) {
@@ -393,7 +417,7 @@ fn distribution_server_startup(candidate: &Path) -> Result<(), TaskError> {
     }
     #[cfg(not(unix))]
     {
-        let _ = candidate;
+        let _ = (candidate, target, translation);
         Err(TaskError::Process(
             xtask::process::ProcessError::UnsupportedSupervision,
         ))

@@ -1,6 +1,6 @@
 use super::{
-    native::{combine, native_target},
-    verify_server_native_with, ServerCandidate,
+    native::{combine, native_target, verify_loaded_server_with},
+    ServerCandidate,
 };
 use crate::{
     distribution::{PreparedSdkHttpConsumer, SdkContents, SdkHttpTarget},
@@ -51,8 +51,8 @@ pub fn verify_server_sdk_with(
         )
         .map_err(io::Error::other)?,
     );
-    let operation = verify_server_native_with(
-        server_candidate,
+    let operation = verify_loaded_server_with(
+        &server,
         &server_execution,
         &artifacts.join("server"),
         supervisor,
