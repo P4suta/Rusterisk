@@ -26,6 +26,14 @@ fn image_runtime_checks_bound_resources_and_keep_configuration_read_only() -> io
                 "{argument}"
             );
         }
+        assert!(step.arguments.windows(2).any(|pair| {
+            pair[0] == "--label"
+                && pair[1]
+                    == format!(
+                        "io.rusterisk.distribution.check=rusterisk-server-oci-check-fixture-{}",
+                        phase.label()
+                    )
+        }));
         let mounted = step.arguments.iter().any(|value| {
             value == "type=bind,source=/runtime/config,target=/run/rusterisk-config,readonly"
         });

@@ -66,7 +66,7 @@ impl ServerOciRuntimePlan {
         })
     }
 
-    fn container(&self, phase: ServerOciRunPhase) -> String {
+    pub(super) fn container(&self, phase: ServerOciRunPhase) -> String {
         format!("{}-{}", self.name, phase.label())
     }
 
@@ -88,6 +88,10 @@ impl ServerOciRuntimePlan {
         .map(str::to_owned)
         .collect();
         arguments.push(self.container(phase));
+        arguments.extend([
+            "--label".into(),
+            format!("io.rusterisk.distribution.check={}", self.container(phase)),
+        ]);
         arguments.push(
             if matches!(phase, ServerOciRunPhase::Serve) {
                 "--network=host"
