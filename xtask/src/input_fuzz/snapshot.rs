@@ -1,4 +1,4 @@
-use super::{normalize_manifest, validate_locks, FuzzError};
+use super::{normalize_manifest, validate_locks, FuzzError, FuzzFileScope};
 use std::{
     io::Read,
     path::{Component, Path, PathBuf},
@@ -7,10 +7,15 @@ use std::{
 #[cfg(test)]
 mod tests;
 
+pub(super) const MAX_PROJECT_FILES: usize = 1024;
+pub(super) const MAX_VENDOR_FILES: usize = 512;
+pub(super) const MAX_SNAPSHOT_BYTES: usize = 40 * 1024 * 1024;
+
 #[derive(PartialEq, Eq)]
 pub struct File {
     pub path: PathBuf,
     pub bytes: Vec<u8>,
+    bounds: FileBounds,
 }
 
 pub struct Snapshot {
@@ -18,11 +23,20 @@ pub struct Snapshot {
     pub normalized: String,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum FileBounds {
     Project,
     Vendor,
     Archive,
+}
+
+impl FileBounds {
+    fn scope(self) -> FuzzFileScope {
+        match self {
+            Self::Project | Self::Archive => FuzzFileScope::Project,
+            Self::Vendor => FuzzFileScope::Vendor,
+        }
+    }
 }
 
 fn directory(path: &Path) -> Result<(), FuzzError> {
@@ -82,8 +96,18 @@ fn add_file(
     bounds: FileBounds,
 ) -> Result<(), FuzzError> {
     parents(root, path)?;
-    if files.len() >= 1024 {
-        return Err(FuzzError::Manifest);
+    let scope = bounds.scope();
+    let maximum = match scope {
+        FuzzFileScope::Project => MAX_PROJECT_FILES,
+        FuzzFileScope::Vendor => MAX_VENDOR_FILES,
+    };
+    if files
+        .iter()
+        .filter(|file| file.bounds.scope() == scope)
+        .count()
+        >= maximum
+    {
+        return Err(FuzzError::FileCount { scope, maximum });
     }
     let limit = match bounds {
         FileBounds::Project => 1024 * 1024,
@@ -93,10 +117,10 @@ fn add_file(
     let total: usize = files.iter().map(|file| file.bytes.len()).sum();
     let vendor: usize = files
         .iter()
-        .filter(|file| file.path.starts_with("vendor/str0m"))
+        .filter(|file| matches!(file.bounds, FileBounds::Vendor))
         .map(|file| file.bytes.len())
         .sum();
-    if total + bytes.len() > 40 * 1024 * 1024
+    if total + bytes.len() > MAX_SNAPSHOT_BYTES
         || (matches!(bounds, FileBounds::Vendor) && vendor + bytes.len() > 12 * 1024 * 1024)
     {
         return Err(FuzzError::Manifest);
@@ -107,6 +131,7 @@ fn add_file(
             .map_err(|_| FuzzError::Manifest)?
             .into(),
         bytes,
+        bounds,
     });
     Ok(())
 }

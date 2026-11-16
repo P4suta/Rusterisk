@@ -118,7 +118,7 @@ pub fn execute(scope: Scope, execution: Execution, image: &str) -> Result<(), Fu
         }
         phases.extend([Phase::Build(*target), Phase::Run(*target)]);
     }
-    println!("input fuzz: {} targets; snapshot <= 16 MiB; native output <= 4 MiB; explicit production path dependencies", targets.len());
+    println!("input fuzz: {} targets; snapshot <= {} MiB; project files <= {}; vendor files <= {}; native output <= 4 MiB; explicit production path dependencies", targets.len(), super::snapshot::MAX_SNAPSHOT_BYTES / (1024 * 1024), super::snapshot::MAX_PROJECT_FILES, super::snapshot::MAX_VENDOR_FILES);
     println!("{}", snapshot.normalized);
     for phase in &phases {
         let step = plan.step(*phase);

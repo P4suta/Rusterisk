@@ -20,6 +20,9 @@ fn fuzz_dry_runs_bind_real_inputs_without_a_daemon() -> Result<(), std::io::Erro
     let stdout = String::from_utf8_lossy(&output.stdout);
     for expected in [
         "4 targets",
+        "snapshot <= 40 MiB",
+        "project files <= 1024",
+        "vendor files <= 512",
         "phase=fetch",
         "phase=build-settings",
         "phase=run-media_packets",

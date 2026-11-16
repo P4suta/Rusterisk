@@ -14,10 +14,29 @@ pub use targets::{Target, MAX_INPUT};
 
 pub const NIGHTLY: &str = "nightly-2026-08-21";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FuzzFileScope {
+    Project,
+    Vendor,
+}
+
+impl FuzzFileScope {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::Vendor => "vendor",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum FuzzError {
     Plan,
     Manifest,
+    FileCount {
+        scope: FuzzFileScope,
+        maximum: usize,
+    },
     SourceChanged,
     Inventory,
     Results,
@@ -35,6 +54,7 @@ impl std::fmt::Display for FuzzError {
         match self {
             Self::Plan => formatter.write_str("invalid bounded input fuzz plan"),
             Self::Manifest => formatter.write_str("fuzz manifest must bind every target to production workspace dependencies"),
+            Self::FileCount { scope, maximum } => write!(formatter, "fuzz snapshot exceeds the {scope} file limit of {maximum}", scope = scope.label()),
             Self::SourceChanged => formatter.write_str("captured fuzz source changed during execution"),
             Self::Inventory => formatter.write_str("fuzz inventory must contain every maintained target exactly once"),
             Self::Results => formatter.write_str("input fuzz requires nonempty complete native execution without crashes or timeouts"),

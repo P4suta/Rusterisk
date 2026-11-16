@@ -61,6 +61,54 @@ const PATCHED: &[u8] =
     b"[workspace]\nmembers=['xtask']\n[patch.crates-io]\nstr0m={path='vendor/str0m'}\n";
 
 #[test]
+fn project_and_vendor_file_budgets_accept_each_complete_bounded_source_tree(
+) -> Result<(), FuzzError> {
+    fixture("independent-file-budgets", |root, _| {
+        vendor(root)?;
+        let baseline = Snapshot::read(root)?;
+        let vendor_files = baseline
+            .files
+            .iter()
+            .filter(|file| file.path.starts_with("vendor/str0m"))
+            .count();
+        let project_files = baseline.files.len() - vendor_files;
+        for number in project_files..1024 {
+            super::write_new(
+                &root.join(format!("xtask/src/count-{number}.rs")),
+                b"fixture",
+            )?;
+        }
+        for number in vendor_files..512 {
+            super::write_new(
+                &root.join(format!("vendor/str0m/count-{number}.rs")),
+                b"fixture",
+            )?;
+        }
+        let snapshot = Snapshot::read(root)?;
+        assert_eq!(snapshot.files.len(), 1536);
+        let project_excess = root.join("xtask/src/count-excess.rs");
+        super::write_new(&project_excess, b"fixture")?;
+        assert!(matches!(
+            Snapshot::read(root),
+            Err(FuzzError::FileCount {
+                scope: super::FuzzFileScope::Project,
+                maximum: 1024
+            })
+        ));
+        std::fs::remove_file(project_excess)?;
+        super::write_new(&root.join("vendor/str0m/count-excess.rs"), b"fixture")?;
+        assert!(matches!(
+            Snapshot::read(root),
+            Err(FuzzError::FileCount {
+                scope: super::FuzzFileScope::Vendor,
+                maximum: 512
+            })
+        ));
+        Ok(())
+    })
+}
+
+#[test]
 fn vendored_dependency_is_captured_only_for_the_exact_workspace_patch() -> Result<(), FuzzError> {
     fixture("vendor", |root, directory| {
         for file in [
