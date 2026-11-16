@@ -17,6 +17,7 @@ pub mod server_distribution;
 pub const WORKSPACE_FORMAT_CHECK: &[&str] = &["fmt", "--", "--check"];
 mod sip_domain_policy;
 mod tls_client_policy;
+mod unsafe_policy;
 
 #[derive(Debug)]
 pub enum SecurityConfigError {
@@ -92,6 +93,7 @@ pub fn inspect_with_exceptions(
         scope_depth: 0,
         block_depth: 0,
         sip_domain_verifier: sip_domain_policy::verifier(&file),
+        accounting_query: unsafe_policy::accounting_query(&file, exceptions)?,
     };
     policy.visit_file(&file);
     for (index, exception) in exceptions.iter().enumerate() {
@@ -113,6 +115,7 @@ struct Policy<'a> {
     scope_depth: usize,
     block_depth: usize,
     sip_domain_verifier: bool,
+    accounting_query: Option<&'a syn::Local>,
 }
 
 impl Policy<'_> {
@@ -132,6 +135,21 @@ impl Policy<'_> {
             }
             "async_trait" => self.reject("async-trait", name),
             _ => {}
+        }
+    }
+
+    fn unsafe_syntax(&mut self, syntax: &unsafe_policy::Syntax) {
+        if syntax.unsafe_code {
+            self.reject(
+                "unsafe-code",
+                "only the registered fixed Job accounting query is permitted",
+            );
+        }
+        if syntax.suppression {
+            self.reject(
+                "lint-suppression",
+                "exceptions must be registered with an ADR and a precise source location",
+            );
         }
     }
 
@@ -160,6 +178,9 @@ impl Policy<'_> {
             Ok(())
         });
         if result.is_err() {
+            return false;
+        }
+        if lint == "unsafe_code" || lint == "r#unsafe_code" {
             return false;
         }
         for (index, exception) in self.exceptions.iter().enumerate() {
@@ -207,12 +228,18 @@ impl<'ast> Visit<'ast> for Policy<'_> {
     }
 
     fn visit_item_impl(&mut self, node: &'ast syn::ItemImpl) {
+        if node.unsafety.is_some() {
+            self.reject("unsafe-code", "unsafe implementations are prohibited");
+        }
         self.scope_depth += 1;
         visit::visit_item_impl(self, node);
         self.scope_depth -= 1;
     }
 
     fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+        if node.unsafety.is_some() {
+            self.reject("unsafe-code", "unsafe traits are prohibited");
+        }
         self.scope_depth += 1;
         visit::visit_item_trait(self, node);
         self.scope_depth -= 1;
@@ -225,6 +252,19 @@ impl<'ast> Visit<'ast> for Policy<'_> {
     }
 
     fn visit_local(&mut self, node: &'ast syn::Local) {
+        if self
+            .accounting_query
+            .is_some_and(|query| std::ptr::eq(query, node))
+        {
+            if let Some(index) = self.exceptions.iter().position(unsafe_policy::registration) {
+                self.used.insert(index);
+                for attribute in &node.attrs {
+                    visit::visit_attribute(self, attribute);
+                }
+                self.visit_pat(&node.pat);
+                return;
+            }
+        }
         if self.block_depth == 1 {
             if let (Some(function), [attribute]) = (self.function.clone(), node.attrs.as_slice()) {
                 let registered = self.exceptions.iter().any(|exception| {
@@ -289,22 +329,48 @@ impl<'ast> Visit<'ast> for Policy<'_> {
         visit::visit_use_name(self, node);
     }
 
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        if unsafe_policy::assembly_import(&node.tree) {
+            self.reject("unsafe-code", "assembly imports are prohibited");
+        }
+        visit::visit_item_use(self, node);
+    }
+
     fn visit_use_rename(&mut self, node: &'ast syn::UseRename) {
         self.name(&node.ident.to_string());
         visit::visit_use_rename(self, node);
     }
 
     fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
-        if node.path().is_ident("allow") || node.path().is_ident("expect") {
-            self.reject(
-                "lint-suppression",
-                "exceptions must be registered with an ADR and a precise source location",
-            );
-        }
+        self.unsafe_syntax(&unsafe_policy::attribute(&node.meta));
         visit::visit_attribute(self, node);
     }
 
+    fn visit_signature(&mut self, node: &'ast syn::Signature) {
+        if node.unsafety.is_some() {
+            self.reject("unsafe-code", "unsafe functions are prohibited");
+        }
+        visit::visit_signature(self, node);
+    }
+
+    fn visit_expr_unsafe(&mut self, node: &'ast syn::ExprUnsafe) {
+        self.reject(
+            "unsafe-code",
+            "only the registered fixed Job accounting query is permitted",
+        );
+        visit::visit_expr_unsafe(self, node);
+    }
+
+    fn visit_item_foreign_mod(&mut self, node: &'ast syn::ItemForeignMod) {
+        self.reject("unsafe-code", "foreign blocks are prohibited");
+        visit::visit_item_foreign_mod(self, node);
+    }
+
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
+        if unsafe_policy::assembly_macro(&node.path) {
+            self.reject("unsafe-code", "assembly macros are prohibited");
+        }
+        self.unsafe_syntax(&unsafe_policy::macro_tokens(node));
         if node.path.is_ident("vec") {
             let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
             if let Ok(elements) = parser.parse2(node.tokens.clone()) {

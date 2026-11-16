@@ -7,7 +7,7 @@ status: proposed
 
 ## Context
 
-Windows supervision must own descendants after their leader exits.
+Windows supervision must own descendants after leader exit.
 [Assigning a suspended process later](https://devblogs.microsoft.com/oldnewthing/20230209-00/?p=107812/) leaves a creator failure window.
 
 ## Decision
@@ -16,7 +16,8 @@ Require `PROC_THREAD_ATTRIBUTE_JOB_LIST` creation through unchanged windows-spaw
 Use [published `Job::as_handle()`](https://docs.rs/windows-spawn/0.1.0/windows_spawn/struct.Job.html#impl-AsHandle-for-Job) and one approved [accounting query](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-queryinformationjobobject) with a `BorrowedHandle` and fixed stack buffer.
 Before adoption, replace inherited `unsafe_code = "forbid"` with [`deny`](https://doc.rust-lang.org/rustc/lints/levels.html) only alongside a syntax gate and an exact registered local expectation.
 Admit only the fixed query function.
-Reject other unsafe syntax across cfg branches, macro tokens, and nested suppression attributes.
+Reject other unsafe syntax across [cfg branches](https://doc.rust-lang.org/reference/conditional-compilation.html), macro tokens, and nested suppression attributes.
+Reject dynamic attribute names and [assembly macros](https://doc.rust-lang.org/reference/inline-assembly.html).
 Keep deadlines, zero-process polling, typed streams, and explicit handle cleanup in the supervisor.
 
 ## Alternatives
@@ -34,4 +35,6 @@ Reconsider when the publisher provides a safe accounting API.
 ## Confirmation
 
 Require rejecting syntax fixtures and native lifecycle tests, including early leader exit, descendants, timeout, cancellation, and handle closure.
+The gate inspects project source.
+External procedural macro expansions require separate validation.
 Keep proposed while command migration and graceful shutdown remain unverified.
