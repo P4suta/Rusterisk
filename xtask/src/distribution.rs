@@ -33,3 +33,7 @@ mod sdk_consumer_workspace;
 pub use sdk_consumer_workspace::SdkConsumerWorkspace;
 mod sdk_consumer_run;
 pub use sdk_consumer_run::{verify_sdk_consumers_with, verify_sdk_with, SdkConsumerRunError};
+mod sdk_http;
+pub use sdk_http::{SdkHttpTarget, SdkHttpTargetError};
+mod sdk_runtime;
+pub use sdk_runtime::SdkRuntimeIdentity;

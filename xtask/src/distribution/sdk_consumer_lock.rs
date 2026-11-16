@@ -1,4 +1,4 @@
-use super::{SdkConsumerScope, SdkPackage};
+use super::{SdkConsumerScope, SdkPackage, SdkRuntimeIdentity};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -123,6 +123,26 @@ fn registry(package: &Package) -> Result<(&str, &str), SdkConsumerLockError> {
         return Err(invalid("registry identity"));
     }
     Ok((source, checksum))
+}
+
+pub(super) fn runtime(bytes: &[u8]) -> Result<SdkRuntimeIdentity, SdkConsumerLockError> {
+    let lock = parse(bytes)?;
+    let mut packages = lock
+        .package
+        .iter()
+        .filter(|package| package.name == "tokio");
+    let package = packages
+        .next()
+        .ok_or_else(|| invalid("candidate Tokio runtime"))?;
+    if packages.next().is_some() {
+        return Err(invalid("single candidate Tokio runtime"));
+    }
+    let (source, checksum) = registry(package)?;
+    Ok(SdkRuntimeIdentity {
+        version: package.version.clone(),
+        source: source.to_owned(),
+        checksum: checksum.to_owned(),
+    })
 }
 
 type RegistryIdentities<'a> = BTreeMap<(&'a str, &'a str, &'a str), &'a str>;
