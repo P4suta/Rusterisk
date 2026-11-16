@@ -30,6 +30,15 @@ distribution-sdk-build:
 distribution-sdk-check-content candidate:
     cargo run --locked --target-dir target/xtask --package xtask -- distribution sdk check-content --candidate {{ quote(candidate) }}
 
+distribution-sdk-verify candidate:
+    cargo run --locked --target-dir target/xtask --package xtask -- distribution sdk verify --candidate {{ quote(candidate) }}
+
+distribution-server-plan target:
+    cargo run --locked --target-dir target/xtask --package xtask -- distribution server plan --target {{ quote(target) }}
+
+distribution-server-build target:
+    cargo run --locked --target-dir target/xtask --package xtask -- distribution server build --target {{ quote(target) }}
+
 browser-example port="3000": browser-check
     cargo run --locked --package rusterisk-server --example browser -- "{{ port }}"
 

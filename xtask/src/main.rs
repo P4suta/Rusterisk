@@ -214,6 +214,12 @@ fn execute() -> Result<(), TaskError> {
         [task, scope, operation] if task == "distribution" && scope == "sdk" && operation == "plan" => xtask::distribution::plan_sdk(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string())),
         [task, scope, operation] if task == "distribution" && scope == "sdk" && operation == "build" => distribution_sdk_build(),
         [task, scope, operation, flag, candidate] if task == "distribution" && scope == "sdk" && operation == "check-content" && flag == "--candidate" => distribution_sdk_content(Path::new(candidate)),
+        [task, scope, operation, flag, candidate] if task == "distribution" && scope == "sdk" && operation == "verify" && flag == "--candidate" => distribution_sdk_verify(Path::new(candidate)),
+        [task, scope, operation, flag, target] if task == "distribution" && scope == "server" && operation == "plan" && flag == "--target" => {
+            let target = xtask::server_distribution::ServerTarget::parse(target).map_err(|error| TaskError::Contract(error.to_string()))?;
+            xtask::server_distribution::plan_server(&std::env::current_dir()?, target).map_err(TaskError::Io)
+        },
+        [task, scope, operation, flag, target] if task == "distribution" && scope == "server" && operation == "build" && flag == "--target" => distribution_server_build(target),
         [task] if task == "check" => {
             distribution_check()?;
             xtask::vendor::check(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string()))?;
@@ -258,7 +264,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|check-content --candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|(check-content|verify) --candidate <path>>|distribution server <plan|build> --target <triple>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
         )),
     }
 }
@@ -302,6 +308,44 @@ fn distribution_sdk_content(candidate: &Path) -> Result<(), TaskError> {
         contents.version(),
     );
     Ok(())
+}
+
+fn distribution_sdk_verify(candidate: &Path) -> Result<(), TaskError> {
+    let root = std::env::current_dir()?;
+    let mut supervisor = xtask::process::CommandSupervisor::new().map_err(TaskError::Process)?;
+    let operation = xtask::distribution::verify_sdk_with(&root, candidate, |command, budget| {
+        supervisor.run(command, budget)
+    })
+    .map(|_| ())
+    .map_err(|error| TaskError::Contract(error.to_string()));
+    let cleanup = supervisor.finish();
+    match (operation, cleanup) {
+        (operation, Ok(())) => operation,
+        (Ok(()), Err(error)) => Err(TaskError::Process(error)),
+        (Err(operation), Err(cleanup)) => Err(TaskError::Contract(format!(
+            "{operation}; SDK consumer supervisor cleanup failed: {cleanup}"
+        ))),
+    }
+}
+
+fn distribution_server_build(target: &str) -> Result<(), TaskError> {
+    let target = xtask::server_distribution::ServerTarget::parse(target)
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
+    let mut supervisor = xtask::process::CommandSupervisor::new().map_err(TaskError::Process)?;
+    let operation = xtask::server_distribution::build_server_with(
+        &std::env::current_dir()?,
+        target,
+        |command, budget| supervisor.run(command, budget),
+    )
+    .map(|_| ())
+    .map_err(TaskError::Io);
+    match (operation, supervisor.finish()) {
+        (operation, Ok(())) => operation,
+        (Ok(()), Err(error)) => Err(TaskError::Process(error)),
+        (Err(operation), Err(cleanup)) => Err(TaskError::Contract(format!(
+            "{operation}; server build supervisor cleanup failed: {cleanup}"
+        ))),
+    }
 }
 
 fn node_check() -> Result<(), TaskError> {
