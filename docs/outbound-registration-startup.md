@@ -21,7 +21,13 @@ Released leases or mismatched keys prevent cache updates and registration transm
 Signaling continues processing packets while lookups wait.
 Shutdown closes the configuration lifetime and joins its lookup jobs.
 
-TCP or TLS registration targets return `ControlError::Unsupported` during binding until their adapters connect.
+TCP registrations with numeric addresses use owned outbound connections.
+Authentication and refresh keep the same connection generation.
+Preparation distinguishes call lifetimes from configuration lifetimes.
+Configuration cancellation prevents prepared flows from entering the registration driver.
+Disconnection stops refresh on the closed flow.
+
+TLS registration targets return `ControlError::Unsupported` during binding until their adapter connects.
 The driver uses matching provisional and final responses, the shared Digest implementation, and validated Contact grants.
 Successful grants schedule refresh requests with renewed authorization counters.
 Retry policy and configuration replacement remain pending in the driver.
