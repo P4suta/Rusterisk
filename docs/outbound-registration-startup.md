@@ -44,5 +44,11 @@ An open backup doesn't bypass a preferred candidate.
 Reuse after an earlier candidate's connection failure remains pending.
 The driver uses matching provisional and final responses, the shared Digest implementation, and validated Contact grants.
 Successful grants schedule refresh requests with renewed authorization counters.
-Retry policy and configuration replacement remain pending in the driver.
+423 responses can raise requested `Expires` through one positive `Min-Expires` value.
+`Min-Expires` must exceed the transmitted value.
+Corrections preserve the route, Contact, Call-ID, URI octets, and authentication scopes.
+Corrections advance CSeq and Digest counters.
+The driver keeps the learned value for refreshes without changing the starting settings.
+Malformed values, removal requests, and cancellation don't create corrections.
+Delayed retry policy and configuration replacement remain pending in the driver.
 The [pure transaction APIs](outbound-registration-transactions.md) and [generation decision](adr/own-outbound-registrations-by-configuration-generation.md) define the remaining integration boundaries.
