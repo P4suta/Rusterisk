@@ -9,10 +9,12 @@ Initial requests follow the [Asterisk 22.9.0 delay](https://github.com/asterisk/
 `max_random_initial_delay=0` still waits one second.
 Positive values select an integer delay from one through `max_random_initial_delay` seconds.
 Round-robin polling emits at most one packet per signaling tick.
-Requests to the same physical registrar wait for the preceding transaction's settlement deadline.
+Requests to the same physical registrar wait for the preceding transaction's final response or settlement deadline.
 The existing bounded transaction supplies retransmission and a 32-second timeout.
 Shutdown cancels waiting and transmitted clients before releasing the listener.
 
 Hostname targets and TCP or TLS registration targets return `ControlError::Unsupported` during binding until their adapters connect.
-Response authentication, successful grant handling, refresh transmission, retry policy, and configuration replacement remain pending in the driver.
+The driver uses matching provisional and final responses, the shared Digest implementation, and validated Contact grants.
+Successful grants schedule refresh requests with renewed authorization counters.
+Retry policy and configuration replacement remain pending in the driver.
 The [pure transaction APIs](outbound-registration-transactions.md) and [generation decision](adr/own-outbound-registrations-by-configuration-generation.md) define the remaining integration boundaries.
