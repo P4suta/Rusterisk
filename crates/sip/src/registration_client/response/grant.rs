@@ -1,4 +1,4 @@
-use super::RegistrationResponse;
+use super::{request::expiration, RegistrationResponse};
 use crate::{
     contact::parse_response_contacts, parse_registration_contacts, ContactError,
     RegistrationContacts, SipError,
@@ -84,20 +84,6 @@ impl RegistrationResponse {
             refresh_at,
         })
     }
-}
-
-fn expiration<'a>(values: impl IntoIterator<Item = &'a str>) -> Result<Option<u32>, SipError> {
-    let mut values = values.into_iter();
-    let Some(value) = values.next() else {
-        return Ok(None);
-    };
-    if values.next().is_some()
-        || value.is_empty()
-        || !value.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err(SipError::InvalidPacket);
-    }
-    value.parse().map(Some).map_err(|_| SipError::InvalidPacket)
 }
 
 fn contact_error(error: ContactError) -> SipError {

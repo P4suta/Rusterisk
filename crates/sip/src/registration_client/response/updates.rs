@@ -37,6 +37,21 @@ impl RegistrationResponse {
         expiration: u32,
         now: u64,
     ) -> Result<RegistrationTransaction, SipError> {
+        if !matches!(self.grant()?, RegistrationGrant::Active { .. }) {
+            return Err(SipError::Unsupported);
+        }
+        let mut transaction = self.with_expiration(credentials, identity, expiration, now)?;
+        transaction.authentication_attempts = 0;
+        Ok(transaction)
+    }
+
+    pub(super) fn with_expiration(
+        &self,
+        credentials: &[Auth],
+        identity: RegistrationIdentity,
+        expiration: u32,
+        now: u64,
+    ) -> Result<RegistrationTransaction, SipError> {
         if now < self.received
             || identity.boot != self.identity.boot
             || identity.sequence <= self.identity.sequence
@@ -44,9 +59,6 @@ impl RegistrationResponse {
             return Err(SipError::InvalidPacket);
         }
         let expires = now.checked_add(TIMEOUT).ok_or(SipError::Capacity)?;
-        if !matches!(self.grant()?, RegistrationGrant::Active { .. }) {
-            return Err(SipError::Unsupported);
-        }
         let source = std::str::from_utf8(&self.request.bytes)?;
         let uri = self.request_uri()?;
         let (_, body) = source
@@ -76,7 +88,7 @@ impl RegistrationResponse {
             expires,
             observed: now,
             state: State::Ready { at: now },
-            authentication_attempts: 0,
+            authentication_attempts: self.authentication_attempts,
         })
     }
 }

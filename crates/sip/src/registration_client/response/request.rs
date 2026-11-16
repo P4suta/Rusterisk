@@ -22,6 +22,22 @@ pub(super) fn header<'a>(source: &'a str, name: &str) -> Option<&'a str> {
         })
 }
 
+pub(super) fn expiration<'a>(
+    values: impl IntoIterator<Item = &'a str>,
+) -> Result<Option<u32>, SipError> {
+    let mut values = values.into_iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some()
+        || value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(SipError::InvalidPacket);
+    }
+    value.parse().map(Some).map_err(|_| SipError::InvalidPacket)
+}
+
 pub(super) fn render(source: &str, update: RequestUpdate<'_>) -> Result<Vec<u8>, SipError> {
     let (headers, body) = source
         .split_once("\r\n\r\n")

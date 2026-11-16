@@ -8,6 +8,7 @@ use rusterisk_config::Protocol;
 use std::net::SocketAddr;
 mod authentication;
 mod grant;
+mod minimum_expiration;
 mod request;
 mod updates;
 pub use grant::RegistrationGrant;

@@ -6,6 +6,8 @@ use rusterisk_sip::{
 mod authentication;
 #[path = "outbound_registration/grants.rs"]
 mod grants;
+#[path = "outbound_registration/minimum_expiration.rs"]
+mod minimum_expiration;
 #[path = "outbound_registration/responses.rs"]
 mod responses;
 #[path = "outbound_registration/updates.rs"]
