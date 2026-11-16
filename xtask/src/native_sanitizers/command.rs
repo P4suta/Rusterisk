@@ -1,14 +1,18 @@
+use super::runner::CheckedNative;
 use super::{
-    CapturedNative, CommandMode, Defect, NativeError, NativeLibrary, NativeSanitizerPlan, Phase,
-    Scope,
+    CapturedNative, CommandMode, Defect, NativeError, NativeInventory, NativeLibrary,
+    NativeSanitizerPlan, Phase, Scope,
 };
-use crate::process::CommandSupervisor;
+use crate::process::{CommandSupervisor, ProcessError};
 use std::{
     fs,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone, Copy)]
 pub enum Execution {
@@ -16,9 +20,84 @@ pub enum Execution {
     Run,
 }
 
-fn preview(capture: &CapturedNative, image: &str) -> Result<(), NativeError> {
+/// Synthetic command ports don't produce completed native outcomes.
+///
+/// ```compile_fail
+/// use std::path::Path;
+/// use xtask::native_sanitizers::{CapturedNative, NativeError, NativeOutcome};
+/// fn synthetic(capture: &CapturedNative, destination: &Path, image: &str) -> Result<NativeOutcome, NativeError> {
+///     capture.run_with(destination, image, |_, _, _| Ok(()))
+/// }
+/// ```
+pub struct NativeOutcome {
+    capture: CapturedNative,
+    checked: CheckedNative,
+    artifacts: PathBuf,
+}
+
+impl NativeOutcome {
+    pub fn inputs(&self) -> impl Iterator<Item = (&Path, &[u8])> {
+        self.capture.inputs()
+    }
+    pub fn image(&self) -> &str {
+        self.checked.plan.image()
+    }
+    pub fn inventory(&self, scope: Scope) -> &NativeInventory {
+        match scope {
+            Scope::Media => &self.checked.inventories[0],
+            Scope::Storage => &self.checked.inventories[1],
+            Scope::Tls => &self.checked.inventories[2],
+        }
+    }
+    pub const fn test_count(&self) -> usize {
+        self.checked.total
+    }
+    pub fn artifacts(&self) -> &Path {
+        &self.artifacts
+    }
+}
+
+impl CapturedNative {
+    pub fn verify(self, destination: &Path, image: &str) -> Result<NativeOutcome, NativeError> {
+        let plan = plan(image)?;
+        let mut supervisor = CommandSupervisor::new().map_err(io::Error::other)?;
+        let operation = self.run_checked_with(
+            destination,
+            plan.image(),
+            |command, budget, mode| match mode {
+                CommandMode::Work => supervisor.run(command, budget),
+                CommandMode::Cleanup => supervisor.run_cleanup(command, budget),
+            },
+        );
+        finish(self, operation, supervisor.finish(), destination.to_owned())
+    }
+}
+
+fn finish(
+    capture: CapturedNative,
+    operation: Result<CheckedNative, NativeError>,
+    cleanup: Result<(), ProcessError>,
+    artifacts: PathBuf,
+) -> Result<NativeOutcome, NativeError> {
+    match (operation, cleanup) {
+        (Ok(checked), Ok(())) => Ok(NativeOutcome {
+            capture,
+            checked,
+            artifacts,
+        }),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(io::Error::other(error).into()),
+        (Err(operation), Err(error)) => Err(NativeError::FollowUp {
+            operation: operation.to_string(),
+            context: "native supervisor cleanup failed",
+            error: io::Error::other(error),
+        }),
+    }
+}
+
+pub fn plan(image: &str) -> Result<NativeSanitizerPlan, NativeError> {
     let directory = std::env::temp_dir().join("rusterisk-native-sanitizers-preview");
-    let plan = NativeSanitizerPlan::new(
+    NativeSanitizerPlan::new(
         "preview",
         directory
             .join("source")
@@ -29,7 +108,12 @@ fn preview(capture: &CapturedNative, image: &str) -> Result<(), NativeError> {
             .to_str()
             .ok_or_else(|| io::Error::other("native state path encoding"))?,
         image,
-    )?;
+    )
+    .map_err(NativeError::Io)
+}
+
+fn preview(capture: &CapturedNative, image: &str) -> Result<(), NativeError> {
+    let plan = plan(image)?;
     println!(
         "native sanitizers: source={} scopes=media,storage,tls",
         capture.digest()
@@ -104,23 +188,10 @@ pub fn execute(root: &Path, execution: Execution, image: &str) -> Result<(), Nat
         destination.display()
     );
     io::stdout().flush()?;
-    let mut supervisor = CommandSupervisor::new().map_err(io::Error::other)?;
-    let operation = capture.run_with(&destination, image, |command, budget, mode| match mode {
-        CommandMode::Work => supervisor.run(command, budget),
-        CommandMode::Cleanup => supervisor.run_cleanup(command, budget),
-    });
-    let cleanup = supervisor.finish();
-    match (operation, cleanup) {
-        (Ok(count), Ok(())) => {
-            println!("native sanitizers: {count} boundary tests passed");
-            Ok(())
-        }
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(io::Error::other(error).into()),
-        (Err(operation), Err(error)) => Err(NativeError::FollowUp {
-            operation: operation.to_string(),
-            context: "native supervisor cleanup failed",
-            error: io::Error::other(error),
-        }),
-    }
+    let outcome = capture.verify(&destination, image)?;
+    println!(
+        "native sanitizers: {} boundary tests passed",
+        outcome.test_count()
+    );
+    Ok(())
 }

@@ -9,7 +9,7 @@ use crate::{
 use std::{
     fs,
     io::{self, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -314,6 +314,32 @@ pub struct CapturedNative {
     source: SourceSnapshot,
 }
 
+pub(super) struct CheckedNative {
+    pub(super) plan: NativeSanitizerPlan,
+    pub(super) inventories: [NativeInventory; 3],
+    pub(super) total: usize,
+}
+
+fn reserve_directory(parent: &Path, identity: &str) -> io::Result<(String, PathBuf)> {
+    for attempt in 0..32 {
+        let identity = if attempt == 0 {
+            identity.to_owned()
+        } else {
+            format!("{identity}-{attempt}")
+        };
+        let directory = parent.join(format!("rusterisk-native-sanitizers-{identity}"));
+        match fs::create_dir(&directory) {
+            Ok(()) => return Ok((identity, directory)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "native execution directory reservation limit exceeded",
+    ))
+}
+
 impl CapturedNative {
     pub fn read(root: &Path) -> Result<Self, NativeError> {
         let source = SourceSnapshot::read(root)?;
@@ -325,12 +351,26 @@ impl CapturedNative {
         self.source.digest()
     }
 
+    pub fn inputs(&self) -> impl Iterator<Item = (&Path, &[u8])> {
+        self.source.files()
+    }
+
     pub fn run_with(
         &self,
         destination: &Path,
         image: &str,
-        mut perform: impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
+        perform: impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
     ) -> Result<usize, NativeError> {
+        self.run_checked_with(destination, image, perform)
+            .map(|checked| checked.total)
+    }
+
+    pub(super) fn run_checked_with(
+        &self,
+        destination: &Path,
+        image: &str,
+        mut perform: impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
+    ) -> Result<CheckedNative, NativeError> {
         if !destination.is_absolute() {
             return Err(io::Error::other("native result directory must be absolute").into());
         }
@@ -347,11 +387,10 @@ impl CapturedNative {
             .duration_since(UNIX_EPOCH)
             .map_err(io::Error::other)?
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!(
-            "rusterisk-native-sanitizers-{}-{stamp}",
-            std::process::id()
-        ));
-        fs::create_dir(&directory)?;
+        let (identity, directory) = reserve_directory(
+            &std::env::temp_dir(),
+            &format!("{}-{stamp}", std::process::id()),
+        )?;
         let source = directory.join("source");
         let state = directory.join("state");
         let operation = (|| {
@@ -366,7 +405,7 @@ impl CapturedNative {
                 )?;
             }
             let plan = NativeSanitizerPlan::new(
-                &format!("{}-{stamp}", std::process::id()),
+                &identity,
                 source
                     .to_str()
                     .ok_or_else(|| io::Error::other("native source path encoding"))?,
@@ -419,7 +458,8 @@ impl CapturedNative {
                     }
                 }
                 let mut total = 0usize;
-                for scope in Scope::ALL {
+                let mut inventories = [None, None, None];
+                for (scope, retained) in Scope::ALL.into_iter().zip(&mut inventories) {
                     let selected = Phase::Inventory(scope);
                     let bytes = phase(&plan, selected, &source, destination, &mut perform)?;
                     let inventory = NativeInventory::parse(scope, &bytes).map_err(|error| {
@@ -439,8 +479,19 @@ impl CapturedNative {
                     total = total
                         .checked_add(count)
                         .ok_or_else(|| io::Error::other("native test count overflow"))?;
+                    *retained = Some(inventory);
                 }
-                Ok(total)
+                let [Some(media), Some(storage), Some(tls)] = inventories else {
+                    return Err(io::Error::other(
+                        "native execution requires every scope inventory",
+                    )
+                    .into());
+                };
+                Ok(CheckedNative {
+                    plan,
+                    inventories: [media, storage, tls],
+                    total,
+                })
             })();
             follow(
                 operation,
@@ -448,10 +499,20 @@ impl CapturedNative {
                 "native execution source changed",
             )
         })();
-        follow(
+        let operation = follow(
             operation,
             fs::remove_dir_all(directory),
             "native execution directory cleanup failed",
+        );
+        follow(
+            operation,
+            self.source
+                .check(&destination.join("source"))
+                .map_err(io::Error::other),
+            "native preserved source changed",
         )
     }
 }
+
+#[cfg(test)]
+mod tests;

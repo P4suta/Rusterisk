@@ -7,7 +7,7 @@ pub use archives::{native_archives, validate_instrumented_archive, NativeArchive
 mod runner;
 pub use runner::{CapturedNative, CommandMode, NativeError};
 mod command;
-pub use command::{execute, Execution};
+pub use command::{execute, plan, Execution, NativeOutcome};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -109,6 +109,10 @@ pub struct NativeSanitizerPlan {
 }
 
 impl NativeSanitizerPlan {
+    pub fn image(&self) -> &str {
+        self.image.as_str()
+    }
+
     pub fn new(identity: &str, source: &str, state: &str, image: &str) -> io::Result<Self> {
         let invalid = || io::Error::other("invalid native sanitizer plan");
         let image = ImageIdentity::parse(image).ok_or_else(invalid)?;
