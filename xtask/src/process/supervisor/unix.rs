@@ -205,6 +205,31 @@ impl Drop for Group {
     }
 }
 
+fn completed_service(
+    service: Service,
+    operation: Result<(), ProcessError>,
+) -> Result<(), ProcessError> {
+    let status = service.group.finish();
+    match (operation, status) {
+        (Ok(()), Ok(Some(status))) if status.success() => Ok(()),
+        (Ok(()), Ok(Some(status))) => Err(ProcessError::Status(status)),
+        (Ok(()), Ok(None)) => Err(ProcessError::InvalidOutput),
+        (Err(error), Ok(_)) | (Ok(()), Err(error)) => Err(error),
+        (Err(operation), Err(cleanup)) => Err(ProcessError::Cleanup {
+            operation: operation.to_string(),
+            cleanup: cleanup.to_string(),
+        }),
+    }
+}
+
+pub(super) fn abort_service(service: Service) -> Result<(), ProcessError> {
+    service
+        .group
+        .finish()?
+        .ok_or(ProcessError::InvalidOutput)
+        .map(|_| ())
+}
+
 impl Supervisor {
     pub(super) fn start_service(
         &mut self,
@@ -257,17 +282,13 @@ impl Supervisor {
                 true,
             )
         })();
-        let status = service.group.finish();
-        match (operation, status) {
-            (Ok(()), Ok(Some(status))) if status.success() => Ok(()),
-            (Ok(()), Ok(Some(status))) => Err(ProcessError::Status(status)),
-            (Ok(()), Ok(None)) => Err(ProcessError::InvalidOutput),
-            (Err(error), Ok(_)) | (Ok(()), Err(error)) => Err(error),
-            (Err(operation), Err(cleanup)) => Err(ProcessError::Cleanup {
-                operation: operation.to_string(),
-                cleanup: cleanup.to_string(),
-            }),
-        }
+        completed_service(service, operation)
+    }
+
+    pub(super) fn wait_service(&mut self, service: Service) -> Result<(), ProcessError> {
+        let deadline = (Instant::now() + Duration::from_secs(5)).min(service.deadline);
+        let operation = self.monitor(service.pid, service.group.pid, deadline, false);
+        completed_service(service, operation)
     }
     pub(super) fn new() -> Result<Self, ProcessError> {
         let (reader, writer) = UnixStream::pair()?;

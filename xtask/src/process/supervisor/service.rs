@@ -10,6 +10,20 @@ pub struct RunningCommand<'a> {
     running: Option<unix::Service>,
 }
 
+fn stopped(
+    operation: Result<(), ProcessError>,
+    cleanup: Result<(), ProcessError>,
+) -> Result<(), ProcessError> {
+    match (operation, cleanup) {
+        (operation, Ok(())) => operation,
+        (Ok(()), Err(error)) => Err(error),
+        (Err(operation), Err(cleanup)) => Err(ProcessError::Cleanup {
+            operation: operation.to_string(),
+            cleanup: cleanup.to_string(),
+        }),
+    }
+}
+
 impl<'a> RunningCommand<'a> {
     pub(super) fn new(supervisor: &'a mut CommandSupervisor, running: unix::Service) -> Self {
         Self {
@@ -50,6 +64,40 @@ impl<'a> RunningCommand<'a> {
         }
     }
 
+    /// Runs a bounded stop request and waits for the service's actual zero exit.
+    pub fn stop_with(
+        mut self,
+        command: &mut Command,
+        budget: Duration,
+    ) -> Result<(), ProcessError> {
+        let operation = if budget.is_zero() {
+            Err(ProcessError::InvalidBudget)
+        } else {
+            self.poll().and_then(|()| {
+                let remaining = self
+                    .running
+                    .as_ref()
+                    .ok_or(ProcessError::InvalidOutput)?
+                    .deadline
+                    .saturating_duration_since(Instant::now());
+                self.supervisor.run(command, budget.min(remaining))
+            })
+        };
+        let running = self.running.take().ok_or(ProcessError::InvalidOutput)?;
+        let cleanup = if operation.is_ok() {
+            match self.supervisor.state.as_mut() {
+                Some(state) => state.wait_service(running),
+                None => stopped(
+                    Err(ProcessError::InvalidOutput),
+                    unix::abort_service(running),
+                ),
+            }
+        } else {
+            unix::abort_service(running)
+        };
+        stopped(operation, cleanup)
+    }
+
     pub fn stop(mut self) -> Result<(), ProcessError> {
         let running = self.running.take().ok_or(ProcessError::InvalidOutput)?;
         self.supervisor
@@ -57,5 +105,29 @@ impl<'a> RunningCommand<'a> {
             .as_mut()
             .ok_or(ProcessError::InvalidOutput)?
             .stop_service(running)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_stop_keeps_the_primary_and_cleanup_failures() -> Result<(), std::io::Error> {
+        for operation in [ProcessError::Timeout, ProcessError::Interrupted] {
+            let expected = operation.to_string();
+            let result = stopped(
+                Err(operation),
+                Err(std::io::Error::other("cleanup fixture").into()),
+            );
+            let error = result
+                .err()
+                .ok_or_else(|| std::io::Error::other("failed stop passed"))?;
+            assert!(matches!(&error, ProcessError::Cleanup { .. }));
+            let message = error.to_string();
+            assert!(message.contains(&expected));
+            assert!(message.contains("cleanup fixture"));
+        }
+        Ok(())
     }
 }
