@@ -37,6 +37,11 @@ URI-only domain certificates follow [RFC 5922](https://www.rfc-editor.org/rfc/rf
 Untrusted or mismatched peers receive no registration request.
 Authentication and refresh reuse the verified connection.
 TLS uses port 5061 when the registrar URI omits a port.
+Initial TCP and TLS requests check the first usable resolved candidate for an open matching flow before connecting.
+TLS reuse requires the captured client configuration, settings generation, and verified domain.
+Setup metadata remains limited to sixteen slots while sixty-four streams are active or connecting.
+An open backup doesn't bypass a preferred candidate.
+Reuse after an earlier candidate's connection failure remains pending.
 The driver uses matching provisional and final responses, the shared Digest implementation, and validated Contact grants.
 Successful grants schedule refresh requests with renewed authorization counters.
 Retry policy and configuration replacement remain pending in the driver.

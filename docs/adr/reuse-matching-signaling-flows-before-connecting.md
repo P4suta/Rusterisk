@@ -13,6 +13,7 @@ Connection reservations begin before resolution, blocking reuse when sixty-four 
 ## Decision
 
 Use independent limits of sixteen setup metadata slots and sixty-four connection slots.
+Preserve [candidate priority](https://www.rfc-editor.org/rfc/rfc2782.html).
 Capture configuration generation and the immutable TLS context at setup admission.
 Compare the starting TLS profile, verified original domain, listener, and connection generation before reuse.
 Reject cancelled requests, closed streams, unverified TLS peers, and stale profiles before publishing reuse.
