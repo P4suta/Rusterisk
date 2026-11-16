@@ -145,3 +145,29 @@ fn server_startup_checks_reject_missing_candidates_before_creating_execution_sta
         Ok(())
     })
 }
+
+#[cfg(unix)]
+#[test]
+fn server_sdk_checks_require_both_candidates_before_creating_execution_state(
+) -> Result<(), SdkCandidateBuildError> {
+    using_project("server-sdk-cli", |root, _| {
+        let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args([
+                "distribution",
+                "server",
+                "verify",
+                "--candidate",
+                "missing-server",
+                "--sdk-candidate",
+                "missing-sdk",
+            ])
+            .current_dir(root)
+            .env("PATH", "")
+            .output()?;
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("usage:"));
+        assert!(output.stdout.is_empty());
+        assert!(!root.join(".cache").exists());
+        Ok(())
+    })
+}

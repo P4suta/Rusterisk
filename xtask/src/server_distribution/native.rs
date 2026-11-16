@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn native_target() -> io::Result<ServerTarget> {
+pub(super) fn native_target() -> io::Result<ServerTarget> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Ok(ServerTarget::MacOsArm64),
         ("macos", "x86_64") => Ok(ServerTarget::MacOsX86_64),
@@ -52,7 +52,11 @@ fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.flush()
 }
 
-fn combine(operation: io::Result<()>, cleanup: io::Result<()>, context: &str) -> io::Result<()> {
+pub(super) fn combine(
+    operation: io::Result<()>,
+    cleanup: io::Result<()>,
+    context: &str,
+) -> io::Result<()> {
     match (operation, cleanup) {
         (operation, Ok(())) => operation,
         (Ok(()), Err(error)) => Err(error),
@@ -233,7 +237,12 @@ fn startup(
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        client(&mut service, http)
+        let result = client(&mut service, http);
+        combine(
+            result,
+            service.poll().map_err(io::Error::other),
+            "server lifetime",
+        )
     })();
     let operation = combine(
         operation,

@@ -29,6 +29,10 @@ pub use ready::check_server_ready_log;
 mod native;
 #[cfg(unix)]
 pub use native::{check_server_startup_with, verify_server_native_with};
+#[cfg(unix)]
+mod sdk_interop;
+#[cfg(unix)]
+pub use sdk_interop::verify_server_sdk_with;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {
