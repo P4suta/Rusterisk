@@ -63,7 +63,7 @@ async fn seeking_discards_prefetched_audio_and_uses_the_requested_sample() -> Re
             "seek did not update the position",
         )?;
         verify(
-            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == &[4000; 160],
+            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == [4000; 160],
             "seek returned prefetched audio",
         )?;
         verify(
@@ -72,12 +72,12 @@ async fn seeking_discards_prefetched_audio_and_uses_the_requested_sample() -> Re
         )?;
         source.seek_sample(0)?;
         verify(
-            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == &[1000; 160],
+            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == [1000; 160],
             "rewind returned incorrect audio",
         )?;
         source.seek_sample(799)?;
         verify(
-            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == &[5000],
+            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == [5000],
             "seek did not preserve the final sample",
         )?;
         verify(
@@ -104,7 +104,7 @@ async fn seeking_can_replace_a_prefetched_end_marker_and_clamps_to_the_recording
         let mut source = open_source(&port).await?;
         source.seek_sample(0)?;
         verify(
-            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == &[1000; 160],
+            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == [1000; 160],
             "queued end marker blocked rewind",
         )?;
         source.seek_sample(u64::MAX)?;
@@ -114,7 +114,7 @@ async fn seeking_can_replace_a_prefetched_end_marker_and_clamps_to_the_recording
         )?;
         source.seek_sample(0)?;
         verify(
-            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == &[1000; 160],
+            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == [1000; 160],
             "end marker from the previous seek stopped audio",
         )?;
         verify(
@@ -129,7 +129,7 @@ async fn seeking_can_replace_a_prefetched_end_marker_and_clamps_to_the_recording
                 .await?
                 .ok_or(WorkerError::Invalid)?
                 .samples()
-                == &[1000; 160],
+                == [1000; 160],
             "replacement source did not start",
         )?;
         Ok(())
