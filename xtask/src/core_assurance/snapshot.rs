@@ -231,15 +231,13 @@ mod tests {
         Ok(source.into_bytes())
     }
 
-    #[test]
-    fn miri_discovery_cannot_omit_transfer_tests_from_the_actual_source(
-    ) -> Result<(), AssuranceError> {
+    fn omission_is_rejected(path: &str) -> Result<(), AssuranceError> {
         let core = Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/core");
         let snapshot = Snapshot::read(&core)?;
         let transfer = snapshot
             .files
             .iter()
-            .find(|file| file.path == Path::new("tests/transfer.rs"))
+            .find(|file| file.path == Path::new(path))
             .ok_or(AssuranceError::Manifest)?;
         let file = syn::parse_file(
             std::str::from_utf8(&transfer.bytes).map_err(|_| AssuranceError::Manifest)?,
@@ -257,5 +255,17 @@ mod tests {
             .collect();
         assert!(validate_miri_discovery(&discovery(&missing)?, &snapshot.tests, 1).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn miri_discovery_cannot_omit_transfer_tests_from_the_actual_source(
+    ) -> Result<(), AssuranceError> {
+        omission_is_rejected("tests/transfer.rs")
+    }
+
+    #[test]
+    fn miri_discovery_cannot_omit_attended_tests_from_the_actual_source(
+    ) -> Result<(), AssuranceError> {
+        omission_is_rejected("tests/attended_transfer.rs")
     }
 }

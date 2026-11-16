@@ -17,7 +17,7 @@ pub use mutation::{validate_mutation_inventory, validate_mutation_outcomes, Muta
 pub use runner::{execute, Task};
 
 pub const NIGHTLY: &str = "nightly-2026-08-21";
-pub const MUTATION_FILTER: &str = "(Call::(apply|claim_connection|reserve_stasis|enter_stasis|move_stasis|leave_stasis|join|leave)|MediaTasks::(reserve|index|cancel|finish)|ResourceSubscriptions.*::(subscribe|unsubscribe|expire)|Transfer::(begin|finish|participant_ended))\\b";
+pub const MUTATION_FILTER: &str = "(Call::(apply|claim_connection|reserve_stasis|enter_stasis|move_stasis|leave_stasis|join|leave)|MediaTasks::(reserve|index|cancel|finish)|ResourceSubscriptions.*::(subscribe|unsubscribe|expire)|Transfer::(begin|finish|participant_ended)|AttendedTransfer::(begin|finish|participant_ended))\\b";
 
 #[derive(Debug)]
 pub enum AssuranceError {
@@ -262,6 +262,8 @@ impl CoreAssurancePlan {
                         "src/resource_subscriptions.rs",
                         "--file",
                         "src/transfer.rs",
+                        "--file",
+                        "src/attended_transfer.rs",
                         "--re",
                         MUTATION_FILTER,
                     ]

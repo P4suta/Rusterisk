@@ -11,10 +11,11 @@ enum Invariant {
     MediaTasks,
     Subscriptions,
     Transfer,
+    AttendedTransfer,
 }
 
 impl Invariant {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Terminal,
         Self::Connection,
         Self::Stasis,
@@ -22,6 +23,7 @@ impl Invariant {
         Self::MediaTasks,
         Self::Subscriptions,
         Self::Transfer,
+        Self::AttendedTransfer,
     ];
 
     fn of(file: &str, function: &str) -> Option<Self> {
@@ -55,6 +57,12 @@ impl Invariant {
                 "src/transfer.rs",
                 "Transfer::begin" | "Transfer::finish" | "Transfer::participant_ended",
             ) => Some(Self::Transfer),
+            (
+                "src/attended_transfer.rs",
+                "AttendedTransfer::begin"
+                | "AttendedTransfer::finish"
+                | "AttendedTransfer::participant_ended",
+            ) => Some(Self::AttendedTransfer),
             _ => None,
         }
     }
@@ -68,6 +76,7 @@ impl Invariant {
             Self::MediaTasks => "media ownership",
             Self::Subscriptions => "subscription bounds",
             Self::Transfer => "transfer ownership",
+            Self::AttendedTransfer => "attended transfer ownership",
         }
     }
 }

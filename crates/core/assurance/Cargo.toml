@@ -14,6 +14,10 @@ test = false
 doctest = false
 
 [[test]]
+name = "attended_transfer"
+path = "../tests/attended_transfer.rs"
+
+[[test]]
 name = "connection_claim"
 path = "../tests/connection_claim.rs"
 
