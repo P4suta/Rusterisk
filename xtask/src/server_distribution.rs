@@ -3,6 +3,8 @@ mod binary_target;
 pub use binary_target::{check_binary_target_header, BinaryTargetError};
 mod payload;
 pub use payload::{PayloadError, ServerPayload};
+mod tar_gzip;
+pub use tar_gzip::write_server_tar_gzip;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {

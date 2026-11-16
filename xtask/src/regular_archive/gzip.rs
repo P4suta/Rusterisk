@@ -74,6 +74,14 @@ pub struct ArchiveLimits {
 }
 
 impl ArchiveLimits {
+    pub const SERVER: Self = Self {
+        compressed: 272 * 1024 * 1024,
+        expanded: 272 * 1024 * 1024,
+        file: 256 * 1024 * 1024,
+        entries: 9,
+        depth: 2,
+    };
+
     pub const SDK: Self = Self {
         compressed: 16 * 1024 * 1024,
         expanded: 32 * 1024 * 1024,
