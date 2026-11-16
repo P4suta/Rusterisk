@@ -7,34 +7,33 @@ status: proposed
 
 ## Context
 
-A cached `REFER` reply can outlive its notification usage.
-[RFC 3261](https://www.rfc-editor.org/rfc/rfc3261.html#section-17.2.2) retains non-INVITE server transactions for retransmissions.
-Notification completion must preserve reply routing.
+Cached `REFER` replies can outlive notification usage.
+[RFC 3261](https://www.rfc-editor.org/rfc/rfc3261.html#section-17.2.3) requires transaction context because legacy response headers lack Request-URI.
 
 ## Decision
 
-Capture a payload-free Network route before Controller mutation.
-Use the transaction identity and expiry retained by `Engine` after notification termination.
-Keep listener, peer, and connection generation while either usage or cached reply remains.
-Check peer and generation on every send.
-Prune expired records before admission.
-Bound each engine to its 64 `REFER` owner slots plus 256 server transaction slots.
-Reject insertion before Controller mutation when capacity is unavailable.
-Keep normal call, registration, and target lifetimes independent.
+Tag packets with their originating `ReferKey` inside `Engine`.
+Preserve provenance in reply caches and notification retries.
+Capture network routes before Controller mutation.
+Use the tag and existing transaction expiry to keep routes after subscription termination.
+Check peer and connection generation on every send.
+Prune expired routes before admission.
+Bound each engine to 64 notification owners plus 256 server transactions.
+Reject capacity before Controller mutation.
+Keep call, registration, and target lifetimes independent.
 
 ## Alternatives
 
-An independent retired map with 64 slots uses less memory but duplicates expiry and needs separate admission checks.
-Current-peer routing can send an old reply through a replacement connection.
+Parsing headers uses fewer fields but can't recover legacy Request-URI.
+An independent retired map duplicates expiry and admission checks.
 
 ## Consequences
 
-Notification completion doesn't immediately release cached reply routing.
-Keep metadata without copying packets.
-Reconsider the decision after changes to the 64/256 limits or cache lifetime.
+Packet provenance adds exhaustive dispatch.
+Reconsider changes to provenance, cache lifetime, or the 64/256 limits.
 
 ## Confirmation
 
 Replay cached `202` after final `NOTIFY` settlement.
-Deliver through the original flow and suppress replacement flows.
-Exercise expiry, saturation, disconnect, and shutdown while preserving unrelated `INVITE`, `REGISTER`, and target audio.
+Deliver through original connections and suppress replacements.
+Exercise mismatched transactions, expiry, saturation, disconnect, and shutdown without stopping unrelated calls, registrations, or target audio.
