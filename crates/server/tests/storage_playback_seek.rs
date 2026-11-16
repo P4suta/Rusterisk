@@ -7,6 +7,16 @@ fn name() -> Result<ChannelId, WorkerError> {
     ChannelId::try_from("seek".to_owned()).map_err(|_| WorkerError::Invalid)
 }
 
+fn verify(condition: bool, message: &'static str) -> Result<(), WorkerError> {
+    if condition {
+        Ok(())
+    } else {
+        Err(WorkerError::Storage(StorageError::Io(
+            std::io::Error::other(message),
+        )))
+    }
+}
+
 fn write(root: &std::path::Path, values: &[i16]) -> Result<(), WorkerError> {
     let mut recording = Recorder::create(root, "seek", 8000)?;
     for value in values {
@@ -45,27 +55,39 @@ async fn seeking_discards_prefetched_audio_and_uses_the_requested_sample() -> Re
     let (port, worker) = StorageWorker::start(root.path().to_owned()).await?;
     let operation = async {
         let mut source = open_source(&port).await?;
-        assert_eq!(source.rate(), 8000);
-        assert_eq!(source.sample_count(), 800);
+        verify(source.rate() == 8000, "incorrect source rate")?;
+        verify(source.sample_count() == 800, "incorrect source size")?;
         source.seek_sample(3 * 160)?;
-        assert_eq!(source.sample_position(), 480);
-        assert_eq!(
-            source.read().await?.ok_or(WorkerError::Invalid)?.samples(),
-            &[4000; 160]
-        );
-        assert_eq!(source.sample_position(), 640);
+        verify(
+            source.sample_position() == 480,
+            "seek did not update the position",
+        )?;
+        verify(
+            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == &[4000; 160],
+            "seek returned prefetched audio",
+        )?;
+        verify(
+            source.sample_position() == 640,
+            "reading did not advance the position",
+        )?;
         source.seek_sample(0)?;
-        assert_eq!(
-            source.read().await?.ok_or(WorkerError::Invalid)?.samples(),
-            &[1000; 160]
-        );
+        verify(
+            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == &[1000; 160],
+            "rewind returned incorrect audio",
+        )?;
         source.seek_sample(799)?;
-        assert_eq!(
-            source.read().await?.ok_or(WorkerError::Invalid)?.samples(),
-            &[5000]
-        );
-        assert!(source.read().await?.is_none());
-        assert!(matches!(source.seek_sample(0), Err(WorkerError::Closed)));
+        verify(
+            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == &[5000],
+            "seek did not preserve the final sample",
+        )?;
+        verify(
+            source.read().await?.is_none(),
+            "audio continued past the recording",
+        )?;
+        verify(
+            matches!(source.seek_sample(0), Err(WorkerError::Closed)),
+            "completed source accepted a seek",
+        )?;
         Ok(())
     }
     .await;
@@ -81,28 +103,35 @@ async fn seeking_can_replace_a_prefetched_end_marker_and_clamps_to_the_recording
     let operation = async {
         let mut source = open_source(&port).await?;
         source.seek_sample(0)?;
-        assert_eq!(
-            source.read().await?.ok_or(WorkerError::Invalid)?.samples(),
-            &[1000; 160]
-        );
+        verify(
+            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == &[1000; 160],
+            "queued end marker blocked rewind",
+        )?;
         source.seek_sample(u64::MAX)?;
-        assert_eq!(source.sample_position(), 160);
+        verify(
+            source.sample_position() == 160,
+            "seek exceeded the recording size",
+        )?;
         source.seek_sample(0)?;
-        assert_eq!(
-            source.read().await?.ok_or(WorkerError::Invalid)?.samples(),
-            &[1000; 160]
-        );
-        assert!(source.read().await?.is_none());
+        verify(
+            source.read().await?.ok_or(WorkerError::Invalid)?.samples() == &[1000; 160],
+            "end marker from the previous seek stopped audio",
+        )?;
+        verify(
+            source.read().await?.is_none(),
+            "short recording did not finish",
+        )?;
         drop(source);
         let mut replacement = open_source(&port).await?;
-        assert_eq!(
+        verify(
             replacement
                 .read()
                 .await?
                 .ok_or(WorkerError::Invalid)?
-                .samples(),
-            &[1000; 160]
-        );
+                .samples()
+                == &[1000; 160],
+            "replacement source did not start",
+        )?;
         Ok(())
     }
     .await;
@@ -120,8 +149,8 @@ async fn a_failed_seek_read_preserves_the_storage_error_and_closes_the_source(
         let file = std::fs::OpenOptions::new().write(true).open(root.path().join("recordings/seek.wav"))?;
         file.set_len(44)?;
         source.seek_sample(0)?;
-        assert!(matches!(source.read().await, Err(WorkerError::Storage(StorageError::Io(error))) if error.kind() == std::io::ErrorKind::UnexpectedEof));
-        assert!(matches!(source.seek_sample(0), Err(WorkerError::Closed)));
+        verify(matches!(source.read().await, Err(WorkerError::Storage(StorageError::Io(error))) if error.kind() == std::io::ErrorKind::UnexpectedEof), "seek hid a truncated-file error")?;
+        verify(matches!(source.seek_sample(0), Err(WorkerError::Closed)), "failed source accepted a seek")?;
         Ok(())
     }.await;
     combine(operation, worker.close().await)
