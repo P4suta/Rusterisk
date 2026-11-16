@@ -133,7 +133,7 @@ fn run(program: &str, arguments: &[&str]) -> Result<(), TaskError> {
 }
 
 fn execute() -> Result<(), TaskError> {
-    let arguments: Vec<String> = std::env::args().skip(1).take(6).collect();
+    let arguments: Vec<String> = std::env::args().skip(1).take(8).collect();
     match arguments.as_slice() {
         [task, flag, archive] if task == "vendor-patch" && flag == "--archive" => {
             let count = xtask::vendor::patch(&std::env::current_dir()?, Path::new(archive))
@@ -220,6 +220,12 @@ fn execute() -> Result<(), TaskError> {
             xtask::server_distribution::plan_server(&std::env::current_dir()?, target).map_err(TaskError::Io)
         },
         [task, scope, operation, flag, target] if task == "distribution" && scope == "server" && operation == "build" && flag == "--target" => distribution_server_build(target),
+        [task, scope, operation, candidate_flag, candidate, target_flag, target] if task == "distribution" && scope == "server" && operation == "check-content" && candidate_flag == "--candidate" && target_flag == "--target" => {
+            let target = xtask::server_distribution::ServerTarget::parse(target).map_err(|error| TaskError::Contract(error.to_string()))?;
+            let candidate = xtask::server_distribution::ServerCandidate::read(Path::new(candidate), target)?;
+            println!("server candidate contents passed source={} target={}", candidate.source_digest(), candidate.name().target().triple());
+            Ok(())
+        },
         [task] if task == "check" => {
             distribution_check()?;
             xtask::vendor::check(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string()))?;

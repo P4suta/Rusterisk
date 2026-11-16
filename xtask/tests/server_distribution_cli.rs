@@ -96,3 +96,28 @@ fn server_build_startup_failures_keep_candidate_inputs_and_release_execution_sta
         Ok(())
     })
 }
+
+#[test]
+fn server_content_checks_refuse_missing_candidates_without_starting_external_tools(
+) -> Result<(), SdkCandidateBuildError> {
+    using_project("server-content-cli", |root, _| {
+        let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args([
+                "distribution",
+                "server",
+                "check-content",
+                "--candidate",
+                "missing",
+                "--target",
+                "aarch64-apple-darwin",
+            ])
+            .current_dir(root)
+            .env("PATH", "")
+            .output()?;
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("usage:"));
+        assert!(!root.join(".cache").exists());
+        Ok(())
+    })
+}

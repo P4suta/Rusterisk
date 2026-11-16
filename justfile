@@ -39,6 +39,9 @@ distribution-server-plan target:
 distribution-server-build target:
     cargo run --locked --target-dir target/xtask --package xtask -- distribution server build --target {{ quote(target) }}
 
+distribution-server-check-content candidate target:
+    cargo run --locked --target-dir target/xtask --package xtask -- distribution server check-content --candidate {{ quote(candidate) }} --target {{ quote(target) }}
+
 browser-example port="3000": browser-check
     cargo run --locked --package rusterisk-server --example browser -- "{{ port }}"
 
