@@ -21,6 +21,7 @@ use media::{PendingMedia, PendingWebRtc};
 mod negotiation_tests;
 mod outbound;
 mod recording;
+mod registrations;
 mod resolver;
 pub(crate) mod sip_websocket;
 #[cfg(test)]
@@ -81,6 +82,7 @@ pub struct Signaling {
     notices: mpsc::Receiver<MediaNotice>,
     listeners: Vec<Listener>,
     network: transport::Network,
+    registrations: registrations::Registrations,
     native_pending: BTreeMap<CallKey, outbound::Pending>,
     native_jobs: JoinSet<outbound::Completion>,
     resolver: Result<resolver::DestinationResolver, ControlError>,
@@ -136,6 +138,7 @@ impl Signaling {
         if config.transports.len() > rusterisk_config::MAX_TRANSPORTS {
             return Err(ControlError::Capacity);
         }
+        let registrations = registrations::Registrations::new(&config)?;
         let websocket_clients = websocket::PreparedClients::new(&config.websocket.clients)?;
         let network = transport::Network::bind(&mut config).await?;
         let mut listeners = Vec::with_capacity(config.transports.len());
@@ -159,6 +162,7 @@ impl Signaling {
             notices,
             listeners,
             network,
+            registrations,
             native_pending: BTreeMap::new(),
             native_jobs: JoinSet::new(),
             resolver: resolver::DestinationResolver::system(),
@@ -1133,6 +1137,7 @@ impl Signaling {
                         self.output(listener, output, now).await?;
                     }
                     self.digit_tick(now).await?;
+                    self.registration_tick(now).await?;
                 }
             }
         }
@@ -1142,6 +1147,7 @@ impl Signaling {
     pub async fn run(mut self, mut stop: watch::Receiver<bool>) -> Result<(), ControlError> {
         let started = Instant::now();
         let result = self.serve(&mut stop, started).await;
+        self.registrations.cancel();
         let mut cleanup = Ok(());
         let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
         if let Err(error) = self.finish_native().await {
