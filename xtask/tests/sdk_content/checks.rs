@@ -141,10 +141,11 @@ fn captured_inputs_reject_duplicates_missing_roots_and_excessive_counts(
         &archive
     )
     .is_err());
-    let names: Vec<_> = (0..1025)
+    let limit = xtask::browser::SourceSnapshot::MAX_FILES;
+    let names: Vec<_> = (0..limit + 1)
         .map(|index| std::path::PathBuf::from(format!("extra/{index}")))
         .collect();
-    let remaining = 1024 - fixture.source.len();
+    let remaining = limit - fixture.source.len();
     let entries = || {
         names
             .iter()

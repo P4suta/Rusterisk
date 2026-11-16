@@ -46,7 +46,7 @@ fn captured<'a>(
         total = total
             .checked_add(bytes.len())
             .ok_or(SdkContentError::Source)?;
-        if files.len() >= 1024
+        if files.len() >= crate::browser::SourceSnapshot::MAX_FILES
             || total > 40 * 1024 * 1024
             || bytes.len() > 8 * 1024 * 1024
             || path.as_os_str().is_empty()
