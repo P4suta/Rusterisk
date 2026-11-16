@@ -6,6 +6,7 @@ pub mod core_proofs;
 pub mod distribution;
 pub mod input_fuzz;
 pub mod legacy_audit;
+pub mod native_sanitizers;
 pub mod process;
 pub mod reference;
 pub mod regular_archive;
