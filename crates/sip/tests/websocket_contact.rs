@@ -2,8 +2,9 @@ use rusterisk_config::{Config, Protocol};
 use rusterisk_sip::{Engine, Outbound, SipError};
 
 #[test]
-fn secure_websocket_contacts_use_sips_with_the_registered_ws_parameter() -> Result<(), SipError> {
-    for (protocol, token, scheme) in [(Protocol::Ws, "ws", "sip"), (Protocol::Wss, "wss", "sips")] {
+fn websocket_contacts_preserve_sip_targets_and_the_registered_ws_parameter() -> Result<(), SipError>
+{
+    for (protocol, token) in [(Protocol::Ws, "ws"), (Protocol::Wss, "wss")] {
         let http = if protocol == Protocol::Wss {
             "[general]\nbindaddr=127.0.0.1\ntlsenable=yes\ntlsbindaddr=127.0.0.1:8089\ntlscertfile=certificate.pem\ntlsprivatekey=private-key.pem\n"
         } else {
@@ -27,7 +28,7 @@ fn secure_websocket_contacts_use_sips_with_the_registered_ws_parameter() -> Resu
         assert!(wire.contains(&format!("Via: SIP/2.0/{} ", token.to_ascii_uppercase())));
         assert!(
             wire.contains(&format!(
-                "Contact: <{scheme}:rusterisk@{address};transport=ws>\r\n"
+                "Contact: <sip:rusterisk@{address};transport=ws>\r\n"
             )),
             "{wire}"
         );

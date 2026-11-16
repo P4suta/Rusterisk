@@ -66,7 +66,7 @@ fn next(source: &mut std::slice::Iter<'_, u8>, fold: bool) -> Option<(bool, u8)>
     ))
 }
 
-fn component(left: &str, right: &str, fold: bool) -> bool {
+pub(super) fn component(left: &str, right: &str, fold: bool) -> bool {
     let mut left = left.as_bytes().iter();
     let mut right = right.as_bytes().iter();
     loop {

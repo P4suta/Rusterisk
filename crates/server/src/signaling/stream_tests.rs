@@ -57,8 +57,7 @@ fn registration(
     authorization: &str,
 ) -> String {
     format!(
-        "REGISTER sip:{target} SIP/2.0\r\nVia: SIP/2.0/{token} {local};branch=z9hG4bK-register-{serial};rport\r\nFrom: <sip:phone@localhost>;tag=phone\r\nTo: <sip:phone@localhost>\r\nCall-ID: registration\r\nCSeq: {serial} REGISTER\r\nContact: <sip:phone@{local};transport={}>\r\nExpires: 120\r\nMax-Forwards: 70\r\n{authorization}Content-Length: 0\r\n\r\n",
-        token.to_ascii_lowercase()
+        "REGISTER sip:{target} SIP/2.0\r\nVia: SIP/2.0/{token} {local};branch=z9hG4bK-register-{serial};rport\r\nFrom: <sip:phone@localhost>;tag=phone\r\nTo: <sip:phone@localhost>\r\nCall-ID: registration\r\nCSeq: {serial} REGISTER\r\nContact: <sip:phone@{local};transport=tcp>\r\nExpires: 120\r\nMax-Forwards: 70\r\n{authorization}Content-Length: 0\r\n\r\n"
     )
 }
 
@@ -155,7 +154,7 @@ async fn channel_state(
     .map_err(failure)?
 }
 
-fn answer(request: &Request, local: SocketAddr, token: &str) -> Result<String, ControlError> {
+fn answer(request: &Request, local: SocketAddr) -> Result<String, ControlError> {
     let body = Session::parse(
         std::str::from_utf8(&request.body).map_err(failure)?,
         &[Codec::Pcmu],
@@ -164,13 +163,12 @@ fn answer(request: &Request, local: SocketAddr, token: &str) -> Result<String, C
     .answer("127.0.0.1:19000".parse().map_err(failure)?, 1)
     .map_err(failure)?;
     Ok(format!(
-        "SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=phone\r\nCall-ID: {}\r\nCSeq: {}\r\nContact: <sip:phone@{local};transport={}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}",
+        "SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=phone\r\nCall-ID: {}\r\nCSeq: {}\r\nContact: <sip:phone@{local};transport=tcp>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}",
         request.top_via_header().map_err(failure)?.value(),
         request.from_header().map_err(failure)?.value(),
         request.to_header().map_err(failure)?.value(),
         request.call_id_header().map_err(failure)?.value(),
         request.cseq_header().map_err(failure)?.value(),
-        token.to_ascii_lowercase(),
         body.len()
     ))
 }
@@ -247,7 +245,7 @@ async fn exercise<S: AsyncRead + AsyncWrite + Unpin>(
     }
     let (id, invite) =
         originated(&mut peer, &mut decoder, controller, "native-call", token).await?;
-    let response = answer(&invite, local, token)?;
+    let response = answer(&invite, local)?;
     for bytes in response.as_bytes().chunks(13) {
         peer.write_all(bytes).await.map_err(failure)?;
     }
@@ -370,7 +368,7 @@ async fn initial_call<S: AsyncRead + AsyncWrite + Unpin>(
         .map_err(failure)?
         .value()
         .starts_with(&format!("SIP/2.0/{token} ")));
-    peer.write_all(answer(&invite, local, token)?.as_bytes())
+    peer.write_all(answer(&invite, local)?.as_bytes())
         .await
         .map_err(failure)?;
     let SipMessage::Request(ack) = receive(&mut peer, &mut decoder).await? else {

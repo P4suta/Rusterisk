@@ -574,6 +574,7 @@ impl Engine {
         }
         let signaling = transport.bind;
         let protocol = transport.protocol;
+        let uri_security = crate::transport::UriSecurity::target(protocol, &uri)?;
         let token = self.token()?;
         let body = match sdp {
             Some(sdp) => sdp.to_owned(),
@@ -585,7 +586,7 @@ impl Engine {
             &outbound.caller
         };
         let token_transport = crate::transport::token(protocol);
-        let contact = crate::transport::contact(protocol, signaling);
+        let contact = crate::transport::contact(protocol, signaling, uri_security);
         let bytes = format!(
             "INVITE {uri} SIP/2.0\r\nVia: SIP/2.0/{token_transport} {signaling};branch=z9hG4bK-{token};rport\r\nFrom: <sip:{caller}@{}>;tag={token}\r\nTo: <{uri}>\r\nCall-ID: {token}@rusterisk\r\nCSeq: 1 INVITE\r\nContact: {contact}\r\nMax-Forwards: 70\r\nAllow: INVITE, ACK, CANCEL, BYE, OPTIONS, INFO, REFER\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}",
             signaling.ip(),

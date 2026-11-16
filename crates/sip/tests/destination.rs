@@ -14,7 +14,7 @@ fn static_targets_preserve_original_hosts_explicit_ports_and_transport_policy(
         (Protocol::Tls, "sips:phone@example.test;transport=tcp", None),
         (
             Protocol::Tls,
-            "sip:phone@example.test:5061;transport=tls",
+            "sip:phone@example.test:5061;transport=tcp",
             Some(5061),
         ),
     ] {
@@ -33,6 +33,7 @@ fn static_targets_preserve_original_hosts_explicit_ports_and_transport_policy(
         (Protocol::Tcp, "sips:phone@example.test"),
         (Protocol::Tcp, "sip:phone@example.test;transport=udp"),
         (Protocol::Tls, "sips:phone@example.test;transport=udp"),
+        (Protocol::Tls, "sip:phone@example.test;transport=tls"),
         (Protocol::Tcp, "sip:phone:password@example.test"),
         (Protocol::Tcp, "sip:phone@example.test;maddr=other.test"),
         (Protocol::Tcp, "sip:phone@example.test?Subject=ignored"),

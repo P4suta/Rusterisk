@@ -3,6 +3,10 @@ mod identity;
 
 const MAX_ENTRIES: usize = 32;
 
+pub(super) fn parameter_eq(left: &str, right: &str) -> bool {
+    identity::component(left, right, true)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContactError {
     Invalid,

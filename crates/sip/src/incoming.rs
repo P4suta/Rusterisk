@@ -97,7 +97,11 @@ impl Engine {
                 generation: dialog.generation,
                 peer: dialog.invite.peer,
                 wire: crate::transfer::wire::Dialog::remote(request)?,
-                contact: crate::transport::contact(dialog.invite.protocol, dialog.invite.local),
+                contact: crate::transport::contact(
+                    dialog.invite.protocol,
+                    dialog.invite.local,
+                    dialog.invite.uri_security,
+                ),
                 authority: dialog.invite.authority.clone(),
                 usage: match dialog.state {
                     State::Terminated { .. } => Usage::Ended,
@@ -380,7 +384,7 @@ impl Engine {
         let answer_version = crate::media_direction::version(&local_security, generation)?;
         let extra = format!(
             "Contact: {}\r\nAllow: INVITE, ACK, CANCEL, BYE, OPTIONS\r\nSupported: \r\n",
-            crate::transport::contact(invite.protocol, invite.local)
+            crate::transport::contact(invite.protocol, invite.local, invite.uri_security)
         );
         let bytes = response(
             &tagged(&invite.request, &invite.local_tag)?,
@@ -544,7 +548,11 @@ impl Engine {
             };
             let extra = format!(
                 "Contact: {}\r\n",
-                crate::transport::contact(dialog.invite.protocol, dialog.invite.local)
+                crate::transport::contact(
+                    dialog.invite.protocol,
+                    dialog.invite.local,
+                    dialog.invite.uri_security
+                )
             );
             let bytes = response(
                 request,

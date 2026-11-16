@@ -37,7 +37,7 @@ fn reliable_invites_advertise_the_transport_and_timeout_without_retransmission(
         )?;
         let wire = std::str::from_utf8(&output.datagrams[0].bytes)?;
         assert!(wire.contains(&format!("Via: SIP/2.0/{token} ")));
-        assert!(wire.contains(&format!(";transport={}>\r\n", token.to_ascii_lowercase())));
+        assert!(wire.contains(";transport=tcp>\r\n"));
         for now in [500, 1500, 3500, 7500, 15_500, 31_500] {
             assert!(engine.tick(now)?.datagrams.is_empty());
         }

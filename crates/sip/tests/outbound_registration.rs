@@ -23,10 +23,11 @@ fn settings(protocol: &str, extra: &str) -> Result<Registration, SipError> {
         "tls" => "sips:provider.example\\;transport=tcp",
         _ => return Err(SipError::Unsupported),
     };
+    let scheme = if protocol == "tls" { "sips" } else { "sip" };
     let config = Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
         "[app]\ntype=user\npassword=sample\n",
-        &format!("[stream]\ntype=transport\nprotocol={protocol}\nbind=127.0.0.1:5060\n{tls}[credential]\ntype=auth\nusername=account\npassword=sample\n[provider]\ntype=registration\ntransport=stream\noutbound_auth=credential\nserver_uri={registrar}\nclient_uri=sip:%61ccount@Provider.Example\ncontact_user=line+1\n{extra}"),
+        &format!("[stream]\ntype=transport\nprotocol={protocol}\nbind=127.0.0.1:5060\n{tls}[credential]\ntype=auth\nusername=account\npassword=sample\n[provider]\ntype=registration\ntransport=stream\noutbound_auth=credential\nserver_uri={registrar}\nclient_uri={scheme}:%61ccount@Provider.Example\ncontact_user=line+1\n{extra}"),
         "",
         "",
     )?;
@@ -158,8 +159,7 @@ fn reliable_requests_have_a_finite_deadline_without_retransmission() -> Result<(
         let wire = std::str::from_utf8(&packet.bytes)?;
         assert!(wire.contains(&format!("Via: SIP/2.0/{token} ")));
         assert!(wire.contains(&format!(
-            "Contact: <{scheme}:line+1@127.0.0.1:5068;transport={}>\r\n",
-            token.to_ascii_lowercase()
+            "Contact: <{scheme}:line+1@127.0.0.1:5068;transport=tcp>\r\n"
         )));
         assert_eq!(pending.next_deadline(), Some(32_000));
         for now in [500, 1500, 3500, 7500, 31_999] {

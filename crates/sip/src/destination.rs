@@ -1,7 +1,7 @@
 use crate::{Engine, SipError};
 use rsipstack::sip::{
     uri::{Host, Param},
-    Scheme, Transport, Uri,
+    Uri,
 };
 use rusterisk_config::Protocol;
 use std::net::{IpAddr, SocketAddr};
@@ -31,13 +31,8 @@ impl StaticTarget {
             return Err(SipError::Capacity);
         }
         let uri = Uri::try_from(source)?;
-        let secure = match &uri.scheme {
-            Some(Scheme::Sip) => false,
-            Some(Scheme::Sips) => true,
-            Some(Scheme::Other(_)) | None => return Err(SipError::Unsupported),
-        };
+        crate::transport::UriSecurity::target(protocol, &uri)?;
         if matches!(protocol, Protocol::Ws | Protocol::Wss)
-            || secure && protocol != Protocol::Tls
             || !uri.headers.is_empty()
             || uri
                 .auth
@@ -51,20 +46,6 @@ impl StaticTarget {
             })
         {
             return Err(SipError::Unsupported);
-        }
-        for parameter in &uri.params {
-            if let Param::Transport(selected) = parameter {
-                let matches =
-                    matches!(
-                        (protocol, selected),
-                        (Protocol::Udp, Transport::Udp)
-                            | (Protocol::Tcp, Transport::Tcp)
-                            | (Protocol::Tls, Transport::Tls)
-                    ) || secure && protocol == Protocol::Tls && *selected == Transport::Tcp;
-                if !matches {
-                    return Err(SipError::Unsupported);
-                }
-            }
         }
         let port = uri.host_with_port.port.map(|port| port.0);
         if port == Some(0) {

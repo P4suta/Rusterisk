@@ -429,6 +429,7 @@ pub struct PendingInvite {
     pub local_tag: String,
     local: SocketAddr,
     protocol: Protocol,
+    uri_security: transport::UriSecurity,
     authority: ReferAuthority,
 }
 
@@ -699,6 +700,31 @@ impl Engine {
                 self.render_response(&request, 503, "Service Unavailable", "", "")?,
             ));
         }
+        let uri_security = if request.method == Method::Invite {
+            match transport::UriSecurity::incoming(self.protocol, &request) {
+                Ok(security) => Some(security),
+                Err(error) => {
+                    let (code, reason, extra) = match error {
+                        transport::IncomingSecurityError::Invalid => (400, "Bad Request", ""),
+                        transport::IncomingSecurityError::UnsupportedScheme => {
+                            (416, "Unsupported URI Scheme", "")
+                        }
+                        transport::IncomingSecurityError::SecureTransportRequired => (
+                            480,
+                            "Temporarily Unavailable",
+                            "Warning: 380 rusterisk \"SIPS Not Allowed\"\r\n",
+                        ),
+                        transport::IncomingSecurityError::Capacity => {
+                            (503, "Service Unavailable", "")
+                        }
+                    };
+                    let reply = self.render_response(&request, code, reason, extra, "")?;
+                    return self.cache_reply(key, request, peer, now, reply, Vec::new());
+                }
+            }
+        } else {
+            None
+        };
         if request.method == Method::Refer {
             return self.receive_refer(key, request, peer, now);
         }
@@ -819,6 +845,7 @@ impl Engine {
                                 local_tag,
                                 local,
                                 protocol: self.protocol,
+                                uri_security: uri_security.ok_or(SipError::InvalidPacket)?,
                                 authority,
                             },
                         );

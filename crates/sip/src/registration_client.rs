@@ -187,10 +187,21 @@ fn request(
     if settings.client_uri.is_secure() && protocol != Protocol::Tls {
         return Err(SipError::Unsupported);
     }
+    if settings.server_uri.is_secure() != settings.client_uri.is_secure() {
+        return Err(SipError::Unsupported);
+    }
     let (token, parameter, scheme) = match protocol {
         Protocol::Udp => ("UDP", "udp", "sip"),
         Protocol::Tcp => ("TCP", "tcp", "sip"),
-        Protocol::Tls => ("TLS", "tls", "sips"),
+        Protocol::Tls => (
+            "TLS",
+            "tcp",
+            if settings.client_uri.is_secure() {
+                "sips"
+            } else {
+                "sip"
+            },
+        ),
         Protocol::Ws | Protocol::Wss => return Err(SipError::Unsupported),
     };
     validate_user(&settings.contact_user)?;
