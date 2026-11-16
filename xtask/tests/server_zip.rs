@@ -1,6 +1,6 @@
 use std::io::{self, Cursor, Read, Write};
 use xtask::server_distribution::{
-    write_server_tar_gzip, write_server_zip, ServerPayload, ServerTarget,
+    check_server_zip, write_server_tar_gzip, write_server_zip, ServerPayload, ServerTarget,
 };
 
 fn payload() -> io::Result<ServerPayload> {
@@ -23,6 +23,107 @@ fn payload() -> io::Result<ServerPayload> {
         })
     })
     .map_err(io::Error::other)
+}
+
+#[test]
+fn zip_candidates_must_match_every_captured_file_and_its_metadata() -> io::Result<()> {
+    let payload = payload()?;
+    let mut bytes = Vec::new();
+    write_server_zip(&payload, &mut bytes)?;
+    check_server_zip(&payload, &bytes)?;
+    let end = bytes.len() - 22;
+    let directory = usize::try_from(u32::from_le_bytes(
+        bytes[end + 16..end + 20]
+            .try_into()
+            .map_err(io::Error::other)?,
+    ))
+    .map_err(io::Error::other)?;
+    let mut parsed = zip::ZipArchive::new(Cursor::new(&bytes)).map_err(io::Error::other)?;
+    let compressed = parsed.by_index(0)?.compressed_size();
+    let name_size = usize::from(u16::from_le_bytes(
+        bytes[26..28].try_into().map_err(io::Error::other)?,
+    ));
+    let data = 30 + name_size;
+    let descriptor = data + usize::try_from(compressed).map_err(io::Error::other)?;
+    for offset in [
+        0,
+        30,
+        data,
+        descriptor,
+        descriptor + 4,
+        descriptor + 8,
+        descriptor + 12,
+        directory,
+        directory + 8,
+        directory + 10,
+        directory + 12,
+        directory + 14,
+        directory + 16,
+        directory + 20,
+        directory + 24,
+        directory + 30,
+        directory + 32,
+        directory + 34,
+        directory + 40,
+        directory + 42,
+        directory + 46,
+        end + 4,
+        end + 6,
+        end + 8,
+        end + 10,
+        end + 12,
+        end + 16,
+        end + 20,
+    ] {
+        let mut corrupt = bytes.clone();
+        corrupt[offset] ^= 1;
+        assert!(
+            check_server_zip(&payload, &corrupt).is_err(),
+            "offset {offset}"
+        );
+    }
+    for size in [0, 1, 21, 22, directory, bytes.len() - 1] {
+        assert!(check_server_zip(&payload, &bytes[..size]).is_err());
+    }
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(check_server_zip(&payload, &trailing).is_err());
+    let mut prefixed = b"prefix".to_vec();
+    prefixed.extend_from_slice(&bytes);
+    assert!(check_server_zip(&payload, &prefixed).is_err());
+    Ok(())
+}
+
+#[test]
+fn zip_readback_rejects_changed_regular_content_and_extra_entries() -> io::Result<()> {
+    let payload = payload()?;
+    for extra in [false, true] {
+        let mut archive = zip::ZipWriter::new_stream(Vec::new());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .last_modified_time(
+                zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0).map_err(io::Error::other)?,
+            );
+        for (index, (path, bytes)) in payload.files().enumerate() {
+            archive.start_file(
+                format!("{}/{path}", payload.name().root()),
+                options.unix_permissions(if index == 0 { 0o755 } else { 0o644 }),
+            )?;
+            if !extra && index == 1 {
+                let mut changed = bytes.to_vec();
+                changed[0] ^= 1;
+                archive.write_all(&changed)?;
+            } else {
+                archive.write_all(bytes)?;
+            }
+        }
+        if extra {
+            archive.start_file(format!("{}/extra", payload.name().root()), options)?;
+            archive.write_all(b"extra")?;
+        }
+        assert!(check_server_zip(&payload, &archive.finish()?.into_inner()).is_err());
+    }
+    Ok(())
 }
 
 struct Failure {

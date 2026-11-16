@@ -8,6 +8,8 @@ mod tar_gzip;
 pub use tar_gzip::write_server_tar_gzip;
 mod zip;
 pub use zip::write_server_zip;
+mod zip_read;
+pub use zip_read::check_server_zip;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {
