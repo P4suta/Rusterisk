@@ -154,7 +154,7 @@ fn check_package(
         || semver::Version::parse(&package.version).is_err()
         || package.dependencies.len() > 256
         || package.targets.is_empty()
-        || package.targets.len() > 128
+        || package.targets.len() > 512
     {
         return Err(fail("package fields"));
     }

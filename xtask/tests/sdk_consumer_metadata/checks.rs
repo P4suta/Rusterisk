@@ -126,6 +126,33 @@ fn the_core_msrv_consumer_remains_dependency_free_beyond_the_core_package(
 }
 
 #[test]
+fn published_registry_test_catalogues_fit_a_finite_per_package_target_limit(
+) -> Result<(), std::io::Error> {
+    let plan = plan()?;
+    for (count, accepted) in [(188, true), (512, true), (513, false)] {
+        let mut data = metadata(&plan, SdkConsumerScope::Sdk);
+        data.add_external(&plan, 0)?;
+        let mut json = serde_json::to_value(data).map_err(std::io::Error::other)?;
+        let targets = json
+            .pointer_mut("/packages/4/targets")
+            .and_then(serde_json::Value::as_array_mut)
+            .ok_or_else(|| std::io::Error::other("fixture registry targets missing"))?;
+        let target = targets
+            .first()
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("fixture target missing"))?;
+        targets.resize(count, target);
+        let bytes = serde_json::to_vec(&json).map_err(std::io::Error::other)?;
+        assert_eq!(
+            check_sdk_consumer_metadata(&plan, SdkConsumerScope::Sdk, "0.1.0", &bytes).is_ok(),
+            accepted,
+            "target count {count}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn json_and_graph_sizes_have_exact_bounds() -> Result<(), std::io::Error> {
     let plan = plan()?;
     let mut data = metadata(&plan, SdkConsumerScope::Sdk);
