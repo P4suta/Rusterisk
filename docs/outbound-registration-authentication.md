@@ -13,7 +13,10 @@ Algorithm selection stays within the received challenge list.
 The client accepts `charset=UTF-8` and prepares credentials through the [negotiated Unicode profiles](adr/prepare-negotiated-utf8-digest-credentials-before-hashing.md).
 Origin and proxy authentication keep their encodings independently through challenges, 423 corrections, failure retries, refresh, and removal.
 Offers without a character encoding preserve the configured credential octets.
-The current profile rejects other character encodings and `userhash=true`.
+Other challenge character encodings remain unsupported.
+The client accepts `userhash=true`, hashes the prepared username and challenge realm with the selected algorithm, and calculates the response from the prepared credentials.
+The client uses `username*` for usernames containing characters outside ASCII when the challenge selects UTF-8 without username hashing.
+Refresh, removal, and failure retries keep the [negotiated username form](adr/resolve-digest-usernames-before-verifying-responses.md).
 
 Origin and proxy authentication keep independent headers.
 A retry renews the other scope's authorization with its existing client nonce and an increased count, following [RFC 7616](https://www.rfc-editor.org/rfc/rfc7616.html#section-3.4).
