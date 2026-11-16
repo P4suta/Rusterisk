@@ -211,12 +211,14 @@ pub enum Action {
         id: ChannelId,
         media: MediaUri,
         language: Option<ChannelId>,
+        options: rusterisk_api::PlaybackOptions,
     },
     PlayChannel {
         channel: ChannelId,
         id: ChannelId,
         media: MediaUri,
         language: Option<ChannelId>,
+        options: rusterisk_api::PlaybackOptions,
     },
     GetPlayback(ChannelId),
     ControlPlayback {
@@ -450,6 +452,7 @@ pub enum Effect {
         token: MediaTaskToken,
         media: MediaUri,
         language: String,
+        options: rusterisk_api::PlaybackOptions,
     },
     ControlPlayback {
         token: MediaTaskToken,
@@ -1187,13 +1190,15 @@ impl Control {
                 id,
                 media,
                 language,
-            } => self.play_bridge(bridge, id, media, language),
+                options,
+            } => self.play_bridge(bridge, id, media, language, options),
             Action::PlayChannel {
                 channel,
                 id,
                 media,
                 language,
-            } => self.play_channel(channel, id, media, language),
+                options,
+            } => self.play_channel(channel, id, media, language, options),
             Action::GetPlayback(id) => self.get_playback(&id),
             Action::ControlPlayback { id, operation } => {
                 self.control_playback(&id, operation, timestamp)

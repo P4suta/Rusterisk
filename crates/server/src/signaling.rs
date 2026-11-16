@@ -777,6 +777,7 @@ impl Signaling {
                 token,
                 media,
                 language,
+                options,
             } => {
                 let media = match media {
                     MediaUri::Sound(name) if !language.is_empty() => ChannelId::try_from(language)
@@ -785,7 +786,8 @@ impl Signaling {
                     MediaUri::Sound(name) => Ok(PlaybackMedia::Sound(name)),
                     MediaUri::Recording(name) => Ok(PlaybackMedia::Recording(name)),
                 };
-                self.start_playback(owner, token, media).await?;
+                self.start_playback_with_options(owner, token, media, options)
+                    .await?;
             }
             Effect::ControlPlayback { token, operation } => self
                 .media
@@ -838,6 +840,17 @@ impl Signaling {
         token: MediaTaskToken,
         media: Result<PlaybackMedia, ControlError>,
     ) -> Result<(), ControlError> {
+        self.start_playback_with_options(owner, token, media, Default::default())
+            .await
+    }
+
+    async fn start_playback_with_options(
+        &mut self,
+        owner: MediaOwner,
+        token: MediaTaskToken,
+        media: Result<PlaybackMedia, ControlError>,
+        options: rusterisk_api::PlaybackOptions,
+    ) -> Result<(), ControlError> {
         let available = match &owner {
             MediaOwner::Channel(key) => {
                 self.calls.contains_key(key) || self.external_media.contains(key)
@@ -850,7 +863,7 @@ impl Signaling {
                 let port = self.media.clone();
                 let controller = self.controller.clone();
                 let completed = match port
-                    .reserve_playback(
+                    .reserve_playback_with_options(
                         match &owner {
                             MediaOwner::Channel(key) => AudioTarget::Channel(key.clone()),
                             MediaOwner::Bridge { generation, .. } => {
@@ -858,6 +871,7 @@ impl Signaling {
                             }
                         },
                         token,
+                        options,
                     )
                     .await
                 {

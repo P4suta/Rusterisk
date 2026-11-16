@@ -20,6 +20,7 @@ pub(super) struct PlaybackEntry {
     token: MediaTaskToken,
     media: MediaUri,
     language: String,
+    options: rusterisk_api::PlaybackOptions,
     phase: Phase,
 }
 
@@ -101,6 +102,7 @@ impl Control {
         id: ChannelId,
         media: MediaUri,
         language: Option<ChannelId>,
+        options: rusterisk_api::PlaybackOptions,
     ) -> Result<Outcome, ControlError> {
         let entry = self
             .channels
@@ -123,7 +125,7 @@ impl Control {
             || entry.snapshot.language.clone(),
             |value| value.to_string(),
         );
-        self.enqueue_playback(MediaOwner::Channel(key), id, media, language)
+        self.enqueue_playback(MediaOwner::Channel(key), id, media, language, options)
     }
 
     pub(super) fn play_bridge(
@@ -132,6 +134,7 @@ impl Control {
         id: ChannelId,
         media: MediaUri,
         language: Option<ChannelId>,
+        options: rusterisk_api::PlaybackOptions,
     ) -> Result<Outcome, ControlError> {
         let entry = self
             .bridges
@@ -146,6 +149,7 @@ impl Control {
             id,
             media,
             language.map_or_else(String::new, |value| value.to_string()),
+            options,
         )
     }
 
@@ -155,6 +159,7 @@ impl Control {
         id: ChannelId,
         media: MediaUri,
         language: String,
+        options: rusterisk_api::PlaybackOptions,
     ) -> Result<Outcome, ControlError> {
         if self.playbacks.contains_key(&id) {
             return Err(ControlError::Conflict("Playback already exists"));
@@ -168,6 +173,7 @@ impl Control {
             token,
             media,
             language,
+            options,
             phase: Phase::Queued,
         };
         let mut outcome = Outcome::json(playback.snapshot(&id))?;
@@ -192,6 +198,7 @@ impl Control {
             let id = id.clone();
             let media = playback.media.clone();
             let language = playback.language.clone();
+            let options = playback.options;
             self.media_tasks(owner)?.start(token)?;
             self.playbacks
                 .get_mut(&id)
@@ -202,6 +209,7 @@ impl Control {
                 token,
                 media,
                 language,
+                options,
             });
         }
         Ok(())

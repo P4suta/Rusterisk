@@ -35,6 +35,7 @@ struct Playback {
     source: Source,
     completed: oneshot::Sender<Result<(), MediaError>>,
     progress: Instant,
+    options: rusterisk_api::PlaybackOptions,
 }
 
 pub(super) struct Playbacks {
@@ -53,6 +54,7 @@ impl Playbacks {
         token: MediaTaskToken,
         target: AudioTarget<CallKey>,
         completed: oneshot::Sender<Result<(), MediaError>>,
+        options: rusterisk_api::PlaybackOptions,
     ) -> Result<(), MediaError> {
         if completed.is_closed() {
             return Err(MediaError::UnknownStream);
@@ -72,6 +74,7 @@ impl Playbacks {
                 source: Source::Waiting,
                 completed,
                 progress: Instant::now(),
+                options,
             },
         );
         Ok(())
@@ -88,7 +91,7 @@ impl Playbacks {
     fn attach_at(
         &mut self,
         token: MediaTaskToken,
-        source: PlaybackSource,
+        mut source: PlaybackSource,
         now: Instant,
     ) -> Result<(), MediaError> {
         let entry = self.entries.get(&token).ok_or(MediaError::UnknownStream)?;
@@ -105,6 +108,14 @@ impl Playbacks {
             .ok_or(MediaError::UnknownStream)?;
         match entry.source {
             Source::Waiting => {
+                let offset = u64::from(source.rate())
+                    * u64::from(entry.options.offset_ms.milliseconds())
+                    / 1000;
+                if offset > 0 {
+                    source
+                        .seek_sample(offset)
+                        .map_err(|error| MediaError::Transport(error.to_string()))?;
+                }
                 entry.source = Source::Attached {
                     source,
                     state: State::Active,
@@ -138,7 +149,8 @@ impl Playbacks {
                 let result = match &mut entry.source {
                     Source::Waiting => Err(MediaError::InvalidRoute),
                     Source::Attached { source, .. } => {
-                        let distance = u64::from(source.rate()) * 3;
+                        let distance =
+                            u64::from(source.rate()) * u64::from(entry.options.step_ms()) / 1000;
                         let sample = match operation {
                             PlaybackControl::Restart => 0,
                             PlaybackControl::Forward => {
@@ -278,12 +290,25 @@ impl Playbacks {
 mod tests {
     use super::{PlaybackControl, Playbacks};
     use crate::storage::{PlaybackMedia, StorageWorker};
-    use rusterisk_api::ChannelId;
+    use rusterisk_api::{ChannelId, PlaybackMilliseconds, PlaybackOptions};
     use rusterisk_core::{MediaTaskKind, MediaTasks};
     use rusterisk_media::{AudioTarget, Frame, MediaError};
     use rusterisk_storage::Recorder;
     use std::time::Duration;
     use tokio::sync::oneshot;
+
+    async fn next_audio(playbacks: &mut Playbacks) -> Result<Frame, MediaError> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some((_, frame)) = playbacks.tick()?.first() {
+                    return Ok::<_, MediaError>(*frame);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(failure)?
+    }
 
     #[tokio::test]
     async fn restart_forward_and_reverse_select_audio_from_the_consumed_position(
@@ -300,50 +325,51 @@ mod tests {
             .await
             .map_err(failure)?;
         let operation = async {
-            let source = storage
-                .play(PlaybackMedia::Recording(
-                    ChannelId::try_from("seeking".to_owned()).map_err(failure)?,
-                ))
-                .await
-                .map_err(failure)?;
-            storage.recordings().await.map_err(failure)?;
-            let mut tasks = MediaTasks::new(1);
-            let token = tasks
-                .reserve(MediaTaskKind::Playback)
-                .map_err(|_| MediaError::Capacity)?;
-            let mut playbacks = Playbacks::new();
-            let (completed, completion) = oneshot::channel();
-            playbacks.reserve(token, AudioTarget::Bridge(1), completed)?;
-            playbacks.attach(token, source)?;
-            let initial = playbacks.tick()?;
-            if !matches!(initial.first(), Some((_, frame)) if frame.samples() == [1000; 960]) {
-                return Err(failure("playback did not start at the first sample"));
-            }
-            for (command, expected) in [
-                (PlaybackControl::Forward, 1151),
-                (PlaybackControl::Reverse, 1002),
-                (PlaybackControl::Restart, 1000),
-            ] {
-                playbacks.control(token, command);
+            for (offset, step, initial_sample, forwarded, reversed) in
+                [(0, 0, 1000, 1151, 1002), (1000, 1000, 1050, 1101, 1052)]
+            {
+                let source = storage
+                    .play(PlaybackMedia::Recording(
+                        ChannelId::try_from("seeking".to_owned()).map_err(failure)?,
+                    ))
+                    .await
+                    .map_err(failure)?;
                 storage.recordings().await.map_err(failure)?;
-                let frames = tokio::time::timeout(Duration::from_secs(2), async {
-                    loop {
-                        let frames = playbacks.tick()?;
-                        if !frames.is_empty() {
-                            return Ok::<_, MediaError>(frames);
-                        }
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .map_err(failure)??;
-                if !matches!(frames.first(), Some((_, frame)) if frame.samples() == [expected; 960])
-                {
-                    return Err(failure(format!("incorrect audio after {command:?}")));
+                let mut tasks = MediaTasks::new(1);
+                let token = tasks
+                    .reserve(MediaTaskKind::Playback)
+                    .map_err(|_| MediaError::Capacity)?;
+                let mut playbacks = Playbacks::new();
+                let (completed, completion) = oneshot::channel();
+                playbacks.reserve(
+                    token,
+                    AudioTarget::Bridge(1),
+                    completed,
+                    PlaybackOptions {
+                        offset_ms: PlaybackMilliseconds::try_from(offset).map_err(failure)?,
+                        skip_ms: PlaybackMilliseconds::try_from(step).map_err(failure)?,
+                    },
+                )?;
+                playbacks.attach(token, source)?;
+                let initial = next_audio(&mut playbacks).await?;
+                if initial.samples() != [initial_sample; 960] {
+                    return Err(failure("playback did not start at the requested offset"));
                 }
+                for (command, expected) in [
+                    (PlaybackControl::Forward, forwarded),
+                    (PlaybackControl::Reverse, reversed),
+                    (PlaybackControl::Restart, 1000),
+                ] {
+                    playbacks.control(token, command);
+                    storage.recordings().await.map_err(failure)?;
+                    let frame = next_audio(&mut playbacks).await?;
+                    if frame.samples() != [expected; 960] {
+                        return Err(failure(format!("incorrect audio after {command:?}")));
+                    }
+                }
+                playbacks.control(token, PlaybackControl::Stop);
+                completion.await.map_err(failure)??;
             }
-            playbacks.control(token, PlaybackControl::Stop);
-            completion.await.map_err(failure)??;
             Ok(())
         }
         .await;
@@ -370,7 +396,7 @@ mod tests {
             .reserve(MediaTaskKind::Playback)
             .map_err(|_| MediaError::Capacity)?;
         let (completed, mut completion) = oneshot::channel();
-        playbacks.reserve(token, AudioTarget::Bridge(1), completed)?;
+        playbacks.reserve(token, AudioTarget::Bridge(1), completed, Default::default())?;
         let deadline = playbacks
             .entries
             .get(&token)
@@ -394,7 +420,12 @@ mod tests {
             .reserve(MediaTaskKind::Playback)
             .map_err(|_| MediaError::Capacity)?;
         let (completed, _completion) = oneshot::channel();
-        playbacks.reserve(replacement, AudioTarget::Bridge(1), completed)?;
+        playbacks.reserve(
+            replacement,
+            AudioTarget::Bridge(1),
+            completed,
+            Default::default(),
+        )?;
         Ok(())
     }
 
@@ -410,7 +441,12 @@ mod tests {
             .reserve(MediaTaskKind::Playback)
             .map_err(|_| MediaError::Capacity)?;
         let (completed, mut completion) = oneshot::channel();
-        playbacks.reserve(token, AudioTarget::Channel(old.clone()), completed)?;
+        playbacks.reserve(
+            token,
+            AudioTarget::Channel(old.clone()),
+            completed,
+            Default::default(),
+        )?;
         playbacks.release(&old);
         completion.try_recv().map_err(failure)??;
         let current = crate::CallKey {
@@ -422,7 +458,12 @@ mod tests {
             .reserve(MediaTaskKind::Playback)
             .map_err(|_| MediaError::Capacity)?;
         let (completed, mut completion) = oneshot::channel();
-        playbacks.reserve(token, AudioTarget::Channel(current.clone()), completed)?;
+        playbacks.reserve(
+            token,
+            AudioTarget::Channel(current.clone()),
+            completed,
+            Default::default(),
+        )?;
         playbacks.release(&old);
         assert!(matches!(
             completion.try_recv(),
@@ -455,7 +496,7 @@ mod tests {
             .map_err(|_| MediaError::Capacity)?;
         let mut playbacks = Playbacks::new();
         let (completed, mut completion) = oneshot::channel();
-        playbacks.reserve(token, AudioTarget::Bridge(1), completed)?;
+        playbacks.reserve(token, AudioTarget::Bridge(1), completed, Default::default())?;
         let deadline = playbacks
             .entries
             .get(&token)
@@ -502,7 +543,7 @@ mod tests {
             .map_err(|_| MediaError::Capacity)?;
         let mut playbacks = Playbacks::new();
         let (completed, completion) = oneshot::channel();
-        playbacks.reserve(token, AudioTarget::Bridge(1), completed)?;
+        playbacks.reserve(token, AudioTarget::Bridge(1), completed, Default::default())?;
         playbacks.attach(token, source)?;
         assert_eq!(playbacks.tick()?[0].1.samples(), &[1000; 960]);
         playbacks.control(token, PlaybackControl::Pause);

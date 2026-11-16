@@ -233,6 +233,31 @@ fn playback_language(
         .transpose()
 }
 
+fn playback_options(
+    parameters: &BTreeMap<String, String>,
+) -> Result<rusterisk_api::PlaybackOptions, ControlError> {
+    let milliseconds = |name: &str| {
+        parameters
+            .get(name)
+            .filter(|value| !value.is_empty())
+            .map(|value| {
+                value
+                    .parse::<u32>()
+                    .map_err(|_| ControlError::Invalid("Invalid playback timing"))
+                    .and_then(|value| {
+                        rusterisk_api::PlaybackMilliseconds::try_from(value)
+                            .map_err(|_| ControlError::Invalid("Invalid playback timing"))
+                    })
+            })
+            .transpose()
+            .map(Option::unwrap_or_default)
+    };
+    Ok(rusterisk_api::PlaybackOptions {
+        offset_ms: milliseconds("offsetms")?,
+        skip_ms: milliseconds("skipms")?,
+    })
+}
+
 fn playback_control(
     parameters: &BTreeMap<String, String>,
 ) -> Result<PlaybackControl, ControlError> {
@@ -531,24 +556,28 @@ async fn dispatch(
             id: optional_id(parameters, "playbackId")?,
             media: playback_media(parameters)?,
             language: playback_language(parameters)?,
+            options: playback_options(parameters)?,
         },
         ("POST", ["ari", "channels", channel, "play", playback]) => Action::PlayChannel {
             channel: id(channel)?,
             id: id(playback)?,
             media: playback_media(parameters)?,
             language: playback_language(parameters)?,
+            options: playback_options(parameters)?,
         },
         ("POST", ["ari", "bridges", bridge, "play"]) => Action::PlayBridge {
             bridge: id(bridge)?,
             id: optional_id(parameters, "playbackId")?,
             media: playback_media(parameters)?,
             language: playback_language(parameters)?,
+            options: playback_options(parameters)?,
         },
         ("POST", ["ari", "bridges", bridge, "play", playback]) => Action::PlayBridge {
             bridge: id(bridge)?,
             id: id(playback)?,
             media: playback_media(parameters)?,
             language: playback_language(parameters)?,
+            options: playback_options(parameters)?,
         },
         ("GET", ["ari", "playbacks", playback]) => Action::GetPlayback(id(playback)?),
         ("DELETE", ["ari", "playbacks", playback]) => Action::ControlPlayback {

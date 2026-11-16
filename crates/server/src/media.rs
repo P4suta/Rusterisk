@@ -49,6 +49,7 @@ enum Command {
         token: MediaTaskToken,
         target: AudioTarget<CallKey>,
         completed: oneshot::Sender<Result<(), MediaError>>,
+        options: rusterisk_api::PlaybackOptions,
         reply: oneshot::Sender<Result<(), MediaError>>,
     },
     AttachPlayback {
@@ -161,6 +162,16 @@ impl MediaPort {
         target: AudioTarget<CallKey>,
         token: MediaTaskToken,
     ) -> Result<oneshot::Receiver<Result<(), MediaError>>, MediaError> {
+        self.reserve_playback_with_options(target, token, Default::default())
+            .await
+    }
+
+    pub async fn reserve_playback_with_options(
+        &self,
+        target: AudioTarget<CallKey>,
+        token: MediaTaskToken,
+        options: rusterisk_api::PlaybackOptions,
+    ) -> Result<oneshot::Receiver<Result<(), MediaError>>, MediaError> {
         let (completed, completion) = oneshot::channel();
         let (reply, response) = oneshot::channel();
         self.commands
@@ -168,6 +179,7 @@ impl MediaPort {
                 token,
                 target,
                 completed,
+                options,
                 reply,
             })
             .map_err(|_| MediaError::Capacity)?;
@@ -554,6 +566,7 @@ impl MediaHub {
                 token,
                 target,
                 completed,
+                options,
                 reply,
             } => {
                 if !reply.is_closed() {
@@ -562,7 +575,7 @@ impl MediaHub {
                         AudioTarget::Bridge(_) => true,
                     };
                     let result = if valid {
-                        self.playbacks.reserve(token, target, completed)
+                        self.playbacks.reserve(token, target, completed, options)
                     } else {
                         Err(MediaError::UnknownStream)
                     };
