@@ -153,7 +153,7 @@ fn constructors_preserve_original_octets_and_distinguish_registrar_transport(
         (Protocol::Udp, "sip:192.0.2.1:5060"),
         (Protocol::Tcp, "sip:[2001:db8::1]:5070;transport=tcp"),
         (Protocol::Tls, "sips:provider.example;transport=tcp"),
-        (Protocol::Tls, "sip:provider.example;transport=tls"),
+        (Protocol::Tls, "sip:provider.example;transport=tcp"),
         (Protocol::Udp, "sip:provider.example;extension=one%20two"),
     ] {
         let uri = RegistrarUri::parse(protocol, source)?;

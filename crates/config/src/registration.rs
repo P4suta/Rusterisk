@@ -47,6 +47,23 @@ pub(crate) fn parse(
             RegistrationUriError::TransportConflict.to_string(),
         ));
     }
+    match (server_uri.is_secure(), client_uri.is_secure()) {
+        (true, false) => {
+            return Err(ConfigError::at(
+                file,
+                section.position("client_uri"),
+                "SIPS registrar scheme requires SIPS Contact and client_uri schemes",
+            ));
+        }
+        (false, true) => {
+            return Err(ConfigError::at(
+                file,
+                section.position("server_uri"),
+                "SIPS Contact scheme requires the registrar Request-URI scheme to be SIPS",
+            ));
+        }
+        (false, false) | (true, true) => {}
+    }
     Ok(Registration {
         name: section.name.clone(),
         transport: transport_name.into(),

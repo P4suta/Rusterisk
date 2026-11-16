@@ -27,6 +27,7 @@ impl std::error::Error for RegistrationUriError {}
 pub struct RegistrarUri {
     source: String,
     protocol: Protocol,
+    secure: bool,
 }
 
 impl RegistrarUri {
@@ -39,13 +40,13 @@ impl RegistrarUri {
             return Err(RegistrationUriError::TransportConflict);
         }
         if let Some(selected) = profile.transport {
-            let matching =
-                matches!(
-                    (protocol, selected),
-                    (Protocol::Udp, Transport::Udp)
-                        | (Protocol::Tcp, Transport::Tcp)
-                        | (Protocol::Tls, Transport::Tls)
-                ) || profile.secure && protocol == Protocol::Tls && selected == Transport::Tcp;
+            if selected == Transport::Tls {
+                return Err(RegistrationUriError::Unsupported);
+            }
+            let matching = matches!(
+                (protocol, selected),
+                (Protocol::Udp, Transport::Udp) | (Protocol::Tcp | Protocol::Tls, Transport::Tcp)
+            );
             if !matching {
                 return Err(RegistrationUriError::TransportConflict);
             }
@@ -53,6 +54,7 @@ impl RegistrarUri {
         Ok(Self {
             source: source.into(),
             protocol,
+            secure: profile.secure,
         })
     }
 
@@ -62,6 +64,10 @@ impl RegistrarUri {
 
     pub const fn protocol(&self) -> Protocol {
         self.protocol
+    }
+
+    pub const fn is_secure(&self) -> bool {
+        self.secure
     }
 }
 
