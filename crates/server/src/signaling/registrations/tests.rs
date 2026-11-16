@@ -1,6 +1,8 @@
 use super::{Registrations, State};
 use crate::ControlError;
 use rusterisk_config::{Config, MAX_REGISTRATIONS};
+mod dns;
+mod generations;
 
 fn config(peers: &[&str], delay: u32) -> Result<Config, ControlError> {
     let mut pjsip = "[native]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[account]\ntype=auth\nusername=account\npassword=sample\n".to_owned();
@@ -26,7 +28,7 @@ fn initial_delay_follows_the_reference_one_second_floor_and_configured_maximum(
         let Some(client) = manager.clients.first() else {
             return Err(ControlError::Capacity);
         };
-        let State::Waiting { at } = client.state else {
+        let (State::Waiting { at } | State::Ready { at, .. }) = client.state else {
             return Err(ControlError::Invalid("Expected initial registration delay"));
         };
         assert!((1000..=u64::from(delay.max(1)) * 1000).contains(&at));

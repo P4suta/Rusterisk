@@ -1171,6 +1171,11 @@ impl Signaling {
                     let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
                     self.native_completed(completed, now).await?;
                 },
+                result = self.registrations.completed(), if self.registrations.setup_count() > 0 => {
+                    let completed = result?.ok_or(ControlError::Capacity)?;
+                    let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
+                    self.registration_completed(completed, now)?;
+                },
                 _instant = tick.tick() => {
                     let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
                     for listener in 0..self.listeners.len() {
@@ -1188,9 +1193,9 @@ impl Signaling {
     pub async fn run(mut self, mut stop: watch::Receiver<bool>) -> Result<(), ControlError> {
         let started = Instant::now();
         let result = self.serve(&mut stop, started).await;
-        self.registrations.cancel();
         let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
-        let mut cleanup = self.close_refer_routes(now);
+        let mut cleanup = self.finish_registrations().await;
+        cleanup = cleanup::combine(cleanup, self.close_refer_routes(now));
         cleanup = cleanup::combine(cleanup, self.finish_native().await);
         cleanup = cleanup::combine(cleanup, self.finish_streams().await);
         cleanup = cleanup::combine(cleanup, self.finish_websockets().await);

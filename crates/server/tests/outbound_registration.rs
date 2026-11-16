@@ -153,9 +153,9 @@ async fn configured_udp_registration_advertises_the_owned_signaling_address(
 }
 
 #[tokio::test]
-async fn registration_profiles_without_connected_adapters_are_identifiably_unsupported(
+async fn stream_registration_profiles_without_connected_adapters_are_identifiably_unsupported(
 ) -> Result<(), ControlError> {
-    for protocol in [Protocol::Udp, Protocol::Tcp, Protocol::Tls] {
+    for protocol in [Protocol::Tcp, Protocol::Tls] {
         let mut config = settings("127.0.0.1:5070".parse().map_err(failure)?)?;
         let transport = config
             .transports
@@ -167,10 +167,9 @@ async fn registration_profiles_without_connected_adapters_are_identifiably_unsup
             .first_mut()
             .ok_or(ControlError::Capacity)?;
         let uri = match protocol {
-            Protocol::Udp => "sip:registrar.invalid:5070;transport=udp",
             Protocol::Tcp => "sip:127.0.0.1:5070;transport=tcp",
             Protocol::Tls => "sips:127.0.0.1:5071;transport=tcp",
-            Protocol::Ws | Protocol::Wss => return Err(ControlError::Unsupported),
+            Protocol::Udp | Protocol::Ws | Protocol::Wss => return Err(ControlError::Unsupported),
         };
         registration.server_uri = RegistrarUri::parse(protocol, uri).map_err(failure)?;
         let (controller, _runner, effects) = Controller::new(config.clone(), 16);
