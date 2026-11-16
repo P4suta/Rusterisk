@@ -158,13 +158,33 @@ impl Signaling {
         if !self.capture_refer(listener, &source, reference, now)? {
             return Ok(());
         }
-        self.emit_refer(
-            listener,
-            reference,
-            ReferProgress::Rejected(ReferFailure::Unsupported),
-            now,
-        )
-        .await
+        let consultation = match self.consultation(refer.target().replaces()) {
+            Ok(consultation) => consultation,
+            Err(failure) => {
+                return self
+                    .emit_refer(listener, reference, ReferProgress::Rejected(failure), now)
+                    .await;
+            }
+        };
+        if self
+            .controller
+            .signal(Signal::AttendedTransferRequested {
+                key: source,
+                refer: refer.into_source(),
+                consultation,
+            })
+            .await
+            .is_err()
+        {
+            self.emit_refer(
+                listener,
+                reference,
+                ReferProgress::Rejected(ReferFailure::Unavailable),
+                now,
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     fn capture_refer(

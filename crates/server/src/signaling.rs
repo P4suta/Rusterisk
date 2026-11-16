@@ -14,6 +14,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
+mod attended;
 mod cleanup;
 mod external_media;
 mod media;
