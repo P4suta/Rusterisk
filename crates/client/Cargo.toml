@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Typed ARI client with owned call lifetimes"
+readme = "../../docs/rust-sdk.md"
 
 [[example]]
 name = "call"

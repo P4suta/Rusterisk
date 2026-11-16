@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version = "1.89"
 license.workspace = true
+repository.workspace = true
+description = "Bounded call state and ownership transitions without runtime effects"
+readme = "../../docs/rust-sdk.md"
 
 [lints]
 workspace = true

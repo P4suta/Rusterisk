@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Typed ARI resources, operations, and events"
+readme = "../../docs/rust-sdk.md"
 
 [dependencies]
 serde.workspace = true
