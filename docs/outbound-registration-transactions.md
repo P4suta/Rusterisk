@@ -16,5 +16,10 @@ Cancellation makes further polling silent and retains `identity` and `expires_at
 A manager must keep the original settlement boundary for a sent request before starting a replacement transaction at the same registrar.
 The [generation decision](adr/own-outbound-registrations-by-configuration-generation.md) defines the pending manager and adapter ownership.
 
-The current unit covers attempts without a response.
-Response matching, authentication, refresh, retry policy, and network scheduling remain pending.
+Responses match the peer, top Via branch, `sent-by`, transport, Call-ID, and request sequence and method.
+Provisional responses preserve the original timeout and select four-second UDP retry intervals.
+`RegistrationResponse` records a matched final response and owns the original request.
+Timer K absorbs duplicate final responses for five seconds on UDP.
+Reliable transactions finish when the final response arrives.
+
+Authentication, Contact grant interpretation, refresh, retry policy, and network scheduling remain pending.
