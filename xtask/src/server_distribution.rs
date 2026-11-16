@@ -25,6 +25,10 @@ mod runtime_config;
 pub use runtime_config::ServerRuntimeConfig;
 mod ready;
 pub use ready::check_server_ready_log;
+#[cfg(unix)]
+mod native;
+#[cfg(unix)]
+pub use native::{check_server_startup_with, verify_server_native_with};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {

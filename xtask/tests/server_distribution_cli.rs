@@ -121,3 +121,27 @@ fn server_content_checks_refuse_missing_candidates_without_starting_external_too
         Ok(())
     })
 }
+
+#[cfg(unix)]
+#[test]
+fn server_startup_checks_reject_missing_candidates_before_creating_execution_state(
+) -> Result<(), SdkCandidateBuildError> {
+    using_project("server-startup-cli", |root, _| {
+        let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args([
+                "distribution",
+                "server",
+                "check-startup",
+                "--candidate",
+                "missing",
+            ])
+            .current_dir(root)
+            .env("PATH", "")
+            .output()?;
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("usage:"));
+        assert!(output.stdout.is_empty());
+        assert!(!root.join(".cache").exists());
+        Ok(())
+    })
+}

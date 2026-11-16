@@ -29,7 +29,7 @@ pub fn plan_server(root: &Path, target: ServerTarget) -> io::Result<()> {
     Ok(())
 }
 
-fn ensure_directory(path: &Path) -> io::Result<()> {
+pub(super) fn ensure_directory(path: &Path) -> io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => Ok(()),
         Ok(_) => Err(io::Error::other(
