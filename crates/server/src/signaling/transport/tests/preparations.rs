@@ -43,12 +43,10 @@ async fn registered_setup_slots_share_capacity_without_reserving_more_connection
     for port in 20_000..20_064 {
         receivers.push(network.reserve(0, ([127, 0, 0, 1], port).into())?);
     }
-    assert!(matches!(
-        network.reserve_setup(0, NonZeroU64::MIN),
-        Err(ControlError::Capacity)
-    ));
+    let resolving = network.reserve_setup(0, NonZeroU64::MIN)?;
     let mut slots = Vec::with_capacity(16);
-    for _ in 0..16 {
+    slots.push(resolving);
+    for _ in 1..16 {
         slots.push(network.reserve_registered_setup(0)?);
     }
     assert!(matches!(

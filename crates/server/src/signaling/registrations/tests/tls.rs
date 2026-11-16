@@ -16,6 +16,7 @@ use tokio::{
     task::JoinHandle,
 };
 mod names;
+mod reuse;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())

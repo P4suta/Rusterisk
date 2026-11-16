@@ -1,6 +1,7 @@
 use super::{Network, Phase, Prepared, SetupEvent};
 use crate::{encryption::TlsClientContext, signaling::cleanup, ControlError};
-use rusterisk_config::Config;
+use hickory_resolver::proto::rr::Name;
+use rusterisk_config::{Config, Protocol, RegistrarUri, RegistrationAddress, RegistrationUriError};
 use std::num::NonZeroU64;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -57,6 +58,8 @@ impl Fixture {
 #[derive(Clone, Copy, Debug)]
 enum Case {
     Matching,
+    EquivalentDomain,
+    MultipleRootDots,
     CapturedBeforeReplacement,
     ChangedRoots,
     ChangedGeneration,
@@ -97,6 +100,8 @@ async fn admission(case: Case) -> Result<(), ControlError> {
         port.identity = Some("provider.test".into());
         port.tls_profile = Some(profile);
         match case {
+            Case::EquivalentDomain => port.identity = Some("PrOvIdEr.TeSt.".into()),
+            Case::MultipleRootDots => port.identity = Some("provider.test..".into()),
             Case::DifferentDomain => port.identity = Some("edge.test".into()),
             Case::Unverified => {
                 port.identity = None;
@@ -133,6 +138,8 @@ async fn admission(case: Case) -> Result<(), ControlError> {
         preparation.identity = Some("provider.test".into());
         match case {
             Case::Matching
+            | Case::EquivalentDomain
+            | Case::MultipleRootDots
             | Case::CapturedBeforeReplacement
             | Case::ChangedRoots
             | Case::ChangedGeneration
@@ -180,7 +187,10 @@ async fn admission(case: Case) -> Result<(), ControlError> {
             peer,
             reply,
         });
-        let matches = matches!(case, Case::Matching | Case::CapturedBeforeReplacement);
+        let matches = matches!(
+            case,
+            Case::Matching | Case::EquivalentDomain | Case::CapturedBeforeReplacement
+        );
         match result {
             Ok(key) if matches && key == existing => {}
             Err(ControlError::Conflict(_)) if !matches => {}
@@ -216,6 +226,8 @@ async fn prepared_tls_profiles_reject_replaced_settings_and_preserve_admitted_fl
 ) -> Result<(), ControlError> {
     for case in [
         Case::Matching,
+        Case::EquivalentDomain,
+        Case::MultipleRootDots,
         Case::CapturedBeforeReplacement,
         Case::ChangedRoots,
         Case::ChangedGeneration,
@@ -229,5 +241,23 @@ async fn prepared_tls_profiles_reject_replaced_settings_and_preserve_admitted_fl
     ] {
         admission(case).await?;
     }
+    Ok(())
+}
+
+#[test]
+fn malformed_dns_root_labels_cannot_enter_registration_settings() -> Result<(), ControlError> {
+    for host in ["provider.test..", "provider.test..."] {
+        assert!(Name::from_utf8(host).is_err());
+        assert!(matches!(
+            RegistrarUri::parse(Protocol::Tls, &format!("sips:{host}")),
+            Err(RegistrationUriError::Invalid)
+        ));
+        assert!(matches!(
+            RegistrationAddress::parse(&format!("sips:account@{host}")),
+            Err(RegistrationUriError::Invalid)
+        ));
+    }
+    RegistrarUri::parse(Protocol::Tls, "sips:provider.test.").map_err(failure)?;
+    RegistrationAddress::parse("sips:account@provider.test.").map_err(failure)?;
     Ok(())
 }

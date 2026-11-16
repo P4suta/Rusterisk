@@ -1,6 +1,6 @@
 use super::{
     cleanup, failure, media,
-    transport::{ConnectionKey, DeliveryRoute, Prepared, SetupKey, SetupLifetime},
+    transport::{ConnectionKey, ConnectionSetup, DeliveryRoute, Prepared, SetupKey, SetupLifetime},
     Received, Signaling,
 };
 use crate::ControlError;
@@ -230,9 +230,20 @@ impl Registrations {
             self.cursor = (self.cursor + 1) % self.clients.len();
             let client = &self.clients[index];
             let due = match &client.state {
-                State::Waiting { at }
-                | State::Ready { at, .. }
-                | State::Registered { refresh_at: at, .. } => {
+                State::Waiting { at } | State::Registered { refresh_at: at, .. } => {
+                    now >= *at
+                        && !self.clients.iter().any(|other| {
+                            client.same_registrar(other)
+                                && matches!(
+                                    other.state,
+                                    State::Ready { .. }
+                                        | State::Trying { .. }
+                                        | State::Resolving { .. }
+                                        | State::Connecting { .. }
+                                )
+                        })
+                }
+                State::Ready { at, .. } => {
                     now >= *at
                         && !self.clients.iter().any(|other| {
                             client.same_registrar(other)
@@ -468,15 +479,25 @@ impl Signaling {
                     setup: completed.setup,
                     lease: completed.lease.clone(),
                 };
-                if let Err(error) = self.network.connect_prepared(
+                match self.network.connect_prepared(
                     completed.setup,
                     resolved,
                     SetupLifetime::Configuration(completed.lease),
                 ) {
-                    self.network.cancel_setup(completed.setup);
-                    self.network.finish_resolution(completed.setup);
-                    client.state = State::Stopped;
-                    tracing::debug!(registration = %client.settings.name, %error, "registration connection failed");
+                    Ok(ConnectionSetup::Reused(connection)) => {
+                        let route = self.network.capture(connection.listener, connection.peer)?;
+                        client.state = State::Ready {
+                            at: now,
+                            route: Route::Stream(route),
+                        };
+                    }
+                    Ok(ConnectionSetup::Connecting) => {}
+                    Err(error) => {
+                        self.network.cancel_setup(completed.setup);
+                        self.network.finish_resolution(completed.setup);
+                        client.state = State::Stopped;
+                        tracing::debug!(registration = %client.settings.name, %error, "registration connection failed");
+                    }
                 }
             }
             Protocol::Ws | Protocol::Wss => {

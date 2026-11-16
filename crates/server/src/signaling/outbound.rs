@@ -1,7 +1,9 @@
 use super::{
     failure,
     resolver::{DestinationResolver, ResolvedTarget},
-    transport::{Prepared, RegisteredRoute, SetupKey, SetupLifetime},
+    transport::{
+        ConnectionKey, ConnectionSetup, Prepared, RegisteredRoute, SetupKey, SetupLifetime,
+    },
     Signaling,
 };
 use crate::{runner::CallLease, CallKey, ControlError, Controller, Signal};
@@ -236,14 +238,21 @@ impl Signaling {
                     }
                     Protocol::Tcp | Protocol::Tls => {
                         pending.phase = Phase::Connecting(resolved.lease.clone());
-                        if let Err(error) = self.network.connect_prepared(
+                        match self.network.connect_prepared(
                             setup,
                             target,
                             SetupLifetime::Call(resolved.lease),
                         ) {
-                            self.cancel_native(&completed.key);
-                            self.network.finish_resolution(setup);
-                            self.native_failed(completed.key, error).await?;
+                            Ok(ConnectionSetup::Reused(connection)) => {
+                                self.native_connected(completed.key, connection, now)
+                                    .await?;
+                            }
+                            Ok(ConnectionSetup::Connecting) => {}
+                            Err(error) => {
+                                self.cancel_native(&completed.key);
+                                self.network.finish_resolution(setup);
+                                self.native_failed(completed.key, error).await?;
+                            }
                         }
                     }
                     Protocol::Ws | Protocol::Wss => return Err(ControlError::Unsupported),
@@ -287,6 +296,15 @@ impl Signaling {
                 return self.native_failed(key, error).await;
             }
         };
+        self.native_connected(key, connection, now).await
+    }
+
+    async fn native_connected(
+        &mut self,
+        key: CallKey,
+        connection: ConnectionKey,
+        now: u64,
+    ) -> Result<(), ControlError> {
         let pending = self
             .native_pending
             .remove(&key)

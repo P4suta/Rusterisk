@@ -13,11 +13,19 @@ use tokio::{
 use tokio_rustls::rustls::pki_types::ServerName;
 #[cfg(test)]
 mod profile_tests;
+#[cfg(test)]
+mod reuse_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct SetupKey {
     pub(crate) listener: usize,
     generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::signaling) enum ConnectionSetup {
+    Reused(ConnectionKey),
+    Connecting,
 }
 
 #[derive(Clone, Copy)]
@@ -55,7 +63,14 @@ pub(super) struct Preparation {
 
 impl Preparation {
     fn matches_flow(&self, port: &Port) -> bool {
-        let identities = self.identity == port.identity;
+        let identities = match (&self.identity, &port.identity) {
+            (None, None) => true,
+            (Some(expected), Some(actual)) => expected
+                .strip_suffix('.')
+                .unwrap_or(expected)
+                .eq_ignore_ascii_case(actual.strip_suffix('.').unwrap_or(actual)),
+            (Some(_), None) | (None, Some(_)) => false,
+        };
         let profiles = match (&self.tls_profile, &port.tls_profile) {
             (None, None) => true,
             (Some(expected), Some(actual)) => {
@@ -116,7 +131,27 @@ impl SetupLifetime {
     }
 }
 
+fn reusable_candidate(
+    mut peers: impl Iterator<Item = SocketAddr>,
+    local: SocketAddr,
+    current: impl FnOnce(SocketAddr) -> Option<ConnectionKey>,
+) -> Result<Option<ConnectionKey>, ControlError> {
+    let peer = peers
+        .find(|peer| peer.is_ipv4() == local.is_ipv4())
+        .ok_or(ControlError::NotFound("No usable signaling address"))?;
+    Ok(current(peer))
+}
+
 impl Network {
+    pub(super) fn connection_slots(&self) -> usize {
+        self.ports.len()
+            + self
+                .preparations
+                .values()
+                .filter(|preparation| matches!(preparation.phase, Phase::Connecting))
+                .count()
+    }
+
     pub(super) fn close_preparations(&self) {
         for preparation in self.preparations.values() {
             preparation.stop.send_replace(true);
@@ -165,9 +200,6 @@ impl Network {
         listener: usize,
         configuration: NonZeroU64,
     ) -> Result<SetupKey, ControlError> {
-        if self.ports.len() + self.preparations.len() >= 64 || self.jobs.len() >= 64 {
-            return Err(ControlError::Capacity);
-        }
         let tls_profile = match self.listeners.get(listener) {
             Some(ListenerSocket::Datagram(_) | ListenerSocket::Stream(_)) => None,
             Some(ListenerSocket::Encrypted { client, .. }) => Some(StartingTlsProfile {
@@ -238,10 +270,7 @@ impl Network {
         key: SetupKey,
         resolved: ResolvedTarget,
         lease: SetupLifetime,
-    ) -> Result<(), ControlError> {
-        if self.jobs.len() >= 64 {
-            return Err(ControlError::Capacity);
-        }
+    ) -> Result<ConnectionSetup, ControlError> {
         if lease.is_released() {
             return Err(ControlError::Conflict("Signaling setup owner ended"));
         }
@@ -271,8 +300,25 @@ impl Network {
         if *preparation.stop.borrow() || !matches!(preparation.phase, Phase::Resolving) {
             return Err(ControlError::Conflict("Signaling setup cancelled"));
         }
-        preparation.phase = Phase::Connecting;
         preparation.identity = encryption.as_ref().map(|_| resolved.identity().to_owned());
+        let reused = reusable_candidate(resolved.peers(), local, |peer| {
+            self.ports
+                .get(&(key.listener, peer))
+                .filter(|port| preparation.matches_flow(port))
+                .map(|port| port.key)
+        })?;
+        if let Some(connection) = reused {
+            self.finish_resolution(key);
+            return Ok(ConnectionSetup::Reused(connection));
+        }
+        if self.connection_slots() >= 64 || self.jobs.len() >= 64 {
+            return Err(ControlError::Capacity);
+        }
+        let preparation = self
+            .preparations
+            .get_mut(&key)
+            .ok_or(ControlError::Conflict("Signaling setup ended"))?;
+        preparation.phase = Phase::Connecting;
         let job = SetupJob {
             key,
             lease,
@@ -294,7 +340,7 @@ impl Network {
                     async move { context.connect(stream, name).await }
                 })),
         };
-        Ok(())
+        Ok(ConnectionSetup::Connecting)
     }
 
     pub(in crate::signaling) fn admit_prepared(

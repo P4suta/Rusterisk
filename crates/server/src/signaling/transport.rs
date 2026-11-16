@@ -24,7 +24,7 @@ mod setup;
 #[cfg(test)]
 mod tests;
 mod websocket;
-pub(super) use setup::{Prepared, RegisteredRoute, SetupKey, SetupLifetime};
+pub(super) use setup::{ConnectionSetup, Prepared, RegisteredRoute, SetupKey, SetupLifetime};
 
 enum ListenerSocket {
     Datagram(UdpSocket),
@@ -367,7 +367,7 @@ impl Network {
     }
 
     fn reserve(&mut self, listener: usize, peer: SocketAddr) -> Result<Reserved, ControlError> {
-        if self.ports.len() + self.preparations.len() >= 64
+        if self.connection_slots() >= 64
             || self.jobs.len() >= 64
             || self.ports.contains_key(&(listener, peer))
         {
