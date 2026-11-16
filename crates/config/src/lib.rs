@@ -1,12 +1,14 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
+mod digest_algorithms;
 mod expansion;
 mod ini_comments;
 mod registration;
 mod registration_uri;
 mod wait_duration;
 mod websocket;
+pub use digest_algorithms::{DigestAlgorithm, DigestAlgorithms, InvalidDigestAlgorithms};
 pub use expansion::{expand_variables, ExpansionError};
 pub use registration_uri::{RegistrarUri, RegistrationAddress, RegistrationUriError};
 pub use wait_duration::{InvalidWaitDuration, WaitDuration};
@@ -295,6 +297,7 @@ pub struct Auth {
     pub username: String,
     pub password: Secret,
     pub realm: String,
+    pub supported_algorithms_uas: DigestAlgorithms,
 }
 
 impl Auth {
@@ -763,7 +766,14 @@ impl Config {
             "auth" => {
                 section.check(
                     file,
-                    &["type", "auth_type", "username", "password", "realm"],
+                    &[
+                        "type",
+                        "auth_type",
+                        "username",
+                        "password",
+                        "realm",
+                        "supported_algorithms_uas",
+                    ],
                 )?;
                 if section.value("auth_type").unwrap_or("userpass") != "userpass" {
                     return Err(ConfigError::at(
@@ -777,6 +787,11 @@ impl Config {
                     username: section.required(file, "username")?.into(),
                     password: Secret(section.required(file, "password")?.into()),
                     realm: section.value("realm").unwrap_or("").into(),
+                    supported_algorithms_uas: section.value("supported_algorithms_uas")
+                        .map(str::parse)
+                        .transpose()
+                        .map_err(|_| ConfigError::at(file, section.position("supported_algorithms_uas"), "supported_algorithms_uas requires one to three distinct algorithms: MD5, SHA-256, SHA-512-256"))?
+                        .unwrap_or_default(),
                 });
             }
             "aor" => {
