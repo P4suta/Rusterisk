@@ -10,6 +10,7 @@ mod authentication;
 mod grant;
 mod minimum_expiration;
 mod request;
+mod retry_after;
 mod updates;
 pub use grant::RegistrationGrant;
 

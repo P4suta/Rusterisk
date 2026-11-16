@@ -10,6 +10,8 @@ mod grants;
 mod minimum_expiration;
 #[path = "outbound_registration/responses.rs"]
 mod responses;
+#[path = "outbound_registration/retry_after.rs"]
+mod retry_after;
 #[path = "outbound_registration/updates.rs"]
 mod updates;
 
