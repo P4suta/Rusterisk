@@ -22,6 +22,58 @@ pub(crate) struct ChallengeChoice<'a> {
 }
 
 impl Header {
+    pub(crate) fn renew_authorization(
+        &self,
+        credentials: &[Auth],
+        method: &str,
+        uri: &str,
+        body: &[u8],
+    ) -> Result<Option<String>, DigestError> {
+        let prior = self.authorization()?;
+        let quality = match prior.protection() {
+            Protection::Auth(_) => Quality::Auth,
+            Protection::Integrity(_) => Quality::Integrity,
+            Protection::Legacy => return Err(DigestError::Unsupported),
+        };
+        let selected = credentials
+            .iter()
+            .find(|credentials| {
+                credentials.username == prior.username() && credentials.realm == prior.realm()
+            })
+            .or_else(|| {
+                credentials.iter().find(|credentials| {
+                    credentials.username == prior.username()
+                        && credentials.matches_outbound_realm(prior.realm())
+                })
+            });
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        let challenge = Challenge {
+            realm: prior.realm().into(),
+            nonce: prior.nonce().into(),
+            algorithm: prior.algorithm(),
+            quality,
+            opaque: self.quoted("opaque")?.map(String::from),
+            stale: false,
+        };
+        let count = prior.count().checked_add(1).ok_or(DigestError::Invalid)?;
+        let credentials = Credentials::new(
+            &selected.username,
+            selected.password.expose(),
+            prior.realm(),
+        )?;
+        let request = DigestRequest::new(method, uri, prior.nonce(), body)?;
+        challenge
+            .authorization(
+                &credentials,
+                &request,
+                self.required_quoted("cnonce")?,
+                count,
+            )
+            .map(Some)
+    }
+
     pub(crate) fn choose_challenge<'a, 'b>(
         offers: impl IntoIterator<Item = &'a str>,
         credentials: &'b [Auth],

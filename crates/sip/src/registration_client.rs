@@ -62,6 +62,7 @@ pub struct RegistrationTransaction {
     expires: u64,
     observed: u64,
     state: State,
+    authentication_attempts: u8,
 }
 
 impl RegistrationTransaction {
@@ -81,6 +82,7 @@ impl RegistrationTransaction {
             expires,
             observed: now,
             state: State::Ready { at: now },
+            authentication_attempts: 0,
         })
     }
 

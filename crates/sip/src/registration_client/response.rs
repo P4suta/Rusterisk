@@ -6,12 +6,15 @@ use rsipstack::sip::{
 };
 use rusterisk_config::Protocol;
 use std::net::SocketAddr;
+mod authentication;
 
 pub struct RegistrationResponse {
     response: Response,
     request: Datagram,
     identity: RegistrationIdentity,
     protocol: Protocol,
+    received: u64,
+    authentication_attempts: u8,
 }
 
 impl RegistrationResponse {
@@ -101,6 +104,8 @@ impl RegistrationTransaction {
                 },
                 identity: self.identity,
                 protocol: self.protocol,
+                received: now,
+                authentication_attempts: self.authentication_attempts,
             },
         )))
     }

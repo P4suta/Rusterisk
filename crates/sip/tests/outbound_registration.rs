@@ -2,6 +2,8 @@ use rusterisk_config::{Config, Registration};
 use rusterisk_sip::{
     Datagram, RegistrationIdentity, RegistrationTransaction, RegistrationTransactionEvent, SipError,
 };
+#[path = "outbound_registration/authentication.rs"]
+mod authentication;
 #[path = "outbound_registration/responses.rs"]
 mod responses;
 

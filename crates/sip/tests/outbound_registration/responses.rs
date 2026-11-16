@@ -20,7 +20,7 @@ pub(super) fn response(packet: &Datagram, status: u16, extra: &str) -> Result<Ve
     Ok(output.into_bytes())
 }
 
-fn final_response(
+pub(super) fn final_response(
     event: Option<RegistrationTransactionEvent>,
 ) -> Result<RegistrationResponse, SipError> {
     match event {
