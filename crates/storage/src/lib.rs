@@ -588,12 +588,25 @@ fn recover(path: &Path) -> Result<bool, StorageError> {
 pub struct WaveReader {
     file: File,
     rate: u32,
+    length: u32,
     remaining: u32,
 }
 
 impl WaveReader {
     pub fn rate(&self) -> u32 {
         self.rate
+    }
+
+    pub fn sample_position(&self) -> u64 {
+        u64::from(self.length - self.remaining) / 2
+    }
+
+    pub fn seek_sample(&mut self, sample: u64) -> Result<u64, StorageError> {
+        let sample = sample.min(u64::from(self.length) / 2);
+        let bytes = u32::try_from(sample * 2).map_err(|_| StorageError::Capacity)?;
+        self.file.seek(SeekFrom::Start(44 + u64::from(bytes)))?;
+        self.remaining = self.length - bytes;
+        Ok(sample)
     }
 
     pub fn open(path: &Path) -> Result<Self, StorageError> {
@@ -605,6 +618,7 @@ impl WaveReader {
         Ok(Self {
             file,
             rate,
+            length: remaining,
             remaining,
         })
     }
