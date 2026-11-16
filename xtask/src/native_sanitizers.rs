@@ -1,5 +1,7 @@
 use crate::{reference::ImageIdentity, reference::Step};
 use std::{io, path::Path, time::Duration};
+mod results;
+pub use results::{validate_rejection, Defect, NativeInventory};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -48,17 +50,45 @@ impl Scope {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
+    ClangVersion,
+    RustVersion,
+    CompileProbe(Defect),
+    RejectProbe(Defect),
     Fetch,
     Build(Scope),
+    Inventory(Scope),
     Run(Scope),
 }
 
 impl Phase {
     pub fn label(self) -> String {
         match self {
+            Self::ClangVersion => "clang-version".to_owned(),
+            Self::RustVersion => "rust-version".to_owned(),
+            Self::CompileProbe(defect) => format!("compile-probe-{}", defect.label()),
+            Self::RejectProbe(defect) => format!("reject-probe-{}", defect.label()),
             Self::Fetch => "fetch".to_owned(),
             Self::Build(scope) => format!("build-{}", scope.label()),
+            Self::Inventory(scope) => format!("inventory-{}", scope.label()),
             Self::Run(scope) => format!("run-{}", scope.label()),
+        }
+    }
+}
+
+impl Defect {
+    pub const ALL: [Self; 2] = [Self::Address, Self::Undefined];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Address => "address",
+            Self::Undefined => "undefined",
+        }
+    }
+
+    pub const fn source(self) -> &'static str {
+        match self {
+            Self::Address => "#include <stdlib.h>\nint main(int argc, char **argv) {\n(void)argv;\nint *value = malloc(sizeof(int));\nif (!value) return 3;\n*value = argc;\nfree(value);\nreturn *(volatile int *)value;\n}\n",
+            Self::Undefined => "int main(int argc, char **argv) {\n(void)argv;\nvolatile int value = 2147483647;\nvalue += argc;\nreturn value;\n}\n",
         }
     }
 }
@@ -114,8 +144,12 @@ impl NativeSanitizerPlan {
 
     pub fn step(&self, phase: Phase) -> Step {
         let budget = match phase {
+            Phase::ClangVersion
+            | Phase::RustVersion
+            | Phase::CompileProbe(_)
+            | Phase::RejectProbe(_) => 30,
             Phase::Fetch | Phase::Build(_) => 900,
-            Phase::Run(_) => 180,
+            Phase::Inventory(_) | Phase::Run(_) => 180,
         };
         let fetch = phase == Phase::Fetch;
         let mut arguments: Vec<String> = [
@@ -133,16 +167,32 @@ impl NativeSanitizerPlan {
             "--env=CFLAGS=-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g",
             "--env=CXXFLAGS=-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g",
             "--env=RUSTFLAGS=-C linker=clang -C link-arg=-fsanitize=address,undefined",
-            "--env=ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:abort_on_error=1:detect_odr_violation=1",
-            "--env=UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1",
+            "--env=ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:abort_on_error=0:exitcode=86:detect_odr_violation=1",
+            "--env=UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:exitcode=87",
             if fetch { "--env=CARGO_NET_OFFLINE=false" } else { "--env=CARGO_NET_OFFLINE=true" },
             "--entrypoint=/usr/bin/timeout", self.image.as_str(), "--signal=TERM", "--kill-after=10s",
-            &format!("{}s", budget - 20), "cargo",
+            &format!("{}s", budget - 20),
         ].into_iter().map(str::to_owned).collect();
         match phase {
-            Phase::Fetch => arguments.extend(["fetch", "--locked"].map(str::to_owned)),
-            Phase::Build(scope) | Phase::Run(scope) => {
-                arguments.extend(["test", "--locked", "--offline"].map(str::to_owned));
+            Phase::ClangVersion => arguments.extend(["clang", "--version"].map(str::to_owned)),
+            Phase::RustVersion => arguments.extend(["rustc", "-vV"].map(str::to_owned)),
+            Phase::CompileProbe(defect) => arguments.extend([
+                "clang".to_owned(),
+                "-O1".to_owned(),
+                "-g".to_owned(),
+                "-fsanitize=address,undefined".to_owned(),
+                "-fno-sanitize-recover=all".to_owned(),
+                "-fno-omit-frame-pointer".to_owned(),
+                format!("/state/probe-{}.c", defect.label()),
+                "-o".to_owned(),
+                format!("/state/probe-{}", defect.label()),
+            ]),
+            Phase::RejectProbe(defect) => {
+                arguments.push(format!("/state/probe-{}", defect.label()))
+            }
+            Phase::Fetch => arguments.extend(["cargo", "fetch", "--locked"].map(str::to_owned)),
+            Phase::Build(scope) | Phase::Inventory(scope) | Phase::Run(scope) => {
+                arguments.extend(["cargo", "test", "--locked", "--offline"].map(str::to_owned));
                 arguments.extend(
                     scope
                         .arguments()
@@ -151,15 +201,22 @@ impl NativeSanitizerPlan {
                 );
                 match phase {
                     Phase::Build(_) => arguments.push("--no-run".into()),
-                    Phase::Run(_) => {
+                    Phase::Inventory(_) | Phase::Run(_) => {
                         if scope == Scope::Tls {
                             arguments.push("signaling::stream_tests::".into());
                         }
                         arguments.extend(
                             ["--", "--test-threads=1", "--format=pretty"].map(str::to_owned),
                         );
+                        if matches!(phase, Phase::Inventory(_)) {
+                            arguments.push("--list".into());
+                        }
                     }
-                    Phase::Fetch => {}
+                    Phase::ClangVersion
+                    | Phase::RustVersion
+                    | Phase::CompileProbe(_)
+                    | Phase::RejectProbe(_)
+                    | Phase::Fetch => {}
                 }
             }
         }
