@@ -1,5 +1,6 @@
 use super::output::Bounded;
 use super::{ArchiveFormat, ServerPayload};
+use crate::regular_archive::{read_regular_gzip, ArchiveLimits, ArchiveRoot};
 use std::io::{self, Write};
 
 pub fn write_server_tar_gzip(payload: &ServerPayload, writer: impl Write) -> io::Result<()> {
@@ -29,4 +30,51 @@ pub fn write_server_tar_gzip(payload: &ServerPayload, writer: impl Write) -> io:
         archive.append(&header, bytes)?;
     }
     archive.into_inner()?.finish()?.flush()
+}
+
+pub fn check_server_tar_gzip(payload: &ServerPayload, bytes: &[u8]) -> io::Result<()> {
+    if payload.name().target().format() != ArchiveFormat::TarGzip {
+        return Err(io::Error::other("server target requires a zip archive"));
+    }
+    let gzip = flate2::bufread::GzDecoder::new(io::Cursor::new(bytes));
+    let header = gzip
+        .header()
+        .ok_or_else(|| io::Error::other("server archive has no gzip header"))?;
+    if header.mtime() != 0
+        || header.operating_system() != 255
+        || header.filename().is_some()
+        || header.comment().is_some()
+        || header.extra().is_some()
+    {
+        return Err(io::Error::other(
+            "server archive has unexpected gzip metadata",
+        ));
+    }
+    let root = ArchiveRoot::new(payload.name().root()).map_err(io::Error::other)?;
+    let archive = read_regular_gzip(io::Cursor::new(bytes), &root, ArchiveLimits::SERVER)
+        .map_err(io::Error::other)?;
+    if archive.files().len() != 9 {
+        return Err(io::Error::other(
+            "server archive requires nine regular files",
+        ));
+    }
+    for ((path, expected), file) in payload.files().zip(archive.files()) {
+        let mode = if path == payload.name().target().binary_path() {
+            0o755
+        } else {
+            0o644
+        };
+        if file.path().as_str() != path
+            || file.bytes() != expected
+            || file.mode()? != mode
+            || file.uid()? != 0
+            || file.gid()? != 0
+            || file.mtime()? != 0
+        {
+            return Err(io::Error::other(
+                "server archive differs from its captured payload",
+            ));
+        }
+    }
+    Ok(())
 }

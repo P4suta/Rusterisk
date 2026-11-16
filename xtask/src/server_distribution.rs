@@ -5,7 +5,7 @@ mod payload;
 pub use payload::{PayloadError, ServerPayload};
 mod output;
 mod tar_gzip;
-pub use tar_gzip::write_server_tar_gzip;
+pub use tar_gzip::{check_server_tar_gzip, write_server_tar_gzip};
 mod zip;
 pub use zip::write_server_zip;
 mod zip_read;

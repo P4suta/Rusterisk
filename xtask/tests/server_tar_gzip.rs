@@ -1,11 +1,71 @@
 use std::io::{self, Cursor, Write};
 use xtask::{
     regular_archive::{read_regular_gzip, ArchiveLimits, ArchiveRoot},
-    server_distribution::{write_server_tar_gzip, ServerPayload, ServerTarget},
+    server_distribution::{
+        check_server_tar_gzip, write_server_tar_gzip, ServerPayload, ServerTarget,
+    },
 };
 
 fn payload(version: &str) -> io::Result<ServerPayload> {
     payload_with_binary_size(version, 32)
+}
+
+#[test]
+fn unix_archive_readback_checks_captured_files_and_regular_metadata() -> io::Result<()> {
+    let payload = payload("0.1.0")?;
+    let mut valid = Vec::new();
+    write_server_tar_gzip(&payload, &mut valid)?;
+    check_server_tar_gzip(&payload, &valid)?;
+    for offset in [4, 9] {
+        let mut changed = valid.clone();
+        changed[offset] ^= 1;
+        assert!(check_server_tar_gzip(&payload, &changed).is_err());
+    }
+    for changed in 0..8 {
+        let gzip = flate2::GzBuilder::new()
+            .mtime(0)
+            .operating_system(255)
+            .write(Vec::new(), flate2::Compression::default());
+        let mut archive = tar::Builder::new(gzip);
+        for (index, (path, original)) in payload.files().enumerate() {
+            if changed == 5 && index == 1 {
+                continue;
+            }
+            let mut header = tar::Header::new_ustar();
+            header.set_path(format!("{}/{path}", payload.name().root()))?;
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_mode(if index == 0 { 0o755 } else { 0o644 });
+            header.set_size(original.len() as u64);
+            header.set_uid(0);
+            header.set_gid(0);
+            header.set_mtime(0);
+            let mut bytes = original.to_vec();
+            if index == 0 {
+                match changed {
+                    0 => header.set_mode(0o644),
+                    1 => header.set_uid(1),
+                    2 => header.set_gid(1),
+                    3 => header.set_mtime(1),
+                    4 => bytes[0] ^= 1,
+                    5 => {}
+                    6 => header.set_path(format!("{}/bin/another", payload.name().root()))?,
+                    7 => header.set_entry_type(tar::EntryType::Symlink),
+                    _ => return Err(io::Error::other("fixture mutation is outside its range")),
+                }
+            }
+            header.set_cksum();
+            archive.append(&header, bytes.as_slice())?;
+        }
+        let bytes = archive.into_inner()?.finish()?;
+        assert!(
+            check_server_tar_gzip(&payload, &bytes).is_err(),
+            "case {changed}"
+        );
+    }
+    let mut trailing = valid;
+    trailing.push(0);
+    assert!(check_server_tar_gzip(&payload, &trailing).is_err());
+    Ok(())
 }
 
 fn payload_with_binary_size(version: &str, size: usize) -> io::Result<ServerPayload> {
