@@ -73,10 +73,15 @@ AudioSocket comparisons check binary session identifiers, Stasis participation, 
 Incoming and configured outgoing WebSocket comparisons check the media subprotocol, start metadata, known samples in both directions, and JSON and plain text controls.
 Outgoing comparisons also check basic authentication, destination queries, and manual answer.
 Control comparisons check buffering, flow thresholds, pause, resume, flushing, queue markers, drained notifications, direction changes, and telephone digits.
+Incoming Opus comparisons decode distinct received tones in both directions.
 The runner inspects its reference container's private address and requires direct container routing.
 Stream callbacks use the reference's resolution of `host.docker.internal` and ephemeral host listener ports.
 The local rehearsal used OrbStack on macOS ARM64.
 
+The runner also executes the same blind and attended transfer fixtures with both servers.
+The attended case changes both surviving signals after confirming retirement of the source dialogs.
+The [transfer profile](blind-transfer.md) records received-audio requirements and remaining wire differences.
+
 The scenario doesn't certify complete operation compatibility.
-SIPp scenarios, signaling calls, and browser comparisons still require integration work.
+SIPp scenarios, broader signaling coverage, and browser comparisons still require integration work.
 The capability response keeps `call_verified=false` until the required call and audio comparisons pass.

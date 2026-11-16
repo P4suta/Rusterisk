@@ -97,7 +97,9 @@ AudioSocket supports client connections with numeric destinations, binary sessio
 Connection attempts have deadlines and preserve signaling progress.
 Cancelling admission closes the owned connection without reviving the channel.
 Incoming external WebSocket channels publish an ephemeral connection identifier and an optimal frame size.
-Media connections use the `media` subprotocol and the connection identifier as a bearer credential.
+Media connections use the connection identifier as a bearer credential.
+An explicit `Sec-WebSocket-Protocol` offer must include `media`.
+Connections without an offer receive no unsolicited subprotocol header.
 Origin validation and exclusive connection claims protect channel generations.
 The service supports JSON and plain text controls, G.711 and signed linear audio, buffering, queue markers, pause, resume, and direction changes.
 Direction changes require JSON controls.
@@ -106,7 +108,7 @@ Configured outgoing WebSocket clients preserve destination queries, negotiate th
 Encrypted connections verify the certificate and peer name through native trust roots or a configured certificate list.
 Owned connection jobs enforce configured retry limits and a four-second admission deadline.
 Cancellation releases pending connections and prevents later retry attempts.
-WebSocket media with Opus remains pending.
+Native and Asterisk reference scenarios decode known tones in both directions over incoming Opus WebSocket connections.
 
 ## Configuration and persistence
 
@@ -141,4 +143,4 @@ Both control formats also compare buffering, flow control, queue markers, pause,
 The reference distinguishes case-sensitive technology lists from case-insensitive endpoint detail queries.
 See [reference comparisons](reference-comparisons.md) for scope and resource limits.
 The native browser campaign verifies received audio and stored recordings on Linux ARM64 loopback.
-Reference signaling calls, browser calls with Asterisk, supported-platform distributions, and physical `HT813` observations remain unverified.
+Broader reference signaling calls, browser calls with Asterisk, supported-platform distributions, and physical `HT813` observations remain unverified.
