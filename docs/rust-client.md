@@ -151,6 +151,15 @@ Remote cleanup has a 60-second deadline for queued requests and late originate r
 Closing the event socket has a separate two-second deadline.
 The driver then aborts and joins any remaining workers.
 
+## Control playback
+
+Use `play_channel` or `play_bridge` to start a named playback from a typed `MediaUri`.
+Use `pause_playback`, `resume_playback`, and `stop_playback` to control its lifetime.
+Use `restart_playback`, `forward_playback`, and `reverse_playback` to request position changes through the [Asterisk playback controls](https://docs.asterisk.org/Asterisk_22_Documentation/API_Documentation/Asterisk_REST_Interface/Playbacks_REST_API/).
+The client preserves the server's 404 and 409 errors.
+Successful requests acknowledge acceptance.
+Playback events report progress and completion.
+
 ## Download stored audio
 
 Use `record_channel` or `record_bridge` with a recording name, format, and `RecordingOptions` to start recording.
