@@ -54,3 +54,18 @@ fn native_defect_probes_require_the_expected_instrumented_diagnostic_and_exit() 
     assert!(validate_rejection(Defect::Address, Some(86), undefined).is_err());
     assert!(validate_rejection(Defect::Undefined, Some(87), address).is_err());
 }
+
+#[test]
+fn rejected_native_probes_name_the_expected_and_observed_exit() -> std::io::Result<()> {
+    let error = validate_rejection(
+        Defect::Address,
+        Some(87),
+        b"ERROR: AddressSanitizer: heap-use-after-free\n",
+    )
+    .err()
+    .ok_or_else(|| std::io::Error::other("unexpected probe status accepted"))?
+    .to_string();
+    assert!(error.contains("86"), "{error}");
+    assert!(error.contains("87"), "{error}");
+    Ok(())
+}

@@ -161,6 +161,11 @@ impl NativeSanitizerPlan {
             Phase::Inventory(_) | Phase::Run(_) => 180,
         };
         let fetch = phase == Phase::Fetch;
+        let exit_code = if phase == Phase::RejectProbe(Defect::Undefined) {
+            87
+        } else {
+            86
+        };
         let mut arguments: Vec<String> = [
             "run", "--rm", "--pull=never", "--name", &self.name(phase),
             "--cpus=1", "--memory=2g", "--memory-swap=2g", "--pids-limit=256",
@@ -176,8 +181,9 @@ impl NativeSanitizerPlan {
             "--env=CFLAGS=-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g",
             "--env=CXXFLAGS=-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g",
             "--env=RUSTFLAGS=-C linker=clang -C link-arg=-fsanitize=address,undefined",
-            "--env=ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:abort_on_error=0:exitcode=86:detect_odr_violation=1",
-            "--env=UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:exitcode=87",
+            "--env=ASAN_SYMBOLIZER_PATH=/usr/bin/llvm-symbolizer-14",
+            &format!("--env=ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:abort_on_error=0:exitcode={exit_code}:detect_odr_violation=1"),
+            &format!("--env=UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:exitcode={exit_code}"),
             if fetch { "--env=CARGO_NET_OFFLINE=false" } else { "--env=CARGO_NET_OFFLINE=true" },
             "--entrypoint=/usr/bin/timeout", self.image.as_str(), "--signal=TERM", "--kill-after=10s",
             &format!("{}s", budget - 20),

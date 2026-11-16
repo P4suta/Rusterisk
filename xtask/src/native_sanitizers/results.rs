@@ -152,6 +152,9 @@ pub fn validate_rejection(defect: Defect, code: Option<i32>, bytes: &[u8]) -> io
     if code == Some(expected) && text(bytes)?.contains(diagnostic) {
         Ok(())
     } else {
-        Err(invalid())
+        Err(io::Error::other(format!(
+            "native {} probe requires exit {expected} and {diagnostic}; observed exit {code:?}",
+            defect.label()
+        )))
     }
 }

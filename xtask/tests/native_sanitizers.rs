@@ -93,6 +93,21 @@ fn native_sanitizers_probe_the_runtime_and_discover_tests_before_execution(
             .iter()
             .any(|argument| argument == "-fsanitize=address,undefined"));
         let rejection = plan.step(Phase::RejectProbe(defect));
+        let expected_exit = match defect {
+            Defect::Address => "exitcode=86",
+            Defect::Undefined => "exitcode=87",
+        };
+        for name in ["--env=ASAN_OPTIONS=", "--env=UBSAN_OPTIONS="] {
+            let options = rejection
+                .arguments
+                .iter()
+                .find_map(|argument| argument.strip_prefix(name))
+                .ok_or_else(|| std::io::Error::other("sanitizer options missing"))?;
+            assert!(
+                options.split(':').any(|option| option == expected_exit),
+                "{name}{options}"
+            );
+        }
         assert!(rejection
             .arguments
             .iter()
