@@ -2,6 +2,8 @@ use crate::{reference::ImageIdentity, reference::Step};
 use std::{io, path::Path, time::Duration};
 mod results;
 pub use results::{validate_rejection, Defect, NativeInventory};
+mod archives;
+pub use archives::{native_archives, validate_instrumented_archive, NativeArchive, NativeLibrary};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -54,6 +56,7 @@ pub enum Phase {
     RustVersion,
     CompileProbe(Defect),
     RejectProbe(Defect),
+    InspectArchive(NativeLibrary),
     Fetch,
     Build(Scope),
     Inventory(Scope),
@@ -67,6 +70,7 @@ impl Phase {
             Self::RustVersion => "rust-version".to_owned(),
             Self::CompileProbe(defect) => format!("compile-probe-{}", defect.label()),
             Self::RejectProbe(defect) => format!("reject-probe-{}", defect.label()),
+            Self::InspectArchive(library) => format!("inspect-{}", library.label()),
             Self::Fetch => "fetch".to_owned(),
             Self::Build(scope) => format!("build-{}", scope.label()),
             Self::Inventory(scope) => format!("inventory-{}", scope.label()),
@@ -148,6 +152,7 @@ impl NativeSanitizerPlan {
             | Phase::RustVersion
             | Phase::CompileProbe(_)
             | Phase::RejectProbe(_) => 30,
+            Phase::InspectArchive(_) => 30,
             Phase::Fetch | Phase::Build(_) => 900,
             Phase::Inventory(_) | Phase::Run(_) => 180,
         };
@@ -190,6 +195,11 @@ impl NativeSanitizerPlan {
             Phase::RejectProbe(defect) => {
                 arguments.push(format!("/state/probe-{}", defect.label()))
             }
+            Phase::InspectArchive(library) => arguments.extend([
+                "nm".to_owned(),
+                "--undefined-only".to_owned(),
+                format!("/state/native/lib-{}.a", library.label()),
+            ]),
             Phase::Fetch => arguments.extend(["cargo", "fetch", "--locked"].map(str::to_owned)),
             Phase::Build(scope) | Phase::Inventory(scope) | Phase::Run(scope) => {
                 arguments.extend(["cargo", "test", "--locked", "--offline"].map(str::to_owned));
@@ -200,7 +210,10 @@ impl NativeSanitizerPlan {
                         .map(|argument| (*argument).to_owned()),
                 );
                 match phase {
-                    Phase::Build(_) => arguments.push("--no-run".into()),
+                    Phase::Build(_) => arguments.extend([
+                        "--no-run".to_owned(),
+                        "--message-format=json-render-diagnostics".to_owned(),
+                    ]),
                     Phase::Inventory(_) | Phase::Run(_) => {
                         if scope == Scope::Tls {
                             arguments.push("signaling::stream_tests::".into());
@@ -216,6 +229,7 @@ impl NativeSanitizerPlan {
                     | Phase::RustVersion
                     | Phase::CompileProbe(_)
                     | Phase::RejectProbe(_)
+                    | Phase::InspectArchive(_)
                     | Phase::Fetch => {}
                 }
             }

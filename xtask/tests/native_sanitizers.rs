@@ -115,3 +115,28 @@ fn native_sanitizers_probe_the_runtime_and_discover_tests_before_execution(
     }
     Ok(())
 }
+
+#[test]
+fn native_builds_report_exact_archives_and_inspection_uses_owned_copies(
+) -> Result<(), std::io::Error> {
+    use xtask::native_sanitizers::NativeLibrary;
+    let plan = NativeSanitizerPlan::new("fixture", "/source", "/state", IMAGE)?;
+    let build = plan.step(Phase::Build(Scope::Tls));
+    assert!(build
+        .arguments
+        .iter()
+        .any(|argument| argument == "--message-format=json-render-diagnostics"));
+    for library in [
+        NativeLibrary::Opus,
+        NativeLibrary::Sqlite,
+        NativeLibrary::AwsLc,
+    ] {
+        let inspected = plan.step(Phase::InspectArchive(library));
+        assert!(inspected.arguments.iter().any(|argument| argument == "nm"));
+        assert!(inspected
+            .arguments
+            .iter()
+            .any(|argument| argument == &format!("/state/native/lib-{}.a", library.label())));
+    }
+    Ok(())
+}
