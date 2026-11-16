@@ -1,7 +1,7 @@
 use rusterisk_client::{
     api::{
-        ChannelId, EventKind, EventSource, ExternalRtpTarget, MediaUri, PlaybackState, SoundId,
-        StaticRtpCodec,
+        ChannelId, EventKind, EventSource, ExternalRtpTarget, MediaUri, PlaybackMilliseconds,
+        PlaybackOptions, PlaybackState, SoundId, StaticRtpCodec,
     },
     Client, Error, Session,
 };
@@ -33,7 +33,7 @@ pub fn prepare(root: &Path) -> Result<(), Error> {
     file.write_all(&16_u16.to_le_bytes())?;
     file.write_all(b"data")?;
     file.write_all(&128_000_u32.to_le_bytes())?;
-    for sample in [4000_i16, 4000, 4000, -7000, -7000, -7000, 1000, 1000] {
+    for sample in [4000_i16, 4000, 4000, -7000, -7000, -7000, 1000, 2000] {
         let mut second = [0; 16_000];
         for bytes in second.as_chunks_mut::<2>().0 {
             bytes.copy_from_slice(&sample.to_le_bytes());
@@ -263,10 +263,42 @@ pub async fn compare(
             client.stop_playback(&playback).await?;
             observed(session, Observation::Finished(&playback)).await?;
             match client.playback(&playback).await {
-                Err(Error::Api { status: 404, .. }) => Ok(()),
-                Err(error) => Err(error),
-                Ok(_) => Err(Error::Invalid("finished playback is still live")),
+                Err(Error::Api { status: 404, .. }) => {}
+                Err(error) => return Err(error),
+                Ok(_) => return Err(Error::Invalid("finished playback is still live")),
             }
+            let options = PlaybackOptions {
+                offset_ms: PlaybackMilliseconds::try_from(7000)
+                    .map_err(|_| Error::Invalid("playback fixture offset"))?,
+                skip_ms: PlaybackMilliseconds::try_from(1000)
+                    .map_err(|_| Error::Invalid("playback fixture step"))?,
+            };
+            let started = tokio::time::Instant::now();
+            match target {
+                Target::Channel => {
+                    client
+                        .play_channel_with_options(&id, &playback, &media, None, options)
+                        .await?;
+                }
+                Target::Bridge => {
+                    client
+                        .play_bridge_with_options(&bridge, &playback, &media, None, options)
+                        .await?;
+                }
+            }
+            received_by(&peer, 2000, "offset", started + Duration::from_secs(1)).await?;
+            client.reverse_playback(&playback).await?;
+            received(&peer, 1000, "custom reverse").await?;
+            client.reverse_playback(&playback).await?;
+            received(&peer, -7000, "custom reverse again").await?;
+            client.forward_playback(&playback).await?;
+            received(&peer, 1000, "custom forward").await?;
+            client.forward_playback(&playback).await?;
+            received(&peer, 2000, "custom forward again").await?;
+            client.restart_playback(&playback).await?;
+            received(&peer, 4000, "custom restart").await?;
+            client.stop_playback(&playback).await?;
+            observed(session, Observation::Finished(&playback)).await
         }
         .await;
         let cleanup = match client.stop_playback(&playback).await {
