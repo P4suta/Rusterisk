@@ -33,6 +33,8 @@ pub use native::{check_server_startup_with, verify_server_native_with};
 mod sdk_interop;
 #[cfg(unix)]
 pub use sdk_interop::verify_server_sdk_with;
+mod oci_profile;
+pub use oci_profile::{ServerOciProfile, OCI_RUNTIME};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {
