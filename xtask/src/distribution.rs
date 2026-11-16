@@ -39,3 +39,5 @@ mod sdk_http;
 pub use sdk_http::{SdkHttpTarget, SdkHttpTargetError};
 mod sdk_runtime;
 pub use sdk_runtime::SdkRuntimeIdentity;
+mod sdk_http_run;
+pub use sdk_http_run::PreparedSdkHttpConsumer;
