@@ -78,17 +78,7 @@ pub fn parse_registration_contacts<'a>(
     values: impl IntoIterator<Item = &'a str>,
     expires: Option<u32>,
 ) -> Result<RegistrationContacts, ContactError> {
-    let mut entries = Vec::new();
-    let mut total = 0usize;
-    for value in values {
-        total = total
-            .checked_add(value.len())
-            .ok_or(ContactError::Capacity)?;
-        if total > crate::MAX_MESSAGE {
-            return Err(ContactError::Capacity);
-        }
-        split(value, ',', &mut entries)?;
-    }
+    let entries = entries(values)?;
     if entries.is_empty() {
         return Ok(RegistrationContacts::Query);
     }
@@ -104,6 +94,46 @@ pub fn parse_registration_contacts<'a>(
         contacts.push(contact(entry, expires)?);
     }
     Ok(RegistrationContacts::Bindings(ContactBindings(contacts)))
+}
+
+pub(super) fn parse_response_contacts<'a>(
+    values: impl IntoIterator<Item = &'a str>,
+    expires: Option<u32>,
+) -> Result<ContactBindings, ContactError> {
+    let mut contacts = Vec::new();
+    for entry in entries(values)? {
+        let (_, uri, _) = parts(entry)?;
+        let (scheme, rest) = uri.split_once(':').ok_or(ContactError::Invalid)?;
+        if scheme.eq_ignore_ascii_case("sip") || scheme.eq_ignore_ascii_case("sips") {
+            contacts.push(contact(entry, expires)?);
+        } else if rest.is_empty()
+            || !scheme
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic)
+            || !scheme
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"+-.".contains(&byte))
+        {
+            return Err(ContactError::Invalid);
+        }
+    }
+    Ok(ContactBindings(contacts))
+}
+
+fn entries<'a>(values: impl IntoIterator<Item = &'a str>) -> Result<Vec<&'a str>, ContactError> {
+    let mut entries = Vec::new();
+    let mut total = 0usize;
+    for value in values {
+        total = total
+            .checked_add(value.len())
+            .ok_or(ContactError::Capacity)?;
+        if total > crate::MAX_MESSAGE {
+            return Err(ContactError::Capacity);
+        }
+        split(value, ',', &mut entries)?;
+    }
+    Ok(entries)
 }
 
 #[derive(Clone, Copy)]

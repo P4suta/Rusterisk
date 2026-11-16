@@ -2,7 +2,7 @@ use crate::{Datagram, SipError, MAX_MESSAGE};
 use rusterisk_config::{Protocol, Registration};
 use std::net::SocketAddr;
 mod response;
-pub use response::RegistrationResponse;
+pub use response::{RegistrationGrant, RegistrationResponse};
 
 const TIMEOUT: u64 = 32_000;
 const INITIAL_RETRY: u64 = 500;

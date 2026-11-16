@@ -7,6 +7,8 @@ use rsipstack::sip::{
 use rusterisk_config::Protocol;
 use std::net::SocketAddr;
 mod authentication;
+mod grant;
+pub use grant::RegistrationGrant;
 
 pub struct RegistrationResponse {
     response: Response,

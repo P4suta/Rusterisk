@@ -33,7 +33,7 @@ pub use destination::{Destination, StaticTarget, TargetHost};
 pub use incoming::RejectReason;
 pub use outgoing::Outbound;
 pub use registration_client::{
-    RegistrationIdentity, RegistrationResponse, RegistrationTransaction,
+    RegistrationGrant, RegistrationIdentity, RegistrationResponse, RegistrationTransaction,
     RegistrationTransactionEvent,
 };
 use request_identity::RequestIdentity;
