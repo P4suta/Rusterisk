@@ -1,4 +1,6 @@
-use super::super::{answer_dialog_at, exchange, final_response, invite_at, AudioPeer};
+use super::super::{
+    answer_dialog_at, exchange, final_response, invite_at, transfer_peer::Peer, AudioPeer,
+};
 use super::{
     combine, failure,
     signals::{acknowledge, ReferEvent, RequestRoute, TransferSignals},
@@ -6,16 +8,10 @@ use super::{
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, SipMessage};
 use rusterisk_config::Codec;
 use rusterisk_media::{AudioFormat, RtpSender};
-use rusterisk_server::{rtp::SocketPair, ControlError};
+use rusterisk_server::ControlError;
 use rusterisk_sip::Session;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use tokio::{net::UdpSocket, sync::mpsc};
-
-pub(super) struct Peer {
-    signal: UdpSocket,
-    audio: SocketPair,
-    advertised: IpAddr,
-}
 
 #[derive(Clone, Copy)]
 pub(super) enum Departure {
@@ -27,38 +23,6 @@ pub(super) struct ObservedTransfer {
     pub event: ReferEvent,
     pub initial_before_answer: bool,
     pub server_bye_before_answer: bool,
-}
-
-impl Peer {
-    pub(super) async fn bind(bind: IpAddr, advertised: IpAddr) -> Result<Self, ControlError> {
-        Ok(Self {
-            signal: UdpSocket::bind((bind, 0)).await.map_err(failure)?,
-            audio: SocketPair::bind(bind, 0, 0).map_err(failure)?,
-            advertised,
-        })
-    }
-
-    pub(super) fn contact(&self) -> Result<SocketAddr, ControlError> {
-        Ok(SocketAddr::new(
-            self.advertised,
-            self.signal.local_addr().map_err(failure)?.port(),
-        ))
-    }
-
-    fn media(&self) -> Result<SocketAddr, ControlError> {
-        Ok(SocketAddr::new(
-            self.advertised,
-            self.audio.local_addr().map_err(failure)?.port(),
-        ))
-    }
-
-    pub(super) fn addresses(&self) -> Result<[SocketAddr; 3], ControlError> {
-        Ok([
-            self.signal.local_addr().map_err(failure)?,
-            self.audio.local_addr().map_err(failure)?,
-            self.audio.control_addr().map_err(failure)?,
-        ])
-    }
 }
 
 fn pending_signal(socket: &UdpSocket) -> Result<String, ControlError> {

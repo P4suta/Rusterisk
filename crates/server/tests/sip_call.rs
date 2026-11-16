@@ -37,6 +37,10 @@ mod attended_transfer;
 mod blind_transfer;
 #[path = "sip_transfer/lifetime.rs"]
 mod transfer_lifetime;
+#[path = "sip_transfer/peer.rs"]
+mod transfer_peer;
+#[path = "sip_transfer/reference_configuration.rs"]
+mod transfer_reference_configuration;
 #[path = "sip_transfer/signals.rs"]
 mod transfer_signals;
 use acknowledgements::AckIdentity;

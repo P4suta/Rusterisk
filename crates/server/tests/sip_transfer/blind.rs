@@ -1,6 +1,7 @@
 use super::{
     failure,
     transfer_lifetime::{combine, finish},
+    transfer_peer::Peer,
     transfer_signals as signals,
 };
 use rusterisk_config::Config;
@@ -14,7 +15,7 @@ use tokio::{net::UdpSocket, sync::mpsc};
 mod exercise;
 #[path = "reference.rs"]
 mod reference;
-use exercise::{Departure, ObservedTransfer, Peer};
+use exercise::{Departure, ObservedTransfer};
 use signals::RequestRoute;
 
 #[tokio::test]

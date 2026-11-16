@@ -1,15 +1,14 @@
 use super::{
     answer_dialog_at, exchange, failure, final_response, start_invitation,
     transfer_lifetime::{combine, finish},
+    transfer_peer::Peer,
     transfer_signals::{acknowledge, RequestRoute, TransferSignals},
     AudioPeer, Invitation,
 };
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Request, Response, SipMessage};
 use rusterisk_config::{Codec, Config};
 use rusterisk_media::{AudioFormat, RtpSender};
-use rusterisk_server::{
-    media::MediaHub, rtp::SocketPair, signaling::Signaling, ControlError, Controller,
-};
+use rusterisk_server::{media::MediaHub, signaling::Signaling, ControlError, Controller};
 use rusterisk_sip::Session;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -18,34 +17,6 @@ use std::{
 use tokio::{net::UdpSocket, sync::mpsc};
 #[path = "survivor_shutdown.rs"]
 mod survivor_shutdown;
-
-struct Peer {
-    signal: UdpSocket,
-    audio: SocketPair,
-}
-
-impl Peer {
-    async fn bind() -> Result<Self, ControlError> {
-        Ok(Self {
-            signal: UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
-                .await
-                .map_err(failure)?,
-            audio: SocketPair::bind(IpAddr::V4(Ipv4Addr::LOCALHOST), 0, 0).map_err(failure)?,
-        })
-    }
-
-    fn contact(&self) -> Result<SocketAddr, ControlError> {
-        self.signal.local_addr().map_err(failure)
-    }
-
-    fn addresses(&self) -> Result<[SocketAddr; 3], ControlError> {
-        Ok([
-            self.contact()?,
-            self.audio.local_addr().map_err(failure)?,
-            self.audio.control_addr().map_err(failure)?,
-        ])
-    }
-}
 
 struct Dialog {
     answer: Response,
@@ -65,16 +36,12 @@ async fn connect(
         &caller.signal,
         target,
         caller.contact()?,
-        caller.audio.local_addr().map_err(failure)?,
+        caller.media()?,
         invitation,
     )
     .await?;
-    let (callee_media, callee_dialog, expected_ack) = answer_dialog_at(
-        &callee.signal,
-        callee.contact()?,
-        callee.audio.local_addr().map_err(failure)?,
-    )
-    .await?;
+    let (callee_media, callee_dialog, expected_ack) =
+        answer_dialog_at(&callee.signal, callee.contact()?, callee.media()?).await?;
     media_ports.try_send(callee_media).map_err(failure)?;
     let answer = final_response(&caller.signal).await?;
     if answer.status_code.code() != 200 {
@@ -299,10 +266,11 @@ async fn exercise(
 }
 
 async fn native(operation: Exercise) -> Result<(), ControlError> {
-    let first = Peer::bind().await?;
-    let bob = Peer::bind().await?;
-    let second = Peer::bind().await?;
-    let charlie = Peer::bind().await?;
+    let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    let first = Peer::bind(ip, ip).await?;
+    let bob = Peer::bind(ip, ip).await?;
+    let second = Peer::bind(ip, ip).await?;
+    let charlie = Peer::bind(ip, ip).await?;
     let sip = format!("[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[alice-auth]\ntype=auth\nusername=phone\npassword=test-password\n[bob-auth]\ntype=auth\nusername=bob\npassword=bob-password\n[charlie-auth]\ntype=auth\nusername=charlie\npassword=charlie-password\n[alice-aor]\ntype=aor\n[bob-aor]\ntype=aor\ncontact=sip:bob@{}\n[charlie-aor]\ntype=aor\ncontact=sip:charlie@{}\n[alice]\ntype=endpoint\ntransport=udp\nauth=alice-auth\naors=alice-aor\ncontext=internal\nallow=ulaw\n[bob]\ntype=endpoint\ntransport=udp\nauth=bob-auth\naors=bob-aor\ncontext=internal\nallow=ulaw\n[charlie]\ntype=endpoint\ntransport=udp\nauth=charlie-auth\naors=charlie-aor\ncontext=internal\nallow=ulaw\n", bob.contact()?, charlie.contact()?);
     let mut config = Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
