@@ -22,6 +22,7 @@ mod session_description;
 mod stream_framing;
 mod telephone;
 mod transactions;
+mod transfer;
 mod transport;
 mod websocket_framing;
 pub use contact::{
@@ -39,6 +40,7 @@ use request_identity::RequestIdentity;
 pub use session_description::{DtlsSetup, SessionSecurity, WebRtcDescription};
 pub use stream_framing::{SipStreamDecoder, StreamFramingError, StreamItem};
 pub use telephone::DtmfFormat;
+pub use transfer::{BlindRefer, ReferError, ReferSubscription};
 pub use websocket_framing::validate_websocket_message;
 
 pub const MAX_MESSAGE: usize = 16384;
