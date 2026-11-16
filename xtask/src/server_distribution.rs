@@ -32,7 +32,9 @@ pub use ready::check_server_ready_log;
 #[cfg(unix)]
 mod native;
 #[cfg(unix)]
-pub use native::{check_server_startup_for_target_with, check_server_startup_with, verify_server_native_with};
+pub use native::{
+    check_server_startup_for_target_with, check_server_startup_with, verify_server_native_with,
+};
 #[cfg(unix)]
 mod sdk_interop;
 #[cfg(unix)]
@@ -48,9 +50,13 @@ pub use oci_export::{export_server_candidate_oci_with, export_server_oci_with};
 mod oci_runtime;
 pub use oci_runtime::{ServerOciRunPhase, ServerOciRuntimePlan};
 mod oci_archive;
+#[cfg(unix)]
+mod oci_sdk;
 pub use oci_archive::{
     check_server_oci_archive, OciArchiveError, OciArchiveLimit, OciArchiveLimits, ServerOciContents,
 };
+#[cfg(unix)]
+pub use oci_sdk::verify_server_oci_sdk_with;
 mod container_build;
 pub use container_build::{ServerBuildCommandMode, ServerContainerBuildPlan};
 
