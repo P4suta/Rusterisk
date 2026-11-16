@@ -1,4 +1,4 @@
-use super::ServerOciProfile;
+use super::{ServerCandidate, ServerOciProfile};
 use crate::regular_archive::ArchivePathError;
 use std::{
     collections::BTreeMap,
@@ -232,4 +232,28 @@ pub fn check_server_oci_archive<'a>(
             .clone(),
         attestations: selected.attestations,
     })
+}
+
+impl ServerCandidate {
+    pub fn check_oci(&self, archive: &std::path::Path) -> io::Result<ServerOciContents> {
+        let limits = OciArchiveLimits::SERVER;
+        let metadata = std::fs::symlink_metadata(archive)?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > limits.archive {
+            return Err(io::Error::other(
+                "OCI candidate requires a bounded regular archive",
+            ));
+        }
+        let profile = ServerOciProfile::new(
+            self.name().target(),
+            self.name().version(),
+            self.source_digest(),
+        )?;
+        check_server_oci_archive(
+            &profile,
+            self.files(),
+            io::BufReader::new(std::fs::File::open(archive)?),
+            limits,
+        )
+        .map_err(io::Error::other)
+    }
 }

@@ -6,6 +6,8 @@ use xtask::server_distribution::{
 #[path = "oci_archive/fixture.rs"]
 mod fixture;
 use fixture::{Attestation, Entry, Image};
+#[path = "sdk_candidate_build/fixture.rs"]
+mod project;
 
 fn check(image: &Image, bytes: &[u8], limits: OciArchiveLimits) -> io::Result<ServerOciContents> {
     check_server_oci_archive(&image.profile, image.files(), Cursor::new(bytes), limits)
@@ -37,6 +39,80 @@ fn complete_candidate_exports_accept_nested_indexes_and_both_attestation_formats
         }
     }
     Ok(())
+}
+
+#[test]
+fn candidate_checks_bind_exported_images_to_the_loaded_source_and_file_bytes(
+) -> Result<(), xtask::distribution::SdkCandidateBuildError> {
+    project::using_project("oci-candidate", |root, parent| {
+        project::write(
+            root,
+            "docs/server-distribution.md",
+            b"Startup instructions.\n",
+        )?;
+        let target = ServerTarget::LinuxArm64;
+        let capture = xtask::server_distribution::CapturedServer::read(root, target)
+            .map_err(io::Error::other)?;
+        let directory = parent.join("candidate");
+        capture.build_with(&directory, |command, _| {
+            if command.get_args().next().is_some_and(|arg| arg == "build") {
+                let state = command
+                    .get_envs()
+                    .find(|(name, _)| *name == "CARGO_TARGET_DIR")
+                    .and_then(|(_, value)| value)
+                    .ok_or(xtask::process::ProcessError::InvalidOutput)?;
+                let mut binary = vec![0; 64];
+                binary[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+                binary[16..18].copy_from_slice(&2_u16.to_le_bytes());
+                binary[18..20].copy_from_slice(&183_u16.to_le_bytes());
+                binary[20..24].copy_from_slice(&1_u32.to_le_bytes());
+                binary[24..32].copy_from_slice(&4096_u64.to_le_bytes());
+                binary[52..54].copy_from_slice(&64_u16.to_le_bytes());
+                project::write(
+                    &std::path::PathBuf::from(state),
+                    "aarch64-unknown-linux-gnu/release/rusterisk",
+                    &binary,
+                )?;
+            }
+            Ok(())
+        })?;
+        let candidate = xtask::server_distribution::ServerCandidate::read(&directory, target)?;
+        let mut image = Image::new(target)?;
+        image.profile = xtask::server_distribution::ServerOciProfile::new(
+            target,
+            candidate.name().version(),
+            candidate.source_digest(),
+        )?;
+        for (path, bytes) in candidate.files() {
+            let expected = image
+                .expected
+                .iter_mut()
+                .find(|(name, _)| name == path)
+                .ok_or_else(|| io::Error::other("fixture expected file missing"))?;
+            expected.1 = bytes.to_vec();
+            let application = image
+                .application
+                .iter_mut()
+                .find(|entry| entry.path == format!("opt/rusterisk/{path}"))
+                .ok_or_else(|| io::Error::other("fixture application file missing"))?;
+            application.bytes = bytes.to_vec();
+        }
+        let archive = parent.join("candidate.oci.tar");
+        std::fs::write(&archive, image.bytes()?)?;
+        let contents = candidate.check_oci(&archive)?;
+        assert!(contents.manifest_digest().starts_with("sha256:"));
+        image.profile = xtask::server_distribution::ServerOciProfile::new(
+            target,
+            candidate.name().version(),
+            &"f".repeat(64),
+        )?;
+        std::fs::write(&archive, image.bytes()?)?;
+        assert!(candidate.check_oci(&archive).is_err());
+        std::fs::write(&archive, b"invalid OCI export")?;
+        assert!(candidate.check_oci(&archive).is_err());
+        assert!(candidate.check_oci(parent).is_err());
+        Ok(())
+    })
 }
 
 #[test]
