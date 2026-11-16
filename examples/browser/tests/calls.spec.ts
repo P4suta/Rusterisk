@@ -19,6 +19,7 @@ import {
 	captureStopped,
 	observeCapture,
 } from "./capture-observer.ts";
+import { verifyConnectionRecovery } from "./connection-recovery.ts";
 
 function target(name: string): string {
 	const value = process.env[name];
@@ -361,6 +362,112 @@ test("actual outgoing and incoming browser calls exchange known audio and save a
 			messages,
 			0,
 			"Browser calls must not log signaling, credentials, or media.",
+		);
+	}).catch(
+		(primary: unknown): Promise<never> => browserFailure(primary, observations),
+	);
+});
+
+test("cancelling or disconnecting during native capture releases late tracks and preserves reconnect", async (): Promise<void> => {
+	const processes = new BrowserProcesses();
+	const observations: BrowserProcess[] = [];
+	await usingBrowsers(processes, async (): Promise<void> => {
+		const browser = await launchBrowser(
+			"Alice",
+			target("RUSTERISK_BROWSER_ALICE_AUDIO"),
+			processes,
+			observations,
+		);
+		const owned = await test.step(
+			"Alice: create the native capture context",
+			(): Promise<BrowserContext> => context(browser),
+			{ timeout: 8000 },
+		);
+		await phase(
+			"Alice: grant microphone permission",
+			(): Promise<void> => owned.grantPermissions(["microphone"]),
+		);
+		const page = await phase(
+			"Alice: create the browser page",
+			(): Promise<Page> => owned.newPage(),
+		);
+		await connect(page, "alice");
+		for (const action of ["End call", "Disconnect"]) {
+			await phase(
+				`${action} while native microphone capture is pending`,
+				async (): Promise<void> => {
+					await page
+						.getByLabel("Destination SIP address")
+						.fill("sip:100@localhost");
+					await page.evaluate((): void => {
+						window.rusteriskCapture.hold = true;
+					});
+					await page.getByRole("button", { name: "Call", exact: true }).click();
+					await captureCheckpoint(
+						(): Promise<CaptureState> => captureState(page),
+						async (): Promise<void> => {
+							await expect
+								.poll((): Promise<CaptureState> => captureState(page))
+								.toMatchObject({ waiting: true });
+						},
+					);
+					await page.getByRole("button", { name: action, exact: true }).click();
+					await expect(page.locator("#call-status")).toHaveText(
+						"No active call",
+					);
+					await page.evaluate((): void => {
+						const capture = window.rusteriskCapture;
+						capture.hold = false;
+						const release = capture.release;
+						capture.release = undefined;
+						release?.();
+					});
+					await expect
+						.poll((): Promise<boolean> => captureStopped(page))
+						.toBe(true);
+					assert.equal(await outgoing(), undefined);
+					if (action === "Disconnect") {
+						await expect(page.locator("#connection-status")).toHaveText(
+							"Disconnected",
+						);
+						await page
+							.getByRole("button", { name: "Connect", exact: true })
+							.click();
+						await expect(page.locator("#connection-status")).toHaveText(
+							"Connected and registered",
+						);
+					}
+				},
+				15000,
+			);
+		}
+		await phase(
+			"Cancel an outgoing SIP call and release the native microphone",
+			async (): Promise<void> => {
+				await page.getByRole("button", { name: "Call", exact: true }).click();
+				await expect.poll(outgoing).toBeDefined();
+				await page
+					.getByRole("button", { name: "End call", exact: true })
+					.click();
+				await expect(page.locator("#call-status")).toHaveText("No active call");
+				await expect
+					.poll((): Promise<boolean> => captureStopped(page))
+					.toBe(true);
+				await expect(page.locator("#call-error")).toBeHidden();
+				await expect.poll(outgoing).toBeUndefined();
+				await page
+					.getByRole("button", { name: "Disconnect", exact: true })
+					.click();
+				await expect(page.locator("#connection-status")).toHaveText(
+					"Disconnected",
+				);
+			},
+			15000,
+		);
+		await phase(
+			"Recover field validation and authentication with the keyboard",
+			(): Promise<void> => verifyConnectionRecovery(page),
+			20000,
 		);
 	}).catch(
 		(primary: unknown): Promise<never> => browserFailure(primary, observations),
