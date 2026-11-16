@@ -13,7 +13,8 @@ Initial setup checks only its first compatible candidate for reuse.
 
 ## Decision
 
-Before opening each ordered candidate, the existing owned setup job requests admission from the Network actor through a bounded channel.
+The Network actor checks the first candidate before starting an owned setup job.
+The job requests admission through a bounded channel before opening later candidates.
 Return reuse, connection permission, or rejection through a closed enum.
 Validate the current owner, setup key, open connection generation, original domain, and captured TLS profile before publishing reuse.
 Keep the original eight-second deadline, sixteen setup slots, and sixty-four connection slots.
@@ -28,7 +29,7 @@ Copying available flows into workers risks stale admission.
 
 ## Consequences
 
-Each attempted candidate adds an actor exchange.
+Each fallback candidate adds an actor exchange.
 Reconsider the exchange if measured admission delays prevent bounded setup completion.
 Persistent resolution cursors, shared 503 suppression, and configuration replacement remain separate decisions.
 
