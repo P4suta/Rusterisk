@@ -149,6 +149,7 @@ fn read_entries<R: Read>(
         if size > limits.file {
             return Err(RegularArchiveError::Limit(ArchiveLimit::File));
         }
+        let header = entry.header().clone();
         let path = ArchivePath::parse(root, &entry.path_bytes(), limits.depth)?;
         let key = path.destination_key();
         if names.contains(&key) {
@@ -178,7 +179,11 @@ fn read_entries<R: Read>(
         if bytes.len() as u64 != size {
             return Err(RegularArchiveError::Termination);
         }
-        inventory.files.push(ArchiveFile { path, bytes });
+        inventory.files.push(ArchiveFile {
+            path,
+            bytes,
+            header,
+        });
     }
     Ok(inventory)
 }
@@ -202,6 +207,7 @@ fn bounded_error<R: BufRead>(
 pub struct ArchiveFile {
     path: ArchivePath,
     bytes: Vec<u8>,
+    header: tar::Header,
 }
 
 impl ArchiveFile {
@@ -210,6 +216,18 @@ impl ArchiveFile {
     }
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+    pub fn mode(&self) -> Result<u32, std::io::Error> {
+        self.header.mode()
+    }
+    pub fn uid(&self) -> Result<u64, std::io::Error> {
+        self.header.uid()
+    }
+    pub fn gid(&self) -> Result<u64, std::io::Error> {
+        self.header.gid()
+    }
+    pub fn mtime(&self) -> Result<u64, std::io::Error> {
+        self.header.mtime()
     }
 }
 

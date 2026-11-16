@@ -10,6 +10,9 @@ fn tar(entries: &[(&str, u8, &[u8])]) -> Result<Vec<u8>, std::io::Error> {
         let mut header = tar::Header::new_gnu();
         header.set_size(bytes.len() as u64);
         header.set_mode(0o644);
+        header.set_uid(21);
+        header.set_gid(22);
+        header.set_mtime(23);
         header.set_entry_type(tar::EntryType::new(*kind));
         let field = header
             .as_mut_bytes()
@@ -55,8 +58,27 @@ fn one_member_regular_archives_preserve_bytes_through_partial_reads() -> Result<
         assert_eq!(archive.files().len(), 2);
         assert_eq!(archive.files()[0].path().as_str(), "Cargo.toml");
         assert_eq!(archive.files()[0].bytes(), b"[package]\n");
+        assert_eq!(archive.files()[0].mode()?, 0o644);
+        assert_eq!(archive.files()[0].uid()?, 21);
+        assert_eq!(archive.files()[0].gid()?, 22);
+        assert_eq!(archive.files()[0].mtime()?, 23);
         assert_eq!(archive.expanded_bytes(), raw.len() as u64);
     }
+    Ok(())
+}
+
+#[test]
+fn invalid_optional_metadata_remains_an_explicit_error_when_requested() -> std::io::Result<()> {
+    let mut raw = tar(&[("sdk-0.1.0/file", b'0', b"data")])?;
+    let mut header = tar::Header::new_gnu();
+    header.as_mut_bytes().copy_from_slice(&raw[..512]);
+    header.as_mut_bytes()[108..116].fill(b'?');
+    header.set_cksum();
+    raw[..512].copy_from_slice(header.as_bytes());
+    let archive = decode(&compress(&raw)?, ArchiveLimits::SDK).map_err(std::io::Error::other)?;
+    assert_eq!(archive.files()[0].bytes(), b"data");
+    assert!(archive.files()[0].uid().is_err());
+    assert_eq!(archive.files()[0].gid()?, 22);
     Ok(())
 }
 
