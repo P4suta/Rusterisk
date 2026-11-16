@@ -16,6 +16,7 @@ use media_probe::Probe;
 const MAX_FOREGROUND_REQUESTS: usize = 8;
 const MAX_REQUESTS: usize = 16;
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_CHANNEL_VARIABLES: usize = 128;
 
 #[derive(Clone, Debug)]
 pub struct Originate {
@@ -128,23 +129,56 @@ pub struct CallSnapshot {
     pub media_probe_failure: Option<CallFailure>,
 }
 
-fn fill_channel_variables(channel: &mut api::Channel, variables: Option<BTreeMap<String, String>>) {
+fn fill_channel_variables(
+    channel: &mut api::Channel,
+    variables: Option<&BTreeMap<String, String>>,
+) -> Result<(), Error> {
+    let mut count = 0;
+    let mut bytes = 0usize;
+    if let Some(current) = &channel.channelvars {
+        count = current.len();
+        bytes = current
+            .iter()
+            .map(|(name, value)| name.len() + value.len())
+            .sum();
+    }
+    if let Some(variables) = variables {
+        for (name, value) in variables {
+            if !channel
+                .channelvars
+                .as_ref()
+                .is_some_and(|current| current.contains_key(name))
+            {
+                count += 1;
+                bytes = bytes
+                    .checked_add(name.len() + value.len())
+                    .ok_or(Error::Capacity)?;
+            }
+        }
+    }
+    if count > MAX_CHANNEL_VARIABLES || bytes > crate::MAX_RESPONSE {
+        return Err(Error::Capacity);
+    }
     if let Some(variables) = variables {
         let current = channel.channelvars.get_or_insert_default();
         for (name, value) in variables {
-            current.entry(name).or_insert(value);
+            current.entry(name.clone()).or_insert_with(|| value.clone());
         }
     }
+    Ok(())
 }
 
 impl CallSnapshot {
-    fn observe_channel(&mut self, channel: &api::Channel) {
+    fn observe_channel(&mut self, channel: &api::Channel) -> Result<(), Error> {
         let mut latest = channel.clone();
         fill_channel_variables(
             &mut latest,
-            self.channel.take().and_then(|value| value.channelvars),
-        );
+            self.channel
+                .as_ref()
+                .and_then(|value| value.channelvars.as_ref()),
+        )?;
         self.channel = Some(latest);
+        Ok(())
     }
 }
 
@@ -862,7 +896,7 @@ impl Calls {
                 });
         }
         if let Some(snapshot) = self.incoming.get_mut(&channel.id) {
-            snapshot.observe_channel(channel);
+            snapshot.observe_channel(channel)?;
             if channel.state == api::ChannelState::Up {
                 snapshot.progress = snapshot.progress.observe(CallMilestone::Answered);
             }
@@ -874,14 +908,15 @@ impl Calls {
             if completion.is_some() && entry.progress.borrow().progress.completion().is_none() {
                 entry.work = Work::Done;
             }
+            let mut observation = Ok(());
             entry.progress.send_modify(|snapshot| {
                 if snapshot.progress.completion().is_some() {
                     if snapshot.channel.is_none() {
-                        snapshot.channel = Some(channel.clone());
+                        observation = snapshot.observe_channel(channel);
                     }
                     return;
                 }
-                snapshot.observe_channel(channel);
+                observation = snapshot.observe_channel(channel);
                 if channel.state == api::ChannelState::Up {
                     snapshot.progress = snapshot.progress.observe(CallMilestone::Answered);
                 }
@@ -896,6 +931,7 @@ impl Calls {
                     snapshot.cleanup = Cleanup::Complete;
                 }
             });
+            observation?;
         }
         self.tick();
         Ok(())
@@ -961,10 +997,20 @@ impl Calls {
             entry.progress.send_modify(|snapshot| match result {
                 Ok(channel) if channel.id == id => {
                     snapshot.progress = snapshot.progress.observe(CallMilestone::Accepted);
-                    if let Some(observed) = &mut snapshot.channel {
-                        fill_channel_variables(observed, channel.channelvars);
+                    let variables = channel.channelvars.as_ref();
+                    let metadata = if let Some(observed) = &mut snapshot.channel {
+                        fill_channel_variables(observed, variables)
                     } else {
-                        snapshot.channel = Some(channel);
+                        let mut channel = channel;
+                        let metadata = fill_channel_variables(&mut channel, None);
+                        if metadata.is_ok() {
+                            snapshot.channel = Some(channel);
+                        }
+                        metadata
+                    };
+                    if let Err(error) = metadata {
+                        snapshot.progress = snapshot.progress.finish(CallCompletion::Failed);
+                        snapshot.failure = Some(error.into());
                     }
                 }
                 Ok(_) => {
