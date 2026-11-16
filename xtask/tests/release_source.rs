@@ -126,6 +126,16 @@ fn captured_release_inputs_supply_every_server_target_projection() -> io::Result
 }
 
 #[test]
+fn captured_release_inputs_supply_the_actual_reference_configuration() -> io::Result<()> {
+    using_source("reference-configuration", |_captured, source| {
+        xtask::reference::copy_configuration(
+            &source.join("tests/interop/asterisk"),
+            &source.with_file_name("reference-configuration"),
+        )
+    })
+}
+
+#[test]
 fn changed_or_added_verification_inputs_cannot_bind_to_an_earlier_capture() -> io::Result<()> {
     using_source("changes", |captured, source| {
         let cohort = captured.inputs().map_err(io::Error::other)?;
