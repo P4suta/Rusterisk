@@ -1,7 +1,7 @@
 use crate::{
     transport::UriSecurity, ContactError, RegistrationContact, RegistrationContacts, SipError,
 };
-use rsipstack::sip::{uri::Param, Request, Uri};
+use rsipstack::sip::{uri::Param, Request, Response, Uri};
 use rusterisk_config::Protocol;
 
 #[derive(Clone)]
@@ -18,8 +18,8 @@ impl DialogTarget {
         let mut uri = contact.uri().clone();
         uri.headers.clear();
         uri.params.retain(|parameter| {
-            !matches!(parameter, Param::Method(_))
-                && !matches!(parameter, Param::Other(name, _) if crate::contact::parameter_eq(&name.to_string(), "method"))
+            !matches!(parameter, Param::Method(_) | Param::Ttl(_))
+                && !matches!(parameter, Param::Other(name, _) if ["method", "ttl"].iter().any(|parameter| crate::contact::parameter_eq(&name.to_string(), parameter)))
         });
         let security = UriSecurity::target(protocol, &uri)?;
         if required == UriSecurity::Sips && security != UriSecurity::Sips {
@@ -37,6 +37,22 @@ impl DialogTarget {
             protocol,
             required,
             request
+                .headers
+                .iter()
+                .filter(|header| header.name().eq_ignore_ascii_case("Contact"))
+                .map(|header| header.value()),
+        )
+    }
+
+    pub(crate) fn from_response(
+        protocol: Protocol,
+        required: UriSecurity,
+        response: &Response,
+    ) -> Result<Option<Self>, SipError> {
+        Self::parse(
+            protocol,
+            required,
+            response
                 .headers
                 .iter()
                 .filter(|header| header.name().eq_ignore_ascii_case("Contact"))

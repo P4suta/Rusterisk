@@ -1,8 +1,11 @@
-use crate::{Datagram, DialogReply, Engine, Output, Session, SessionSecurity, SipError, SipEvent};
+use crate::{
+    dialog_target::DialogTarget, transport::UriSecurity, Datagram, DialogReply, Engine, Output,
+    Session, SessionSecurity, SipError, SipEvent,
+};
 use rsipstack::sip::{
     headers::untyped::ToTypedHeader, Header, HeadersExt, Method, Request, Response, SipMessage, Uri,
 };
-use rusterisk_config::{Auth, Codec};
+use rusterisk_config::{Auth, Codec, Protocol};
 use std::net::SocketAddr;
 
 pub struct Outbound {
@@ -32,6 +35,9 @@ enum State {
     Terminated {
         expires: u64,
     },
+    RejectedTarget {
+        expires: u64,
+    },
 }
 
 pub(crate) struct Outgoing {
@@ -39,10 +45,12 @@ pub(crate) struct Outgoing {
     generation: u64,
     peer: SocketAddr,
     reliable: bool,
+    protocol: Protocol,
+    uri_security: UriSecurity,
     invite: Request,
     bytes: Vec<u8>,
     remote_to: String,
-    remote_contact: Uri,
+    remote_contact: DialogTarget,
     codecs: Vec<Codec>,
     deadline: Option<u64>,
     transaction_deadline: u64,
@@ -50,7 +58,8 @@ pub(crate) struct Outgoing {
     cseq: u32,
     remote_cseq: Option<u32>,
     credentials: Vec<Auth>,
-    challenges: Vec<Challenge>,
+    challenges: Vec<AcknowledgedResponse>,
+    final_response: FinalResponse,
     local_media: SocketAddr,
     local_security: SessionSecurity,
     session_id: u64,
@@ -93,7 +102,8 @@ impl Engine {
                     | State::Proceeding
                     | State::CancelPending { .. }
                     | State::Cancelling { .. }
-                    | State::Terminated { .. } => Usage::Ended,
+                    | State::Terminated { .. }
+                    | State::RejectedTarget { .. } => Usage::Ended,
                 },
             });
         }
@@ -115,6 +125,11 @@ impl Engine {
         else {
             return Ok(None);
         };
+        let target = target
+            .map(|target| {
+                DialogTarget::from_uri(dialog.protocol, dialog.uri_security, target.uri())
+            })
+            .transpose()?;
         dialog.cseq = dialog
             .cseq
             .checked_add(1)
@@ -122,12 +137,12 @@ impl Engine {
             .ok_or(SipError::Capacity)?;
         let packet = related(dialog, Method::Notify, &dialog.remote_to, dialog.cseq, true)?;
         let mut request = request(std::str::from_utf8(&packet)?)?;
-        if let Some(target) = target {
+        if let Some(target) = &target {
             request.uri = target.uri().clone();
         }
         let bytes = crate::transfer::notify::encode(request, contact, notification)?;
         if let Some(target) = target {
-            dialog.remote_contact = target.uri().clone();
+            dialog.remote_contact = target;
         }
         Ok(Some(Datagram::new(dialog.peer, bytes)))
     }
@@ -147,7 +162,8 @@ impl Engine {
                 }
                 State::CancelPending { .. }
                 | State::Cancelling { .. }
-                | State::Terminated { .. } => {}
+                | State::Terminated { .. }
+                | State::RejectedTarget { .. } => {}
             }
             false
         });
@@ -199,10 +215,16 @@ impl Outgoing {
     }
 }
 
-struct Challenge {
+struct AcknowledgedResponse {
     response: Response,
     ack: Vec<u8>,
     expires: u64,
+}
+
+enum FinalResponse {
+    Pending,
+    Acknowledged(AcknowledgedResponse),
+    Expired,
 }
 
 fn authenticate(
@@ -359,6 +381,24 @@ fn related(
     cseq: u32,
     fresh_branch: bool,
 ) -> Result<Vec<u8>, SipError> {
+    related_to(
+        dialog,
+        method,
+        to,
+        cseq,
+        fresh_branch,
+        &dialog.remote_contact,
+    )
+}
+
+fn related_to(
+    dialog: &Outgoing,
+    method: Method,
+    to: &str,
+    cseq: u32,
+    fresh_branch: bool,
+    target: &DialogTarget,
+) -> Result<Vec<u8>, SipError> {
     let via = dialog.invite.top_via_header()?;
     let via = if fresh_branch {
         let via = via.typed()?;
@@ -371,7 +411,7 @@ fn related(
     let uri = if matches!(method, Method::Cancel) || (method == Method::Ack && !fresh_branch) {
         &dialog.invite.uri
     } else {
-        &dialog.remote_contact
+        target.uri()
     };
     let bytes = format!(
         "{method} {uri} SIP/2.0\r\nVia: {via}\r\nFrom: {}\r\nTo: {to}\r\nCall-ID: {}\r\nCSeq: {cseq} {method}\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
@@ -594,8 +634,10 @@ impl Engine {
             generation: outbound.generation,
             peer,
             reliable: protocol != rusterisk_config::Protocol::Udp,
+            protocol,
+            uri_security,
             remote_to: invite.to_header()?.value().into(),
-            remote_contact: uri,
+            remote_contact: DialogTarget::from_uri(protocol, uri_security, &uri)?,
             invite,
             bytes: bytes.as_bytes().to_vec(),
             codecs: endpoint.codecs,
@@ -614,6 +656,7 @@ impl Engine {
                 .cloned()
                 .collect(),
             challenges: Vec::new(),
+            final_response: FinalResponse::Pending,
             local_media: outbound.local_rtp,
             local_security,
             session_id: self.serial,
@@ -675,7 +718,10 @@ impl Engine {
                 };
                 packet
             }
-            State::CancelPending { .. } | State::Cancelling { .. } | State::Terminated { .. } => {
+            State::CancelPending { .. }
+            | State::Cancelling { .. }
+            | State::Terminated { .. }
+            | State::RejectedTarget { .. } => {
                 return Ok(Output {
                     datagrams: Vec::new(),
                     events: Vec::new(),
@@ -709,11 +755,15 @@ impl Engine {
         let incoming = self.incoming_tick(now)?;
         output.datagrams.extend(incoming.datagrams);
         output.events.extend(incoming.events);
-        self.outgoing.retain(|_, dialog| !matches!(dialog.state, State::CancelPending { expires, .. } | State::Cancelling { expires } | State::Terminated { expires } if expires <= now) || self.refers.holds(&dialog.id, dialog.generation));
+        self.outgoing.retain(|_, dialog| !matches!(dialog.state, State::CancelPending { expires, .. } | State::Cancelling { expires } | State::Terminated { expires } | State::RejectedTarget { expires } if expires <= now) || self.refers.holds(&dialog.id, dialog.generation));
         for dialog in self.outgoing.values_mut() {
             dialog
                 .challenges
                 .retain(|challenge| challenge.expires > now);
+            if matches!(&dialog.final_response, FinalResponse::Acknowledged(response) if response.expires <= now)
+            {
+                dialog.final_response = FinalResponse::Expired;
+            }
             if let State::Established(media) = &mut dialog.state {
                 if media
                     .pending
@@ -820,7 +870,8 @@ impl Engine {
                 | State::Proceeding
                 | State::Established(_)
                 | State::Cancelling { .. }
-                | State::Terminated { .. } => {}
+                | State::Terminated { .. }
+                | State::RejectedTarget { .. } => {}
             }
         }
         Ok(output)
@@ -855,6 +906,26 @@ impl Engine {
         {
             return Ok(output);
         }
+        if matches!(dialog.state, State::RejectedTarget { .. }) {
+            return Ok(output);
+        }
+        match &dialog.final_response {
+            FinalResponse::Acknowledged(previous) if previous.expires > now => {
+                if previous.response.status_code == response.status_code
+                    && previous.response.to_header()?.value() == response.to_header()?.value()
+                {
+                    output
+                        .datagrams
+                        .push(Datagram::new(peer, previous.ack.clone()));
+                }
+                return Ok(output);
+            }
+            FinalResponse::Acknowledged(_) | FinalResponse::Expired => {
+                dialog.final_response = FinalResponse::Expired;
+                return Ok(output);
+            }
+            FinalResponse::Pending => {}
+        }
         let code = response.status_code.code();
         if code < 200 {
             if let State::CancelPending { expires, .. } = dialog.state {
@@ -882,36 +953,57 @@ impl Engine {
             }
             return Ok(output);
         }
-        dialog.remote_to = response.to_header()?.value().into();
-        if let Ok(contact) = response.contact_header() {
-            let contact = contact
-                .value()
-                .trim()
-                .trim_start_matches('<')
-                .split('>')
-                .next()
-                .ok_or(SipError::InvalidPacket)?;
-            dialog.remote_contact = Uri::try_from(contact)?;
+        let remote_to = response.to_header()?.value().to_owned();
+        let target = if code < 300 {
+            let target = match DialogTarget::from_response(
+                dialog.protocol,
+                dialog.uri_security,
+                &response,
+            ) {
+                Ok(Some(target)) => target,
+                Ok(None) | Err(_) => {
+                    dialog.state = State::RejectedTarget {
+                        expires: now.saturating_add(32_000),
+                    };
+                    output.events.push(SipEvent::Ended {
+                        id: dialog.id.clone(),
+                        generation: dialog.generation,
+                        cause: 21,
+                    });
+                    return Ok(output);
+                }
+            };
+            Some(target)
+        } else {
+            None
+        };
+        let ack = related_to(
+            dialog,
+            Method::Ack,
+            &remote_to,
+            dialog.invite.cseq_header()?.typed()?.seq,
+            code < 300,
+            target.as_ref().unwrap_or(&dialog.remote_contact),
+        )?;
+        if let Some(target) = target {
+            dialog.remote_contact = target;
         }
-        output.datagrams.push(Datagram::new(
-            peer,
-            related(
-                dialog,
-                Method::Ack,
-                &dialog.remote_to,
-                dialog.invite.cseq_header()?.typed()?.seq,
-                code < 300,
-            )?,
-        ));
+        dialog.remote_to = remote_to;
+        output.datagrams.push(Datagram::new(peer, ack.clone()));
         if let Some(bytes) = authenticate(dialog, &response, now)? {
-            dialog.challenges.push(Challenge {
+            dialog.challenges.push(AcknowledgedResponse {
                 response,
-                ack: output.datagrams[0].bytes.clone(),
+                ack,
                 expires: now.saturating_add(32_000),
             });
             output.datagrams.push(Datagram::new(peer, bytes));
             return Ok(output);
         }
+        dialog.final_response = FinalResponse::Acknowledged(AcknowledgedResponse {
+            response: response.clone(),
+            ack,
+            expires: now.saturating_add(32_000),
+        });
         if code < 300 {
             match dialog.state {
                 State::Calling { .. } | State::Proceeding => {
@@ -951,7 +1043,8 @@ impl Engine {
                         expires: now.saturating_add(32_000),
                     };
                 }
-                State::Established(_) | State::Terminated { .. } => {}
+                State::Established(_) | State::Terminated { .. } | State::RejectedTarget { .. } => {
+                }
             }
         } else {
             if matches!(dialog.state, State::Calling { .. } | State::Proceeding) {
@@ -1011,6 +1104,19 @@ impl Engine {
             )?)));
         }
         if request.method == Method::Invite {
+            let target =
+                match DialogTarget::from_request(dialog.protocol, dialog.uri_security, request) {
+                    Ok(target) => target,
+                    Err(_) => {
+                        return Ok(Some(DialogReply::Rejected(crate::response(
+                            request,
+                            400,
+                            "Bad Request",
+                            "",
+                            "",
+                        )?)));
+                    }
+                };
             let State::Established(media) = &mut dialog.state else {
                 return Ok(Some(DialogReply::response(crate::response(
                     request,
@@ -1046,13 +1152,6 @@ impl Engine {
                     )?)));
                 }
             };
-            let target = request
-                .headers
-                .iter()
-                .find(|header| header.name().eq_ignore_ascii_case("Contact"))
-                .map(|header| rsipstack::sip::headers::typed::Contact::parse(header.value()))
-                .transpose()?
-                .map(|contact| contact.uri);
             let version = media
                 .answer_version
                 .checked_add(1)
@@ -1123,7 +1222,8 @@ impl Engine {
             | State::CancelPending { .. }
             | State::Proceeding
             | State::Cancelling { .. }
-            | State::Terminated { .. } => {}
+            | State::Terminated { .. }
+            | State::RejectedTarget { .. } => {}
         }
         dialog.state = State::Terminated {
             expires: now.saturating_add(32_000),

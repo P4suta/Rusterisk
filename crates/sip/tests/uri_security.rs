@@ -5,6 +5,8 @@ use rusterisk_sip::{
 };
 #[path = "uri_security/incoming.rs"]
 mod incoming;
+#[path = "uri_security/outgoing.rs"]
+mod outgoing;
 #[path = "uri_security/registration.rs"]
 mod registration;
 
