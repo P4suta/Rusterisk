@@ -2324,6 +2324,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "rsipstack",
+ "rusqlite",
  "rusterisk-api",
  "rusterisk-config",
  "rusterisk-core",
