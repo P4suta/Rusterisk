@@ -15,3 +15,5 @@ mod sdk_candidate_build;
 pub use sdk_candidate_build::{
     build_sdk, build_sdk_with, plan_sdk, CapturedSdk, SdkCandidateBuildError,
 };
+mod sdk_manifest;
+pub use sdk_manifest::{check_sdk_manifest, SdkManifestError};

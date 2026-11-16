@@ -76,6 +76,14 @@ pub enum SdkPackage {
 impl SdkPackage {
     pub const ALL: [Self; 3] = [Self::Core, Self::Api, Self::Client];
 
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Core => "rusterisk-core",
+            Self::Api => "rusterisk-api",
+            Self::Client => "rusterisk-client",
+        }
+    }
+
     pub const fn directory(self) -> &'static str {
         match self {
             Self::Core => "crates/core",
