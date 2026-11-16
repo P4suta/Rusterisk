@@ -1,10 +1,12 @@
 use std::time::Duration;
 mod configuration;
 mod interop;
+mod sipp_statistics;
 pub use configuration::copy_configuration;
 pub use interop::{
     callback_address, media_address, published_address, CallbackHost, Interop, SipTransferCase,
 };
+pub use sipp_statistics::validate_sipp_statistics;
 
 pub struct Step {
     pub arguments: Vec<String>,
@@ -61,6 +63,7 @@ pub enum ReferenceError {
     InvalidAddress,
     InvalidConfigPath,
     IncompleteTransfer,
+    IncompleteSippStatistics,
 }
 
 impl std::fmt::Display for ReferenceError {
@@ -71,6 +74,9 @@ impl std::fmt::Display for ReferenceError {
             Self::InvalidConfigPath => formatter.write_str("invalid reference configuration path"),
             Self::IncompleteTransfer => {
                 formatter.write_str("the required SIP transfer comparison did not pass")
+            }
+            Self::IncompleteSippStatistics => {
+                formatter.write_str("SIPp statistics do not complete one successful call")
             }
         }
     }
