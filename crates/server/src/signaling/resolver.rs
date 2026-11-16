@@ -22,6 +22,21 @@ const MAX_CANDIDATES: usize = 8;
 const QUERY_TIMEOUT: Duration = Duration::from_millis(500);
 const RESOLUTION_TIMEOUT: Duration = Duration::from_secs(2);
 
+#[derive(Clone, Copy)]
+enum Cacheability {
+    Reusable,
+    Uncacheable,
+}
+
+#[derive(Clone, Copy)]
+enum ResolutionValidity {
+    Literal,
+    Dns {
+        until: Instant,
+        caching: Cacheability,
+    },
+}
+
 #[derive(Clone)]
 pub(super) struct DestinationResolver {
     inner: TokioResolver,
@@ -32,7 +47,7 @@ pub(super) struct ResolvedTarget {
     target: StaticTarget,
     identity: String,
     peers: [Option<SocketAddr>; MAX_CANDIDATES],
-    expires: Option<Instant>,
+    validity: ResolutionValidity,
 }
 
 impl ResolvedTarget {
@@ -45,14 +60,14 @@ impl ResolvedTarget {
             Protocol::Tls => 5061,
             Protocol::Ws | Protocol::Wss => return Err(ControlError::Unsupported),
         };
-        let mut resolved = Self {
+        let mut peers = [None; MAX_CANDIDATES];
+        Self::insert(&mut peers, *address, target.port().unwrap_or(default_port))?;
+        Ok(Some(Self {
             target: target.clone(),
             identity: address.to_string(),
-            peers: [None; MAX_CANDIDATES],
-            expires: None,
-        };
-        resolved.insert(*address, target.port().unwrap_or(default_port))?;
-        Ok(Some(resolved))
+            peers,
+            validity: ResolutionValidity::Literal,
+        }))
     }
 
     pub(super) fn protocol(&self) -> Protocol {
@@ -67,19 +82,27 @@ impl ResolvedTarget {
     }
 
     pub(super) fn cache_valid(&self, now: Instant) -> bool {
-        self.expires.is_some_and(|deadline| now < deadline)
+        match self.validity {
+            ResolutionValidity::Literal => false,
+            ResolutionValidity::Dns { until, caching } => {
+                now < until && matches!(caching, Cacheability::Reusable)
+            }
+        }
     }
 
-    fn insert(&mut self, address: IpAddr, port: u16) -> Result<(), ControlError> {
+    fn insert(
+        peers: &mut [Option<SocketAddr>; MAX_CANDIDATES],
+        address: IpAddr,
+        port: u16,
+    ) -> Result<(), ControlError> {
         if address.is_unspecified() || address.is_multicast() || port == 0 {
             return Err(ControlError::Invalid("Invalid resolved signaling address"));
         }
         let peer = SocketAddr::new(address, port);
-        if self.peers().any(|current| current == peer) {
+        if peers.iter().flatten().any(|current| *current == peer) {
             return Ok(());
         }
-        *self
-            .peers
+        *peers
             .iter_mut()
             .find(|current| current.is_none())
             .ok_or(ControlError::Capacity)? = Some(peer);
@@ -149,20 +172,23 @@ impl DestinationResolver {
                     return Err(ControlError::Invalid("Empty signaling hostname"));
                 }
                 let identity = name.to_ascii().trim_end_matches('.').to_ascii_lowercase();
-                let mut resolved = ResolvedTarget {
-                    target: target.clone(),
-                    identity,
-                    peers: [None; MAX_CANDIDATES],
-                    expires: None,
-                };
-                resolved.expires = match target.port() {
-                    Some(port) => Some(self.addresses(&name, port, &mut resolved).await?),
+                let mut peers = [None; MAX_CANDIDATES];
+                let validity = match target.port() {
+                    Some(port) => ResolutionValidity::Dns {
+                        until: self.addresses(&name, port, &mut peers).await?,
+                        caching: Cacheability::Reusable,
+                    },
                     None => {
-                        self.services(&name, target.protocol(), default_port, &mut resolved)
+                        self.services(&name, target.protocol(), default_port, &mut peers)
                             .await?
                     }
                 };
-                Ok(resolved)
+                Ok(ResolvedTarget {
+                    target: target.clone(),
+                    identity,
+                    peers,
+                    validity,
+                })
             }
         }
     }
@@ -172,8 +198,8 @@ impl DestinationResolver {
         name: &Name,
         protocol: Protocol,
         default_port: u16,
-        resolved: &mut ResolvedTarget,
-    ) -> Result<Option<Instant>, ControlError> {
+        peers: &mut [Option<SocketAddr>; MAX_CANDIDATES],
+    ) -> Result<ResolutionValidity, ControlError> {
         let service = match protocol {
             Protocol::Udp => "_sip._udp",
             Protocol::Tcp => "_sip._tcp",
@@ -188,8 +214,10 @@ impl DestinationResolver {
         let lookup = match lookup {
             Ok(lookup) => lookup,
             Err(error) if error.is_no_records_found() => {
-                self.addresses(name, default_port, resolved).await?;
-                return Ok(None);
+                return Ok(ResolutionValidity::Dns {
+                    until: self.addresses(name, default_port, peers).await?,
+                    caching: Cacheability::Uncacheable,
+                });
             }
             Err(error) => return Err(failure(error)),
         };
@@ -210,13 +238,15 @@ impl DestinationResolver {
             }
         }
         if records.is_empty() {
-            self.addresses(name, default_port, resolved).await?;
-            return Ok(None);
+            return Ok(ResolutionValidity::Dns {
+                until: self.addresses(name, default_port, peers).await?,
+                caching: Cacheability::Uncacheable,
+            });
         }
         let ordered = ordered_srv(records, |bound| rand::random_range(0..=bound))?;
         let mut last_failure = ControlError::NotFound("No signaling service addresses found");
         for record in ordered {
-            match self.addresses(&record.target, record.port, resolved).await {
+            match self.addresses(&record.target, record.port, peers).await {
                 Ok(deadline) => expires = expires.min(deadline),
                 Err(error) => {
                     if matches!(error, ControlError::Capacity | ControlError::Invalid(_)) {
@@ -226,8 +256,11 @@ impl DestinationResolver {
                 }
             }
         }
-        if resolved.peers().next().is_some() {
-            Ok(Some(expires))
+        if peers.iter().flatten().next().is_some() {
+            Ok(ResolutionValidity::Dns {
+                until: expires,
+                caching: Cacheability::Reusable,
+            })
         } else {
             Err(last_failure)
         }
@@ -237,7 +270,7 @@ impl DestinationResolver {
         &self,
         name: &Name,
         port: u16,
-        resolved: &mut ResolvedTarget,
+        peers: &mut [Option<SocketAddr>; MAX_CANDIDATES],
     ) -> Result<Instant, ControlError> {
         let lookup = tokio::time::timeout(QUERY_TIMEOUT, self.inner.lookup_ip(name.clone()))
             .await
@@ -247,9 +280,9 @@ impl DestinationResolver {
             return Err(ControlError::Capacity);
         }
         for address in lookup.iter() {
-            resolved.insert(address, port)?;
+            ResolvedTarget::insert(peers, address, port)?;
         }
-        if resolved.peers().next().is_none() {
+        if peers.iter().flatten().next().is_none() {
             return Err(ControlError::NotFound("No signaling addresses found"));
         }
         Ok(lookup.valid_until())
