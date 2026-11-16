@@ -6,6 +6,8 @@ mod archives;
 pub use archives::{native_archives, validate_instrumented_archive, NativeArchive, NativeLibrary};
 mod runner;
 pub use runner::{CapturedNative, CommandMode, NativeError};
+mod command;
+pub use command::{execute, Execution};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {

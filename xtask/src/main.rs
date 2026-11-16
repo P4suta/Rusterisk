@@ -154,6 +154,14 @@ fn execute() -> Result<(), TaskError> {
             Ok(())
         }
         [task] if task == "browser-types" => xtask::browser::prepare_types(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string())),
+        [task, mode, flag, image] if task == "native-sanitizers" && flag == "--image" => {
+            let execution = match mode.as_str() {
+                "--dry-run" => xtask::native_sanitizers::Execution::DryRun,
+                "--run" => xtask::native_sanitizers::Execution::Run,
+                _ => return Err(TaskError::Contract("invalid native sanitizer execution mode".into())),
+            };
+            xtask::native_sanitizers::execute(&std::env::current_dir()?, execution, image).map_err(|error| TaskError::Contract(error.to_string()))
+        }
         [task, mode, flag, image] if task == "browser" && flag == "--image" => {
             let execution = match mode.as_str() {
                 "--dry-run" => xtask::browser::Execution::DryRun,
@@ -250,7 +258,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|check-content --candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|check-content --candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
         )),
     }
 }
