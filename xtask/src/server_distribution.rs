@@ -12,6 +12,8 @@ mod zip_read;
 pub use zip_read::check_server_zip;
 mod build;
 pub use build::{ServerBuildPhase, ServerBuildPlan};
+mod capture;
+pub use capture::CapturedServer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {
