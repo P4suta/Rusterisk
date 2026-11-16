@@ -10,7 +10,10 @@ The shared Digest implementation selects the first supported offer matching conf
 It hashes the serialized Request-URI and request body.
 Missing quality offers select explicit `auth`, and offered `auth-int` uses the selected algorithm's entity hash.
 Algorithm selection stays within the received challenge list.
-The current profile rejects `charset` and `userhash=true` offers.
+The client accepts `charset=UTF-8` and prepares credentials through the [negotiated Unicode profiles](adr/prepare-negotiated-utf8-digest-credentials-before-hashing.md).
+Origin and proxy authentication keep their encodings independently through challenges, 423 corrections, failure retries, refresh, and removal.
+Offers without a character encoding preserve the configured credential octets.
+The current profile rejects other character encodings and `userhash=true`.
 
 Origin and proxy authentication keep independent headers.
 A retry renews the other scope's authorization with its existing client nonce and an increased count, following [RFC 7616](https://www.rfc-editor.org/rfc/rfc7616.html#section-3.4).
