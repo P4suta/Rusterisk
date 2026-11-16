@@ -18,6 +18,9 @@ node-check:
 browser-check:
     cargo run --locked --target-dir target/xtask --package xtask -- browser-check
 
+distribution-check:
+    cargo run --locked --target-dir target/xtask --package xtask -- distribution-check
+
 browser-example port="3000": browser-check
     cargo run --locked --package rusterisk-server --example browser -- "{{ port }}"
 

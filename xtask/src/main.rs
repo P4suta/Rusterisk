@@ -202,7 +202,9 @@ fn execute() -> Result<(), TaskError> {
         [task] if task == "core-msrv" => core_msrv(),
         [task] if task == "node-check" => node_check(),
         [task] if task == "browser-check" => xtask::browser::check(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string())),
+        [task] if task == "distribution-check" => distribution_check(),
         [task] if task == "check" => {
+            distribution_check()?;
             xtask::vendor::check(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string()))?;
             run("cargo", xtask::WORKSPACE_FORMAT_CHECK)?;
             run("cargo", &["fmt", "--manifest-path", "xtask/fuzz/Cargo.toml", "--", "--check"])?;
@@ -245,9 +247,19 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
         )),
     }
+}
+
+fn distribution_check() -> Result<(), TaskError> {
+    let root = std::env::current_dir()?;
+    xtask::distribution::check_sdk_inputs(&root)
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
+    xtask::distribution::check_sdk_archive_inputs(&root)
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
+    println!("distribution: SDK package inputs verified");
+    Ok(())
 }
 
 fn node_check() -> Result<(), TaskError> {
