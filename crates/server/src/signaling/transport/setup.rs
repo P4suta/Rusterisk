@@ -115,7 +115,10 @@ impl Network {
         &mut self,
         listener: usize,
     ) -> Result<SetupKey, ControlError> {
-        if self.ports.len() + self.preparations.len() >= 64 || self.jobs.len() >= 64 {
+        if self.preparations.len() >= 16
+            || self.ports.len() + self.preparations.len() >= 64
+            || self.jobs.len() >= 64
+        {
             return Err(ControlError::Capacity);
         }
         if !matches!(

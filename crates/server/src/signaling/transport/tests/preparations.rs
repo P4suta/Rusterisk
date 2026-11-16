@@ -4,13 +4,8 @@ use tokio::{io::AsyncWriteExt, net::TcpStream};
 #[tokio::test]
 async fn cancelled_resolutions_keep_shared_capacity_until_reaped() -> Result<(), ControlError> {
     let mut network = network().await?;
-    let mut peer = TcpStream::connect(network.local_addr(0)?)
-        .await
-        .map_err(failure)?;
-    peer.write_all(OPTIONS).await.map_err(failure)?;
-    assert!(matches!(network.next().await?, Input::Packet(_)));
-    let mut pending = Vec::with_capacity(63);
-    for _ in 0..63 {
+    let mut pending = Vec::with_capacity(16);
+    for _ in 0..16 {
         pending.push(network.reserve_setup(0)?);
     }
     assert!(matches!(
@@ -36,7 +31,6 @@ async fn cancelled_resolutions_keep_shared_capacity_until_reaped() -> Result<(),
     assert!(network.preparations.is_empty());
     assert!(network.ports.is_empty());
     assert!(network.jobs.is_empty());
-    drop(peer);
     Ok(())
 }
 
