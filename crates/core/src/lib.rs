@@ -1,5 +1,6 @@
 #![no_std]
 
+mod attended_transfer;
 mod dial_failure;
 mod dial_fork;
 mod dialplan;
@@ -19,6 +20,7 @@ mod recording_stop_keys;
 mod resource_subscriptions;
 mod stasis;
 mod transfer;
+pub use attended_transfer::{AttendedStart, AttendedTransfer};
 pub use dial_failure::DialFailure;
 pub use dial_fork::{DialFork, DialForkDecision, DialForkError, DialForkOutcome, DialForkState};
 pub use dialplan::{
