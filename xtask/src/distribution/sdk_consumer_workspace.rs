@@ -1,4 +1,4 @@
-use super::{SdkConsumerPlan, SdkConsumerScope, SdkContents, SdkPackage};
+use super::{SdkConsumerPlan, SdkConsumerScope, SdkContents, SdkPackage, SdkRuntimeIdentity};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
@@ -8,6 +8,8 @@ use std::{
 const CONTRACT: &[u8] = include_bytes!("consumer_sources/core_contract.rs");
 const CORE: &[u8] = include_bytes!("consumer_sources/core_main.rs");
 const SDK: &[u8] = include_bytes!("consumer_sources/sdk_main.rs");
+const HTTP: &[u8] = include_bytes!("consumer_sources/http_main.rs");
+const HTTP_CONTRACT: &[u8] = include_bytes!("consumer_sources/http_contract.rs");
 
 struct Generated {
     path: PathBuf,
@@ -19,6 +21,7 @@ pub struct SdkConsumerWorkspace<'a> {
     plan: SdkConsumerPlan,
     contents: &'a SdkContents,
     generated: Vec<Generated>,
+    runtime: Option<SdkRuntimeIdentity>,
 }
 
 fn invalid(message: &str) -> std::io::Error {
@@ -66,7 +69,11 @@ fn independent(root: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-fn consumer_manifest(scope: SdkConsumerScope, version: &str) -> Result<Vec<u8>, std::io::Error> {
+fn consumer_manifest(
+    scope: SdkConsumerScope,
+    version: &str,
+    runtime: Option<&SdkRuntimeIdentity>,
+) -> Result<Vec<u8>, std::io::Error> {
     let selected: &[SdkPackage] = match scope {
         SdkConsumerScope::CoreMsrv => &[SdkPackage::Core],
         SdkConsumerScope::Sdk => &SdkPackage::ALL,
@@ -93,7 +100,7 @@ fn consumer_manifest(scope: SdkConsumerScope, version: &str) -> Result<Vec<u8>, 
     ] {
         package.insert(field.to_owned(), toml::Value::Boolean(false));
     }
-    let dependencies: toml::Table = selected
+    let mut dependencies: toml::Table = selected
         .iter()
         .map(|package| {
             (
@@ -102,6 +109,27 @@ fn consumer_manifest(scope: SdkConsumerScope, version: &str) -> Result<Vec<u8>, 
             )
         })
         .collect();
+    if let (SdkConsumerScope::Sdk, Some(runtime)) = (scope, runtime) {
+        dependencies.insert(
+            "tokio".to_owned(),
+            toml::Value::Table(toml::Table::from_iter([
+                (
+                    "version".to_owned(),
+                    toml::Value::String(format!("={}", runtime.version())),
+                ),
+                ("default-features".to_owned(), toml::Value::Boolean(false)),
+                (
+                    "features".to_owned(),
+                    toml::Value::Array(
+                        ["net", "rt", "time"]
+                            .into_iter()
+                            .map(|feature| toml::Value::String(feature.to_owned()))
+                            .collect(),
+                    ),
+                ),
+            ])),
+        );
+    }
     let overrides: toml::Table = selected
         .iter()
         .map(|package| {
@@ -151,13 +179,16 @@ fn consumer_manifest(scope: SdkConsumerScope, version: &str) -> Result<Vec<u8>, 
         .map_err(std::io::Error::other)
 }
 
-fn generated(contents: &SdkContents) -> Result<Vec<Generated>, std::io::Error> {
+fn generated(
+    contents: &SdkContents,
+    runtime: Option<&SdkRuntimeIdentity>,
+) -> Result<Vec<Generated>, std::io::Error> {
     let mut files = Vec::new();
     for scope in SdkConsumerScope::ALL {
         let directory = Path::new("consumers").join(scope.label());
         files.push(Generated {
             path: directory.join("Cargo.toml"),
-            bytes: consumer_manifest(scope, contents.version())?,
+            bytes: consumer_manifest(scope, contents.version(), runtime)?,
         });
         files.push(Generated {
             path: directory.join("src/core_contract.rs"),
@@ -167,10 +198,17 @@ fn generated(contents: &SdkContents) -> Result<Vec<Generated>, std::io::Error> {
             path: directory.join("src/main.rs"),
             bytes: match scope {
                 SdkConsumerScope::CoreMsrv => CORE,
+                SdkConsumerScope::Sdk if runtime.is_some() => HTTP,
                 SdkConsumerScope::Sdk => SDK,
             }
             .to_vec(),
         });
+        if scope == SdkConsumerScope::Sdk && runtime.is_some() {
+            files.push(Generated {
+                path: directory.join("src/http_contract.rs"),
+                bytes: HTTP_CONTRACT.to_vec(),
+            });
+        }
         let package = match scope {
             SdkConsumerScope::CoreMsrv => SdkPackage::Core,
             SdkConsumerScope::Sdk => SdkPackage::Client,
@@ -205,17 +243,32 @@ impl<'a> SdkConsumerWorkspace<'a> {
     pub fn create_with(
         contents: &'a SdkContents,
         root: &Path,
+        write: impl FnMut(&Path, &[u8]) -> Result<(), std::io::Error>,
+    ) -> Result<Self, std::io::Error> {
+        Self::create_profile(contents, root, None, write)
+    }
+
+    pub fn create_http(contents: &'a SdkContents, root: &Path) -> Result<Self, std::io::Error> {
+        let runtime = SdkRuntimeIdentity::from_contents(contents).map_err(std::io::Error::other)?;
+        Self::create_profile(contents, root, Some(runtime), write_new)
+    }
+
+    fn create_profile(
+        contents: &'a SdkContents,
+        root: &Path,
+        runtime: Option<SdkRuntimeIdentity>,
         mut write: impl FnMut(&Path, &[u8]) -> Result<(), std::io::Error>,
     ) -> Result<Self, std::io::Error> {
         independent(root)?;
         let plan = SdkConsumerPlan::new(&root.join("work"), &root.join("state"))?;
-        let generated = generated(contents)?;
+        let generated = generated(contents, runtime.as_ref())?;
         std::fs::create_dir(root)?;
         let workspace = Self {
             root: Some(root.to_owned()),
             plan,
             contents,
             generated,
+            runtime,
         };
         let operation = (|| {
             std::fs::create_dir(workspace.plan.work())?;
@@ -244,6 +297,10 @@ impl<'a> SdkConsumerWorkspace<'a> {
 
     pub fn plan(&self) -> &SdkConsumerPlan {
         &self.plan
+    }
+
+    pub fn runtime(&self) -> Option<&SdkRuntimeIdentity> {
+        self.runtime.as_ref()
     }
 
     fn check_initial_locks(&self) -> Result<(), std::io::Error> {
