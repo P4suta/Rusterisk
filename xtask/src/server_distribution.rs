@@ -16,7 +16,9 @@ mod capture;
 pub use capture::CapturedServer;
 mod candidate;
 mod command;
-pub use command::{build_server_with, plan_server};
+pub use command::{
+    build_server_in_container_with, build_server_with, plan_server, plan_server_container,
+};
 mod read;
 pub use read::ServerCandidate;
 mod extraction;

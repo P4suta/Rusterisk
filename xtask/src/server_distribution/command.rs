@@ -1,4 +1,7 @@
-use super::{CapturedServer, ServerBuildPhase, ServerBuildPlan, ServerTarget};
+use super::{
+    CapturedServer, ServerBuildCommandMode, ServerBuildPhase, ServerBuildPlan,
+    ServerContainerBuildPlan, ServerTarget,
+};
 use crate::process::ProcessError;
 use std::{
     io::{self, Write},
@@ -29,6 +32,33 @@ pub fn plan_server(root: &Path, target: ServerTarget) -> io::Result<()> {
     Ok(())
 }
 
+pub fn plan_server_container(root: &Path, target: ServerTarget, image: &str) -> io::Result<()> {
+    let capture = CapturedServer::read(root, target)?;
+    let directory = std::env::temp_dir().join("rusterisk-server-container-preview");
+    let plan = ServerContainerBuildPlan::new(
+        "preview",
+        &directory.join("source"),
+        &directory.join("state"),
+        target,
+        image,
+    )?;
+    println!(
+        "server source={} target={} image={image}",
+        capture.source_digest(),
+        target.triple()
+    );
+    for phase in ServerBuildPhase::ALL {
+        let step = plan.step(phase);
+        println!(
+            "phase={} budget={}s docker {}",
+            phase.label(),
+            step.budget.as_secs(),
+            step.arguments.join(" ")
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn ensure_directory(path: &Path) -> io::Result<()> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_dir() => Ok(()),
@@ -43,7 +73,35 @@ pub(super) fn ensure_directory(path: &Path) -> io::Result<()> {
 pub fn build_server_with(
     root: &Path,
     target: ServerTarget,
-    perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+    mut perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+) -> io::Result<PathBuf> {
+    build_server_using(root, target, None, |command, budget, _| {
+        perform(command, budget)
+    })
+}
+
+pub fn build_server_in_container_with(
+    root: &Path,
+    target: ServerTarget,
+    image: &str,
+    perform: impl FnMut(&mut Command, Duration, ServerBuildCommandMode) -> Result<(), ProcessError>,
+) -> io::Result<PathBuf> {
+    let temporary = std::env::temp_dir();
+    ServerContainerBuildPlan::new(
+        "validation",
+        &temporary.join("source"),
+        &temporary.join("state"),
+        target,
+        image,
+    )?;
+    build_server_using(root, target, Some(image), perform)
+}
+
+fn build_server_using(
+    root: &Path,
+    target: ServerTarget,
+    image: Option<&str>,
+    mut perform: impl FnMut(&mut Command, Duration, ServerBuildCommandMode) -> Result<(), ProcessError>,
 ) -> io::Result<PathBuf> {
     let capture = CapturedServer::read(root, target)?;
     println!(
@@ -63,7 +121,12 @@ pub fn build_server_with(
     let candidate = parent.join(format!("{}-{stamp}", std::process::id()));
     println!("server candidate: {}", candidate.display());
     io::stdout().flush()?;
-    capture.build_with(&candidate, perform)?;
+    match image {
+        Some(image) => capture.build_in_container_with(&candidate, image, perform)?,
+        None => capture.build_with(&candidate, |command, budget| {
+            perform(command, budget, ServerBuildCommandMode::Work)
+        })?,
+    }
     println!("server candidate created");
     Ok(candidate)
 }

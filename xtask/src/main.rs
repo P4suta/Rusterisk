@@ -220,6 +220,11 @@ fn execute() -> Result<(), TaskError> {
             xtask::server_distribution::plan_server(&std::env::current_dir()?, target).map_err(TaskError::Io)
         },
         [task, scope, operation, flag, target] if task == "distribution" && scope == "server" && operation == "build" && flag == "--target" => distribution_server_build(target),
+        [task, scope, operation, target_flag, target, image_flag, image] if task == "distribution" && scope == "server" && operation == "plan-container" && target_flag == "--target" && image_flag == "--image" => {
+            let target = xtask::server_distribution::ServerTarget::parse(target).map_err(|error| TaskError::Contract(error.to_string()))?;
+            xtask::server_distribution::plan_server_container(&std::env::current_dir()?, target, image).map_err(TaskError::Io)
+        },
+        [task, scope, operation, target_flag, target, image_flag, image] if task == "distribution" && scope == "server" && operation == "build-container" && target_flag == "--target" && image_flag == "--image" => distribution_server_container(target, image),
         [task, scope, operation, flag, candidate] if task == "distribution" && scope == "server" && operation == "check-startup" && flag == "--candidate" => distribution_server_startup(Path::new(candidate)),
         [task, scope, operation, candidate_flag, candidate, sdk_flag, sdk] if task == "distribution" && scope == "server" && operation == "verify" && candidate_flag == "--candidate" && sdk_flag == "--sdk-candidate" => distribution_server_sdk(Path::new(candidate), Path::new(sdk)),
         [task, scope, operation, candidate_flag, candidate, target_flag, target] if task == "distribution" && scope == "server" && operation == "check-content" && candidate_flag == "--candidate" && target_flag == "--target" => {
@@ -392,6 +397,34 @@ fn distribution_server_startup(candidate: &Path) -> Result<(), TaskError> {
         Err(TaskError::Process(
             xtask::process::ProcessError::UnsupportedSupervision,
         ))
+    }
+}
+
+fn distribution_server_container(target: &str, image: &str) -> Result<(), TaskError> {
+    let target = xtask::server_distribution::ServerTarget::parse(target)
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
+    let mut supervisor = xtask::process::CommandSupervisor::new().map_err(TaskError::Process)?;
+    let operation = xtask::server_distribution::build_server_in_container_with(
+        &std::env::current_dir()?,
+        target,
+        image,
+        |command, budget, mode| match mode {
+            xtask::server_distribution::ServerBuildCommandMode::Work => {
+                supervisor.run(command, budget)
+            }
+            xtask::server_distribution::ServerBuildCommandMode::Cleanup => {
+                supervisor.run_cleanup(command, budget)
+            }
+        },
+    )
+    .map(|_| ())
+    .map_err(TaskError::Io);
+    match (operation, supervisor.finish()) {
+        (operation, Ok(())) => operation,
+        (Ok(()), Err(error)) => Err(TaskError::Process(error)),
+        (Err(operation), Err(cleanup)) => Err(TaskError::Contract(format!(
+            "{operation}; server container supervisor cleanup failed: {cleanup}"
+        ))),
     }
 }
 

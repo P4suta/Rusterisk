@@ -171,3 +171,34 @@ fn server_sdk_checks_require_both_candidates_before_creating_execution_state(
         Ok(())
     })
 }
+
+#[test]
+fn container_builds_and_plans_require_immutable_images_before_creating_state(
+) -> Result<(), SdkCandidateBuildError> {
+    using_project("server-container-cli", |root, _| {
+        write(
+            root,
+            "docs/server-distribution.md",
+            b"Startup instructions.\n",
+        )?;
+        for operation in ["plan-container", "build-container"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+                .args([
+                    "distribution",
+                    "server",
+                    operation,
+                    "--target",
+                    "aarch64-unknown-linux-gnu",
+                    "--image",
+                    "rust:latest",
+                ])
+                .current_dir(root)
+                .env("PATH", "")
+                .output()?;
+            assert!(!output.status.success());
+            assert!(!String::from_utf8_lossy(&output.stderr).contains("usage:"));
+            assert!(!root.join(".cache").exists());
+        }
+        Ok(())
+    })
+}
