@@ -46,7 +46,30 @@ pub struct AttendedDialogRefer {
     authority: ReferAuthority,
 }
 
+#[derive(Clone, Debug)]
+pub struct AttendedReferSource {
+    key: ReferKey,
+    authority: ReferAuthority,
+}
+
+impl AttendedReferSource {
+    pub const fn key(&self) -> ReferKey {
+        self.key
+    }
+
+    pub const fn authority(&self) -> &ReferAuthority {
+        &self.authority
+    }
+}
+
 impl AttendedDialogRefer {
+    pub fn into_source(self) -> AttendedReferSource {
+        AttendedReferSource {
+            key: self.key,
+            authority: self.authority,
+        }
+    }
+
     pub const fn key(&self) -> ReferKey {
         self.key
     }

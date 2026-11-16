@@ -24,6 +24,26 @@ fn failure(error: impl std::fmt::Display) -> String {
 }
 
 #[test]
+fn source_projection_keeps_the_wire_owner_and_captured_authority() -> Result<(), String> {
+    let mut fixture = Fixture::new(true, true).map_err(failure)?;
+    let requested = attended(
+        fixture.receive("REFER", 3, TARGET, 5).map_err(failure)?,
+        &fixture.id,
+    )?;
+    let reference = requested.key();
+    let source = requested.into_source();
+    assert_eq!(source.key(), reference);
+    assert_eq!(source.authority().endpoint(), "alice");
+    assert_eq!(source.authority().context(), "internal");
+    assert_eq!(source.authority().authenticated_identity(), Some("phone"));
+    let debug = format!("{source:?}");
+    for private in ["Consultation", "Local", "Remote", "phone"] {
+        assert!(!debug.contains(private));
+    }
+    Ok(())
+}
+
+#[test]
 fn attended_requests_keep_the_source_authority_and_independent_subscription() -> Result<(), String>
 {
     let mut fixture = Fixture::new(true, true).map_err(failure)?;

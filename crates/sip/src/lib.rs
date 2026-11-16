@@ -42,9 +42,9 @@ pub use session_description::{DtlsSetup, SessionSecurity, WebRtcDescription};
 pub use stream_framing::{SipStreamDecoder, StreamFramingError, StreamItem};
 pub use telephone::DtmfFormat;
 pub use transfer::{
-    AttendedDialogRefer, AttendedRefer, BlindRefer, DialogRefer, ReferAuthority, ReferError,
-    ReferFailure, ReferIdentity, ReferKey, ReferProgress, ReferSubscription, ReplacementDialog,
-    Replaces,
+    AttendedDialogRefer, AttendedRefer, AttendedReferSource, BlindRefer, DialogRefer,
+    ReferAuthority, ReferError, ReferFailure, ReferIdentity, ReferKey, ReferProgress,
+    ReferSubscription, ReplacementDialog, Replaces,
 };
 pub use websocket_framing::validate_websocket_message;
 
