@@ -7,6 +7,7 @@ use crate::{
 use rsipstack::sip::{HeadersExt, Request, SipMessage};
 use std::{net::SocketAddr, time::Duration};
 use tokio::net::UdpSocket;
+mod stream;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())

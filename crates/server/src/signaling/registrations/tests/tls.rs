@@ -22,14 +22,14 @@ fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
 }
 
-struct Identity {
+pub(super) struct Identity {
     _directory: tempfile::TempDir,
-    files: TlsFiles,
+    pub(super) files: TlsFiles,
     certificate: PathBuf,
 }
 
 impl Identity {
-    fn new(name: &str) -> Result<Self, ControlError> {
+    pub(super) fn new(name: &str) -> Result<Self, ControlError> {
         let directory = tempfile::tempdir().map_err(failure)?;
         let identity = rcgen::generate_simple_self_signed([name.into()]).map_err(failure)?;
         let certificate = directory.path().join("certificate.pem");
@@ -47,7 +47,7 @@ impl Identity {
     }
 }
 
-fn configuration(
+pub(super) fn configuration(
     registrar: SocketAddr,
     identity: &Identity,
     trusted: &Identity,

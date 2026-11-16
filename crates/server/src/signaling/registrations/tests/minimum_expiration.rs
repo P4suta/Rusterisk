@@ -155,7 +155,7 @@ fn quoted<'a>(source: &'a str, name: &str) -> Result<&'a str, ControlError> {
         ))
 }
 
-fn check(
+pub(super) fn check(
     request: &Request,
     initial: &Request,
     uri: &str,
