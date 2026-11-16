@@ -4,12 +4,14 @@ use std::path::Path;
 mod digest_algorithms;
 mod expansion;
 mod ini_comments;
+mod music_on_hold;
 mod registration;
 mod registration_uri;
 mod wait_duration;
 mod websocket;
 pub use digest_algorithms::{DigestAlgorithm, DigestAlgorithms, InvalidDigestAlgorithms};
 pub use expansion::{expand_variables, ExpansionError};
+pub use music_on_hold::{MusicClassName, MusicDirectory, MusicFilesClass, MusicOnHold, MusicSort};
 pub use registration_uri::{RegistrarUri, RegistrationAddress, RegistrationUriError};
 pub use wait_duration::{InvalidWaitDuration, WaitDuration};
 pub use websocket::{WebSocketClient, WebSocketConfig, WebSocketControlFormat};
@@ -388,6 +390,7 @@ pub struct Rtp {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     pub websocket: WebSocketConfig,
+    pub music_on_hold: MusicOnHold,
     pub http: Http,
     pub users: Vec<AriUser>,
     pub origins: Vec<String>,
@@ -445,7 +448,12 @@ impl Config {
         .with_websocket_configuration(
             &read(directory, "chan_websocket.conf", Missing::Empty)?,
             &read(directory, "websocket_client.conf", Missing::Empty)?,
-        )
+        )?
+        .with_music_on_hold_configuration(&read(
+            directory,
+            "musiconhold.conf",
+            Missing::Empty,
+        )?)
     }
 
     pub fn parse(
@@ -521,6 +529,7 @@ impl Config {
         }
         let mut config = Self {
             websocket: WebSocketConfig::default(),
+            music_on_hold: MusicOnHold::default(),
             http: Http { bind, tls },
             users: Vec::new(),
             origins: Vec::new(),
