@@ -40,7 +40,10 @@ use request_identity::RequestIdentity;
 pub use session_description::{DtlsSetup, SessionSecurity, WebRtcDescription};
 pub use stream_framing::{SipStreamDecoder, StreamFramingError, StreamItem};
 pub use telephone::DtmfFormat;
-pub use transfer::{BlindRefer, ReferError, ReferSubscription};
+pub use transfer::{
+    BlindRefer, DialogRefer, ReferAuthority, ReferError, ReferFailure, ReferKey, ReferProgress,
+    ReferSubscription,
+};
 pub use websocket_framing::validate_websocket_message;
 
 pub const MAX_MESSAGE: usize = 16384;
@@ -290,6 +293,14 @@ impl Session {
 }
 
 pub enum SipEvent {
+    BlindTransferRequested {
+        id: String,
+        generation: u64,
+        refer: DialogRefer,
+    },
+    ReferSubscriptionEnded {
+        refer: ReferKey,
+    },
     EndpointContact {
         endpoint: String,
         generation: u64,
@@ -418,6 +429,7 @@ pub struct PendingInvite {
     pub local_tag: String,
     local: SocketAddr,
     protocol: Protocol,
+    authority: ReferAuthority,
 }
 
 pub struct Engine {
@@ -433,6 +445,7 @@ pub struct Engine {
     outgoing: BTreeMap<String, outgoing::Outgoing>,
     incoming: BTreeMap<String, incoming::Incoming>,
     transactions: transactions::Transactions,
+    refers: transfer::owners::Owners,
 }
 
 impl Engine {
@@ -461,6 +474,7 @@ impl Engine {
             outgoing: BTreeMap::new(),
             incoming: BTreeMap::new(),
             transactions: transactions::Transactions::default(),
+            refers: transfer::owners::Owners::default(),
         }
     }
     pub fn with_transport(mut self, protocol: Protocol) -> Self {
@@ -637,11 +651,17 @@ impl Engine {
         let mut request = match SipMessage::try_from(bytes)? {
             SipMessage::Request(request) => request,
             SipMessage::Response(response) => {
-                if self.transactions.receive(&response, peer, now)? {
-                    return Ok(Output {
-                        datagrams: Vec::new(),
-                        events: Vec::new(),
-                    });
+                match self.transactions.receive(&response, peer, now)? {
+                    transactions::Receipt::Unmatched => {}
+                    transactions::Receipt::Consumed => {
+                        return Ok(Output {
+                            datagrams: Vec::new(),
+                            events: Vec::new(),
+                        })
+                    }
+                    transactions::Receipt::Notification(receipt) => {
+                        return Ok(self.refer_receipt(receipt))
+                    }
                 }
                 return self.receive_response(response, peer, now);
             }
@@ -673,11 +693,17 @@ impl Engine {
                 self.render_response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
             ));
         }
-        if self.cache.len() >= 256 {
+        if self.cache.len() + self.refers.pending.len() >= 256 {
             return Ok(Output::response(
                 peer,
                 self.render_response(&request, 503, "Service Unavailable", "", "")?,
             ));
+        }
+        if request.method == Method::Refer {
+            return self.receive_refer(key, request, peer, now);
+        }
+        if request.method == Method::Subscribe {
+            return self.receive_refer_subscription(key, request, peer, now);
         }
         if self.merged_request(&request)? {
             let reply = self.render_response(&request, 482, "Loop Detected", "", "")?;
@@ -758,14 +784,14 @@ impl Engine {
                             .as_ref()
                             .map(|auth| auth.user.clone())
                             .ok_or(SipError::InvalidPacket)?;
-                        let identity = self
+                        let auth = self
                             .config
                             .auth
                             .iter()
                             .find(|auth| auth.name == endpoint.auth)
-                            .ok_or(SipError::InvalidPacket)?
-                            .username
-                            .clone();
+                            .ok_or(SipError::InvalidPacket)?;
+                        let identity = auth.username.clone();
+                        let authority = ReferAuthority::authenticated(&endpoint, auth);
                         let local_tag = self.token()?;
                         let local = self
                             .config
@@ -793,6 +819,7 @@ impl Engine {
                                 local_tag,
                                 local,
                                 protocol: self.protocol,
+                                authority,
                             },
                         );
                         self.render_response(&request, 100, "Trying", "", "")?

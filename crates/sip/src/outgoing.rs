@@ -54,6 +54,7 @@ pub(crate) struct Outgoing {
     local_media: SocketAddr,
     local_security: SessionSecurity,
     session_id: u64,
+    authority: crate::ReferAuthority,
 }
 
 struct DialogMedia {
@@ -64,6 +65,76 @@ struct DialogMedia {
 }
 
 impl Engine {
+    pub(crate) fn outgoing_refer_dialog(
+        &mut self,
+        request: &Request,
+        peer: SocketAddr,
+    ) -> Result<crate::transfer::dialog::Dialog, crate::transfer::dialog::MatchError> {
+        use crate::transfer::dialog::{Dialog, MatchError, Usage};
+        for dialog in self.outgoing.values_mut() {
+            if !dialog.matches(request, peer)? {
+                continue;
+            }
+            let sequence = request.cseq_header()?.typed()?.seq;
+            if dialog.remote_cseq.is_some_and(|last| sequence <= last) {
+                return Err(MatchError::Rejected(500, "Server Internal Error"));
+            }
+            dialog.remote_cseq = Some(sequence);
+            return Ok(Dialog {
+                id: dialog.id.clone(),
+                generation: dialog.generation,
+                peer: dialog.peer,
+                wire: crate::transfer::wire::Dialog::remote(request)?,
+                contact: dialog.invite.contact_header()?.value().into(),
+                authority: dialog.authority.clone(),
+                usage: match dialog.state {
+                    State::Established(_) => Usage::Active,
+                    State::Calling { .. }
+                    | State::Proceeding
+                    | State::CancelPending { .. }
+                    | State::Cancelling { .. }
+                    | State::Terminated { .. } => Usage::Ended,
+                },
+            });
+        }
+        Err(MatchError::Missing)
+    }
+
+    pub(crate) fn outgoing_notify(
+        &mut self,
+        id: &str,
+        generation: u64,
+        contact: &str,
+        notification: crate::transfer::notify::Notification,
+        target: Option<&crate::transfer::dialog::Target>,
+    ) -> Result<Option<Datagram>, SipError> {
+        let Some(dialog) = self
+            .outgoing
+            .values_mut()
+            .find(|dialog| dialog.id == id && dialog.generation == generation)
+        else {
+            return Ok(None);
+        };
+        dialog.cseq = dialog
+            .cseq
+            .checked_add(1)
+            .filter(|sequence| *sequence < 1 << 31)
+            .ok_or(SipError::Capacity)?;
+        let packet = related(dialog, Method::Notify, &dialog.remote_to, dialog.cseq, true)?;
+        let mut request = request(std::str::from_utf8(&packet)?)?;
+        if let Some(target) = target {
+            request.uri = target.uri().clone();
+        }
+        let bytes = crate::transfer::notify::encode(request, contact, notification)?;
+        if let Some(target) = target {
+            dialog.remote_contact = target.uri().clone();
+        }
+        Ok(Some(Datagram {
+            peer: dialog.peer,
+            bytes,
+        }))
+    }
+
     pub(super) fn outgoing_disconnected(&mut self, peer: SocketAddr, events: &mut Vec<SipEvent>) {
         self.outgoing.retain(|_, dialog| {
             if dialog.peer != peer {
@@ -523,6 +594,7 @@ impl Engine {
         let invite = request(&bytes)?;
         let call_id = invite.call_id_header()?.value().to_owned();
         let dialog = Outgoing {
+            authority: crate::ReferAuthority::configured_peer(&endpoint),
             id: outbound.id,
             generation: outbound.generation,
             peer,
@@ -627,8 +699,22 @@ impl Engine {
     }
 
     fn tick_inner(&mut self, now: u64) -> Result<Output, SipError> {
-        let mut output = self.incoming_tick(now)?;
-        self.outgoing.retain(|_, dialog| !matches!(dialog.state, State::CancelPending { expires, .. } | State::Cancelling { expires } | State::Terminated { expires } if expires <= now));
+        let expired = self.transactions.expire(now);
+        let mut output = Output {
+            datagrams: Vec::new(),
+            events: Vec::new(),
+        };
+        for receipt in expired {
+            let closed = self.refer_receipt(receipt);
+            output.events.extend(closed.events);
+        }
+        let refers = self.refer_tick(now)?;
+        output.datagrams.extend(refers.datagrams);
+        output.events.extend(refers.events);
+        let incoming = self.incoming_tick(now)?;
+        output.datagrams.extend(incoming.datagrams);
+        output.events.extend(incoming.events);
+        self.outgoing.retain(|_, dialog| !matches!(dialog.state, State::CancelPending { expires, .. } | State::Cancelling { expires } | State::Terminated { expires } if expires <= now) || self.refers.holds(&dialog.id, dialog.generation));
         for dialog in self.outgoing.values_mut() {
             dialog
                 .challenges

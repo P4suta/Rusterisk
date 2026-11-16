@@ -77,6 +77,66 @@ impl Incoming {
 }
 
 impl Engine {
+    pub(crate) fn incoming_refer_dialog(
+        &mut self,
+        request: &Request,
+        peer: SocketAddr,
+    ) -> Result<crate::transfer::dialog::Dialog, crate::transfer::dialog::MatchError> {
+        use crate::transfer::dialog::{Dialog, MatchError, Usage};
+        for dialog in self.incoming.values_mut() {
+            if !dialog.matches(request, peer)? {
+                continue;
+            }
+            let sequence = request.cseq_header()?.typed()?.seq;
+            if sequence <= dialog.remote_cseq {
+                return Err(MatchError::Rejected(500, "Server Internal Error"));
+            }
+            dialog.remote_cseq = sequence;
+            return Ok(Dialog {
+                id: dialog.invite.id.clone(),
+                generation: dialog.generation,
+                peer: dialog.invite.peer,
+                wire: crate::transfer::wire::Dialog::remote(request)?,
+                contact: crate::transport::contact(dialog.invite.protocol, dialog.invite.local),
+                authority: dialog.invite.authority.clone(),
+                usage: match dialog.state {
+                    State::Terminated { .. } => Usage::Ended,
+                    State::AwaitingAck { .. } | State::Established => Usage::Active,
+                },
+            });
+        }
+        Err(MatchError::Missing)
+    }
+
+    pub(crate) fn incoming_notify(
+        &mut self,
+        id: &str,
+        generation: u64,
+        contact: &str,
+        notification: crate::transfer::notify::Notification,
+        target: Option<&crate::transfer::dialog::Target>,
+    ) -> Result<Option<Datagram>, SipError> {
+        let Some(dialog) = self
+            .incoming
+            .values_mut()
+            .find(|dialog| dialog.invite.id == id && dialog.generation == generation)
+        else {
+            return Ok(None);
+        };
+        let mut request = dialog.request(Method::Notify)?;
+        if let Some(target) = target {
+            request.uri = target.uri().clone();
+        }
+        let bytes = crate::transfer::notify::encode(request, contact, notification)?;
+        if let Some(target) = target {
+            dialog.remote_target = target.uri().clone();
+        }
+        Ok(Some(Datagram {
+            peer: dialog.invite.peer,
+            bytes,
+        }))
+    }
+
     pub(super) fn incoming_disconnected(&mut self, peer: SocketAddr, events: &mut Vec<SipEvent>) {
         self.incoming.retain(|_, dialog| {
             if dialog.invite.peer != peer {
@@ -599,9 +659,10 @@ impl Engine {
     pub(crate) fn incoming_tick(&mut self, now: u64) -> Result<Output, SipError> {
         self.cache
             .retain(|_, cached| cached.expires.is_none_or(|expires| expires > now));
-        self.incoming.retain(
-            |_, dialog| !matches!(dialog.state, State::Terminated { expires } if expires <= now),
-        );
+        self.incoming.retain(|_, dialog| {
+            !matches!(dialog.state, State::Terminated { expires } if expires <= now)
+                || self.refers.holds(&dialog.invite.id, dialog.generation)
+        });
         let mut output = Output {
             datagrams: Vec::new(),
             events: Vec::new(),

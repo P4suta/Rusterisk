@@ -66,7 +66,9 @@ fn incoming_direction_answers_keep_local_security_and_established_roles() -> Res
         .iter()
         .find_map(|event| match event {
             SipEvent::Incoming { id, .. } => Some(id.clone()),
-            SipEvent::EndpointContact { .. }
+            SipEvent::BlindTransferRequested { .. }
+            | SipEvent::ReferSubscriptionEnded { .. }
+            | SipEvent::EndpointContact { .. }
             | SipEvent::PeerDirection { .. }
             | SipEvent::DtmfReceived { .. }
             | SipEvent::Ringing { .. }

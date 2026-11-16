@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 impl Engine {
     pub fn disconnected(&mut self, peer: SocketAddr) -> Output {
         let mut events = Vec::new();
+        self.refers.disconnected(peer, &mut events);
         let before = self.contact_snapshot();
         self.contacts.disconnected(peer);
         self.contact_changes(&before, &mut events);

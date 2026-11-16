@@ -242,6 +242,20 @@ impl Signaling {
         self.transmit(listener, datagrams).await?;
         for event in output.events {
             match event {
+                SipEvent::BlindTransferRequested { refer, .. } => {
+                    let rejected = self.listeners[listener]
+                        .engine
+                        .refer_progress(
+                            refer.key(),
+                            rusterisk_sip::ReferProgress::Rejected(
+                                rusterisk_sip::ReferFailure::Unsupported,
+                            ),
+                            now,
+                        )
+                        .map_err(failure)?;
+                    self.transmit(listener, rejected.datagrams).await?;
+                }
+                SipEvent::ReferSubscriptionEnded { .. } => {}
                 SipEvent::EndpointContact {
                     endpoint,
                     generation,

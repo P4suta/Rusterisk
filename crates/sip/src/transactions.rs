@@ -17,6 +17,24 @@ struct Pending {
     interval: u64,
     expires: u64,
     retry: Retry,
+    notification: Option<crate::transfer::wire::Notification>,
+}
+
+pub(super) enum Receipt {
+    Unmatched,
+    Consumed,
+    Notification(NotificationReceipt),
+}
+
+pub(crate) enum NotificationOutcome {
+    Response(u16),
+    Timeout,
+}
+
+pub(crate) struct NotificationReceipt {
+    pub notification: crate::transfer::wire::Notification,
+    pub peer: SocketAddr,
+    pub outcome: NotificationOutcome,
 }
 
 #[derive(Default)]
@@ -46,7 +64,8 @@ impl Transactions {
         now: u64,
         reliable: bool,
     ) -> Result<(), SipError> {
-        self.requests.retain(|_, pending| pending.expires > now);
+        self.requests
+            .retain(|_, pending| pending.expires > now || pending.notification.is_some());
         let key = key(&request)?;
         if let Some(pending) = self.requests.get(&key) {
             return if pending.peer == peer && pending.request == request {
@@ -58,6 +77,7 @@ impl Transactions {
         if self.requests.len() >= 128 {
             return Err(SipError::Capacity);
         }
+        let notification = crate::transfer::wire::Notification::from_request(&request)?;
         self.requests.insert(
             key,
             Pending {
@@ -72,6 +92,7 @@ impl Transactions {
                 } else {
                     Retry::Backoff
                 },
+                notification,
             },
         );
         Ok(())
@@ -82,16 +103,32 @@ impl Transactions {
         response: &Response,
         peer: SocketAddr,
         now: u64,
-    ) -> Result<bool, SipError> {
+    ) -> Result<Receipt, SipError> {
         let key = key(response)?;
         let Some(pending) = self.requests.get_mut(&key) else {
-            return Ok(false);
+            return Ok(Receipt::Unmatched);
         };
         if pending.peer != peer
             || pending.expires <= now
             || pending.request.from_header()?.typed()? != response.from_header()?.typed()?
         {
-            return Ok(false);
+            return Ok(Receipt::Unmatched);
+        }
+        if let Some(notification) = &pending.notification {
+            if ["From", "To", "Call-ID", "CSeq"].into_iter().any(|name| {
+                response
+                    .headers
+                    .iter()
+                    .filter(|header| header.name().eq_ignore_ascii_case(name))
+                    .count()
+                    != 1
+            }) {
+                return Ok(Receipt::Unmatched);
+            }
+            match crate::transfer::wire::Dialog::local(response) {
+                Ok(dialog) if dialog == notification.dialog => {}
+                Ok(_) | Err(_) => return Ok(Receipt::Unmatched),
+            }
         }
         let code = response.status_code.code();
         if (100..200).contains(&code) {
@@ -99,15 +136,63 @@ impl Transactions {
                 pending.retry = Retry::Provisional;
             }
         } else if (200..700).contains(&code) {
-            self.requests.remove(&key);
+            if let Some(Pending {
+                notification: Some(notification),
+                peer,
+                ..
+            }) = self.requests.remove(&key)
+            {
+                return Ok(Receipt::Notification(NotificationReceipt {
+                    notification,
+                    peer,
+                    outcome: NotificationOutcome::Response(code),
+                }));
+            }
         } else {
             return Err(SipError::InvalidPacket);
         }
-        Ok(true)
+        Ok(Receipt::Consumed)
+    }
+
+    pub fn cancel_notification(
+        &mut self,
+        notification: &crate::transfer::wire::Notification,
+        peer: SocketAddr,
+    ) {
+        self.requests.retain(|_, pending| {
+            pending.peer != peer
+                || !pending
+                    .notification
+                    .as_ref()
+                    .is_some_and(|candidate| candidate.same_subscription(notification))
+        });
+    }
+
+    pub fn expire(&mut self, now: u64) -> Vec<NotificationReceipt> {
+        let expired: Vec<_> = self
+            .requests
+            .iter()
+            .filter_map(|(key, pending)| (pending.expires <= now).then_some(key.clone()))
+            .collect();
+        let mut notifications = Vec::new();
+        for key in expired {
+            if let Some(Pending {
+                notification: Some(notification),
+                peer,
+                ..
+            }) = self.requests.remove(&key)
+            {
+                notifications.push(NotificationReceipt {
+                    notification,
+                    peer,
+                    outcome: NotificationOutcome::Timeout,
+                });
+            }
+        }
+        notifications
     }
 
     pub fn tick(&mut self, now: u64) -> Vec<Datagram> {
-        self.requests.retain(|_, pending| pending.expires > now);
         let mut datagrams = Vec::new();
         for pending in self.requests.values_mut() {
             if pending.next <= now && !matches!(pending.retry, Retry::Reliable) {

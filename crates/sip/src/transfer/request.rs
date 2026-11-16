@@ -104,6 +104,32 @@ fn address(source: &str) -> Result<(&str, &str, &str), ReferError> {
 }
 
 fn extension(source: &str) -> Result<String, ReferError> {
+    uri_user(source, UriPurpose::Refer)
+}
+
+pub(super) fn validate_dialog_target(source: &str) -> Result<(), ReferError> {
+    uri_user(source, UriPurpose::Dialog).map(|_| ())
+}
+
+#[derive(Clone, Copy)]
+enum UriPurpose {
+    Refer,
+    Dialog,
+}
+
+fn uri_purpose(name: &str, value: Option<&str>, role: UriPurpose) -> Result<(), ReferError> {
+    match role {
+        UriPurpose::Refer => purpose(name, value),
+        UriPurpose::Dialog
+            if name.eq_ignore_ascii_case("method") || name.eq_ignore_ascii_case("Replaces") =>
+        {
+            Err(ReferError::Unsupported)
+        }
+        UriPurpose::Dialog => Ok(()),
+    }
+}
+
+fn uri_user(source: &str, role: UriPurpose) -> Result<String, ReferError> {
     if source
         .bytes()
         .any(|byte| !byte.is_ascii_graphic() || b"<>\"\\#".contains(&byte))
@@ -155,10 +181,13 @@ fn extension(source: &str) -> Result<String, ReferError> {
             if value.as_deref() == Some("") {
                 return Err(ReferError::Invalid);
             }
-            purpose(&name, value.as_deref())?;
+            uri_purpose(&name, value.as_deref(), role)?;
         }
     }
     if let Some(headers) = headers {
+        if matches!(role, UriPurpose::Dialog) {
+            return Err(ReferError::Unsupported);
+        }
         for (index, header) in headers.split('&').enumerate() {
             if index >= 16 {
                 return Err(ReferError::Capacity);
@@ -276,6 +305,13 @@ fn validate_host(source: &str, uri: &Uri) -> Result<(), ReferError> {
 }
 
 fn generic_parameters(source: &str) -> Result<(), ReferError> {
+    visit_parameters(source, purpose)
+}
+
+pub(super) fn visit_parameters<'a>(
+    source: &'a str,
+    mut visit: impl FnMut(&'a str, Option<&'a str>) -> Result<(), ReferError>,
+) -> Result<(), ReferError> {
     if source.is_empty() {
         return Ok(());
     }
@@ -309,7 +345,7 @@ fn generic_parameters(source: &str) -> Result<(), ReferError> {
             if name.is_empty() || !name.bytes().all(token) {
                 return Err(ReferError::Invalid);
             }
-            purpose(name, value)?;
+            visit(name, value)?;
             if let Some(value) = value {
                 if value.starts_with('"') {
                     let mut escaped = false;
