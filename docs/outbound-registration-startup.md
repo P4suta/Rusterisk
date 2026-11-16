@@ -41,7 +41,7 @@ Initial TCP and TLS requests check the first usable resolved candidate for an op
 TLS reuse requires the captured client configuration, settings generation, and verified domain.
 Setup metadata remains limited to sixteen slots while sixty-four streams are active or connecting.
 An open backup doesn't bypass a preferred candidate.
-Reuse after an earlier candidate's connection failure remains pending.
+After an earlier connection attempt fails, setup checks the next usable candidate for a matching open flow before connecting.
 The driver uses matching provisional and final responses, the shared Digest implementation, and validated Contact grants.
 Successful grants schedule refresh requests with renewed authorization counters.
 423 responses can raise requested `Expires` through one positive `Min-Expires` value.

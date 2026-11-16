@@ -70,7 +70,9 @@ Closing a registered stream removes its bindings while preserving other peers.
 Endpoint availability changes when its first binding appears or last binding disappears across configured addresses.
 Calls select live bindings by configured address order, then Contact preference.
 Bindings keep Contact URIs separate from physical routing peers and route browser placeholder hosts through the registered connection.
-Complete URI header matching and outbound REGISTER clients remain pending.
+Outbound `REGISTER` clients support authenticated startup, Contact grants, refresh, `Min-Expires` corrections, and bounded retries.
+The [startup profile](outbound-registration-startup.md) describes connection reuse and remaining alternate-server and configuration replacement work.
+Complete URI header matching remains pending.
 Authenticated endpoint identity determines the context independently of displayed caller identification.
 Telephone digits use `RFC 4733` packets or `SIP INFO` according to the endpoint's configuration.
 The audio adapter decodes `PCMU`, `PCMA`, and Opus into complete 20 ms mixer frames.
