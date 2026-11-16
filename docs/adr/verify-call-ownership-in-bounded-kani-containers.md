@@ -13,7 +13,7 @@ The approved plan requires Kani 0.68 checks for terminal states and resource own
 ## Decision
 
 Point an independent, dependency-free proof manifest at the production core source.
-Use six bounded harnesses for terminal transitions, connection claims, Stasis, bridge membership, task cancellation, and generation isolation.
+Use fourteen bounded harnesses for terminal transitions, connection claims, Stasis, bridge membership, task cancellation, generation isolation, and transfers.
 Keep unwinding assertions and explicit reachability checks.
 Run one verification worker in a digest-selected container with two processors, 2 GiB of memory, 256 processes, and a fifteen-minute deadline.
 Reject missing harnesses, incomplete results, failed checks, unreachable cover goals, and unapproved verifier versions.
@@ -33,4 +33,4 @@ Reconsider bounds when an invariant needs longer sequences.
 ## Confirmation
 
 Runner tests reject invalid plans and incomplete results.
-All six harnesses and their cover goals pass within the declared limits.
+All fourteen harnesses and their cover goals pass within the declared limits.
