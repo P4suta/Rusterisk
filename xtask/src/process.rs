@@ -83,3 +83,5 @@ pub fn run(command: &mut Command, budget: Duration) -> Result<(), ProcessError> 
 
 mod supervisor;
 pub use supervisor::CommandSupervisor;
+#[cfg(unix)]
+pub use supervisor::RunningCommand;

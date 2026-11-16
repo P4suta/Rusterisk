@@ -1,5 +1,7 @@
 use crate::process::ProcessError;
-use rustix::process::{kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions};
+use rustix::process::{
+    kill_process, kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions,
+};
 use signal_hook::{
     consts::{SIGINT, SIGTERM},
     low_level::{pipe, unregister},
@@ -16,6 +18,12 @@ pub(super) struct Supervisor {
     reader: UnixStream,
     registrations: [SigId; 2],
     interrupted: bool,
+}
+
+pub(super) struct Service {
+    group: Group,
+    pid: Pid,
+    pub(super) deadline: Instant,
 }
 
 fn registration_failure(operation: io::Error, removed: bool) -> ProcessError {
@@ -198,6 +206,69 @@ impl Drop for Group {
 }
 
 impl Supervisor {
+    pub(super) fn start_service(
+        &mut self,
+        command: &mut Command,
+        deadline: Instant,
+    ) -> Result<Service, ProcessError> {
+        if self.pending()? {
+            self.interrupted = true;
+        }
+        if self.interrupted {
+            return Err(ProcessError::Interrupted);
+        }
+        let mut group = Group::new()?;
+        let pid = group.start(command)?;
+        Ok(Service {
+            group,
+            pid,
+            deadline,
+        })
+    }
+
+    pub(super) fn poll_service(&mut self, service: &Service) -> Result<(), ProcessError> {
+        if self.pending()? {
+            self.interrupted = true;
+        }
+        if self.interrupted {
+            return Err(ProcessError::Interrupted);
+        }
+        if Instant::now() >= service.deadline {
+            return Err(ProcessError::Timeout);
+        }
+        if peek(service.pid)? || peek(service.group.pid)? {
+            return Err(ProcessError::InvalidOutput);
+        }
+        Ok(())
+    }
+
+    pub(super) fn stop_service(&mut self, service: Service) -> Result<(), ProcessError> {
+        let operation = (|| {
+            if !peek(service.pid)? {
+                match kill_process(service.pid, Signal::TERM) {
+                    Ok(()) | Err(rustix::io::Errno::SRCH) => {}
+                    Err(error) => return Err(io::Error::from(error).into()),
+                }
+            }
+            self.monitor(
+                service.pid,
+                service.group.pid,
+                Instant::now() + Duration::from_secs(5),
+                true,
+            )
+        })();
+        let status = service.group.finish();
+        match (operation, status) {
+            (Ok(()), Ok(Some(status))) if status.success() => Ok(()),
+            (Ok(()), Ok(Some(status))) => Err(ProcessError::Status(status)),
+            (Ok(()), Ok(None)) => Err(ProcessError::InvalidOutput),
+            (Err(error), Ok(_)) | (Ok(()), Err(error)) => Err(error),
+            (Err(operation), Err(cleanup)) => Err(ProcessError::Cleanup {
+                operation: operation.to_string(),
+                cleanup: cleanup.to_string(),
+            }),
+        }
+    }
     pub(super) fn new() -> Result<Self, ProcessError> {
         let (reader, writer) = UnixStream::pair()?;
         reader.set_nonblocking(true)?;

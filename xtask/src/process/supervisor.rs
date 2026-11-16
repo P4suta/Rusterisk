@@ -5,7 +5,11 @@ use std::{
 };
 
 #[cfg(unix)]
+mod service;
+#[cfg(unix)]
 mod unix;
+#[cfg(unix)]
+pub use service::RunningCommand;
 
 pub struct CommandSupervisor {
     #[cfg(unix)]
@@ -13,6 +17,23 @@ pub struct CommandSupervisor {
 }
 
 impl CommandSupervisor {
+    #[cfg(unix)]
+    pub fn start_service(
+        &mut self,
+        command: &mut Command,
+        budget: Duration,
+    ) -> Result<RunningCommand<'_>, ProcessError> {
+        let deadline = Instant::now()
+            .checked_add(budget)
+            .filter(|_| !budget.is_zero())
+            .ok_or(ProcessError::InvalidBudget)?;
+        let running = self
+            .state
+            .as_mut()
+            .ok_or(ProcessError::InvalidOutput)?
+            .start_service(command, deadline)?;
+        Ok(RunningCommand::new(self, running))
+    }
     pub fn new() -> Result<Self, ProcessError> {
         #[cfg(unix)]
         {
