@@ -55,6 +55,7 @@ Live recording duration statistics remain absent.
 ## Signaling and audio
 
 The signaling adapter handles `SIP` over `UDP`, native `TCP`, verified `TLS`, and signaling WebSockets, with digest authentication, incoming calls, outgoing calls, cancellation, and hangup.
+The [inbound authentication profile](inbound-sip-authentication.md) defines configured Digest algorithms, prepared identities, nonce boundaries, and initial INVITE requirements.
 Native stream tests cover authenticated registration, partial messages, shared flows, initial outbound connections, call control, half-close responses, saturation, and shutdown.
 HTTP `/ws` upgrades require the `sip` subprotocol and enforce the configured Origin policy.
 Authenticated REGISTER requests select an address of record through the endpoint configuration and the To URI.
