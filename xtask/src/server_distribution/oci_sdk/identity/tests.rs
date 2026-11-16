@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Deserialize)]
+struct ContainerIdentity {
+    image: String,
+    manifest: Descriptor,
+}
+
 fn descriptor(digest: &str, size: u64) -> String {
     format!(
         r#"{{"digest":"{digest}","media_type":"application/vnd.oci.image.manifest.v1+json","size":{size}}}"#
@@ -53,10 +59,11 @@ fn image_profiles_bind_identifiers_descriptors_and_platforms_to_the_verified_gra
         assert!(modern.check(invalid.as_bytes()).is_err());
     }
     let descriptor: Descriptor = serde_json::from_str(&raw_descriptor).map_err(io::Error::other)?;
-    assert!(modern.container_matches(&config, Some(&descriptor)));
-    assert!(!modern.container_matches(&manifest, Some(&descriptor)));
-    assert!(!modern.container_matches(&config, None));
+    assert!(modern.container_matches(&manifest, Some(&descriptor)));
+    assert!(!modern.container_matches(&config, Some(&descriptor)));
+    assert!(!modern.container_matches(&manifest, None));
     assert!(legacy.container_matches(&config, None));
+    assert!(!legacy.container_matches(&manifest, None));
     assert!(!legacy.container_matches(&config, Some(&descriptor)));
     Ok(())
 }
@@ -73,5 +80,11 @@ fn observed_containerd_metadata_keeps_the_manifest_and_configuration_distinct() 
     let inspect = br#"{"id":"sha256:eb2b501054399158d4274c5073d1446a3bda8e10fbe1417abd94ce1ab5669678","os":"linux","architecture":"arm64","descriptor":{"digest":"sha256:eb2b501054399158d4274c5073d1446a3bda8e10fbe1417abd94ce1ab5669678","media_type":"application/vnd.oci.image.manifest.v1+json","size":1014}}"#;
     let image = EngineImage::loaded(loaded, expected)?;
     assert_eq!(image.id(), expected.manifest);
-    image.check(inspect)
+    image.check(inspect)?;
+    let observed = br#"{"id":"5d7a3d75a218dc458d46716ab731440bae1d9ae294a21b72c637f3e766945dc6","image":"sha256:eb2b501054399158d4274c5073d1446a3bda8e10fbe1417abd94ce1ab5669678","owner":"rusterisk-server-oci-check-54043-1794836730958011000-serve","manifest":{"digest":"sha256:eb2b501054399158d4274c5073d1446a3bda8e10fbe1417abd94ce1ab5669678","media_type":"application/vnd.oci.image.manifest.v1+json","size":1014}}"#;
+    let container: ContainerIdentity =
+        serde_json::from_slice(observed).map_err(io::Error::other)?;
+    assert!(image.container_matches(&container.image, Some(&container.manifest)));
+    assert!(!image.container_matches(expected.configuration, Some(&container.manifest)));
+    Ok(())
 }

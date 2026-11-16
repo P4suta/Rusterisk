@@ -18,8 +18,9 @@ Inspect that ID once before constructing the execution plan.
 Check Linux architecture and ID.
 The configuration profile requires no image descriptor.
 The manifest profile requires matching descriptor digest, size, and OCI manifest media type.
-[Container inspection](https://raw.githubusercontent.com/moby/moby/8af9fe3/daemon/inspect.go) keeps configuration and manifest identity separate.
-Match `.Image` to the verified configuration and the optional manifest descriptor to the selected profile.
+[Containerd's GetImage](https://raw.githubusercontent.com/moby/moby/8af9fe3/daemon/containerd/image.go) constructs the image with its target digest.
+[Container inspection](https://raw.githubusercontent.com/moby/moby/8af9fe3/daemon/inspect.go) returns that stored engine identity.
+Match `.Image` and the optional manifest descriptor to the selected profile.
 Keep control bound to the inspected container ID and ownership label.
 
 ## Alternatives

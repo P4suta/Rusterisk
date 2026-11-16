@@ -128,9 +128,8 @@ fn serve(root: &Path, args: &[String], stdout: &Path, case: &str) -> io::Result<
     let (_, owner) = owner
         .split_once('=')
         .ok_or_else(|| io::Error::other("fixture label missing"))?;
-    let configuration = format!("sha256:{}", "a".repeat(64));
     let manifest = (case == "manifest-store").then_some(image.as_str());
-    state(root, &name, owner, &configuration, manifest)?;
+    state(root, &name, owner, image, manifest)?;
     let mount = after(args, "--mount")?;
     let config = mount
         .strip_prefix("type=bind,source=")
@@ -161,7 +160,7 @@ fn serve(root: &Path, args: &[String], stdout: &Path, case: &str) -> io::Result<
                 stream.write_all(&request)?;
                 if request == *b"Q" {
                     if matches!(case, "foreign-cleanup" | "combined-failure") {
-                        state(root, &name, "foreign", &configuration, manifest)?;
+                        state(root, &name, "foreign", image, manifest)?;
                     } else {
                         std::fs::remove_file(root.join(format!("{name}.json")))?;
                     }

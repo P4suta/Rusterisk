@@ -66,11 +66,8 @@ impl<'a> EngineImage<'a> {
         }
     }
 
-    pub fn container_matches(&self, configuration: &str, descriptor: Option<&Descriptor>) -> bool {
-        let expected = match self {
-            Self::Configuration(expected) | Self::ApplicationManifest(expected) => expected,
-        };
-        configuration == expected.configuration && self.descriptor_matches(descriptor)
+    pub fn container_matches(&self, image: &str, descriptor: Option<&Descriptor>) -> bool {
+        image == self.id() && self.descriptor_matches(descriptor)
     }
 
     pub fn check(&self, bytes: &[u8]) -> io::Result<()> {
