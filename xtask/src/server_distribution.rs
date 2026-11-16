@@ -1,6 +1,8 @@
 use std::fmt;
 mod binary_target;
 pub use binary_target::{check_binary_target_header, BinaryTargetError};
+mod payload;
+pub use payload::{PayloadError, ServerPayload};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {
@@ -115,6 +117,7 @@ impl ServerCandidateName {
             return Err(CandidateNameError::Version);
         }
         let root = format!("rusterisk-{version}-{}", target.triple());
+        crate::regular_archive::ArchiveRoot::new(&root).map_err(|_| CandidateNameError::Version)?;
         let file_name = format!("{root}.{}", target.format().extension());
         Ok(Self {
             version: version.to_owned(),

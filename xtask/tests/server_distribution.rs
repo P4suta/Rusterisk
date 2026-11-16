@@ -83,6 +83,7 @@ fn candidate_names_reject_unsupported_targets_and_nonportable_versions() {
         "0.1.0\n",
         "0.1.0+日本語",
         "0.1.0/target",
+        "0.1.0+build.2",
     ] {
         assert!(
             ServerCandidateName::new(version, ServerTarget::ALL[0]).is_err(),
@@ -93,5 +94,5 @@ fn candidate_names_reject_unsupported_targets_and_nonportable_versions() {
         ServerCandidateName::new(&format!("0.1.0+{}", "a".repeat(128)), ServerTarget::ALL[0])
             .is_err()
     );
-    assert!(ServerCandidateName::new("0.1.0-rc.1+build.2", ServerTarget::ALL[0]).is_ok());
+    assert!(ServerCandidateName::new("0.1.0-rc.1", ServerTarget::ALL[0]).is_ok());
 }
