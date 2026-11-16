@@ -37,6 +37,8 @@ mod sdk_interop;
 pub use sdk_interop::verify_server_sdk_with;
 mod oci_profile;
 pub use oci_profile::{ServerOciProfile, OCI_RUNTIME};
+mod oci_context;
+pub use oci_context::ServerOciContext;
 mod container_build;
 pub use container_build::{ServerBuildCommandMode, ServerContainerBuildPlan};
 

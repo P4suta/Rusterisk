@@ -18,7 +18,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.flush()
 }
 
-fn check_file(path: &Path, expected: &[u8]) -> io::Result<()> {
+pub(super) fn check_file(path: &Path, expected: &[u8]) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.len() != expected.len() as u64 {
         return Err(io::Error::other("extracted server file changed"));
