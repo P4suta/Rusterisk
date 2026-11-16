@@ -46,4 +46,9 @@ The example serves the maintained HTML, style sheet, and built JavaScript throug
 The isolated `just browser` campaign drives the browser through actual server requests and compares received tones and stored recording samples.
 The campaign uses its own typed control fixture.
 The Rust bridge example has separate HTTP and event lifecycle tests.
-The campaign also checks permission recovery, cancellation, keyboard focus, targets, narrow layouts, enlarged text, spacing, and resource failure.
+The campaign also checks permission recovery, cancellation, keyboard focus, targets, narrow layouts, enlarged text, and spacing.
+Failure reports include bounded process and resource diagnostics.
+
+The Linux ARM64 campaign passed on loopback with Playwright `1.65.1`, Chromium `159.0.8154.6`, and the configured `ulaw` codec.
+The campaign matched 660 Hz at Alice, 440 Hz at Bob, and both test signals in the stored recording.
+VoiceOver, network address translation (NAT) traversal, [Traversal Using Relays around NAT](https://www.rfc-editor.org/rfc/rfc8656.html) media relays, and browser calls with Asterisk `22.9.0` remain unverified by the campaign.
