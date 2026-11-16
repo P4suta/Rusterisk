@@ -1,4 +1,4 @@
-FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6
+FROM rust:1.99.0-trixie@sha256:81015672d6939b0265f09adf96d5de125482bb1330106076956b0518e74edc90
 
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
