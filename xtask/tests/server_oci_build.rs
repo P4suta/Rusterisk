@@ -49,7 +49,7 @@ fn image_builds_export_candidate_bytes_with_an_owned_bounded_builder() -> io::Re
     assert!(!export
         .arguments
         .iter()
-        .any(|value| value == "--push" || value == "--load"));
+        .any(|value| value == "--push" || value == "--load" || value == "--tag"));
     let cleanup = plan.cleanup();
     assert_eq!(&cleanup.arguments[..3], &["buildx", "rm", "--force"]);
     assert_eq!(cleanup.budget, Duration::from_secs(60));

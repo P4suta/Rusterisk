@@ -87,7 +87,6 @@ impl ServerOciBuildPlan {
                     "buildx".to_owned(), "build".to_owned(), "--builder".to_owned(), self.name.clone(),
                     format!("--platform={}", self.platform), "--progress=plain".to_owned(), "--network=none".to_owned(),
                     "--build-arg".to_owned(), "SOURCE_DATE_EPOCH=0".to_owned(),
-                    "--tag".to_owned(), format!("rusterisk-server-candidate:{}", self.name),
                     "--output".to_owned(), format!("type=oci,dest={},oci-mediatypes=true,compression=gzip,compression-level=6,rewrite-timestamp=true", self.output),
                     self.context.clone(),
                 ].into(),
