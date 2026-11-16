@@ -1,7 +1,9 @@
 use crate::server_distribution::ServerTarget;
 
 mod inputs;
+mod source;
 pub use inputs::{InputError, InputKey, SourceInputs};
+pub use source::{CapturedReleaseSource, ReleaseSourceError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinuxOciTarget {
