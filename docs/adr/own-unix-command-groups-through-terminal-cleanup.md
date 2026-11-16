@@ -11,31 +11,31 @@ Killing Cargo alone leaves compiler descendants alive.
 
 ## Decision
 
-Give each command a [process group](https://doc.rust-lang.org/std/os/unix/process/trait.CommandExt.html#tymethod.process_group).
-Observe exits with [waitid NOWAIT](https://docs.rs/rustix/1.1.6/rustix/process/struct.WaitIdOptions.html#associatedconstant.NOWAIT).
-Keep the leader unreaped until group termination prevents identifier reuse, including early leader exit.
 The CLI owns a concrete CommandSupervisor and borrows it through command ports.
-Use rustix 1.1.6 and [signal-hook 0.4.6](https://docs.rs/signal-hook/0.4.6/signal_hook/low_level/pipe/) without default features for process control and a nonblocking self-pipe covering SIGINT and SIGTERM.
-Poll signals with the command deadline.
-Create no helper thread.
-Keep registrations until terminal CLI cleanup, then unregister and let process exit close descriptors.
-The dependencies contain private unsafe and shared registry implementation.
-Project code uses neither.
+Start a [cat anchor](https://raw.githubusercontent.com/apple-oss-distributions/text_cmds/main/cat/cat.c) with a parent-owned input pipe and null outputs.
+Join actual commands to its process group.
+Keep the anchor unreaped to prevent identifier reuse.
+Stop the group with SIGKILL, then reap both children with deadlines.
+The anchor avoids macOS [permission errors for groups containing only zombies](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/bsd/kern/kern_sig.c).
+Use safe rustix 1.1.6 process APIs and [signal-hook 0.4.6](https://docs.rs/signal-hook/0.4.6/signal_hook/low_level/pipe/) without default features.
+Poll a nonblocking SIGINT/SIGTERM self-pipe without helper threads.
+Unregister and close descriptors at terminal CLI cleanup.
+Dependencies contain private unsafe and registry sharing.
 
 ## Alternatives
 
 Per-command handler removal [leaves termination signals ignored](https://docs.rs/signal-hook-registry/latest/signal_hook_registry/fn.unregister.html).
-command-group's publisher ended maintenance.
-process-wrap exposes dynamic child dispatch.
-Individual PID termination misses descendants.
+A self-executable anchor adds another entrypoint and test harness wiring.
+System cat already waits for input on supported Unix hosts.
+command-group lacks maintenance.
+process-wrap exposes dynamic dispatch.
 
 ## Consequences
 
 Assume children keep their inherited group.
 Abrupt SIGKILL of the supervisor can leave children alive.
 Windows requires a separate Job Object adapter.
-The decision remains proposed pending native checks.
 
 ## Confirmation
 
-Require timeout, interruption, early leader exit, repeated execution, cleanup failures, and existing caller regressions.
+Require both children reaped, early anchor exit, spawn failure, interruption cleanup, descriptor closure, and caller regressions.
