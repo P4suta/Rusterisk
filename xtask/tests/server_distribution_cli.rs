@@ -4,6 +4,35 @@ use fixture::{using_project, write};
 use std::{io, process::Command};
 use xtask::{distribution::SdkCandidateBuildError, server_distribution::ServerTarget};
 
+#[cfg(unix)]
+#[test]
+fn malformed_argument_encoding_is_rejected_before_creating_execution_state(
+) -> Result<(), SdkCandidateBuildError> {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    using_project("server-encoding-cli", |root, _| {
+        let prefixes: [&[&str]; 3] = [
+            &[],
+            &["distribution", "server", "build", "--target"],
+            &["distribution", "server", "check-content", "--candidate"],
+        ];
+        for prefix in prefixes {
+            let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+                .args(prefix)
+                .arg(OsString::from_vec([0xff, 0xfe].to_vec()))
+                .current_dir(root)
+                .env("PATH", "")
+                .output()?;
+            assert_eq!(output.status.code(), Some(1));
+            assert!(output.stdout.is_empty());
+            let message = String::from_utf8_lossy(&output.stderr);
+            assert!(message.contains("task arguments must be valid UTF-8"));
+            assert!(!message.contains("panicked"));
+            assert!(!root.join(".cache").exists());
+        }
+        Ok(())
+    })
+}
+
 #[test]
 fn server_distribution_plans_require_one_target_and_never_invoke_external_tools(
 ) -> Result<(), SdkCandidateBuildError> {

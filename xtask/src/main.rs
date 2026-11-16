@@ -133,7 +133,15 @@ fn run(program: &str, arguments: &[&str]) -> Result<(), TaskError> {
 }
 
 fn execute() -> Result<(), TaskError> {
-    let arguments: Vec<String> = std::env::args().skip(1).take(12).collect();
+    let arguments: Vec<String> = std::env::args_os()
+        .skip(1)
+        .take(12)
+        .map(|argument| {
+            argument
+                .into_string()
+                .map_err(|_| TaskError::Contract("task arguments must be valid UTF-8".into()))
+        })
+        .collect::<Result<_, _>>()?;
     match arguments.as_slice() {
         [task, flag, archive] if task == "vendor-patch" && flag == "--archive" => {
             let count = xtask::vendor::patch(&std::env::current_dir()?, Path::new(archive))
