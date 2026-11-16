@@ -15,6 +15,8 @@ use std::{
     time::Duration,
 };
 use tokio::{net::UdpSocket, sync::mpsc};
+#[path = "attended_reference.rs"]
+mod reference;
 #[path = "survivor_shutdown.rs"]
 mod survivor_shutdown;
 
@@ -105,6 +107,7 @@ async fn exercise(
     targets: [SocketAddr; 2],
     media_ports: mpsc::Sender<SocketAddr>,
     operation: Exercise,
+    requests: [RequestRoute; 2],
 ) -> Result<(), ControlError> {
     let [first, bob, second, charlie] = peers;
     let [target, consultation_target] = targets;
@@ -220,16 +223,14 @@ async fn exercise(
         .send_to(refer.as_bytes(), target)
         .await
         .map_err(failure)?;
-    let mut source = TransferSignals::new(&initial.answer, RequestRoute::Direct(target))?;
+    let [source_requests, consultation_requests] = requests;
+    let mut source = TransferSignals::new(&initial.answer, source_requests)?;
     source
         .accepted(&first.signal, target)
         .await
         .map_err(|error| failure(format!("attended REFER acceptance: {error}")))?;
     let consultation_dialog = consultation.callee;
-    let mut consultation = TransferSignals::new(
-        &consultation.answer,
-        RequestRoute::Direct(consultation_target),
-    )?;
+    let mut consultation = TransferSignals::new(&consultation.answer, consultation_requests)?;
     let source_ended = async {
         source
             .settled(&first.signal, target)
@@ -248,6 +249,7 @@ async fn exercise(
             .map_err(|error| failure(format!("attended received audio: {error}")))
     };
     tokio::try_join!(source_ended, consultation_ended, received_audio)?;
+    println!("Observed attended transfer event={:?}", source.event()?);
     match operation {
         Exercise::Consultation | Exercise::Transfer => Ok(()),
         Exercise::PeerEnded(Survivor::Bob) => {
@@ -353,6 +355,10 @@ async fn native_on(operation: Exercise, layout: CallListeners) -> Result<(), Con
         [target, consultation],
         media_ports,
         operation,
+        [
+            RequestRoute::Direct(target),
+            RequestRoute::Direct(consultation),
+        ],
     ));
     let mut result = finish(worker, Duration::from_secs(8)).await;
     controller.shutdown();
@@ -418,4 +424,17 @@ async fn ending_either_surviving_dialog_releases_its_peer_after_attended_audio(
 async fn attended_consultation_on_another_listener_preserves_known_audio_and_source_routes(
 ) -> Result<(), ControlError> {
     native_on(Exercise::Transfer, CallListeners::Separate).await
+}
+
+#[tokio::test]
+#[ignore = "Requires the isolated Asterisk 22.9.0 reference."]
+async fn reference_attended_transfer_matches_native_received_audio() -> Result<(), ControlError> {
+    println!("Comparing attended transfer against the native server");
+    native(Exercise::Transfer)
+        .await
+        .map_err(|error| failure(format!("native attended transfer: {error}")))?;
+    println!("Comparing attended transfer against Asterisk 22.9.0");
+    reference::compare()
+        .await
+        .map_err(|error| failure(format!("Asterisk attended transfer: {error}")))
 }
