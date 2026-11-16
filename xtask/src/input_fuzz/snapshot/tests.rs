@@ -332,3 +332,148 @@ fn captured_sources_remain_bound_while_independent_checkout_edits_continue() -> 
         }),
     }
 }
+
+#[test]
+fn harness_tree_refuses_added_configuration_source_or_missing_inputs() -> Result<(), FuzzError> {
+    for path in [
+        ".cargo/config.toml",
+        ".cargo/config",
+        "src/hidden.rs",
+        "tests/hidden.rs",
+        "fuzz_targets/hidden.rs",
+        "build.rs",
+    ] {
+        fixture("added-harness-input", |root, directory| {
+            let snapshot = Snapshot::read(root)?;
+            let state = directory.join("state");
+            snapshot.write(&directory.join("source"), &state)?;
+            snapshot.check_harness(&state)?;
+            super::write_new(&state.join("fuzz").join(path), b"added")?;
+            if snapshot.check_harness(&state).is_ok() {
+                return Err(FuzzError::Io(std::io::Error::other(format!(
+                    "unexpected harness input accepted: {path}"
+                ))));
+            }
+            Ok(())
+        })?;
+    }
+    for path in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "src/lib.rs",
+        "tests/contract.rs",
+        "fuzz_targets/settings.rs",
+    ] {
+        fixture("missing-harness-input", |root, directory| {
+            let snapshot = Snapshot::read(root)?;
+            let state = directory.join("state");
+            snapshot.write(&directory.join("source"), &state)?;
+            std::fs::remove_file(state.join("fuzz").join(path))?;
+            if snapshot.check_harness(&state).is_ok() {
+                return Err(FuzzError::Io(std::io::Error::other(format!(
+                    "missing harness input accepted: {path}"
+                ))));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn captured_source_refuses_added_root_build_configuration() -> Result<(), FuzzError> {
+    for path in [".cargo/config.toml", ".cargo/config", "build.rs"] {
+        fixture("added-source-input", |root, directory| {
+            let snapshot = Snapshot::read(root)?;
+            let source = directory.join("source");
+            snapshot.write(&source, &directory.join("state"))?;
+            super::write_new(&source.join(path), b"added")?;
+            if snapshot.verify_source(&source).is_ok() {
+                return Err(FuzzError::Io(std::io::Error::other(format!(
+                    "unexpected captured source input accepted: {path}"
+                ))));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn harness_checks_allow_owned_outputs_outside_the_exact_harness_tree() -> Result<(), FuzzError> {
+    fixture("state-output-boundary", |root, directory| {
+        let snapshot = Snapshot::read(root)?;
+        let source = directory.join("source");
+        let state = directory.join("state");
+        snapshot.write(&source, &state)?;
+        for path in [
+            "target/native-binary",
+            "corpus/settings/discovered-input",
+            "artifacts/settings/crash-input",
+        ] {
+            super::write_new(&state.join(path), b"generated")?;
+        }
+        snapshot.check_harness(&state)?;
+        snapshot.verify_source(&source)
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn native_readers_refuse_linked_files_and_every_owned_ancestor() -> Result<(), FuzzError> {
+    for path in ["state", "state/deep", "state/deep/native.txt"] {
+        fixture("native-link-boundary", |_, directory| {
+            super::write_new(&directory.join("state/deep/native.txt"), b"native")?;
+            let outside = directory.join("outside");
+            std::fs::rename(directory.join(path), &outside)?;
+            std::os::unix::fs::symlink(outside, directory.join(path))?;
+            assert!(super::read_under(
+                directory,
+                Path::new("state/deep/native.txt"),
+                4 * 1024 * 1024
+            )
+            .is_err());
+            if path != "state/deep/native.txt" {
+                assert!(super::read_directory(directory, Path::new("state/deep")).is_err());
+            }
+            Ok(())
+        })?;
+    }
+    fixture("native-size-boundary", |_, directory| {
+        let relative = Path::new("state/native.txt");
+        sparse(directory, "state/native.txt", 4 * 1024 * 1024)?;
+        assert_eq!(
+            super::read_under(directory, relative, 4 * 1024 * 1024)?.len(),
+            4 * 1024 * 1024
+        );
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(directory.join(relative))?
+            .set_len(4 * 1024 * 1024 + 1)?;
+        assert!(super::read_under(directory, relative, 4 * 1024 * 1024).is_err());
+        Ok(())
+    })
+}
+
+#[cfg(unix)]
+#[test]
+fn harness_tree_refuses_linked_roots_directories_and_files() -> Result<(), FuzzError> {
+    for path in [
+        "state",
+        "state/fuzz",
+        "state/fuzz/src",
+        "state/fuzz/src/lib.rs",
+    ] {
+        fixture("harness-link-boundary", |root, directory| {
+            let snapshot = Snapshot::read(root)?;
+            let state = directory.join("state");
+            snapshot.write(&directory.join("source"), &state)?;
+            let outside = directory.join("outside");
+            std::fs::rename(directory.join(path), &outside)?;
+            std::os::unix::fs::symlink(outside, directory.join(path))?;
+            assert!(snapshot.check_harness(&state).is_err());
+            Ok(())
+        })?;
+    }
+    Ok(())
+}

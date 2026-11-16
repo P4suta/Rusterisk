@@ -1,5 +1,6 @@
 use super::{normalize_manifest, validate_locks, FuzzError, FuzzFileScope};
 use std::{
+    collections::BTreeMap,
     io::Read,
     path::{Component, Path, PathBuf},
 };
@@ -83,6 +84,52 @@ pub fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, FuzzError> {
         return Err(FuzzError::Manifest);
     }
     Ok(bytes)
+}
+
+pub(super) fn read_under(root: &Path, relative: &Path, limit: usize) -> Result<Vec<u8>, FuzzError> {
+    directory(root)?;
+    let path = root.join(relative);
+    parents(root, &path)?;
+    read_bounded(&path, limit)
+}
+
+pub(super) fn read_directory(root: &Path, relative: &Path) -> Result<std::fs::ReadDir, FuzzError> {
+    directory(root)?;
+    let path = root.join(relative);
+    if !relative.as_os_str().is_empty() {
+        parents(root, &path)?;
+        directory(&path)?;
+    }
+    Ok(std::fs::read_dir(path)?)
+}
+
+fn check_tree(root: &Path, mut expected: BTreeMap<PathBuf, &[u8]>) -> Result<(), FuzzError> {
+    let mut pending: Vec<_> = [PathBuf::new()].into();
+    while let Some(relative) = pending.pop() {
+        for entry in read_directory(root, &relative)? {
+            let entry = entry?;
+            let path = relative.join(entry.file_name());
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                if !expected.keys().any(|expected| expected.starts_with(&path)) {
+                    return Err(FuzzError::Manifest);
+                }
+                pending.push(path);
+            } else if kind.is_file() {
+                let bytes = expected.remove(&path).ok_or(FuzzError::Manifest)?;
+                if read_under(root, &path, bytes.len())? != bytes {
+                    return Err(FuzzError::Manifest);
+                }
+            } else {
+                return Err(FuzzError::Manifest);
+            }
+        }
+    }
+    if expected.is_empty() {
+        Ok(())
+    } else {
+        Err(FuzzError::Manifest)
+    }
 }
 
 fn add(root: &Path, path: &Path, files: &mut Vec<File>) -> Result<(), FuzzError> {
@@ -281,24 +328,30 @@ impl Snapshot {
         if Self::read(source)?.files != self.files {
             return Err(FuzzError::SourceChanged);
         }
-        Ok(())
+        check_tree(
+            source,
+            self.files
+                .iter()
+                .map(|file| (file.path.clone(), file.bytes.as_slice()))
+                .collect(),
+        )
     }
 
     pub fn check_harness(&self, state: &Path) -> Result<(), FuzzError> {
-        if read_bounded(&state.join("fuzz/Cargo.toml"), 1024 * 1024)? != self.normalized.as_bytes()
-        {
+        directory(state)?;
+        if self.normalized.len() > 1024 * 1024 {
             return Err(FuzzError::Manifest);
         }
+        let mut expected = BTreeMap::new();
         for file in &self.files {
             if let Ok(path) = file.path.strip_prefix("xtask/fuzz") {
-                if path != Path::new("Cargo.toml")
-                    && read_bounded(&state.join("fuzz").join(path), 1024 * 1024)? != file.bytes
-                {
-                    return Err(FuzzError::Manifest);
+                if path != Path::new("Cargo.toml") {
+                    expected.insert(path.to_owned(), file.bytes.as_slice());
                 }
             }
         }
-        Ok(())
+        expected.insert(PathBuf::from("Cargo.toml"), self.normalized.as_bytes());
+        check_tree(&state.join("fuzz"), expected)
     }
 }
 
