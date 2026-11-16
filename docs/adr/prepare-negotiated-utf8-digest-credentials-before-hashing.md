@@ -27,15 +27,16 @@ Carry the selected encoding through later authenticated requests.
 
 Accepting UTF-8 without preparation hashes canonically equivalent credentials differently.
 Applying preparation to every challenge changes authentication without negotiation.
-Implementing Unicode tables locally duplicates the profile library.
+Local static tables duplicate profile maintenance.
 
 ## Consequences
 
-The SIP adapter gains bundled Unicode inputs.
-The dependency-free core remains unchanged.
+Property checks use an internal borrowed trait object.
+Erased state stays internal.
+The core remains dependency-free.
 Reconsider when Unicode updates require migration.
 
 ## Confirmation
 
 Require independent digest vectors, canonical equivalence, case distinction, width and space mapping, prohibited code points, length boundaries, and authenticated refreshes.
-Keep proposed while inbound negotiation and username hashing remain incomplete.
+Keep proposed until inbound negotiation and username hashing pass.
