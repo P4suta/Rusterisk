@@ -8,6 +8,8 @@ mod authentication;
 mod failure_retry;
 #[path = "outbound_registration/grants.rs"]
 mod grants;
+#[path = "outbound_registration/identity.rs"]
+mod identity;
 #[path = "outbound_registration/minimum_expiration.rs"]
 mod minimum_expiration;
 #[path = "outbound_registration/responses.rs"]
