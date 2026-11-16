@@ -49,6 +49,11 @@ Use `Client::move_channel` to select a subscribed destination app and its argume
 Supply at most 32 nonempty arguments, each limited to 256 bytes and containing no commas or control characters.
 The client sends up to 4096 bytes of joined arguments in the JSON request body.
 
+Use `Client::continue_in_dialplan` to return a channel to its dialplan.
+Omit the context, extension, and priority to continue after the current step.
+Context and extension values accept at most 128 bytes without control characters.
+Priorities range from 0 through 65535, with zero selecting the server's default position.
+
 `MediaConnected` observes Rusterisk's `RUSTERISK_MEDIA_CONNECTED` channel variable event.
 The milestone means the server received an audio frame.
 Checking received audio remains necessary to verify the intended signal.
