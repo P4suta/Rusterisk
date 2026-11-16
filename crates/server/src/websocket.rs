@@ -94,7 +94,16 @@ async fn events(
                         if !send(&mut socket, Message::Pong(bytes)).await { break; }
                     }
                     Some(Ok(Message::Pong(_))) => {}
-                    Some(Ok(Message::Text(_) | Message::Binary(_) | Message::Close(_)))
+                    Some(Ok(Message::Close(_))) => {
+                        match tokio::time::timeout(Duration::from_secs(2), futures_util::SinkExt::flush(&mut socket)).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => tracing::debug!(%error, "event close response failed"),
+                            Err(error) => tracing::debug!(%error, "event close response timed out"),
+                        }
+                        drop(subscription);
+                        return;
+                    }
+                    Some(Ok(Message::Text(_) | Message::Binary(_)))
                     | Some(Err(_)) | None => break,
                 }
             }
