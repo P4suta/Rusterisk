@@ -2,6 +2,7 @@ use syn::parse::Parser;
 use syn::visit::{self, Visit};
 pub mod browser;
 pub mod core_assurance;
+pub mod core_miri;
 pub mod core_proofs;
 pub mod distribution;
 pub mod input_fuzz;

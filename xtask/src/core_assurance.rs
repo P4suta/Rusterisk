@@ -4,11 +4,13 @@ mod field_mutations;
 mod field_runner;
 mod manifest;
 pub use field_mutations::FieldMutation;
+mod captured;
 mod miri;
 mod mutation;
 mod runner;
 mod snapshot;
 pub use crate::core_proofs::Execution;
+pub(crate) use captured::CapturedAssurance;
 pub use manifest::normalize_manifest;
 pub use miri::{
     validate_field_execution, validate_miri_discovery, validate_miri_execution, MiriInventory,
