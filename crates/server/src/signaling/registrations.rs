@@ -8,8 +8,9 @@ pub(super) use resolution::ConfigurationLease;
 use resolution::{Completion, ConfigurationLifetime};
 use rusterisk_config::{Auth, Config, Protocol, Registration, MAX_REGISTRATIONS};
 use rusterisk_sip::{
-    Datagram, RegistrationGrant, RegistrationIdentity, RegistrationResponse,
-    RegistrationTransaction, RegistrationTransactionEvent, StaticTarget, TargetHost,
+    Datagram, RegistrationAuthentication, RegistrationGrant, RegistrationIdentity,
+    RegistrationResponse, RegistrationTransaction, RegistrationTransactionEvent, StaticTarget,
+    TargetHost,
 };
 use std::{
     net::SocketAddr,
@@ -18,6 +19,7 @@ use std::{
 };
 use tokio::task::JoinSet;
 mod resolution;
+mod retry;
 #[cfg(test)]
 mod tests;
 
@@ -40,6 +42,7 @@ struct Client {
     target: StaticTarget,
     settings: Registration,
     requested_expiration: u32,
+    retries: u32,
     auth: Auth,
     state: State,
 }
@@ -91,6 +94,11 @@ enum State {
         refresh_at: u64,
         route: Route,
     },
+    Backoff {
+        at: u64,
+        response: Option<RegistrationResponse>,
+        route: Route,
+    },
     Stopped,
 }
 
@@ -103,7 +111,8 @@ impl State {
         match self {
             Self::Ready { route, .. }
             | Self::Trying { route, .. }
-            | Self::Registered { route, .. } => Some(*route),
+            | Self::Registered { route, .. }
+            | Self::Backoff { route, .. } => Some(*route),
             Self::Waiting { .. }
             | Self::Resolving { .. }
             | Self::Connecting { .. }
@@ -113,6 +122,38 @@ impl State {
 }
 
 impl Client {
+    fn failed_response(
+        &mut self,
+        response: RegistrationResponse,
+        route: Route,
+        now: u64,
+    ) -> Result<State, ControlError> {
+        let status = response.status();
+        let instruction = response.retry_after().map_err(failure)?;
+        self.retry(status, instruction, Some(response), route, now)
+    }
+
+    fn retry(
+        &mut self,
+        status: u16,
+        instruction: Option<NonZeroU32>,
+        response: Option<RegistrationResponse>,
+        route: Route,
+        now: u64,
+    ) -> Result<State, ControlError> {
+        match retry::decide(&self.settings, self.retries, status, instruction, now)? {
+            retry::Decision::Stop => Ok(State::Stopped),
+            retry::Decision::Wait { at, retries } => {
+                self.retries = retries;
+                Ok(State::Backoff {
+                    at,
+                    response,
+                    route,
+                })
+            }
+        }
+    }
+
     fn same_registrar(&self, other: &Self) -> bool {
         if self
             .state
@@ -208,6 +249,7 @@ impl Registrations {
                 target,
                 settings: settings.clone(),
                 requested_expiration: settings.expiration,
+                retries: 0,
                 auth,
                 state,
             });
@@ -227,6 +269,9 @@ impl Registrations {
     }
 
     fn select(&mut self, now: u64) -> Option<usize> {
+        if self.lifetime.lease().is_released() {
+            return None;
+        }
         for _ in 0..self.clients.len() {
             let index = self.cursor;
             self.cursor = (self.cursor + 1) % self.clients.len();
@@ -245,7 +290,7 @@ impl Registrations {
                                 )
                         })
                 }
-                State::Ready { at, .. } => {
+                State::Ready { at, .. } | State::Backoff { at, .. } => {
                     now >= *at
                         && !self.clients.iter().any(|other| {
                             client.same_registrar(other)
@@ -275,38 +320,62 @@ impl Registrations {
         local: SocketAddr,
         now: u64,
     ) -> Result<Option<Datagram>, ControlError> {
+        if self.lifetime.lease().is_released() {
+            return Ok(None);
+        }
         let client = self.clients.get_mut(index).ok_or(ControlError::Capacity)?;
+        if matches!(
+            &client.state,
+            State::Ready { at, .. }
+                | State::Backoff { at, .. }
+                | State::Registered { refresh_at: at, .. }
+                if now < *at
+        ) {
+            return Ok(None);
+        }
         let transaction = match &client.state {
-            State::Ready { route, .. } => {
-                self.identity = self.identity.advance(random()?).map_err(failure)?;
+            State::Ready { route, .. }
+            | State::Backoff {
+                response: None,
+                route,
+                ..
+            } => {
+                let identity = self.identity.advance(random()?).map_err(failure)?;
                 let mut settings = client.settings.clone();
                 settings.expiration = client.requested_expiration;
                 Some((
-                    RegistrationTransaction::new(
-                        &settings,
-                        local,
-                        route.peer(),
-                        self.identity,
-                        now,
-                    )
-                    .map_err(failure)?,
+                    RegistrationTransaction::new(&settings, local, route.peer(), identity, now)
+                        .map_err(failure)?,
                     *route,
                 ))
             }
             State::Registered {
                 response, route, ..
             } => {
-                self.identity = self.identity.advance(random()?).map_err(failure)?;
+                let identity = self.identity.advance(random()?).map_err(failure)?;
                 Some((
                     response
                         .refresh(
                             std::slice::from_ref(&client.auth),
-                            self.identity,
+                            identity,
                             NonZeroU32::new(client.requested_expiration).ok_or(
                                 ControlError::Invalid("Refresh lifetime must be positive"),
                             )?,
                             now,
                         )
+                        .map_err(failure)?,
+                    *route,
+                ))
+            }
+            State::Backoff {
+                response: Some(response),
+                route,
+                ..
+            } => {
+                let identity = self.identity.advance(random()?).map_err(failure)?;
+                Some((
+                    response
+                        .retry_after_failure(std::slice::from_ref(&client.auth), identity, now)
                         .map_err(failure)?,
                     *route,
                 ))
@@ -318,15 +387,17 @@ impl Registrations {
             | State::Stopped => None,
         };
         if let Some((transaction, route)) = transaction {
+            self.identity = transaction.identity();
             client.state = State::Trying { transaction, route };
         }
-        let State::Trying { transaction, .. } = &mut client.state else {
+        let State::Trying { transaction, route } = &mut client.state else {
             return Ok(None);
         };
+        let route = *route;
         match transaction.poll(now).map_err(failure)? {
             Some(RegistrationTransactionEvent::Transmit(packet)) => Ok(Some(packet)),
             Some(RegistrationTransactionEvent::TimedOut) => {
-                client.state = State::Stopped;
+                client.state = client.retry(408, None, None, route, now)?;
                 Ok(None)
             }
             Some(
@@ -350,29 +421,38 @@ impl Registrations {
             .ok_or(ControlError::Invalid("Registration response has no route"))?;
         client.state = match response.status() {
             401 | 407 => {
-                self.identity = self.identity.advance(random()?).map_err(failure)?;
+                let identity = self.identity.advance(random()?).map_err(failure)?;
                 match response
-                    .authenticated_retry(
+                    .authenticate(
                         std::slice::from_ref(&client.auth),
-                        self.identity,
+                        identity,
                         &format!("{:032x}", random()?),
                         1,
                         now,
                     )
                     .map_err(failure)?
                 {
-                    Some(transaction) => State::Trying { transaction, route },
-                    None => return Err(ControlError::Unsupported),
+                    RegistrationAuthentication::Retry(transaction) => {
+                        self.identity = identity;
+                        State::Trying { transaction, route }
+                    }
+                    RegistrationAuthentication::Rejected(response) => {
+                        client.failed_response(response, route, now)?
+                    }
                 }
             }
-            200..=299 => match response.grant().map_err(failure)? {
-                RegistrationGrant::Active { refresh_at, .. } => State::Registered {
-                    response,
-                    refresh_at,
-                    route,
-                },
-                RegistrationGrant::Removed => State::Stopped,
-            },
+            200..=299 => {
+                let grant = response.grant().map_err(failure)?;
+                client.retries = 0;
+                match grant {
+                    RegistrationGrant::Active { refresh_at, .. } => State::Registered {
+                        response,
+                        refresh_at,
+                        route,
+                    },
+                    RegistrationGrant::Removed => State::Stopped,
+                }
+            }
             423 => match response.minimum_expiration().map_err(failure)? {
                 Some(expiration) => {
                     let identity = self.identity.advance(random()?).map_err(failure)?;
@@ -386,7 +466,7 @@ impl Registrations {
                 }
                 None => State::Stopped,
             },
-            _ => State::Stopped,
+            _ => client.failed_response(response, route, now)?,
         };
         Ok(())
     }
@@ -591,6 +671,10 @@ impl Signaling {
                 .route()
                 .is_some_and(|route| route.matches_connection(key))
             {
+                if let State::Backoff { at, .. } = &client.state {
+                    client.state = State::Waiting { at: *at };
+                    continue;
+                }
                 if let State::Trying { transaction, .. } = &mut client.state {
                     transaction.cancel();
                 }
@@ -610,6 +694,7 @@ impl Signaling {
                 | State::Ready { .. }
                 | State::Trying { .. }
                 | State::Registered { .. }
+                | State::Backoff { .. }
                 | State::Stopped => None,
             })
             .collect::<Vec<_>>();
@@ -707,11 +792,24 @@ impl Signaling {
             .route()
             .ok_or(ControlError::Invalid("Registration has no signaling route"))?;
         if matches!(route, Route::Stream(route) if !self.network.current(route)) {
-            self.registrations.clients[index].state = State::Stopped;
+            self.registrations.clients[index].state = match &client.state {
+                State::Backoff { at, .. } => State::Waiting { at: *at },
+                State::Waiting { .. }
+                | State::Ready { .. }
+                | State::Resolving { .. }
+                | State::Connecting { .. }
+                | State::Trying { .. }
+                | State::Registered { .. }
+                | State::Stopped => State::Stopped,
+            };
             return Ok(());
         }
         let mut local = self.network.local_addr(listener)?;
-        if matches!(client.state, State::Ready { .. }) && local.ip().is_unspecified() {
+        if matches!(
+            client.state,
+            State::Ready { .. } | State::Backoff { response: None, .. }
+        ) && local.ip().is_unspecified()
+        {
             local.set_ip(media::local_ip(route.peer())?);
         }
         let result = async {

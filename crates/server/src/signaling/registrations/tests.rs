@@ -4,6 +4,7 @@ use rusterisk_config::{Config, MAX_REGISTRATIONS};
 mod dns;
 mod generations;
 mod minimum_expiration;
+mod retry;
 mod reuse;
 mod reuse_capacity;
 mod stream;
@@ -11,7 +12,7 @@ mod stream_deadlines;
 mod stream_lifetime;
 mod tls;
 
-fn config(peers: &[&str], delay: u32) -> Result<Config, ControlError> {
+pub(super) fn config(peers: &[&str], delay: u32) -> Result<Config, ControlError> {
     let mut pjsip = "[native]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[account]\ntype=auth\nusername=account\npassword=sample\n".to_owned();
     for (index, peer) in peers.iter().enumerate() {
         pjsip.push_str(&format!("[provider-{index}]\ntype=registration\ntransport=native\noutbound_auth=account\nserver_uri=sip:{peer}\nclient_uri=sip:account{index}@provider.example\nmax_random_initial_delay={delay}\n"));
