@@ -164,6 +164,28 @@ fn optional_id(
         .unwrap_or(&uuid::Uuid::new_v4().to_string()))
 }
 
+fn originate(
+    parameters: &BTreeMap<String, String>,
+    channel: ChannelId,
+) -> Result<Action, ControlError> {
+    Ok(Action::Originate {
+        id: channel,
+        endpoint: required(parameters, "endpoint")?.into(),
+        app: required(parameters, "app")?.into(),
+        args: parameters
+            .get("appArgs")
+            .map(|value| value.split(',').map(String::from).collect())
+            .unwrap_or_default(),
+        caller: parameters.get("callerId").cloned().unwrap_or_default(),
+        timeout: parameters
+            .get("timeout")
+            .map(|value| value.parse())
+            .transpose()
+            .map_err(|_| ControlError::Invalid("Invalid timeout"))?
+            .unwrap_or(30),
+    })
+}
+
 fn mute_direction(parameters: &BTreeMap<String, String>) -> Result<MuteDirection, ControlError> {
     match parameters
         .get("direction")
@@ -589,22 +611,14 @@ async fn dispatch(
             operation: playback_control(parameters)?,
         },
         ("GET", ["ari", "channels"]) => Action::ListChannels,
-        ("POST", ["ari", "channels"]) => Action::Originate {
-            id: optional_id(parameters, "channelId")?,
-            endpoint: required(parameters, "endpoint")?.into(),
-            app: required(parameters, "app")?.into(),
-            args: parameters
-                .get("appArgs")
-                .map(|value| value.split(',').map(String::from).collect())
-                .unwrap_or_default(),
-            caller: parameters.get("callerId").cloned().unwrap_or_default(),
-            timeout: parameters
-                .get("timeout")
-                .map(|value| value.parse())
-                .transpose()
-                .map_err(|_| ControlError::Invalid("Invalid timeout"))?
-                .unwrap_or(30),
-        },
+        ("POST", ["ari", "channels"]) => {
+            originate(parameters, optional_id(parameters, "channelId")?)?
+        }
+        ("POST", ["ari", "channels", channel])
+            if operation.is_some_and(|operation| operation.id == "channels.originateWithId") =>
+        {
+            originate(parameters, id(channel)?)?
+        }
         ("GET", ["ari", "channels", channel]) => Action::GetChannel(id(channel)?),
         ("POST", ["ari", "channels", channel, "answer"]) => Action::Answer(id(channel)?),
         ("POST", ["ari", "channels", channel, "ring"]) => Action::Ring(id(channel)?),
