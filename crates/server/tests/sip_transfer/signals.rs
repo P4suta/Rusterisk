@@ -287,6 +287,31 @@ impl TransferSignals {
             .await
     }
 
+    pub(super) async fn settled(
+        &mut self,
+        socket: &UdpSocket,
+        target: SocketAddr,
+    ) -> Result<(), ControlError> {
+        self.until(socket, target, |state| {
+            state.initial && state.completed && state.ended
+        })
+        .await
+    }
+
+    pub(super) async fn consultation_ended(
+        &mut self,
+        socket: &UdpSocket,
+        target: SocketAddr,
+    ) -> Result<(), ControlError> {
+        self.until(socket, target, |state| state.ended).await?;
+        if self.response.is_some() || self.initial || self.completed || self.event.is_some() {
+            return Err(ControlError::Invalid(
+                "Consultation received another dialog's transfer progress",
+            ));
+        }
+        Ok(())
+    }
+
     pub(super) async fn transferor_ended(
         &mut self,
         socket: &UdpSocket,

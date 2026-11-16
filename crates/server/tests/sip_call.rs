@@ -31,8 +31,14 @@ use tower::ServiceExt;
 
 #[path = "sip_transfer/acknowledgements.rs"]
 mod acknowledgements;
+#[path = "sip_transfer/attended.rs"]
+mod attended_transfer;
 #[path = "sip_transfer/blind.rs"]
 mod blind_transfer;
+#[path = "sip_transfer/lifetime.rs"]
+mod transfer_lifetime;
+#[path = "sip_transfer/signals.rs"]
+mod transfer_signals;
 use acknowledgements::AckIdentity;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -639,7 +645,39 @@ async fn invite_at(
     local: SocketAddr,
     audio: SocketAddr,
 ) -> Result<(), ControlError> {
-    let uri = Uri::try_from(format!("sip:100@{target}")).map_err(failure)?;
+    start_invitation(
+        signal,
+        target,
+        local,
+        audio,
+        Invitation {
+            extension: "100",
+            call_id: "incoming-test",
+            from_tag: "caller",
+        },
+    )
+    .await
+}
+
+struct Invitation<'a> {
+    extension: &'a str,
+    call_id: &'a str,
+    from_tag: &'a str,
+}
+
+async fn start_invitation(
+    signal: &UdpSocket,
+    target: SocketAddr,
+    local: SocketAddr,
+    audio: SocketAddr,
+    invitation: Invitation<'_>,
+) -> Result<(), ControlError> {
+    let Invitation {
+        extension,
+        call_id,
+        from_tag,
+    } = invitation;
+    let uri = Uri::try_from(format!("sip:{extension}@{target}")).map_err(failure)?;
     let body = Session {
         remote: audio,
         codec: Codec::Pcmu,
@@ -651,7 +689,7 @@ async fn invite_at(
     .answer(audio, 1)
     .map_err(failure)?;
     let packet = |sequence: u32, authorization: &str| {
-        format!("INVITE {uri} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK-incoming-{sequence};rport\r\nFrom: <sip:spoofed@localhost>;tag=caller\r\nTo: <{uri}>\r\nCall-ID: incoming-test\r\nCSeq: {sequence} INVITE\r\nContact: <sip:phone@{local}>\r\nMax-Forwards: 70\r\n{authorization}Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", body.len())
+        format!("INVITE {uri} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK-incoming-{sequence};rport\r\nFrom: <sip:spoofed@localhost>;tag={from_tag}\r\nTo: <{uri}>\r\nCall-ID: {call_id}\r\nCSeq: {sequence} INVITE\r\nContact: <sip:phone@{local}>\r\nMax-Forwards: 70\r\n{authorization}Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", body.len())
     };
     signal
         .send_to(packet(1, "").as_bytes(), target)
