@@ -43,6 +43,8 @@ mod oci_build;
 pub use oci_build::{ServerOciBuildPhase, ServerOciBuildPlan};
 mod oci_export;
 pub use oci_export::{export_server_candidate_oci_with, export_server_oci_with};
+mod oci_runtime;
+pub use oci_runtime::{ServerOciRunPhase, ServerOciRuntimePlan};
 mod oci_archive;
 pub use oci_archive::{
     check_server_oci_archive, OciArchiveError, OciArchiveLimit, OciArchiveLimits, ServerOciContents,
