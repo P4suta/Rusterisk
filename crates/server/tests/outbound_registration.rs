@@ -153,8 +153,7 @@ async fn configured_udp_registration_advertises_the_owned_signaling_address(
 }
 
 #[tokio::test]
-async fn tls_registration_without_a_connected_adapter_is_identifiably_unsupported(
-) -> Result<(), ControlError> {
+async fn tls_registration_requires_configured_listener_identity() -> Result<(), ControlError> {
     let mut config = settings("127.0.0.1:5070".parse().map_err(failure)?)?;
     config
         .transports
@@ -171,7 +170,7 @@ async fn tls_registration_without_a_connected_adapter_is_identifiably_unsupporte
     let (media, _hub, notices) = MediaHub::new(16);
     assert!(matches!(
         Signaling::bind(config, controller, effects, media, notices).await,
-        Err(ControlError::Unsupported)
+        Err(ControlError::Invalid("Encryption configuration missing"))
     ));
     Ok(())
 }

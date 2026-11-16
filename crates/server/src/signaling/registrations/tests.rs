@@ -6,6 +6,7 @@ mod generations;
 mod stream;
 mod stream_deadlines;
 mod stream_lifetime;
+mod tls;
 
 fn config(peers: &[&str], delay: u32) -> Result<Config, ControlError> {
     let mut pjsip = "[native]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[account]\ntype=auth\nusername=account\npassword=sample\n".to_owned();

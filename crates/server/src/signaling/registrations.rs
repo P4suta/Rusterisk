@@ -121,8 +121,12 @@ impl Client {
         {
             return true;
         }
+        let Ok(default_port) = default_port(self.target.protocol()) else {
+            return false;
+        };
         self.target.protocol() == other.target.protocol()
-            && self.target.port().unwrap_or(5060) == other.target.port().unwrap_or(5060)
+            && self.target.port().unwrap_or(default_port)
+                == other.target.port().unwrap_or(default_port)
             && match (self.target.host(), other.target.host()) {
                 (TargetHost::Address(first), TargetHost::Address(second)) => first == second,
                 (TargetHost::Name(first), TargetHost::Name(second)) => first
@@ -131,6 +135,14 @@ impl Client {
                 (TargetHost::Address(_), TargetHost::Name(_))
                 | (TargetHost::Name(_), TargetHost::Address(_)) => false,
             }
+    }
+}
+
+fn default_port(protocol: Protocol) -> Result<u16, ControlError> {
+    match protocol {
+        Protocol::Udp | Protocol::Tcp => Ok(5060),
+        Protocol::Tls => Ok(5061),
+        Protocol::Ws | Protocol::Wss => Err(ControlError::Unsupported),
     }
 }
 
@@ -153,9 +165,8 @@ impl Registrations {
                 .position(|transport| transport.name == settings.transport)
                 .ok_or(ControlError::NotFound("Registration transport not found"))?;
             let protocol = config.transports[listener].protocol;
-            if !matches!(protocol, Protocol::Udp | Protocol::Tcp)
-                || settings.server_uri.protocol() != protocol
-            {
+            let default_port = default_port(protocol)?;
+            if settings.server_uri.protocol() != protocol {
                 return Err(ControlError::Unsupported);
             }
             let target =
@@ -168,7 +179,7 @@ impl Registrations {
             let at = (u64::try_from(delay).map_err(failure)? + 1) * 1000;
             let state = match target.host() {
                 TargetHost::Address(address) => {
-                    let peer = SocketAddr::new(*address, target.port().unwrap_or(5060));
+                    let peer = SocketAddr::new(*address, target.port().unwrap_or(default_port));
                     if peer.is_ipv4() != config.transports[listener].bind.is_ipv4() {
                         return Err(ControlError::Invalid(
                             "Registration address family mismatch",
