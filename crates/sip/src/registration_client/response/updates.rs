@@ -80,13 +80,21 @@ impl RegistrationResponse {
         let (_, body) = source
             .split_once("\r\n\r\n")
             .ok_or(SipError::InvalidPacket)?;
-        let authorization = renew(source, "Authorization", credentials, uri, body.as_bytes())?;
+        let authorization = renew(
+            source,
+            "Authorization",
+            credentials,
+            uri,
+            body.as_bytes(),
+            self.origin_encoding,
+        )?;
         let proxy = renew(
             source,
             "Proxy-Authorization",
             credentials,
             uri,
             body.as_bytes(),
+            self.proxy_encoding,
         )?;
         let bytes = render(
             source,
@@ -105,6 +113,8 @@ impl RegistrationResponse {
             observed: now,
             state: State::Ready { at: now },
             authentication_attempts: self.authentication_attempts,
+            origin_encoding: self.origin_encoding,
+            proxy_encoding: self.proxy_encoding,
         })
     }
 }
@@ -115,6 +125,7 @@ fn renew(
     credentials: &[Auth],
     uri: &str,
     body: &[u8],
+    encoding: crate::digest::CredentialEncoding,
 ) -> Result<Option<String>, SipError> {
     let Some(previous) = header(source, name) else {
         return Ok(None);
@@ -124,7 +135,7 @@ fn renew(
         return Err(SipError::Capacity);
     }
     previous
-        .renew_authorization(credentials, "REGISTER", uri, body)
+        .renew_authorization(credentials, "REGISTER", uri, body, encoding)
         .map_err(digest_error)?
         .map(Some)
         .ok_or(SipError::Unsupported)

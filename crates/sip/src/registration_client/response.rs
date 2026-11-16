@@ -22,6 +22,8 @@ pub struct RegistrationResponse {
     protocol: Protocol,
     received: u64,
     authentication_attempts: u8,
+    origin_encoding: crate::digest::CredentialEncoding,
+    proxy_encoding: crate::digest::CredentialEncoding,
 }
 
 impl RegistrationResponse {
@@ -110,6 +112,8 @@ impl RegistrationTransaction {
                 protocol: self.protocol,
                 received: now,
                 authentication_attempts: self.authentication_attempts,
+                origin_encoding: self.origin_encoding,
+                proxy_encoding: self.proxy_encoding,
             },
         )))
     }

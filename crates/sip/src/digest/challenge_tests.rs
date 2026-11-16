@@ -133,7 +133,7 @@ fn challenge_values_roundtrip_once_and_keep_the_digest_uri_octets() -> Result<()
 fn unsupported_profiles_and_invalid_boundaries_cannot_emit_authorization() -> Result<(), DigestError>
 {
     for source in [
-        "Digest realm=\"example.net\", nonce=\"nonce\", charset=UTF-8".to_owned(),
+        "Digest realm=\"example.net\", nonce=\"nonce\", charset=ISO-8859-1".to_owned(),
         "Digest realm=\"example.net\", nonce=\"nonce\", userhash=true".to_owned(),
         format!("Digest realm=\"{}\", nonce=\"nonce\"", "x".repeat(257)),
         format!(

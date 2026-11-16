@@ -5,8 +5,12 @@ use std::num::NonZeroU32;
 use subtle::ConstantTimeEq;
 mod header;
 pub(crate) use header::Header;
+mod encoding;
+pub(crate) use encoding::CredentialEncoding;
 #[cfg(test)]
 mod challenge_tests;
+#[cfg(test)]
+mod utf8_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DigestError {

@@ -1,5 +1,7 @@
 use super::Header;
-use crate::digest::{text, Algorithm, Credentials, DigestError, DigestRequest, Nonce, Protection};
+use crate::digest::{
+    text, Algorithm, CredentialEncoding, Credentials, DigestError, DigestRequest, Nonce, Protection,
+};
 use rusterisk_config::Auth;
 
 enum Quality {
@@ -14,6 +16,7 @@ pub(crate) struct Challenge {
     quality: Quality,
     opaque: Option<String>,
     stale: bool,
+    encoding: CredentialEncoding,
 }
 
 pub(crate) struct ChallengeChoice<'a> {
@@ -28,6 +31,7 @@ impl Header {
         method: &str,
         uri: &str,
         body: &[u8],
+        encoding: CredentialEncoding,
     ) -> Result<Option<String>, DigestError> {
         let prior = self.authorization()?;
         let quality = match prior.protection() {
@@ -35,17 +39,24 @@ impl Header {
             Protection::Integrity(_) => Quality::Integrity,
             Protection::Legacy => return Err(DigestError::Unsupported),
         };
-        let selected = credentials
-            .iter()
-            .find(|credentials| {
-                credentials.username == prior.username() && credentials.realm == prior.realm()
-            })
-            .or_else(|| {
-                credentials.iter().find(|credentials| {
-                    credentials.username == prior.username()
-                        && credentials.matches_outbound_realm(prior.realm())
-                })
-            });
+        let username = encoding.username(prior.username())?;
+        let mut exact = None;
+        let mut wildcard = None;
+        for candidate in credentials {
+            if !candidate.matches_outbound_realm(prior.realm())
+                || encoding.username(&candidate.username)? != username
+            {
+                continue;
+            }
+            if candidate.realm == prior.realm() {
+                exact = Some(candidate);
+                break;
+            }
+            if wildcard.is_none() {
+                wildcard = Some(candidate);
+            }
+        }
+        let selected = exact.or(wildcard);
         let Some(selected) = selected else {
             return Ok(None);
         };
@@ -56,6 +67,7 @@ impl Header {
             quality,
             opaque: self.quoted("opaque")?.map(String::from),
             stale: false,
+            encoding,
         };
         let count = prior.count().checked_add(1).ok_or(DigestError::Invalid)?;
         let credentials = Credentials::new(
@@ -124,10 +136,10 @@ impl Header {
             None => false,
             Some(_) => return Err(DigestError::Invalid),
         };
-        if self.get("charset").is_some()
-            || self
-                .literal("userhash")?
-                .is_some_and(|value| !value.eq_ignore_ascii_case("false"))
+        let encoding = CredentialEncoding::parse(self.get("charset"))?;
+        if self
+            .literal("userhash")?
+            .is_some_and(|value| !value.eq_ignore_ascii_case("false"))
         {
             return Err(DigestError::Unsupported);
         }
@@ -142,6 +154,7 @@ impl Header {
             quality,
             opaque: opaque.map(String::from),
             stale,
+            encoding,
         })
     }
 }
@@ -176,12 +189,14 @@ impl Challenge {
         if credentials.realm != self.realm() || request.nonce.0 != self.nonce() {
             return Err(DigestError::Invalid);
         }
+        let prepared = self.encoding.prepare(credentials)?;
+        let credentials = prepared.credentials()?;
         let counter = format!("{count:08x}");
         let protection =
             Protection::parse(Some(self.quality()), Some(client_nonce), Some(&counter))?;
         let response = self
             .algorithm()
-            .calculate(credentials, request, &protection)?
+            .calculate(&credentials, request, &protection)?
             .hex();
         let mut output = format!(
             "Digest username={}, realm={}, nonce={}, uri={}, response=\"{response}\", algorithm={}, qop={}, cnonce={}, nc={counter}",
@@ -205,6 +220,10 @@ impl Challenge {
 }
 
 impl ChallengeChoice<'_> {
+    pub(crate) const fn encoding(&self) -> CredentialEncoding {
+        self.challenge.encoding
+    }
+
     pub(crate) fn authorization(
         &self,
         method: &str,

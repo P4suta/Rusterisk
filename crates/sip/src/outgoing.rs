@@ -58,6 +58,8 @@ pub(crate) struct Outgoing {
     cseq: u32,
     remote_cseq: Option<u32>,
     credentials: Vec<Auth>,
+    origin_encoding: crate::digest::CredentialEncoding,
+    proxy_encoding: crate::digest::CredentialEncoding,
     challenges: Vec<AcknowledgedResponse>,
     final_response: FinalResponse,
     local_media: SocketAddr,
@@ -327,6 +329,7 @@ fn authenticate(
             return Ok(None)
         }
     };
+    let encoding = selected.encoding();
     let mut invite = dialog.invite.clone();
     let other_name = if proxy {
         "Authorization"
@@ -340,7 +343,17 @@ fn authenticate(
         .find(|header| header.name().eq_ignore_ascii_case(other_name))
     {
         let renewed = crate::digest::Header::parse(header.value()).and_then(|previous| {
-            previous.renew_authorization(&dialog.credentials, "INVITE", &uri, &invite.body)
+            previous.renew_authorization(
+                &dialog.credentials,
+                "INVITE",
+                &uri,
+                &invite.body,
+                if proxy {
+                    dialog.origin_encoding
+                } else {
+                    dialog.proxy_encoding
+                },
+            )
         });
         let renewed = match renewed {
             Ok(Some(renewed)) => renewed,
@@ -396,6 +409,11 @@ fn authenticate(
     }
     dialog.cseq = sequence;
     dialog.invite = invite;
+    if proxy {
+        dialog.proxy_encoding = encoding;
+    } else {
+        dialog.origin_encoding = encoding;
+    }
     dialog.bytes = bytes.clone();
     dialog.state = State::Calling {
         retry: now.saturating_add(500),
@@ -694,6 +712,8 @@ impl Engine {
                 .cloned()
                 .collect(),
             challenges: Vec::new(),
+            origin_encoding: crate::digest::CredentialEncoding::Unspecified,
+            proxy_encoding: crate::digest::CredentialEncoding::Unspecified,
             final_response: FinalResponse::Pending,
             local_media: outbound.local_rtp,
             local_security,

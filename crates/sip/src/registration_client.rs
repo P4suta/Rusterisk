@@ -63,6 +63,8 @@ pub struct RegistrationTransaction {
     observed: u64,
     state: State,
     authentication_attempts: u8,
+    origin_encoding: crate::digest::CredentialEncoding,
+    proxy_encoding: crate::digest::CredentialEncoding,
 }
 
 impl RegistrationTransaction {
@@ -83,6 +85,8 @@ impl RegistrationTransaction {
             observed: now,
             state: State::Ready { at: now },
             authentication_attempts: 0,
+            origin_encoding: crate::digest::CredentialEncoding::Unspecified,
+            proxy_encoding: crate::digest::CredentialEncoding::Unspecified,
         })
     }
 

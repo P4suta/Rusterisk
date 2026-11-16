@@ -2,9 +2,15 @@ use rsipstack::sip::{HeadersExt, Request, SipMessage};
 use rusterisk_config::Config;
 use rusterisk_sip::{Engine, Outbound, Output, SipError, SipEvent};
 use sha2::{Digest, Sha256, Sha512_256};
+#[path = "digest_challenges/utf8.rs"]
+mod utf8;
 
 fn engine() -> Result<Engine, SipError> {
-    let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=sample\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:5060\n[incoming]\ntype=auth\nusername=incoming\npassword=sample\n[remote]\ntype=auth\nusername=outbound\npassword=remote-password\nrealm=provider.example\n[phone]\ntype=aor\ncontact=sip:phone@127.0.0.1:5061\n[phone]\ntype=endpoint\ntransport=udp\nauth=incoming\noutbound_auth=remote\naors=phone\nallow=ulaw\n", "", "")?;
+    engine_with_password("remote-password")
+}
+
+fn engine_with_password(password: &str) -> Result<Engine, SipError> {
+    let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=sample\n", &format!("[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:5060\n[incoming]\ntype=auth\nusername=incoming\npassword=sample\n[remote]\ntype=auth\nusername=outbound\npassword={password}\nrealm=provider.example\n[phone]\ntype=aor\ncontact=sip:phone@127.0.0.1:5061\n[phone]\ntype=endpoint\ntransport=udp\nauth=incoming\noutbound_auth=remote\naors=phone\nallow=ulaw\n"), "", "")?;
     Ok(Engine::new(config, [9; 32]))
 }
 

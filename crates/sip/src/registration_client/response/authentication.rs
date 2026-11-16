@@ -117,6 +117,11 @@ impl RegistrationResponse {
         let authorization = selected
             .authorization("REGISTER", uri, body.as_bytes(), client_nonce, nonce_count)
             .map_err(digest_error)?;
+        let encoding = selected.encoding();
+        let (origin_encoding, proxy_encoding) = match scope {
+            Scope::Origin => (encoding, self.proxy_encoding),
+            Scope::Proxy => (self.origin_encoding, encoding),
+        };
         let other_name = scope.other_authorization();
         let other = if let Some(previous) = header(source, other_name) {
             let previous = Header::parse(previous).map_err(digest_error)?;
@@ -124,7 +129,16 @@ impl RegistrationResponse {
                 return Err(SipError::Capacity);
             }
             let Some(renewed) = previous
-                .renew_authorization(credentials, "REGISTER", uri, body.as_bytes())
+                .renew_authorization(
+                    credentials,
+                    "REGISTER",
+                    uri,
+                    body.as_bytes(),
+                    match scope {
+                        Scope::Origin => proxy_encoding,
+                        Scope::Proxy => origin_encoding,
+                    },
+                )
                 .map_err(digest_error)?
             else {
                 return Ok(None);
@@ -154,6 +168,8 @@ impl RegistrationResponse {
             observed: now,
             state: State::Ready { at: now },
             authentication_attempts: self.authentication_attempts + 1,
+            origin_encoding,
+            proxy_encoding,
         }))
     }
 }

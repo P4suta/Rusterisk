@@ -16,6 +16,8 @@ mod responses;
 mod retry_after;
 #[path = "outbound_registration/updates.rs"]
 mod updates;
+#[path = "outbound_registration/utf8.rs"]
+mod utf8;
 
 fn settings(protocol: &str, extra: &str) -> Result<Registration, SipError> {
     let tls = if protocol == "tls" {
