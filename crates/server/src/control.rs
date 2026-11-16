@@ -20,6 +20,9 @@ mod playback;
 mod recording;
 mod stasis;
 mod subscriptions;
+mod transfer;
+#[cfg(test)]
+mod transfer_tests;
 use dialplan::DialplanFrame;
 pub use endpoints::EndpointKey;
 use endpoints::Endpoints;
@@ -400,6 +403,17 @@ impl Action {
 
 #[derive(Clone, Debug)]
 pub enum Effect {
+    RejectRefer {
+        source: CallKey,
+        refer: rusterisk_sip::ReferKey,
+        failure: rusterisk_sip::ReferFailure,
+    },
+    ReferProgress {
+        source: CallKey,
+        refer: rusterisk_sip::ReferKey,
+        token: rusterisk_core::TransferToken,
+        progress: rusterisk_sip::ReferProgress,
+    },
     ConnectWebSocket {
         key: CallKey,
         client: rusterisk_config::WebSocketClient,
@@ -499,6 +513,10 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
+    BlindTransferRequested {
+        key: CallKey,
+        refer: rusterisk_sip::DialogRefer,
+    },
     WebSocketAdmitted {
         key: CallKey,
         result: Result<(), ControlError>,
@@ -782,11 +800,12 @@ pub struct Control {
     endpoints: Endpoints,
     media_connections: BTreeMap<ChannelId, (CallKey, crate::media_websocket::MediaLinkOptions)>,
     websocket: rusterisk_config::WebSocketConfig,
+    transfers: BTreeMap<rusterisk_core::TransferToken, transfer::ActiveTransfer>,
 }
 
 impl Control {
     pub(crate) fn terminal_effect_reserve(&self) -> usize {
-        self.channels.len() * 2
+        self.channels.len() * 2 + self.transfers.len()
     }
 
     pub(crate) fn effect_budget(&self, action: &Action) -> usize {
@@ -945,6 +964,7 @@ impl Control {
             endpoints: Endpoints::default(),
             media_connections: BTreeMap::new(),
             websocket: rusterisk_config::WebSocketConfig::default(),
+            transfers: BTreeMap::new(),
         }
     }
 
@@ -1721,6 +1741,10 @@ impl Control {
             timestamp,
             &mut outcome,
         );
+        outcome.append(self.end_transfer_participant(&CallKey {
+            id: id.clone(),
+            generation: entry.call.generation(),
+        }));
         outcome
             .ended_sources
             .push(subscriptions::EndedSource::Channel {
@@ -1892,6 +1916,9 @@ impl Control {
         now: u64,
     ) -> Result<Outcome, ControlError> {
         match signal {
+            Signal::BlindTransferRequested { key, refer } => {
+                self.blind_transfer(key, refer, now, timestamp)
+            }
             Signal::WebSocketAdmitted { key, result } => {
                 self.websocket_client_admitted(key, result, timestamp)
             }

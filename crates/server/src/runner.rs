@@ -598,7 +598,9 @@ impl Runner {
                                     token: *token,
                                 })
                             }
-                            Effect::ControlRecording { .. }
+                            Effect::RejectRefer { .. }
+                            | Effect::ReferProgress { .. }
+                            | Effect::ControlRecording { .. }
                             | Effect::ReserveWebSocket { .. }
                             | Effect::EndRecording { .. }
                             | Effect::PlayMedia { .. }

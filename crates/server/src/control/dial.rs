@@ -21,6 +21,13 @@ pub(super) struct DialBranch {
     token: DialplanToken,
 }
 
+pub(super) struct TransferPair {
+    pub parent: CallKey,
+    pub peer: CallKey,
+    pub bridge: u64,
+    pub token: DialplanToken,
+}
+
 fn failure(cause: u16) -> DialFailure {
     match cause {
         16 | 19 => DialFailure::NoAnswer,
@@ -50,11 +57,92 @@ fn fork_error(error: DialForkError) -> ControlError {
 }
 
 impl Control {
+    pub(super) fn transfer_dial_pair(
+        &self,
+        source: &CallKey,
+    ) -> Result<TransferPair, ControlError> {
+        let entry = self
+            .channels
+            .get(&source.id)
+            .filter(|entry| entry.call.generation() == source.generation)
+            .ok_or(ControlError::NotFound("Transfer source not found"))?;
+        let parent = if entry
+            .dialplan
+            .as_ref()
+            .and_then(|frame| frame.dial.as_ref())
+            .is_some()
+        {
+            source.clone()
+        } else {
+            self.dial_branch(source)
+                .ok_or(ControlError::Unsupported)?
+                .parent
+        };
+        let dial = self
+            .channels
+            .get(&parent.id)
+            .filter(|entry| entry.call.generation() == parent.generation)
+            .and_then(|entry| entry.dialplan.as_ref())
+            .and_then(|frame| frame.dial.as_ref())
+            .ok_or(ControlError::Unsupported)?;
+        let DialForkState::Bridged { winner } = dial.fork.state() else {
+            return Err(ControlError::Unsupported);
+        };
+        let peer = dial
+            .children
+            .get(usize::from(winner))
+            .ok_or(ControlError::Unsupported)?
+            .clone();
+        if source != &parent && source != &peer {
+            return Err(ControlError::Unsupported);
+        }
+        let bridge = dial.bridge.ok_or(ControlError::Unsupported)?;
+        let mut members = 0;
+        for (id, entry) in &self.channels {
+            if entry.call.state() != CallState::Ended && entry.call.bridge() == Some(bridge) {
+                if !((id == &parent.id && entry.call.generation() == parent.generation)
+                    || (id == &peer.id && entry.call.generation() == peer.generation))
+                {
+                    return Err(ControlError::Unsupported);
+                }
+                members += 1;
+            }
+        }
+        if members != 2 {
+            return Err(ControlError::Unsupported);
+        }
+        Ok(TransferPair {
+            parent,
+            peer,
+            bridge,
+            token: dial.token,
+        })
+    }
+
+    pub(super) fn detach_transfer_dial(&mut self, pair: &TransferPair) -> Result<(), ControlError> {
+        let frame = self
+            .channels
+            .get_mut(&pair.parent.id)
+            .filter(|entry| entry.call.generation() == pair.parent.generation)
+            .and_then(|entry| entry.dialplan.as_mut())
+            .ok_or(ControlError::Conflict("Transfer parent changed"))?;
+        if !frame
+            .dial
+            .as_ref()
+            .is_some_and(|dial| dial.token == pair.token && dial.bridge == Some(pair.bridge))
+        {
+            return Err(ControlError::Conflict("Transfer Dial changed"));
+        }
+        frame.dial = None;
+        Ok(())
+    }
+
     pub(super) fn ring_dial_branch(&mut self, child: &CallKey) -> Result<Outcome, ControlError> {
         let mut outcome = Outcome::empty();
         let Some(branch) = self.dial_branch(child) else {
             return Ok(outcome);
         };
+        outcome.append(self.transfer_dial_ringing(&branch.parent, branch.token));
         let entry = self
             .channels
             .get_mut(&branch.parent.id)
@@ -102,7 +190,7 @@ impl Control {
                 .call
                 .bridge()
                 .is_some_and(|token| self.bridges.values().any(|bridge| bridge.token == token));
-            effects += 1 + usize::from(managed_bridge);
+            effects += 1 + usize::from(managed_bridge) + self.transfer_terminal_effects(&key);
             if let Some(dial) = entry
                 .dialplan
                 .as_ref()
@@ -193,7 +281,7 @@ impl Control {
             .and_then(|entry| entry.dialplan.as_mut())
             .ok_or(ControlError::Conflict("Dial parent disappeared"))?;
         match result {
-            Ok((DialForkOutcome::Continue, outcome)) => {
+            Ok((DialForkOutcome::Continue, mut outcome)) => {
                 if let Err(error) = frame.complete_dial(dial.token) {
                     frame.dial = Some(dial);
                     return Err(error);
@@ -203,6 +291,7 @@ impl Control {
                     .ok_or(ControlError::NotFound("Channel not found"))?
                     .variables
                     .insert("DIALSTATUS".into(), failure_status(dial.failure).into());
+                outcome.append(self.transfer_dial_failed(&branch.parent, dial.token, dial.failure));
                 Ok(outcome)
             }
             Ok((DialForkOutcome::Pending, outcome)) => {
@@ -330,6 +419,7 @@ impl Control {
             .get(usize::from(winner))
             .ok_or(ControlError::Conflict("Dial winner is missing"))?
             .clone();
+        let dial_token = dial.token;
         let mut outcome = Outcome::empty();
         if entry.call.state() != CallState::Up {
             outcome.effects.push(Effect::Answer {
@@ -372,6 +462,7 @@ impl Control {
             generation: token,
             peer: Some(peer),
         });
+        outcome.append(self.transfer_dial_answered(parent, dial_token));
         Ok(outcome)
     }
 
@@ -481,6 +572,7 @@ impl Control {
             });
             children.push(key);
         }
+        self.transfer_dial_started(parent, token);
         Ok((
             DialBranches {
                 token,

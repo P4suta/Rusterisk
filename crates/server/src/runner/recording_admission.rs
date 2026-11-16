@@ -66,7 +66,8 @@ impl Runner {
                         "Recording ended before admission".into(),
                     ))),
             )),
-            Signal::MediaPlaybackStarted { .. }
+            Signal::BlindTransferRequested { .. }
+            | Signal::MediaPlaybackStarted { .. }
             | Signal::MediaPlaybackFinished { .. }
             | Signal::PlaybackStarted { .. }
             | Signal::PlaybackFinished { .. }
@@ -324,7 +325,9 @@ mod tests {
                     } => cancellations += 1,
                     Effect::RecordMedia { owner, token, .. } => recordings.push((owner, token)),
                     Effect::Ring { .. } => {}
-                    Effect::ControlRecording { .. }
+                    Effect::RejectRefer { .. }
+                    | Effect::ReferProgress { .. }
+                    | Effect::ControlRecording { .. }
                     | Effect::ReserveWebSocket { .. }
                     | Effect::EndRecording {
                         mode: crate::media::RecordingEnd::Finish,

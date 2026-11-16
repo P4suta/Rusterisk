@@ -2,7 +2,7 @@ use super::{CallKey, Control, ControlError, Effect, Outcome, PlaybackCompletion,
 use rusterisk_api::{ChannelId, ChannelState, EventKind};
 use rusterisk_config::{expand_variables, Application, Dialplan, ExpansionError};
 use rusterisk_core::{
-    AnswerProgress, AnswerStatus, CallState, DialForkOutcome, DialplanContinuation,
+    AnswerProgress, AnswerStatus, CallState, DialFailure, DialForkOutcome, DialplanContinuation,
     DialplanDispatch, DialplanError, DialplanInstruction, DialplanMachine, DialplanState,
     DialplanToken, MediaTaskKind, MediaTaskToken, StasisMembership,
 };
@@ -27,6 +27,9 @@ enum PlaybackWait {
 }
 
 impl DialplanFrame {
+    pub(super) fn program(&self) -> &Dialplan {
+        &self.program
+    }
     pub(super) fn complete_dial(&mut self, token: DialplanToken) -> Result<(), ControlError> {
         if self
             .machine
@@ -411,6 +414,11 @@ impl Control {
                     if !machine.complete(dial.token, DialplanContinuation::Advance) {
                         return Err(ControlError::Conflict("Dial completion changed"));
                     }
+                    outcome.append(self.transfer_dial_failed(
+                        key,
+                        dial.token,
+                        DialFailure::NoAnswer,
+                    ));
                     frame.dial = None;
                     self.channels
                         .get_mut(&key.id)

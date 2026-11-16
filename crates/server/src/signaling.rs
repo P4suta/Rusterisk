@@ -572,6 +572,9 @@ impl Signaling {
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
+            Effect::RejectRefer { .. } | Effect::ReferProgress { .. } => {
+                return Err(ControlError::Unsupported)
+            }
             Effect::ConnectWebSocket {
                 key,
                 client,
