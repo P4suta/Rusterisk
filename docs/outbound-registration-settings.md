@@ -1,7 +1,7 @@
 # Outbound registration settings
 
 Registration settings use `type=registration` sections in `pjsip.conf`.
-The running registration client remains pending.
+The [startup adapter](outbound-registration-startup.md) connects to numeric addresses over User Datagram Protocol (UDP).
 
 Section names are unique within the registration object type.
 `transport` selects a configured signaling transport.
@@ -11,8 +11,12 @@ Each section requires all four settings.
 The parser admits at most 16 registration sections.
 
 `RegistrarUri` and `RegistrationAddress` preserve the original URI octets within 2048 ASCII bytes.
-The settings profile admits User Datagram Protocol (UDP), TCP, and TLS registrar targets.
-An explicit URI transport must match the named transport, and the `sips` scheme requires TLS.
+The settings profile admits UDP, TCP, and TLS registrar targets.
+The `sips` scheme requires TLS.
+TLS uses `transport=tcp` when the URI parameter is present.
+The URI profile rejects `transport=tls` before request generation.
+With a `sips` registrar, the single Contact requires a `sips` address of record.
+A `sips` Contact also requires a `sips` registrar Request-URI under [RFC 5630](https://www.rfc-editor.org/rfc/rfc5630.html#section-5.2).
 Registrar URIs exclude user information.
 Addresses of record exclude explicit ports and transport parameters, following the component roles in [RFC 3261](https://www.rfc-editor.org/rfc/rfc3261.html#section-19.1.2).
 The profile rejects passwords, URI headers, routing and method parameters, malformed escapes, and duplicate parameter names.
@@ -34,4 +38,4 @@ The defaults follow [Asterisk 22.9.0](https://github.com/asterisk/asterisk/blob/
 Timer values use unsigned 32-bit seconds.
 Invalid values and capacity overflow report their file and line.
 Reference lookup accepts later declarations and reports unresolved names at their option lines.
-Registration scheduling, network setup, and replacement publication remain pending.
+Retry policy, hostname and stream transport setup, and replacement publication remain pending.
