@@ -13,17 +13,12 @@ use std::{
 };
 
 mod docker;
+mod identity;
 mod runtime;
 use super::{ServerOciRunPhase, ServerOciRuntimePlan};
 use crate::process::CommandSupervisor;
+use identity::ExpectedImage;
 use runtime::{runtime_using, Runtime};
-
-fn loaded_identity(bytes: &[u8], image: &str) -> io::Result<()> {
-    if bytes != format!("{image}\n").as_bytes() {
-        return Err(io::Error::other("loaded OCI image identity differs"));
-    }
-    Ok(())
-}
 
 fn copy_archive(source: &Path, destination: &Path, maximum: u64) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(source)?;
@@ -89,8 +84,12 @@ pub fn verify_server_oci_sdk_with(
         copy_archive(archive, &copied, 512 * 1024 * 1024)?;
         let checked = server.check_oci(&copied)?;
         write(
-            &artifacts.join("IMAGE.id"),
+            &artifacts.join("CONFIG.sha256"),
             format!("{}\n", checked.config_digest()).as_bytes(),
+        )?;
+        write(
+            &artifacts.join("MANIFEST.sha256"),
+            format!("{}\n", checked.manifest_digest()).as_bytes(),
         )?;
         write(
             &artifacts.join("SOURCE.sha256"),
@@ -119,7 +118,6 @@ pub fn verify_server_oci_sdk_with(
             write(&path, bytes)?;
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
         }
-        let plan = ServerOciRuntimePlan::new(&identity, checked.config_digest(), &config)?;
         prepared = Some(
             PreparedSdkHttpConsumer::prepare_with(
                 &contents,
@@ -131,9 +129,15 @@ pub fn verify_server_oci_sdk_with(
         );
         runtime_using(
             Runtime {
-                plan,
+                identity: &identity,
+                configuration: &config,
+                expected: ExpectedImage {
+                    configuration: checked.config_digest(),
+                    manifest: checked.manifest_digest(),
+                    manifest_size: checked.manifest_size(),
+                    target,
+                },
                 archive: &copied,
-                image: checked.config_digest(),
                 version: server.name().version(),
                 artifacts: &artifacts,
                 http_reservation: Some(http_reservation),

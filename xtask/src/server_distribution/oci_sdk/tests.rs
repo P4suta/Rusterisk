@@ -1,3 +1,4 @@
+use super::identity::EngineImage;
 use super::*;
 use std::{io, path::Path, process::Command};
 
@@ -14,11 +15,30 @@ fn docker_fixture() -> io::Result<()> {
 #[test]
 fn a_runtime_must_check_the_loaded_identity_before_starting_a_container() -> io::Result<()> {
     let image = format!("sha256:{}", "a".repeat(64));
-    let identity = format!("sha256:{}", "b".repeat(64));
-    assert!(loaded_identity(format!("{identity}\n").as_bytes(), &image).is_err());
-    assert!(loaded_identity(format!("{image}\n").as_bytes(), &image).is_ok());
-    assert!(loaded_identity(format!("{image}\n{image}\n").as_bytes(), &image).is_err());
-    assert!(loaded_identity(b"rusterisk:latest\n", &image).is_err());
+    let manifest = format!("sha256:{}", "b".repeat(64));
+    let expected = ExpectedImage {
+        configuration: &image,
+        manifest: &manifest,
+        manifest_size: 1014,
+        target: ServerTarget::LinuxArm64,
+    };
+    let config = EngineImage::loaded(format!("Loaded image ID: {image}\n").as_bytes(), expected)?;
+    assert!(matches!(config, EngineImage::Configuration(_)));
+    let loaded = EngineImage::loaded(
+        format!("Loaded image ID: {manifest}\n").as_bytes(),
+        expected,
+    )?;
+    assert!(matches!(loaded, EngineImage::ApplicationManifest(_)));
+    for invalid in [
+        format!("Loaded image ID: sha256:{}\n", "c".repeat(64)),
+        format!("Loaded image ID: {image}\nLoaded image ID: {manifest}\n"),
+        "Loaded image: rusterisk:latest\n".into(),
+        format!("Loaded image ID: {image}"),
+        format!("Loaded image ID: {image}\n\n"),
+        String::new(),
+    ] {
+        assert!(EngineImage::loaded(invalid.as_bytes(), expected).is_err());
+    }
     Ok(())
 }
 
@@ -65,6 +85,7 @@ fn runtime_case(case: &str) -> io::Result<()> {
         let artifacts = root.join("artifacts");
         std::fs::create_dir(&artifacts)?;
         let image = format!("sha256:{}", "a".repeat(64));
+        let manifest = format!("sha256:{}", "b".repeat(64));
         let archive = root.join("input.oci.tar");
         std::fs::write(&archive, b"owned archive fixture")?;
         let http_reservation = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -82,13 +103,20 @@ fn runtime_case(case: &str) -> io::Result<()> {
                 &plan.container(ServerOciRunPhase::Serve),
                 "foreign",
                 &image,
+                None,
             )?;
         }
         let mut client_calls = 0;
         let runtime = Runtime {
-            plan,
+            identity: "fixture",
+            configuration: &configuration,
+            expected: ExpectedImage {
+                configuration: &image,
+                manifest: &manifest,
+                manifest_size: 1014,
+                target: ServerTarget::LinuxArm64,
+            },
             archive: &archive,
-            image: &image,
             version: "0.1.0",
             artifacts: &artifacts,
             http_reservation: Some(http_reservation),
@@ -132,7 +160,7 @@ fn runtime_case(case: &str) -> io::Result<()> {
         );
         let trace = std::fs::read_to_string(root.join("trace"))?;
         match case {
-            "success" => {
+            "success" | "manifest-store" => {
                 result?;
                 assert_eq!(client_calls, 1);
                 assert_eq!(trace.lines().filter(|line| *line == "serve").count(), 2);
@@ -147,12 +175,16 @@ fn runtime_case(case: &str) -> io::Result<()> {
                     .join("rusterisk-server-oci-check-fixture-serve.json")
                     .exists());
             }
-            "changed-image" => {
+            "changed-image" | "index-store" | "tag-load" | "multi-load" => {
                 assert!(result.is_err());
                 assert_eq!(client_calls, 0);
                 assert!(!trace
                     .lines()
                     .any(|line| line == "serve" || line == "remove"));
+                assert_eq!(
+                    trace.lines().filter(|line| *line == "image").count(),
+                    usize::from(case == "changed-image")
+                );
             }
             "missing-ready" | "config-output" => {
                 assert!(result.is_err());
@@ -170,7 +202,7 @@ fn runtime_case(case: &str) -> io::Result<()> {
                     assert!(error.to_string().contains("requested client failure"));
                 }
                 if matches!(case, "foreign-cleanup" | "combined-failure") {
-                    assert!(error.to_string().contains("ownership"));
+                    assert!(error.to_string().contains("ownership"), "{error}");
                     assert!(!trace.lines().any(|line| line == "remove"));
                 }
                 assert_eq!(client_calls, 1);
@@ -212,8 +244,19 @@ fn an_owned_runtime_loads_checks_calls_stops_and_restarts_on_the_same_ports() ->
 }
 
 #[test]
+fn a_manifest_store_runs_only_the_loaded_verified_application_manifest() -> io::Result<()> {
+    isolated_case("manifest-store")
+}
+
+#[test]
 fn existing_names_and_changed_loaded_images_are_never_started_or_removed() -> io::Result<()> {
-    for case in ["existing", "changed-image"] {
+    for case in [
+        "existing",
+        "changed-image",
+        "index-store",
+        "tag-load",
+        "multi-load",
+    ] {
         isolated_case(case)?;
     }
     Ok(())

@@ -11,9 +11,31 @@ struct State {
     id: String,
     image: String,
     owner: String,
+    manifest: Option<ImageDescriptor>,
 }
 
-pub(super) fn state(root: &Path, name: &str, owner: &str, image: &str) -> io::Result<()> {
+#[derive(Serialize)]
+struct ImageView {
+    id: String,
+    os: &'static str,
+    architecture: &'static str,
+    descriptor: Option<ImageDescriptor>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ImageDescriptor {
+    digest: String,
+    media_type: String,
+    size: u64,
+}
+
+pub(super) fn state(
+    root: &Path,
+    name: &str,
+    owner: &str,
+    image: &str,
+    manifest: Option<&str>,
+) -> io::Result<()> {
     use sha2::{Digest, Sha256};
     let id = Sha256::digest(format!("{name}:{owner}:{image}").as_bytes())
         .iter()
@@ -25,6 +47,11 @@ pub(super) fn state(root: &Path, name: &str, owner: &str, image: &str) -> io::Re
             id,
             image: image.into(),
             owner: owner.into(),
+            manifest: manifest.map(|digest| ImageDescriptor {
+                digest: digest.into(),
+                media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+                size: 1014,
+            }),
         })
         .map_err(io::Error::other)?,
     )
@@ -101,7 +128,9 @@ fn serve(root: &Path, args: &[String], stdout: &Path, case: &str) -> io::Result<
     let (_, owner) = owner
         .split_once('=')
         .ok_or_else(|| io::Error::other("fixture label missing"))?;
-    state(root, &name, owner, image)?;
+    let configuration = format!("sha256:{}", "a".repeat(64));
+    let manifest = (case == "manifest-store").then_some(image.as_str());
+    state(root, &name, owner, &configuration, manifest)?;
     let mount = after(args, "--mount")?;
     let config = mount
         .strip_prefix("type=bind,source=")
@@ -132,7 +161,7 @@ fn serve(root: &Path, args: &[String], stdout: &Path, case: &str) -> io::Result<
                 stream.write_all(&request)?;
                 if request == *b"Q" {
                     if matches!(case, "foreign-cleanup" | "combined-failure") {
-                        state(root, &name, "foreign", image)?;
+                        state(root, &name, "foreign", &configuration, manifest)?;
                     } else {
                         std::fs::remove_file(root.join(format!("{name}.json")))?;
                     }
@@ -168,15 +197,46 @@ pub(super) fn execute(root: &Path) -> io::Result<()> {
             if std::fs::read(source)? != b"owned archive fixture" {
                 return Err(io::Error::other("fixture archive changed"));
             }
+            let line = match case.as_str() {
+                "manifest-store" => format!("Loaded image ID: sha256:{}\n", "b".repeat(64)),
+                "index-store" => format!("Loaded image ID: sha256:{}\n", "c".repeat(64)),
+                "tag-load" => "Loaded image: unrelated:latest\n".into(),
+                "multi-load" => format!(
+                    "Loaded image ID: sha256:{}\nLoaded image ID: sha256:{}\n",
+                    "a".repeat(64),
+                    "b".repeat(64)
+                ),
+                _ => format!("Loaded image ID: sha256:{}\n", "a".repeat(64)),
+            };
+            std::fs::write(stdout, line)?;
         }
         "image" => {
             trace(root, "image")?;
-            let image = if case == "changed-image" {
+            let image = if matches!(case.as_str(), "changed-image" | "manifest-store") {
                 format!("sha256:{}", "b".repeat(64))
             } else {
                 format!("sha256:{}", "a".repeat(64))
             };
-            std::fs::write(stdout, format!("{image}\n"))?;
+            if case == "manifest-store" && args.last() != Some(&image) {
+                return Err(io::Error::other(
+                    "manifest store rejects configuration IDs as image identifiers",
+                ));
+            }
+            let descriptor = (case == "manifest-store").then(|| ImageDescriptor {
+                digest: image.clone(),
+                media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+                size: 1014,
+            });
+            std::fs::write(
+                stdout,
+                serde_json::to_vec(&ImageView {
+                    id: image,
+                    os: "linux",
+                    architecture: "arm64",
+                    descriptor,
+                })
+                .map_err(io::Error::other)?,
+            )?;
         }
         "container" => {
             let sub = args
@@ -207,7 +267,7 @@ pub(super) fn execute(root: &Path) -> io::Result<()> {
                             .any(|line| line == "stop")
                     {
                         let image = format!("sha256:{}", "a".repeat(64));
-                        state(root, name, "foreign", &image)?;
+                        state(root, name, "foreign", &image, None)?;
                     }
                 }
                 _ => return Err(io::Error::other("fixture container subcommand changed")),

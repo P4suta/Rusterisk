@@ -1,9 +1,14 @@
 use super::{
-    docker::Docker, loaded_identity, CommandSupervisor, ServerOciRunPhase, ServerOciRuntimePlan,
+    docker::Docker,
+    identity::{Descriptor, EngineImage, ExpectedImage, INSPECT},
+    CommandSupervisor, ServerOciRunPhase, ServerOciRuntimePlan,
 };
 use crate::{
     process::{ProcessError, RunningCommand},
-    server_distribution::{check_server_ready_log, native::combine},
+    server_distribution::{
+        check_server_ready_log,
+        native::{combine, write},
+    },
 };
 use serde::Deserialize;
 use std::{
@@ -15,11 +20,20 @@ use std::{
 };
 
 pub(super) struct Runtime<'a> {
-    pub plan: ServerOciRuntimePlan,
+    pub identity: &'a str,
+    pub configuration: &'a Path,
+    pub expected: ExpectedImage<'a>,
     pub archive: &'a Path,
-    pub image: &'a str,
     pub version: &'a str,
     pub artifacts: &'a Path,
+    pub http_reservation: Option<TcpListener>,
+    pub sip_reservation: Option<UdpSocket>,
+}
+
+struct ActiveRuntime<'a> {
+    pub plan: ServerOciRuntimePlan,
+    pub image: EngineImage<'a>,
+    pub version: &'a str,
     pub http_reservation: Option<TcpListener>,
     pub sip_reservation: Option<UdpSocket>,
 }
@@ -75,18 +89,19 @@ struct Ownership {
     id: String,
     image: String,
     owner: String,
+    manifest: Option<Descriptor>,
 }
 
 fn inspect<F>(
     docker: &mut Docker<'_, F>,
-    runtime: &Runtime<'_>,
+    runtime: &ActiveRuntime<'_>,
     name: &str,
     perform: impl FnOnce(&mut Command, Duration) -> Result<(), ProcessError>,
 ) -> io::Result<Ownership>
 where
     F: FnMut(&[String], &Path, &Path) -> io::Result<Command>,
 {
-    let format = "{\"id\":{{json .Id}},\"image\":{{json .Image}},\"owner\":{{json (index .Config.Labels \"io.rusterisk.distribution.check\")}}}";
+    let format = "{\"id\":{{json .Id}},\"image\":{{json .Image}},\"owner\":{{json (index .Config.Labels \"io.rusterisk.distribution.check\")}},\"manifest\":{{with index . \"ImageManifestDescriptor\"}}{\"digest\":{{json .digest}},\"media_type\":{{json .mediaType}},\"size\":{{json .size}}}{{else}}null{{end}}}";
     let observed = docker.run_with(
         &arguments(["container", "inspect", "--format", format, name]),
         Duration::from_secs(15),
@@ -105,7 +120,9 @@ where
             .id
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        || ownership.image != runtime.image
+        || !runtime
+            .image
+            .container_matches(&ownership.image, ownership.manifest.as_ref())
         || ownership.owner != name
     {
         return Err(io::Error::other(
@@ -118,7 +135,7 @@ where
 fn cleanup<F>(
     docker: &mut Docker<'_, F>,
     supervisor: &mut CommandSupervisor,
-    runtime: &Runtime<'_>,
+    runtime: &ActiveRuntime<'_>,
     phase: ServerOciRunPhase,
 ) -> io::Result<()>
 where
@@ -150,7 +167,7 @@ where
 fn serve<F>(
     docker: &mut Docker<'_, F>,
     supervisor: &mut CommandSupervisor,
-    runtime: &Runtime<'_>,
+    runtime: &ActiveRuntime<'_>,
     address: SocketAddr,
     client: impl FnOnce(&mut RunningCommand<'_>, SocketAddr) -> io::Result<()>,
 ) -> io::Result<()>
@@ -231,7 +248,7 @@ where
 }
 
 pub(super) fn runtime_using<F>(
-    mut runtime: Runtime<'_>,
+    runtime: Runtime<'_>,
     supervisor: &mut CommandSupervisor,
     factory: F,
     client: impl FnOnce(&mut RunningCommand<'_>, SocketAddr) -> io::Result<()>,
@@ -240,42 +257,66 @@ where
     F: FnMut(&[String], &Path, &Path) -> io::Result<Command>,
 {
     let mut docker = Docker::new(factory, runtime.artifacts);
+    let scope = ServerOciRuntimePlan::new(
+        runtime.identity,
+        runtime.expected.configuration,
+        runtime.configuration,
+    )?;
+    for phase in ServerOciRunPhase::ALL {
+        if present(&mut docker, supervisor, &scope.container(phase), false)? {
+            return Err(io::Error::other("OCI runtime container already exists"));
+        }
+    }
+    let archive = runtime
+        .archive
+        .to_str()
+        .ok_or_else(|| io::Error::other("OCI archive path is not UTF-8"))?;
+    let loaded = docker.run(
+        supervisor,
+        &arguments(["load", "--input", archive]),
+        Duration::from_secs(60),
+        "load",
+        false,
+    )?;
+    let image = EngineImage::loaded(&loaded.stdout, runtime.expected)?;
+    let observed = docker.run(
+        supervisor,
+        &arguments(["image", "inspect", "--format", INSPECT, image.id()]),
+        Duration::from_secs(15),
+        "image",
+        false,
+    )?;
+    if !observed.stderr.is_empty() {
+        return Err(io::Error::other(
+            "OCI image inspection produced diagnostics",
+        ));
+    }
+    image.check(&observed.stdout)?;
+    write(
+        &runtime.artifacts.join("IMAGE.id"),
+        format!("{}\n", image.id()).as_bytes(),
+    )?;
+    let active = ActiveRuntime {
+        plan: ServerOciRuntimePlan::new(runtime.identity, image.id(), runtime.configuration)?,
+        image,
+        version: runtime.version,
+        http_reservation: runtime.http_reservation,
+        sip_reservation: runtime.sip_reservation,
+    };
+    run_loaded(active, supervisor, &mut docker, client)
+}
+
+fn run_loaded<F>(
+    mut runtime: ActiveRuntime<'_>,
+    supervisor: &mut CommandSupervisor,
+    docker: &mut Docker<'_, F>,
+    client: impl FnOnce(&mut RunningCommand<'_>, SocketAddr) -> io::Result<()>,
+) -> io::Result<()>
+where
+    F: FnMut(&[String], &Path, &Path) -> io::Result<Command>,
+{
     let mut attempted = Vec::with_capacity(4);
     let operation = (|| {
-        for phase in ServerOciRunPhase::ALL {
-            if present(
-                &mut docker,
-                supervisor,
-                &runtime.plan.container(phase),
-                false,
-            )? {
-                return Err(io::Error::other("OCI runtime container already exists"));
-            }
-        }
-        let archive = runtime
-            .archive
-            .to_str()
-            .ok_or_else(|| io::Error::other("OCI archive path is not UTF-8"))?;
-        docker.run(
-            supervisor,
-            &arguments(["load", "--input", archive]),
-            Duration::from_secs(60),
-            "load",
-            false,
-        )?;
-        let observed = docker.run(
-            supervisor,
-            &arguments(["image", "inspect", "--format", "{{.Id}}", runtime.image]),
-            Duration::from_secs(15),
-            "image",
-            false,
-        )?;
-        if !observed.stderr.is_empty() {
-            return Err(io::Error::other(
-                "OCI image inspection produced diagnostics",
-            ));
-        }
-        loaded_identity(&observed.stdout, runtime.image)?;
         for phase in [
             ServerOciRunPhase::Version,
             ServerOciRunPhase::PackagedConfig,
@@ -314,12 +355,12 @@ where
         let sip = sip_reservation.local_addr()?;
         drop(http_reservation);
         drop(sip_reservation);
-        serve(&mut docker, supervisor, &runtime, http, client)?;
+        serve(docker, supervisor, &runtime, http, client)?;
         let http_reservation = TcpListener::bind(http)?;
         let sip_reservation = UdpSocket::bind(sip)?;
         drop(http_reservation);
         drop(sip_reservation);
-        serve(&mut docker, supervisor, &runtime, http, |_, _| Ok(()))?;
+        serve(docker, supervisor, &runtime, http, |_, _| Ok(()))?;
         let _http = TcpListener::bind(http)?;
         let _sip = UdpSocket::bind(sip)?;
         Ok(())
@@ -328,7 +369,7 @@ where
     for phase in attempted.into_iter().rev() {
         removed = combine(
             removed,
-            cleanup(&mut docker, supervisor, &runtime, phase),
+            cleanup(docker, supervisor, &runtime, phase),
             "OCI container cleanup",
         );
     }
