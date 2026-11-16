@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 description = "Typed ARI client with owned call lifetimes"
 readme = "../../docs/rust-sdk.md"
+exclude = ["tests/**", "examples/**"]
 
 [[example]]
 name = "call"
@@ -43,9 +44,9 @@ url = "2.5.8"
 [dev-dependencies]
 tokio = { workspace = true, features = ["process"] }
 axum = "0.8.8"
-rusterisk-server = { version = "0.1.0", path = "../server" }
-rusterisk-config = { version = "0.1.0", path = "../config" }
-rusterisk-media = { version = "0.1.0", path = "../media" }
+rusterisk-server = { path = "../server" }
+rusterisk-config = { path = "../config" }
+rusterisk-media = { path = "../media" }
 
 [lints]
 workspace = true
