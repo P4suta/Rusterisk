@@ -1,6 +1,6 @@
 use super::{
     connection, failure, listen, Config, ConnectionKey, ConnectionState, ControlError, Datagram,
-    Input, ListenerInput, Network, Reserved, StreamEvent, StreamPacket,
+    Input, ListenerInput, Network, Reserved, StreamEvent, StreamPacket, StreamRole,
 };
 use std::time::Duration;
 use tokio::{
@@ -8,6 +8,7 @@ use tokio::{
     net::TcpStream,
     sync::{mpsc, watch},
 };
+mod deadlines;
 mod deferred;
 mod preparations;
 mod routes;
@@ -162,7 +163,14 @@ async fn cancellation_drops_a_partial_frame_and_releases_the_stream() -> Result<
     let (packets, input) = mpsc::channel(8);
     let (sender, mut received) = mpsc::channel(8);
     let (stop, stopped) = watch::channel(false);
-    let task = tokio::spawn(connection(stream, key, input, sender, stopped));
+    let task = tokio::spawn(connection(
+        stream,
+        key,
+        input,
+        sender,
+        stopped,
+        StreamRole::Accepted,
+    ));
     peer.write_all(b"OPTIONS sip:localhost SIP/2.0\r\nContent-Len")
         .await
         .map_err(failure)?;

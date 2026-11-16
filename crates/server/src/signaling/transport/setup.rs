@@ -1,6 +1,6 @@
 use super::{
     connection, failure, finished, ConnectionKey, ConnectionState, ControlError, ListenerSocket,
-    Network, Port, Reserved, StreamPacket,
+    Network, Port, Reserved, StreamPacket, StreamRole,
 };
 use crate::runner::CallLease;
 use crate::signaling::{registrations::ConfigurationLease, resolver::ResolvedTarget};
@@ -495,7 +495,15 @@ async fn admission<S: AsyncRead + AsyncWrite + Unpin>(
                 )
                 .await;
             }
-            connection(stream, key, packets, job.sender, stop).await
+            connection(
+                stream,
+                key,
+                packets,
+                job.sender,
+                stop,
+                StreamRole::Initiated,
+            )
+            .await
         }
         Err(error) => setup_finished(&job.setup_sender, job.key, Err(error)).await,
     }

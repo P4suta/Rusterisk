@@ -119,6 +119,11 @@ enum FrameDeadline {
     Idle,
 }
 
+enum StreamRole {
+    Accepted,
+    Initiated,
+}
+
 struct Reserved {
     key: ConnectionKey,
     packets: mpsc::Receiver<Vec<u8>>,
@@ -434,11 +439,11 @@ impl Network {
         let sender = self.sender.clone();
         self.jobs.spawn(async move {
             match encryption {
-                None => connection(stream, key, packets, sender, stop).await,
+                None => connection(stream, key, packets, sender, stop, StreamRole::Accepted).await,
                 Some(context) => {
                     tokio::select! {
                         changed = stop.changed() => match changed { Ok(()) | Err(_) => finished(&sender, key, Ok(()), &stop).await },
-                        accepted = context.accept(stream) => match accepted { Ok(stream) => connection(stream, key, packets, sender, stop).await, Err(error) => finished(&sender, key, Err(error), &stop).await },
+                        accepted = context.accept(stream) => match accepted { Ok(stream) => connection(stream, key, packets, sender, stop, StreamRole::Accepted).await, Err(error) => finished(&sender, key, Err(error), &stop).await },
                     }
                 }
             }
@@ -657,12 +662,16 @@ async fn connection<S: AsyncRead + AsyncWrite + Unpin>(
     mut packets: mpsc::Receiver<Vec<u8>>,
     sender: mpsc::Sender<StreamPacket>,
     mut stop: watch::Receiver<bool>,
+    role: StreamRole,
 ) -> Result<(), ControlError> {
     let result = async {
         let mut decoder = SipStreamDecoder::new();
         let mut bytes = [0; 4096];
         let mut crlf = false;
-        let mut deadline = FrameDeadline::FirstMessage(tokio::time::Instant::now() + Duration::from_secs(5));
+        let mut deadline = match role {
+            StreamRole::Accepted => FrameDeadline::FirstMessage(tokio::time::Instant::now() + Duration::from_secs(5)),
+            StreamRole::Initiated => FrameDeadline::Idle,
+        };
         loop {
             if *stop.borrow() { break; }
             let timer = async { match deadline { FrameDeadline::FirstMessage(deadline) | FrameDeadline::Message(deadline) => tokio::time::sleep_until(deadline).await, FrameDeadline::Idle => std::future::pending().await } };

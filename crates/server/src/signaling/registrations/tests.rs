@@ -4,6 +4,7 @@ use rusterisk_config::{Config, MAX_REGISTRATIONS};
 mod dns;
 mod generations;
 mod stream;
+mod stream_deadlines;
 mod stream_lifetime;
 
 fn config(peers: &[&str], delay: u32) -> Result<Config, ControlError> {
