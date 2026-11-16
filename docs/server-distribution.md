@@ -47,3 +47,15 @@ The runner retains bounded command logs under `.cache/distributions/server-start
 It requires a complete readiness record, graceful shutdown, and both listener ports to become available.
 It removes the owned extraction and runtime data after the check.
 The startup check doesn't establish SDK interoperability or verify another operating system.
+
+On Apple silicon, request [Rosetta execution](https://developer.apple.com/documentation/apple-silicon/building-a-universal-macos-binary) explicitly when checking a macOS Intel candidate.
+
+```sh
+mise x -- just distribution-server-build x86_64-apple-darwin
+mise x -- just distribution-server-check-content <candidate-directory> x86_64-apple-darwin
+mise x -- just distribution-server-check-startup-rosetta <candidate-directory>
+```
+
+The runner reports `execution=rosetta` and rejects unsupported host combinations.
+Translated startup doesn't establish native Intel performance.
+Use `distribution-server-check-startup-target <candidate-directory> <target>` to select another native target explicitly.
