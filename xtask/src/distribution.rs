@@ -17,3 +17,5 @@ pub use sdk_candidate_build::{
 };
 mod sdk_manifest;
 pub use sdk_manifest::{check_sdk_manifest, SdkManifestError};
+mod sdk_content;
+pub use sdk_content::{check_sdk_content, SdkContentError};
