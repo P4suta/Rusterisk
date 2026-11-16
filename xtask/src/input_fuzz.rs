@@ -1,5 +1,6 @@
 use crate::{process::ProcessError, reference::Step};
 use std::time::Duration;
+mod capture;
 mod manifest;
 mod native;
 mod runner;
@@ -7,9 +8,10 @@ mod snapshot;
 #[path = "../fuzz/src/targets.rs"]
 mod targets;
 pub use crate::core_proofs::Execution;
+pub use capture::CapturedInputFuzz;
 pub use manifest::{normalize_manifest, validate_locks};
 pub use native::{validate_inventory, validate_run};
-pub use runner::{execute, Scope};
+pub use runner::{execute, InputFuzzOutcome, InputFuzzTargetOutcome, Scope, TargetCompletion};
 pub use targets::{Target, MAX_INPUT};
 
 pub const NIGHTLY: &str = "nightly-2026-08-21";
@@ -47,6 +49,11 @@ pub enum FuzzError {
         operation: String,
         cleanup: ProcessError,
     },
+    FollowUp {
+        operation: String,
+        context: &'static str,
+        follow_up: String,
+    },
 }
 
 impl std::fmt::Display for FuzzError {
@@ -62,6 +69,7 @@ impl std::fmt::Display for FuzzError {
             Self::Toml(error) => error.fmt(formatter),
             Self::Process(error) => error.fmt(formatter),
             Self::Cleanup { operation, cleanup } => write!(formatter, "{operation}; input fuzz cleanup failed: {cleanup}"),
+            Self::FollowUp { operation, context, follow_up } => write!(formatter, "{operation}; {context}: {follow_up}"),
         }
     }
 }
