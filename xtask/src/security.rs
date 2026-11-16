@@ -151,6 +151,8 @@ fn snapshot(root: &Path) -> Result<(), TaskError> {
 }
 
 pub(super) fn check() -> Result<(), TaskError> {
+    xtask::distribution::check_dependency_paths(&std::env::current_dir()?)
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
     let time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_err(|error| TaskError::Contract(error.to_string()))?;

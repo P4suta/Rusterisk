@@ -258,6 +258,8 @@ fn distribution_check() -> Result<(), TaskError> {
         .map_err(|error| TaskError::Contract(error.to_string()))?;
     xtask::distribution::check_sdk_archive_inputs(&root)
         .map_err(|error| TaskError::Contract(error.to_string()))?;
+    xtask::distribution::check_dependency_paths(&root)
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
     println!("distribution: SDK package inputs verified");
     Ok(())
 }
