@@ -1,6 +1,6 @@
 # Outbound registration startup
 
-Signaling startup connects numeric-address User Datagram Protocol (UDP) registration targets to the existing listener.
+Signaling startup connects numeric-address and hostname User Datagram Protocol (UDP) registration targets to the existing listener.
 Each request advertises the listener's reachable address and preserves the configured Request-URI octets.
 The starting configuration owns at most sixteen clients.
 Configurations without registrations start no registration work.
@@ -13,7 +13,15 @@ Requests to the same physical registrar wait for the preceding transaction's fin
 The existing bounded transaction supplies retransmission and a 32-second timeout.
 Shutdown cancels waiting and transmitted clients before releasing the listener.
 
-Hostname targets and TCP or TLS registration targets return `ControlError::Unsupported` during binding until their adapters connect.
+Hostname lookups use the shared bounded resolver and actor-owned cache.
+Calls and registration lookups share sixteen setup slots.
+Cancelled jobs keep their slots until reaped.
+Each lookup owns a configuration lease and a generation key.
+Released leases or mismatched keys prevent cache updates and registration transmission.
+Signaling continues processing packets while lookups wait.
+Shutdown closes the configuration lifetime and joins its lookup jobs.
+
+TCP or TLS registration targets return `ControlError::Unsupported` during binding until their adapters connect.
 The driver uses matching provisional and final responses, the shared Digest implementation, and validated Contact grants.
 Successful grants schedule refresh requests with renewed authorization counters.
 Retry policy and configuration replacement remain pending in the driver.
