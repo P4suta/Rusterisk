@@ -1,5 +1,5 @@
 use super::{
-    request::{digest_error, header, render, RequestUpdate},
+    request::{digest_error, expiration, header, render, RequestUpdate},
     RegistrationGrant, RegistrationResponse,
 };
 use crate::{
@@ -11,6 +11,22 @@ use rusterisk_config::Auth;
 use std::num::NonZeroU32;
 
 impl RegistrationResponse {
+    pub fn retry_after_failure(
+        &self,
+        credentials: &[Auth],
+        identity: RegistrationIdentity,
+        now: u64,
+    ) -> Result<RegistrationTransaction, SipError> {
+        if !(300..=699).contains(&self.status()) || self.status() == 423 {
+            return Err(SipError::Unsupported);
+        }
+        let source = std::str::from_utf8(&self.request.bytes)?;
+        let expiration = expiration(header(source, "Expires"))?.ok_or(SipError::InvalidPacket)?;
+        let mut transaction = self.with_expiration(credentials, identity, expiration, now)?;
+        transaction.authentication_attempts = 0;
+        Ok(transaction)
+    }
+
     pub fn refresh(
         &self,
         credentials: &[Auth],

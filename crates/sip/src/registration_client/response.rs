@@ -12,6 +12,7 @@ mod minimum_expiration;
 mod request;
 mod retry_after;
 mod updates;
+pub use authentication::RegistrationAuthentication;
 pub use grant::RegistrationGrant;
 
 pub struct RegistrationResponse {

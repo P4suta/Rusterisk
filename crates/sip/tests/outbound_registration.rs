@@ -4,6 +4,8 @@ use rusterisk_sip::{
 };
 #[path = "outbound_registration/authentication.rs"]
 mod authentication;
+#[path = "outbound_registration/failure_retry.rs"]
+mod failure_retry;
 #[path = "outbound_registration/grants.rs"]
 mod grants;
 #[path = "outbound_registration/minimum_expiration.rs"]

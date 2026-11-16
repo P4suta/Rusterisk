@@ -9,6 +9,11 @@ use crate::{
 };
 use rusterisk_config::Auth;
 
+pub enum RegistrationAuthentication {
+    Retry(RegistrationTransaction),
+    Rejected(RegistrationResponse),
+}
+
 enum Scope {
     Origin,
     Proxy,
@@ -38,6 +43,39 @@ impl Scope {
 impl RegistrationResponse {
     pub fn authenticated_retry(
         self,
+        credentials: &[Auth],
+        identity: RegistrationIdentity,
+        client_nonce: &str,
+        nonce_count: u32,
+        now: u64,
+    ) -> Result<Option<RegistrationTransaction>, SipError> {
+        self.authenticated_request(credentials, identity, client_nonce, nonce_count, now)
+    }
+
+    pub fn authenticate(
+        self,
+        credentials: &[Auth],
+        identity: RegistrationIdentity,
+        client_nonce: &str,
+        nonce_count: u32,
+        now: u64,
+    ) -> Result<RegistrationAuthentication, SipError> {
+        Ok(
+            match self.authenticated_request(
+                credentials,
+                identity,
+                client_nonce,
+                nonce_count,
+                now,
+            )? {
+                Some(transaction) => RegistrationAuthentication::Retry(transaction),
+                None => RegistrationAuthentication::Rejected(self),
+            },
+        )
+    }
+
+    fn authenticated_request(
+        &self,
         credentials: &[Auth],
         identity: RegistrationIdentity,
         client_nonce: &str,
