@@ -9,6 +9,8 @@ mod media_probe;
 pub(crate) use incoming::adopt;
 #[cfg(test)]
 mod media_probe_tests;
+#[cfg(test)]
+mod response_snapshot_tests;
 use media_probe::Probe;
 
 const MAX_FOREGROUND_REQUESTS: usize = 8;
@@ -124,6 +126,26 @@ pub struct CallSnapshot {
     pub failure: Option<CallFailure>,
     pub cleanup: Cleanup,
     pub media_probe_failure: Option<CallFailure>,
+}
+
+fn fill_channel_variables(channel: &mut api::Channel, variables: Option<BTreeMap<String, String>>) {
+    if let Some(variables) = variables {
+        let current = channel.channelvars.get_or_insert_default();
+        for (name, value) in variables {
+            current.entry(name).or_insert(value);
+        }
+    }
+}
+
+impl CallSnapshot {
+    fn observe_channel(&mut self, channel: &api::Channel) {
+        let mut latest = channel.clone();
+        fill_channel_variables(
+            &mut latest,
+            self.channel.take().and_then(|value| value.channelvars),
+        );
+        self.channel = Some(latest);
+    }
 }
 
 pub struct OwnedCall {
@@ -800,7 +822,7 @@ impl Calls {
                 });
         }
         if let Some(snapshot) = self.incoming.get_mut(&channel.id) {
-            snapshot.channel = Some(channel.clone());
+            snapshot.observe_channel(channel);
             if channel.state == api::ChannelState::Up {
                 snapshot.progress = snapshot.progress.observe(CallMilestone::Answered);
             }
@@ -819,7 +841,7 @@ impl Calls {
                     }
                     return;
                 }
-                snapshot.channel = Some(channel.clone());
+                snapshot.observe_channel(channel);
                 if channel.state == api::ChannelState::Up {
                     snapshot.progress = snapshot.progress.observe(CallMilestone::Answered);
                 }
@@ -899,7 +921,9 @@ impl Calls {
             entry.progress.send_modify(|snapshot| match result {
                 Ok(channel) if channel.id == id => {
                     snapshot.progress = snapshot.progress.observe(CallMilestone::Accepted);
-                    if snapshot.channel.is_none() {
+                    if let Some(observed) = &mut snapshot.channel {
+                        fill_channel_variables(observed, channel.channelvars);
+                    } else {
                         snapshot.channel = Some(channel);
                     }
                 }
