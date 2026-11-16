@@ -1,0 +1,972 @@
+diff --git a/src/change/sdp.rs b/src/change/sdp.rs
+index 9ead038..0d79fbe 100644
+--- a/src/change/sdp.rs
++++ b/src/change/sdp.rs
+@@ -93,6 +93,8 @@ impl<'a> SdpApi<'a> {
+             return Err(RtcError::RemoteSdp("No m-lines in offer".into()));
+         }
+ 
++        self.rtc.session.check_receive_sources(&offer)?;
++
+         if self.rtc.ice.ice_lite() && offer.session.ice_lite() {
+             return Err(RtcError::RemoteSdp(
+                 "Both peers being ICE-Lite not supported".into(),
+@@ -187,6 +189,8 @@ impl<'a> SdpApi<'a> {
+             return Err(RtcError::ChangesOutOfOrder);
+         }
+ 
++        self.rtc.session.check_receive_sources(&answer)?;
++
+         if self.rtc.ice.ice_lite() && answer.session.ice_lite() {
+             return Err(RtcError::RemoteSdp(
+                 "Both peers being ICE-Lite not supported".into(),
+diff --git a/src/config.rs b/src/config.rs
+index 67a0c09..ee7eefc 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -1,3 +1,4 @@
++use std::num::NonZeroUsize;
+ use std::ops::RangeInclusive;
+ use std::sync::Arc;
+ use std::time::{Duration, Instant};
+@@ -53,6 +54,7 @@ pub struct RtcConfig {
+     pub(crate) sctp_max_buffered_amount: usize,
+     pub(crate) sctp_max_message_size: u32,
+     pub(crate) rtp_mode: bool,
++    pub(crate) rtp_source_limit: Option<NonZeroUsize>,
+     pub(crate) enable_raw_packets: bool,
+     pub(crate) dtls_version: DtlsVersion,
+     pub(crate) vp9_packetizer_mode: Vp9PacketizerMode,
+@@ -738,6 +740,13 @@ impl RtcConfig {
+         self
+     }
+ 
++    /// Preserve independent receive sources within this limit when using [`Self::set_rtp_mode`].
++    /// Negotiated source declarations and authenticated history share the limit.
++    pub fn set_rtp_source_limit(mut self, limit: NonZeroUsize) -> Self {
++        self.rtp_source_limit = Some(limit);
++        self
++    }
++
+     /// Checks if RTP mode is set.
+     ///
+     /// ```
+@@ -905,6 +914,7 @@ impl Default for RtcConfig {
+             sctp_max_buffered_amount: crate::sctp::DEFAULT_MAX_BUFFERED_AMOUNT,
+             sctp_max_message_size: crate::sctp::LOCAL_MAX_MESSAGE_SIZE,
+             rtp_mode: false,
++            rtp_source_limit: None,
+             enable_raw_packets: false,
+             dtls_version: DtlsVersion::Dtls12,
+             vp9_packetizer_mode: Vp9PacketizerMode::default(),
+diff --git a/src/pacer/leaky.rs b/src/pacer/leaky.rs
+index bbf2eac..ac28fa7 100644
+--- a/src/pacer/leaky.rs
++++ b/src/pacer/leaky.rs
+@@ -3,13 +3,14 @@ use std::time::{Duration, Instant};
+ 
+ use super::Pacer;
+ use super::PaddingRequest;
++use super::QueueId;
+ use super::QueueState;
+ use crate::Reason;
+ use crate::bwe_::ProbeClusterConfig;
+ use crate::bwe_::ProbeClusterState;
+ use crate::bwe_::{log_pacer_media_debt, log_pacer_padding_debt};
+ use crate::pacer::PacerReason;
+-use crate::rtp_::{Bitrate, DataSize, MidRid, TwccClusterId};
++use crate::rtp_::{Bitrate, DataSize, TwccClusterId};
+ use crate::util::Soonest;
+ 
+ const MAX_BITRATE: Bitrate = Bitrate::gbps(10);
+@@ -43,7 +44,7 @@ pub struct LeakyBucketPacer {
+     /// The queue states given by last handle_timeout.
+     queue_states: Vec<QueueState>,
+     /// The next return value for `poll_queue``
+-    next_poll_queue: Option<MidRid>,
++    next_poll_queue: Option<QueueId>,
+     /// Queue of probe clusters waiting to be executed
+     probe_queue: VecDeque<ProbeClusterState>,
+     /// Last completed probe cluster (to be consumed by check_probe_complete)
+@@ -99,7 +100,7 @@ impl Pacer for LeakyBucketPacer {
+         self.maybe_update_adjusted_bitrate(now);
+ 
+         if let Some(request) = self.maybe_create_padding_request(now) {
+-            self.next_poll_queue = Some(request.midrid);
++            self.next_poll_queue = Some(request.id);
+             return Some(request);
+         }
+ 
+@@ -114,7 +115,7 @@ impl Pacer for LeakyBucketPacer {
+             // that we should poll a different queue i.e. media could be queued.
+             self.next_poll_queue = None;
+         } else {
+-            self.next_poll_queue = queue.map(|q| q.midrid);
++            self.next_poll_queue = queue.map(|q| q.id);
+         }
+ 
+         self.next_poll_time = Some(next_poll_time_and_reason);
+@@ -122,7 +123,7 @@ impl Pacer for LeakyBucketPacer {
+         None
+     }
+ 
+-    fn poll_queue(&mut self) -> Option<(MidRid, Option<TwccClusterId>)> {
++    fn poll_queue(&mut self) -> Option<(QueueId, Option<TwccClusterId>)> {
+         // GATE: Block if we need timeout first
+         if self.needs_timeout_before_next_poll {
+             return None;
+@@ -140,7 +141,7 @@ impl Pacer for LeakyBucketPacer {
+         Some((next, cluster_id))
+     }
+ 
+-    fn register_send(&mut self, now: Instant, packet_size: DataSize, _from: MidRid) {
++    fn register_send(&mut self, now: Instant, packet_size: DataSize, _from: QueueId) {
+         self.last_emitted = Some(now);
+ 
+         self.media_debt += packet_size;
+@@ -441,7 +442,7 @@ impl LeakyBucketPacer {
+             };
+ 
+             return Some(PaddingRequest {
+-                midrid: queue.midrid,
++                id: queue.id,
+                 padding: padding_size.as_bytes_usize(),
+             });
+         }
+@@ -459,7 +460,7 @@ impl LeakyBucketPacer {
+         let padding = (self.padding_bitrate * PADDING_BURST_INTERVAL).as_bytes_usize();
+ 
+         Some(PaddingRequest {
+-            midrid: queue.midrid,
++            id: queue.id,
+             padding,
+         })
+     }
+@@ -484,7 +485,7 @@ impl LeakyBucketPacer {
+ mod test {
+     use super::super::{QueuePriority, QueueSnapshot};
+     use super::*;
+-    use crate::rtp_::{DataSize, Mid, RtpHeader};
++    use crate::rtp_::{DataSize, Mid, MidRid, RtpHeader};
+     use queue::{PacketKind, Queue, QueuedPacket};
+     use std::time::{Duration, Instant};
+ 
+@@ -495,7 +496,10 @@ mod test {
+         let now = Instant::now();
+         let mut pacer = LeakyBucketPacer::new(Bitrate::kbps(300));
+         let queue = QueueState {
+-            midrid: MidRid("probe".into(), None),
++            id: QueueId {
++                midrid: MidRid("probe".into(), None),
++                ssrc: 0.into(),
++            },
+             unpaced: false,
+             use_for_padding: true,
+             snapshot: QueueSnapshot {
+@@ -913,7 +917,10 @@ mod test {
+         let now = Instant::now();
+ 
+         let mut state = QueueState {
+-            midrid: MidRid(Mid::from("001"), None),
++            id: QueueId {
++                midrid: MidRid(Mid::from("001"), None),
++                ssrc: 1.into(),
++            },
+             unpaced: false,
+             use_for_padding: true,
+             snapshot: QueueSnapshot {
+@@ -928,7 +935,10 @@ mod test {
+         };
+ 
+         let other = QueueState {
+-            midrid: MidRid(Mid::from("002"), None),
++            id: QueueId {
++                midrid: MidRid(Mid::from("002"), None),
++                ssrc: 2.into(),
++            },
+             unpaced: false,
+             use_for_padding: false,
+             snapshot: QueueSnapshot {
+@@ -944,7 +954,7 @@ mod test {
+ 
+         state.snapshot.merge(&other.snapshot);
+ 
+-        assert_eq!(state.midrid.mid(), Mid::from("001"));
++        assert_eq!(state.id.midrid.mid(), Mid::from("001"));
+         assert_eq!(state.snapshot.byte_size, 40_usize);
+         assert_eq!(state.snapshot.packet_count, 1337);
+         assert_eq!(state.snapshot.total_queue_time_origin, duration_ms(1337));
+@@ -1315,17 +1325,17 @@ mod test {
+                 .into_iter()
+             }
+ 
+-            pub(super) fn register_send(&mut self, midrid: MidRid, now: Instant) {
+-                if self.video_queue.midrid == midrid {
++            pub(super) fn register_send(&mut self, id: QueueId, now: Instant) {
++                if self.video_queue.id == id {
+                     self.video_queue.last_emitted = Some(now);
+-                } else if self.audio_queue.midrid == midrid {
++                } else if self.audio_queue.id == id {
+                     self.audio_queue.last_emitted = Some(now);
+-                } else if self.padding_queue.midrid == midrid {
++                } else if self.padding_queue.id == id {
+                     self.padding_queue.last_emitted = Some(now);
+                 } else {
+                     panic!(
+                         "Attempted to register send on unknown queue with id {:?}",
+-                        midrid
++                        id
+                     );
+                 }
+             }
+@@ -1361,17 +1371,26 @@ mod test {
+             fn default() -> Self {
+                 Self {
+                     audio_queue: Inner::new(
+-                        MidRid(Mid::from("001"), None),
++                        QueueId {
++                            midrid: MidRid(Mid::from("001"), None),
++                            ssrc: 1.into(),
++                        },
+                         true,
+                         QueuePriority::Media,
+                     ),
+                     video_queue: Inner::new(
+-                        MidRid(Mid::from("002"), None),
++                        QueueId {
++                            midrid: MidRid(Mid::from("002"), None),
++                            ssrc: 2.into(),
++                        },
+                         false,
+                         QueuePriority::Media,
+                     ),
+                     padding_queue: Inner::new(
+-                        MidRid(Mid::from("003"), None),
++                        QueueId {
++                            midrid: MidRid(Mid::from("003"), None),
++                            ssrc: 3.into(),
++                        },
+                         false,
+                         QueuePriority::Padding,
+                     ),
+@@ -1386,7 +1405,7 @@ mod test {
+         }
+ 
+         struct Inner {
+-            midrid: MidRid,
++            id: QueueId,
+             last_emitted: Option<Instant>,
+             queue: VecDeque<QueuedPacket>,
+             packet_count: u32,
+@@ -1397,9 +1416,9 @@ mod test {
+         }
+ 
+         impl Inner {
+-            fn new(midrid: MidRid, is_audio: bool, priority: QueuePriority) -> Self {
++            fn new(id: QueueId, is_audio: bool, priority: QueuePriority) -> Self {
+                 Self {
+-                    midrid,
++                    id,
+                     last_emitted: None,
+                     queue: VecDeque::default(),
+                     packet_count: 0,
+@@ -1447,7 +1466,7 @@ mod test {
+ 
+             fn queue_state(&self, now: Instant) -> QueueState {
+                 QueueState {
+-                    midrid: self.midrid,
++                    id: self.id,
+                     unpaced: self.is_audio,
+                     use_for_padding: !self.is_audio && self.last_emitted.is_some(),
+                     snapshot: QueueSnapshot {
+diff --git a/src/pacer/mod.rs b/src/pacer/mod.rs
+index 35c90d1..592244c 100644
+--- a/src/pacer/mod.rs
++++ b/src/pacer/mod.rs
+@@ -2,7 +2,7 @@ use std::time::Instant;
+ 
+ use crate::Reason;
+ use crate::bwe_::ProbeClusterConfig;
+-use crate::rtp_::{Bitrate, DataSize, MidRid, TwccClusterId};
++use crate::rtp_::{Bitrate, DataSize, TwccClusterId};
+ 
+ mod control;
+ pub(crate) use control::PacerControl;
+@@ -14,7 +14,7 @@ mod leaky;
+ use leaky::LeakyBucketPacer;
+ 
+ mod queue;
+-pub(crate) use queue::{PaddingRequest, QueuePriority, QueueSnapshot, QueueState};
++pub(crate) use queue::{PaddingRequest, QueueId, QueuePriority, QueueSnapshot, QueueState};
+ 
+ #[allow(clippy::large_enum_variant)]
+ pub(crate) enum PacerImpl {
+@@ -88,14 +88,14 @@ impl Pacer for PacerImpl {
+         }
+     }
+ 
+-    fn poll_queue(&mut self) -> Option<(MidRid, Option<TwccClusterId>)> {
++    fn poll_queue(&mut self) -> Option<(QueueId, Option<TwccClusterId>)> {
+         match self {
+             PacerImpl::Null(v) => v.poll_queue(),
+             PacerImpl::LeakyBucket(v) => v.poll_queue(),
+         }
+     }
+ 
+-    fn register_send(&mut self, now: Instant, packet_size: DataSize, from: MidRid) {
++    fn register_send(&mut self, now: Instant, packet_size: DataSize, from: QueueId) {
+         match self {
+             PacerImpl::Null(v) => v.register_send(now, packet_size, from),
+             PacerImpl::LeakyBucket(v) => v.register_send(now, packet_size, from),
+@@ -127,13 +127,13 @@ pub trait Pacer {
+ 
+     /// Determines which mid to poll, if any.
+     ///
+-    /// Returns the MidRid to poll and the probe cluster ID if this packet belongs to a probe.
+-    fn poll_queue(&mut self) -> Option<(MidRid, Option<TwccClusterId>)>;
++    /// Returns the source queue and the probe cluster identifier if the packet belongs to a probe.
++    fn poll_queue(&mut self) -> Option<(QueueId, Option<TwccClusterId>)>;
+ 
+     /// Register a packet having been sent.
+     ///
+     /// **MUST** be called each time [`Pacer::poll_queue`] produces a mid.
+-    fn register_send(&mut self, now: Instant, packet_size: DataSize, from: MidRid);
++    fn register_send(&mut self, now: Instant, packet_size: DataSize, from: QueueId);
+ }
+ 
+ /// The sub-reason for the [`Reason::Pacer`][crate::Reason::Pacer].
+diff --git a/src/pacer/null.rs b/src/pacer/null.rs
+index 1c601e2..d9b5e1d 100644
+--- a/src/pacer/null.rs
++++ b/src/pacer/null.rs
+@@ -3,15 +3,16 @@ use std::time::Instant;
+ 
+ use super::Pacer;
+ use super::PaddingRequest;
++use super::QueueId;
+ use super::QueueState;
+ use crate::Reason;
+ use crate::pacer::PacerReason;
+-use crate::rtp_::{Bitrate, DataSize, MidRid, TwccClusterId};
++use crate::rtp_::{Bitrate, DataSize, TwccClusterId};
+ 
+ /// A null pacer that doesn't pace.
+ #[derive(Debug, Default)]
+ pub struct NullPacer {
+-    last_sends: HashMap<MidRid, Instant>,
++    last_sends: HashMap<QueueId, Instant>,
+     /// Snapshots from the last `handle_timeout`. `poll_queue` counts off
+     /// each packet it hands out.
+     queue_states: Vec<QueueState>,
+@@ -43,25 +44,27 @@ impl Pacer for NullPacer {
+         self.unsent_since = None;
+         self.queue_states.clear();
+         self.queue_states.extend(iter);
++        self.last_sends
++            .retain(|id, _| self.queue_states.iter().any(|queue| queue.id == *id));
+ 
+         None
+     }
+ 
+-    fn poll_queue(&mut self) -> Option<(MidRid, Option<TwccClusterId>)> {
++    fn poll_queue(&mut self) -> Option<(QueueId, Option<TwccClusterId>)> {
+         // Pick a queue using round robin, prioritize the least recently sent on queue.
+         let queue = self
+             .queue_states
+             .iter_mut()
+             .filter(|q| q.snapshot.packet_count > 0)
+-            .min_by_key(|q| self.last_sends.get(&q.midrid))?;
++            .min_by_key(|q| self.last_sends.get(&q.id))?;
+ 
+         queue.snapshot.packet_count -= 1;
+         self.unsent_since = Some(queue.snapshot.created_at);
+ 
+-        Some((queue.midrid, None))
++        Some((queue.id, None))
+     }
+ 
+-    fn register_send(&mut self, now: Instant, _packet_size: DataSize, from: MidRid) {
++    fn register_send(&mut self, now: Instant, _packet_size: DataSize, from: QueueId) {
+         self.unsent_since = None;
+         let e = self.last_sends.entry(from).or_insert(now);
+         *e = now;
+@@ -72,10 +75,14 @@ impl Pacer for NullPacer {
+ mod test {
+     use super::*;
+     use crate::pacer::QueueSnapshot;
++    use crate::rtp_::MidRid;
+ 
+-    fn queue(mid: &str, packet_count: u32, now: Instant) -> QueueState {
++    fn queue(mid: &str, source: u32, packet_count: u32, now: Instant) -> QueueState {
+         QueueState {
+-            midrid: MidRid(mid.into(), None),
++            id: QueueId {
++                midrid: MidRid(mid.into(), None),
++                ssrc: source.into(),
++            },
+             unpaced: true,
+             use_for_padding: false,
+             snapshot: QueueSnapshot {
+@@ -90,7 +97,11 @@ mod test {
+     fn drains_every_queue_without_another_timeout() {
+         let now = Instant::now();
+         let mut pacer = NullPacer::default();
+-        let queues = [queue("a", 2, now), queue("b", 1, now), queue("c", 0, now)];
++        let queues = [
++            queue("a", 1, 2, now),
++            queue("b", 2, 1, now),
++            queue("c", 3, 0, now),
++        ];
+         pacer.handle_timeout(now, queues.into_iter());
+ 
+         let mut sent = vec![];
+@@ -98,7 +109,7 @@ mod test {
+             let (midrid, _) = pacer.poll_queue().expect("queued packet");
+             pacer.register_send(now, DataSize::bytes(100), midrid);
+             assert_eq!(pacer.poll_timeout().0, None, "no timeout between sends");
+-            sent.push(midrid.mid().to_string());
++            sent.push(midrid.midrid.mid().to_string());
+         }
+         sent.sort();
+         assert_eq!(sent, ["a", "a", "b"]);
+@@ -110,15 +121,18 @@ mod test {
+     fn unsent_poll_asks_for_a_fresh_snapshot() {
+         let now = Instant::now();
+         let mut pacer = NullPacer::default();
+-        pacer.handle_timeout(now, [queue("a", 1, now), queue("b", 1, now)].into_iter());
++        pacer.handle_timeout(
++            now,
++            [queue("a", 1, 1, now), queue("b", 2, 1, now)].into_iter(),
++        );
+ 
+         assert!(pacer.poll_queue().is_some());
+         assert_eq!(pacer.poll_timeout().0, Some(now), "stream sent nothing");
+ 
+-        pacer.handle_timeout(now, [queue("b", 1, now)].into_iter());
++        pacer.handle_timeout(now, [queue("b", 2, 1, now)].into_iter());
+         assert_eq!(pacer.poll_timeout().0, None);
+         let (midrid, _) = pacer.poll_queue().expect("remaining packet");
+-        assert_eq!(midrid, MidRid("b".into(), None));
++        assert_eq!(midrid, queue("b", 2, 1, now).id);
+         pacer.register_send(now, DataSize::bytes(100), midrid);
+         assert_eq!(pacer.poll_queue(), None);
+         assert_eq!(pacer.poll_timeout().0, None);
+@@ -128,14 +142,30 @@ mod test {
+     fn round_robin_by_least_recently_sent() {
+         let now = Instant::now();
+         let mut pacer = NullPacer::default();
+-        pacer.register_send(now, DataSize::bytes(100), MidRid("a".into(), None));
++        pacer.register_send(now, DataSize::bytes(100), queue("a", 1, 1, now).id);
+         let later = now + std::time::Duration::from_millis(1);
+-        pacer.register_send(later, DataSize::bytes(100), MidRid("b".into(), None));
++        pacer.register_send(later, DataSize::bytes(100), queue("b", 2, 1, now).id);
+         pacer.handle_timeout(
+             later,
+-            [queue("a", 1, later), queue("b", 1, later)].into_iter(),
++            [queue("a", 1, 1, later), queue("b", 2, 1, later)].into_iter(),
+         );
+ 
+-        assert_eq!(pacer.poll_queue(), Some((MidRid("a".into(), None), None)));
++        assert_eq!(pacer.poll_queue(), Some((queue("a", 1, 1, later).id, None)));
++    }
++
++    #[test]
++    fn source_histories_are_distinct_and_removed_with_their_queues() {
++        let now = Instant::now();
++        let first = queue("a", 7, 1, now);
++        let second = queue("a", 8, 1, now);
++        let mut pacer = NullPacer::default();
++        pacer.handle_timeout(now, [first, second].into_iter());
++        for queue in [first, second] {
++            assert_eq!(pacer.poll_queue(), Some((queue.id, None)));
++            pacer.register_send(now, DataSize::bytes(100), queue.id);
++        }
++        assert_eq!(pacer.last_sends.len(), 2);
++        pacer.handle_timeout(now, std::iter::empty());
++        assert!(pacer.last_sends.is_empty());
+     }
+ }
+diff --git a/src/pacer/queue.rs b/src/pacer/queue.rs
+index ad53640..51130e4 100644
+--- a/src/pacer/queue.rs
++++ b/src/pacer/queue.rs
+@@ -1,6 +1,6 @@
+ use std::time::{Duration, Instant};
+ 
+-use crate::rtp_::MidRid;
++use crate::rtp_::{MidRid, Ssrc};
+ use crate::util::not_happening;
+ 
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -66,11 +66,17 @@ impl Default for QueueSnapshot {
+     }
+ }
+ 
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
++pub struct QueueId {
++    pub midrid: MidRid,
++    pub ssrc: Ssrc,
++}
++
+ /// The state of a single upstream queue.
+ /// The pacer manages packets across several upstream queues.
+ #[derive(Debug, Clone, Copy)]
+ pub struct QueueState {
+-    pub midrid: MidRid,
++    pub id: QueueId,
+     pub unpaced: bool,
+     pub use_for_padding: bool,
+     pub snapshot: QueueSnapshot,
+@@ -79,8 +85,8 @@ pub struct QueueState {
+ /// A request to generate a specific amount of padding.
+ #[derive(Debug, Clone, Copy)]
+ pub struct PaddingRequest {
+-    /// The Mid that should generate and queue the padding.
+-    pub midrid: MidRid,
++    /// The source that should generate and queue the padding.
++    pub id: QueueId,
+     /// The amount of padding in bytes to generate.
+     pub padding: usize,
+ }
+diff --git a/src/session.rs b/src/session.rs
+index 90025f2..797801f 100644
+--- a/src/session.rs
++++ b/src/session.rs
+@@ -1,4 +1,5 @@
+ use std::collections::{HashMap, VecDeque};
++use std::num::NonZeroUsize;
+ use std::ops::RangeInclusive;
+ use std::sync::Arc;
+ use std::time::{Duration, Instant};
+@@ -37,12 +38,19 @@ use crate::rtp_::{Dlrr, DlrrItem, ExtendedReport, ReportBlock};
+ use crate::rtp_::{RtpHeader, SessionId, TwccPacketId, extend_u16};
+ use crate::rtp_::{SrtpContext, Ssrc};
+ use crate::rtp_::{TwccRecvRegister, TwccSendRegister};
++use crate::sdp::{MediaAttribute, Sdp};
+ use crate::stats::StatsSnapshot;
+ use crate::streams::{RtpPacket, StreamTimeoutConfig, Streams};
+ use crate::util::{Soonest, SystemTimeExt, already_happened, not_happening};
+ use crate::{Reason, net};
+ use crate::{RtcConfig, RtcError};
+ 
++enum RtpAdmission {
++    Existing,
++    Trial(Ssrc),
++    Rejected,
++}
++
+ /// Minimum interval between NACK polls. Per-packet retries also wait for RTT.
+ /// Keep this high enough to avoid additional problems in very bad network conditions.
+ const NACK_MIN_INTERVAL: Duration = Duration::from_millis(33);
+@@ -120,6 +128,7 @@ pub(crate) struct Session {
+ 
+     /// Whether we are running in RTP-mode.
+     pub rtp_mode: bool,
++    rtp_source_limit: Option<NonZeroUsize>,
+ 
+     /// VP9 packetizer mode.
+     vp9_packetizer_mode: Vp9PacketizerMode,
+@@ -213,6 +222,7 @@ impl Session {
+             media_bytes_tx: 0,
+             ice_lite: config.ice_lite,
+             rtp_mode: config.rtp_mode,
++            rtp_source_limit: config.rtp_source_limit,
+             vp9_packetizer_mode: config.vp9_packetizer_mode,
+             feedback_tx: VecDeque::new(),
+             feedback_rx: VecDeque::new(),
+@@ -407,7 +417,7 @@ impl Session {
+ 
+         let stream = self
+             .streams
+-            .stream_tx_by_midrid(padding_request.midrid)
++            .stream_tx_by_queue(padding_request.id)
+             .expect("pacer to use an existing stream");
+ 
+         stream.generate_padding(padding_request.padding);
+@@ -493,7 +503,118 @@ impl Session {
+             return;
+         };
+ 
++        let admission = self.admit_rtp_source(now, &header);
++        if matches!(admission, RtpAdmission::Rejected) {
++            wake.no_events();
++            wake.no_timeout();
++            return;
++        }
+         self.handle_rtp(now, header, message);
++        if let RtpAdmission::Trial(source) = admission {
++            if self
++                .streams
++                .stream_rx(&source)
++                .is_none_or(|stream| stream.last_time().is_none())
++            {
++                let _removed = self.streams.remove_stream_rx(source);
++                wake.no_events();
++                wake.no_timeout();
++            }
++        }
++    }
++
++    pub(crate) fn check_receive_sources(&self, remote: &Sdp) -> Result<(), RtcError> {
++        let Some(limit) = self.rtp_source_limit.filter(|_| self.rtp_mode) else {
++            return Ok(());
++        };
++        let announced = remote
++            .media_lines
++            .iter()
++            .filter(|line| !line.disabled)
++            .flat_map(|line| line.attrs.iter())
++            .flat_map(|attribute| match attribute {
++                MediaAttribute::Ssrc { ssrc, .. } => std::slice::from_ref(ssrc),
++                MediaAttribute::SsrcGroup { ssrcs, .. } => ssrcs.as_slice(),
++                _ => &[],
++            })
++            .copied();
++        let mut sources = Vec::new();
++        for source in self
++            .streams
++            .receive_sources()
++            .chain(self.max_rx_seq_lookup.keys().copied())
++            .chain(announced)
++        {
++            if sources.contains(&source) {
++                continue;
++            }
++            if sources.len() >= limit.get() {
++                return Err(RtcError::RemoteSdp(
++                    "RTP receive source limit exceeded".into(),
++                ));
++            }
++            sources.push(source);
++        }
++        Ok(())
++    }
++
++    fn admit_rtp_source(&mut self, now: Instant, header: &RtpHeader) -> RtpAdmission {
++        let Some(limit) = self.rtp_source_limit.filter(|_| self.rtp_mode) else {
++            return RtpAdmission::Existing;
++        };
++        if self
++            .streams
++            .mid_ssrc_rx_by_ssrc_or_rtx(now, header.ssrc)
++            .is_some()
++        {
++            return RtpAdmission::Existing;
++        }
++        let known = self.max_rx_seq_lookup.len().saturating_add(
++            self.streams
++                .receive_sources()
++                .filter(|source| !self.max_rx_seq_lookup.contains_key(source))
++                .count(),
++        );
++        if known >= limit.get() && !self.max_rx_seq_lookup.contains_key(&header.ssrc) {
++            return RtpAdmission::Rejected;
++        }
++        if header.ssrc.is_probe() {
++            return match self.ensure_probe_stream(header.payload_type) {
++                Some(_) => RtpAdmission::Trial(header.ssrc),
++                None => RtpAdmission::Rejected,
++            };
++        }
++        let Some(mid) = header.ext_vals.mid else {
++            return RtpAdmission::Rejected;
++        };
++        let Some(media) = self.medias.iter().find(|media| media.mid() == mid) else {
++            return RtpAdmission::Rejected;
++        };
++        if media.stopped()
++            || !media.direction().is_receiving()
++            || header.ext_vals.rid_repair.is_some()
++        {
++            return RtpAdmission::Rejected;
++        }
++        let rid = header.ext_vals.rid;
++        if rid.is_some_and(|rid| !media.rids_rx().contains(rid))
++            || rid.is_none() && media.rids_rx().is_specific()
++        {
++            return RtpAdmission::Rejected;
++        }
++        let Some(payload) = self.codec_config.iter().find(|payload| {
++            (payload.pt() == header.payload_type || payload.red() == Some(header.payload_type))
++                && media.remote_pts().contains(&payload.pt())
++        }) else {
++            return RtpAdmission::Rejected;
++        };
++        self.streams.expect_stream_rx(
++            header.ssrc,
++            None,
++            MidRid(mid, rid),
++            payload.resend().is_none(),
++        );
++        RtpAdmission::Trial(header.ssrc)
+     }
+ 
+     pub fn handle_rtcp_receive(&mut self, now: Instant, message: &[u8], wake: &mut Wake) {
+@@ -614,6 +735,7 @@ impl Session {
+     pub(crate) fn handle_rtp(&mut self, now: Instant, mut header: RtpHeader, buf: &[u8]) {
+         // Rewrite absolute-send-time (if present) to be relative to now.
+         header.ext_vals.update_absolute_send_time(now);
++        let independent_receipts = self.rtp_mode && self.rtp_source_limit.is_some();
+ 
+         trace!("Handle RTP: {:?}", header);
+ 
+@@ -665,7 +787,7 @@ impl Session {
+             header.sequence_number(max_seq)
+         };
+         let is_repair_padding = is_repair && header.has_padding;
+-        let use_session_history = is_repair_padding || stream.is_none();
++        let use_session_history = is_repair_padding || stream.is_none() || independent_receipts;
+         // A newly discovered stream restores only the RTX maximum and blocks older packets.
+         // Keep using the session bitmap for padding so unseen reordered packets still count,
+         // while padding already received before discovery remains protected against replay.
+@@ -743,7 +865,11 @@ impl Session {
+         let (mid, ssrc) = mapped.unwrap();
+ 
+         // Register reception in nack registers.
+-        let receipt_outer = stream.update_register(now, &header, clock_rate, is_repair, seq_no);
++        let receipt_outer = if independent_receipts && !is_repair {
++            stream.update_authenticated_register(now, &header, clock_rate, seq_no)
++        } else {
++            stream.update_register(now, &header, clock_rate, is_repair, seq_no)
++        };
+ 
+         // RED-recovered packets (frame mode) are collected here and delivered after the
+         // primary, filling single-packet losses from the next packet's redundancy.
+@@ -1233,10 +1359,13 @@ impl Session {
+ 
+         // Figure out which, if any, queue to poll
+         // The cluster_id is captured by the pacer at poll time, before register_send() might clear it
+-        let (midrid, cluster_id) = self.pacer.poll_queue()?;
+-        let stream = self.streams.stream_tx_by_midrid(midrid)?;
++        let (queue, cluster_id) = self.pacer.poll_queue()?;
++        let stream = self.streams.stream_tx_by_queue(queue)?;
+         let Some(media) = self.medias.iter().find(|m| m.mid() == stream.mid()) else {
+-            trace!("Pacer pointed to mid {} which has no media", midrid.mid());
++            trace!(
++                "Pacer pointed to mid {} which has no media",
++                queue.midrid.mid()
++            );
+             return None;
+         };
+         let buf = &mut self.poll_packet_buf;
+@@ -1268,7 +1397,7 @@ impl Session {
+             crate::log_stat!("PACKET_SENT", header.ssrc, payload_size, kind);
+         }
+ 
+-        self.pacer.register_send(now, payload_size.into(), midrid);
++        self.pacer.register_send(now, payload_size.into(), queue);
+ 
+         if let Some(raw_packets) = &mut self.raw_packets {
+             raw_packets.push_back(Box::new(RawPacket::RtpTx(header.clone(), buf.clone())));
+diff --git a/src/streams/mod.rs b/src/streams/mod.rs
+index 38729c5..678beb6 100644
+--- a/src/streams/mod.rs
++++ b/src/streams/mod.rs
+@@ -359,6 +359,12 @@ impl Streams {
+         self.streams_rx.get_mut(ssrc)
+     }
+ 
++    pub(crate) fn receive_sources(&self) -> impl Iterator<Item = Ssrc> + '_ {
++        self.streams_rx
++            .values()
++            .flat_map(|stream| std::iter::once(stream.ssrc()).chain(stream.rtx()))
++    }
++
+     pub fn stream_tx(&mut self, ssrc: &Ssrc) -> Option<&mut StreamTx> {
+         self.streams_tx.get_mut(ssrc)
+     }
+@@ -644,7 +650,7 @@ impl Streams {
+         let mut media_padding = false;
+         let mut probe_queue = self.probe_media.map(|_| {
+             let mut queue = self.probe_tx.queue_state(now);
+-            queue.midrid = MidRid(MID_PROBE, None);
++            queue.id.midrid = MidRid(MID_PROBE, None);
+             queue
+         });
+         let mut streams = self.streams_tx.values_mut();
+@@ -667,6 +673,19 @@ impl Streams {
+         })
+     }
+ 
++    pub(crate) fn stream_tx_by_queue(
++        &mut self,
++        id: crate::pacer::QueueId,
++    ) -> Option<&mut StreamTx> {
++        if id.midrid == MidRid(MID_PROBE, None) {
++            self.probe_media?;
++            return (self.probe_tx.ssrc() == id.ssrc).then_some(&mut self.probe_tx);
++        }
++        self.streams_tx
++            .get_mut(&id.ssrc)
++            .filter(|stream| stream.is_midrid(id.midrid))
++    }
++
+     pub(crate) fn stream_tx_by_midrid(&mut self, midrid: MidRid) -> Option<&mut StreamTx> {
+         if midrid == MidRid(MID_PROBE, None) {
+             self.probe_media?;
+diff --git a/src/streams/receive.rs b/src/streams/receive.rs
+index 1ab2bbd..0845db9 100644
+--- a/src/streams/receive.rs
++++ b/src/streams/receive.rs
+@@ -25,6 +25,12 @@ use super::register::ReceiverRegister;
+ /// recovery depth plus some reordering slack.
+ const RED_RECENT_PACKETS: usize = 32;
+ 
++enum Registration {
++    Main,
++    Repair,
++    AuthenticatedMain,
++}
++
+ /// Incoming encoded stream.
+ ///
+ /// A stream is a primary SSRC + optional RTX SSRC.
+@@ -516,6 +522,39 @@ impl StreamRx {
+         is_repair: bool,
+         seq_no: SeqNo,
+     ) -> RegisterUpdateReceipt {
++        let registration = if is_repair {
++            Registration::Repair
++        } else {
++            Registration::Main
++        };
++        self.register_packet(now, header, clock_rate, registration, seq_no)
++    }
++
++    pub(crate) fn update_authenticated_register(
++        &mut self,
++        now: Instant,
++        header: &RtpHeader,
++        clock_rate: Frequency,
++        seq_no: SeqNo,
++    ) -> RegisterUpdateReceipt {
++        self.register_packet(
++            now,
++            header,
++            clock_rate,
++            Registration::AuthenticatedMain,
++            seq_no,
++        )
++    }
++
++    fn register_packet(
++        &mut self,
++        now: Instant,
++        header: &RtpHeader,
++        clock_rate: Frequency,
++        registration: Registration,
++        seq_no: SeqNo,
++    ) -> RegisterUpdateReceipt {
++        let is_repair = matches!(registration, Registration::Repair);
+         self.last_used = now;
+ 
+         let was_paused = self.paused;
+@@ -533,10 +572,12 @@ impl StreamRx {
+             is_new
+         } else {
+             // extend_seq() initializes the main register before this update.
+-            self.register
+-                .as_mut()
+-                .unwrap()
+-                .update(seq_no, now, header.timestamp, clock_rate.get())
++            let register = self.register.as_mut().unwrap();
++            if matches!(registration, Registration::AuthenticatedMain) {
++                register.update_authenticated(seq_no, now, header.timestamp, clock_rate.get())
++            } else {
++                register.update(seq_no, now, header.timestamp, clock_rate.get())
++            }
+         };
+ 
+         // Get the previous time for comparison
+diff --git a/src/streams/register.rs b/src/streams/register.rs
+index aa7c77a..1e3edea 100644
+--- a/src/streams/register.rs
++++ b/src/streams/register.rs
+@@ -89,11 +89,32 @@ impl ReceiverRegister {
+     }
+ 
+     pub fn update(&mut self, seq: SeqNo, arrival: Instant, rtp_time: u32, clock_rate: u32) -> bool {
++        self.record(seq, arrival, rtp_time, clock_rate, false)
++    }
++
++    pub fn update_authenticated(
++        &mut self,
++        seq: SeqNo,
++        arrival: Instant,
++        rtp_time: u32,
++        clock_rate: u32,
++    ) -> bool {
++        self.record(seq, arrival, rtp_time, clock_rate, true)
++    }
++
++    fn record(
++        &mut self,
++        seq: SeqNo,
++        arrival: Instant,
++        rtp_time: u32,
++        clock_rate: u32,
++        authenticated: bool,
++    ) -> bool {
+         if self.first.is_none() {
+             self.first = Some(seq);
+         }
+ 
+-        let new = self.nack.update(seq);
++        let new = self.nack.update(seq) || authenticated;
+ 
+         if new {
+             self.count += 1;
+@@ -293,6 +314,28 @@ mod test {
+ 
+     use crate::streams::register::{ReceiverRegister, expected, packets_lost};
+ 
++    #[test]
++    fn authenticated_wire_receipts_count_packets_outside_the_loss_range()
++    -> Result<(), crate::RtcError> {
++        let mut register = ReceiverRegister::new(None);
++        let now = Instant::now();
++        assert!(register.update_authenticated(65535.into(), now, 160, 8000));
++        assert!(register.update_authenticated(
++            65534.into(),
++            now + Duration::from_millis(20),
++            0,
++            8000
++        ));
++        assert!(!register.has_pending_nacks());
++        let report = register
++            .reception_report()
++            .ok_or_else(|| crate::RtcError::RemoteSdp("Missing reception report".into()))?;
++        assert_eq!(report.max_seq, 65535);
++        assert_eq!(report.packets_lost, u32::MAX);
++        assert_eq!(report.fraction_lost, 0);
++        Ok(())
++    }
++
+     #[test]
+     fn clearing_register_resets_nack_timing() {
+         let mut reg = ReceiverRegister::new(None);
+diff --git a/src/streams/send.rs b/src/streams/send.rs
+index e4ce33e..97d56b6 100644
+--- a/src/streams/send.rs
++++ b/src/streams/send.rs
+@@ -13,7 +13,7 @@ use crate::media::Media;
+ use crate::media::MediaKind;
+ use crate::pacer::QueuePriority;
+ use crate::pacer::QueueSnapshot;
+-use crate::pacer::QueueState;
++use crate::pacer::{QueueId, QueueState};
+ use crate::packet::Vp8Patch;
+ use crate::rtp_::MidRid;
+ use crate::rtp_::{Bitrate, Descriptions, Extension, ExtensionMap, ExtensionValues, Frequency};
+@@ -1195,7 +1195,10 @@ impl StreamTx {
+         self.queue_info = Some(snapshot);
+ 
+         QueueState {
+-            midrid: self.midrid,
++            id: QueueId {
++                midrid: self.midrid,
++                ssrc: self.ssrc,
++            },
+             unpaced,
+             use_for_padding,
+             snapshot,
