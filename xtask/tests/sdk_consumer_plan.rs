@@ -86,7 +86,7 @@ fn independent_consumers_resolve_then_inspect_build_and_run_with_finite_budgets(
             SdkConsumerAction::Resolve
         ))
         .arguments,
-        ["generate-lockfile", "--offline"]
+        ["metadata", "--format-version", "1", "--offline"]
     );
     let build = plan.step(SdkConsumerPhase::new(
         SdkConsumerScope::Sdk,

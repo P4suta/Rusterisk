@@ -179,7 +179,8 @@ impl SdkConsumerPlan {
         }
         let seconds = match phase.action {
             SdkConsumerAction::Resolve => {
-                arguments.extend(["generate-lockfile", "--offline"].map(str::to_owned));
+                arguments
+                    .extend(["metadata", "--format-version", "1", "--offline"].map(str::to_owned));
                 180
             }
             SdkConsumerAction::Metadata => {
