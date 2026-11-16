@@ -1,18 +1,105 @@
 use super::failure;
-use rsipstack::sip::{HeadersExt, Method, Request, SipMessage};
+use crate::AckIdentity;
+use rsipstack::sip::{
+    headers::untyped::ToTypedHeader, HeadersExt, Method, Request, Response, SipMessage, Uri,
+};
 use rusterisk_server::ControlError;
 use std::{net::SocketAddr, time::Duration};
 use tokio::net::UdpSocket;
+#[path = "routes.rs"]
+mod route_tests;
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ReferEvent {
+    Bare,
+    Numbered,
+}
+
+pub(super) enum RequestRoute {
+    Direct(SocketAddr),
+    CallbackPending { server: SocketAddr },
+    CallbackPinned(SocketAddr),
+}
+
+impl RequestRoute {
+    pub(super) fn allows(&mut self, peer: SocketAddr) -> bool {
+        match *self {
+            Self::Direct(expected) | Self::CallbackPinned(expected) => peer == expected,
+            Self::CallbackPending { server }
+                if peer == server
+                    || (peer.is_ipv4() && peer.ip().is_loopback() && peer.port() != 0) =>
+            {
+                *self = Self::CallbackPinned(peer);
+                true
+            }
+            Self::CallbackPending { .. } => false,
+        }
+    }
+}
+
+enum NotifyProgress {
+    Trying,
+    Ringing,
+    Answered,
+}
+
+enum Notice {
+    Bye,
+    Notify {
+        event: ReferEvent,
+        progress: NotifyProgress,
+    },
+}
+
 pub(super) struct TransferSignals {
+    from: String,
+    to: String,
+    call_id: String,
+    remote: Uri,
+    requests: RequestRoute,
+    event: Option<ReferEvent>,
     response: Option<u16>,
     initial: bool,
     ended: bool,
     completed: bool,
+    bye_response: bool,
 }
 
 impl TransferSignals {
+    pub(super) fn new(answer: &Response, requests: RequestRoute) -> Result<Self, ControlError> {
+        Ok(Self {
+            from: answer.to_header().map_err(failure)?.value().into(),
+            to: answer.from_header().map_err(failure)?.value().into(),
+            call_id: answer.call_id_header().map_err(failure)?.value().into(),
+            remote: answer
+                .contact_header()
+                .map_err(failure)?
+                .typed()
+                .map_err(failure)?
+                .uri,
+            requests,
+            event: None,
+            response: None,
+            initial: false,
+            ended: false,
+            completed: false,
+            bye_response: false,
+        })
+    }
+
+    pub(super) fn event(&self) -> Result<ReferEvent, ControlError> {
+        self.event
+            .ok_or(ControlError::Invalid("Missing REFER event identity"))
+    }
+
+    pub(super) fn received_initial_notify(&self) -> bool {
+        self.initial
+    }
+
+    pub(super) fn received_server_bye(&self) -> bool {
+        self.ended
+    }
+
     async fn receive(
         &mut self,
         socket: &UdpSocket,
@@ -20,10 +107,21 @@ impl TransferSignals {
     ) -> Result<(), ControlError> {
         let mut bytes = [0; 16385];
         let (size, peer) = socket.recv_from(&mut bytes).await.map_err(failure)?;
-        if peer != target {
-            return Err(ControlError::Invalid("Transfer response changed its peer"));
+        let message = SipMessage::try_from(&bytes[..size]).map_err(failure)?;
+        if let SipMessage::Response(response) = &message {
+            if peer != target {
+                return Err(ControlError::Invalid("Transfer response changed its peer"));
+            }
+            if response.from_header().map_err(failure)?.value() != self.to
+                || response.to_header().map_err(failure)?.value() != self.from
+                || response.call_id_header().map_err(failure)?.value() != self.call_id
+            {
+                return Err(ControlError::Invalid(
+                    "Transfer response changed its dialog",
+                ));
+            }
         }
-        match SipMessage::try_from(&bytes[..size]).map_err(failure)? {
+        match message {
             SipMessage::Response(response)
                 if response.cseq_header().map_err(failure)?.value() == "3 REFER" =>
             {
@@ -32,10 +130,37 @@ impl TransferSignals {
                     return Err(ControlError::Invalid("REFER changed its final response"));
                 }
             }
+            SipMessage::Response(response)
+                if response.cseq_header().map_err(failure)?.value() == "4 BYE" =>
+            {
+                let code = response.status_code.code();
+                if code != 200 {
+                    return Err(failure(format!(
+                        "Expected SIP 200 for transferor BYE, received {code}"
+                    )));
+                }
+                self.bye_response = true;
+            }
             SipMessage::Request(request)
                 if matches!(request.method, Method::Notify | Method::Bye) =>
             {
-                self.request(&request)?;
+                let notice = self.request(&request)?;
+                if !self.requests.allows(peer) {
+                    return Err(failure(format!(
+                        "Transfer request changed its callback peer to {peer}"
+                    )));
+                }
+                match notice {
+                    Notice::Bye => self.ended = true,
+                    Notice::Notify { event, progress } => {
+                        self.event = Some(event);
+                        match progress {
+                            NotifyProgress::Trying => self.initial = true,
+                            NotifyProgress::Ringing => {}
+                            NotifyProgress::Answered => self.completed = true,
+                        }
+                    }
+                }
                 let response = format!("SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n", request.top_via_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.to_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value(), request.cseq_header().map_err(failure)?.value());
                 socket
                     .send_to(response.as_bytes(), peer)
@@ -49,14 +174,31 @@ impl TransferSignals {
         Ok(())
     }
 
-    fn request(&mut self, request: &Request) -> Result<(), ControlError> {
+    fn request(&self, request: &Request) -> Result<Notice, ControlError> {
+        if request.from_header().map_err(failure)?.value() != self.from
+            || request.to_header().map_err(failure)?.value() != self.to
+            || request.call_id_header().map_err(failure)?.value() != self.call_id
+        {
+            return Err(ControlError::Invalid(
+                "Transfer notification changed its dialog",
+            ));
+        }
         if request.method == Method::Bye {
-            self.ended = true;
-            return Ok(());
+            return Ok(Notice::Bye);
+        }
+        let mut events = request
+            .headers
+            .iter()
+            .filter(|header| header.name().eq_ignore_ascii_case("Event"));
+        let event = match (events.next().map(|header| header.value()), events.next()) {
+            (Some("refer"), None) => ReferEvent::Bare,
+            (Some("refer;id=3"), None) => ReferEvent::Numbered,
+            _ => return Err(ControlError::Invalid("Unexpected REFER event identity")),
+        };
+        if self.event.is_some_and(|old| old != event) {
+            return Err(ControlError::Invalid("REFER event identity changed"));
         }
         if !request.headers.iter().any(|header| {
-            header.name().eq_ignore_ascii_case("Event") && header.value() == "refer;id=3"
-        }) || !request.headers.iter().any(|header| {
             header.name().eq_ignore_ascii_case("Content-Type")
                 && header.value().split(';').next() == Some("message/sipfrag")
         }) {
@@ -64,22 +206,22 @@ impl TransferSignals {
                 "Unexpected REFER notification headers",
             ));
         }
-        match request.body.as_slice() {
-            b"SIP/2.0 100 Trying\r\n" => self.initial = true,
-            b"SIP/2.0 180 Ringing\r\n" => {}
+        let progress = match request.body.as_slice() {
+            b"SIP/2.0 100 Trying\r\n" => NotifyProgress::Trying,
+            b"SIP/2.0 180 Ringing\r\n" => NotifyProgress::Ringing,
             b"SIP/2.0 200 OK\r\n"
                 if request.headers.iter().any(|header| {
                     header.name().eq_ignore_ascii_case("Subscription-State")
                         && header.value() == "terminated;reason=noresource"
                 }) =>
             {
-                self.completed = true;
+                NotifyProgress::Answered
             }
             _ => {
                 return Err(ControlError::Invalid("Unexpected transfer progress"));
             }
-        }
-        Ok(())
+        };
+        Ok(Notice::Notify { event, progress })
     }
 
     async fn until(
@@ -121,7 +263,13 @@ impl TransferSignals {
         target: SocketAddr,
     ) -> Result<(), ControlError> {
         self.until(socket, target, |state| state.initial && state.ended)
-            .await?;
+            .await
+            .map_err(|error| {
+                failure(format!(
+                    "{error}; initial_notify={}, source_bye={}, final_notify={}, event={:?}",
+                    self.initial, self.ended, self.completed, self.event
+                ))
+            })?;
         if self.completed {
             return Err(ControlError::Invalid(
                 "Transfer completed before its target answered",
@@ -135,25 +283,51 @@ impl TransferSignals {
         socket: &UdpSocket,
         target: SocketAddr,
     ) -> Result<(), ControlError> {
-        self.until(socket, target, |state| state.completed).await
+        self.until(socket, target, |state| state.initial && state.completed)
+            .await
+    }
+
+    pub(super) async fn transferor_ended(
+        &mut self,
+        socket: &UdpSocket,
+        target: SocketAddr,
+        local: SocketAddr,
+    ) -> Result<(), ControlError> {
+        let request = format!("BYE {} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK-transferor-bye;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 4 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", self.remote, self.to, self.from, self.call_id);
+        socket
+            .send_to(request.as_bytes(), target)
+            .await
+            .map_err(failure)?;
+        self.until(socket, target, |state| state.bye_response)
+            .await?;
+        if self.completed {
+            return Err(ControlError::Invalid(
+                "Transfer completed before its target answered",
+            ));
+        }
+        Ok(())
     }
 }
 
 pub(super) async fn acknowledge(
     socket: &UdpSocket,
-    target: SocketAddr,
+    expected: &AckIdentity,
 ) -> Result<(), ControlError> {
     let mut bytes = [0; 16385];
     let (size, peer) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))
         .await
         .map_err(failure)?
         .map_err(failure)?;
-    if peer != target
-        || !matches!(SipMessage::try_from(&bytes[..size]).map_err(failure)?, SipMessage::Request(request) if request.method == Method::Ack)
-    {
-        return Err(ControlError::Invalid(
-            "Missing transfer target acknowledgement",
-        ));
+    let target = expected.peer();
+    match SipMessage::try_from(&bytes[..size]).map_err(failure)? {
+        SipMessage::Request(request) if expected.matches(&request, peer)? => Ok(()),
+        SipMessage::Request(request) => Err(failure(format!(
+            "Expected transfer target ACK from {target}, received {} from {peer}",
+            request.method
+        ))),
+        SipMessage::Response(response) => Err(failure(format!(
+            "Expected transfer target ACK from {target}, received response {} from {peer}",
+            response.status_code.code()
+        ))),
     }
-    Ok(())
 }
