@@ -7,8 +7,14 @@ async fn sdk_channel_and_bridge_recordings_contain_actual_received_audio() -> Re
         uuid::Uuid::new_v4()
     ));
     std::fs::create_dir(&root)?;
-    let result =
-        super::native_server::run(&root, "recording-audio", super::recording::compare).await;
+    let result = super::native_server::run(
+        &root,
+        "recording-audio",
+        async |client, session, application, callback, _address| {
+            super::recording::compare(client, session, application, callback).await
+        },
+    )
+    .await;
     match (result, std::fs::remove_dir_all(root)) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) => Err(error),

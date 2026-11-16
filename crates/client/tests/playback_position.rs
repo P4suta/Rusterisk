@@ -14,7 +14,14 @@ async fn sdk_playback_position_controls_change_the_actual_received_audio(
     std::fs::create_dir(&root)?;
     let result = async {
         position::prepare(&root)?;
-        native_server::run(&root, "playback-position", position::compare).await
+        native_server::run(
+            &root,
+            "playback-position",
+            async |client, session, application, callback, _address| {
+                position::compare(client, session, application, callback).await
+            },
+        )
+        .await
     }
     .await;
     match (result, std::fs::remove_dir_all(root)) {

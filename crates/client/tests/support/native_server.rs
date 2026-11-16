@@ -41,6 +41,7 @@ pub async fn run(
         &'a mut Session,
         &'a str,
         Ipv4Addr,
+        &'a str,
     ) -> Result<(), Error>,
 ) -> Result<(), Error> {
     let configuration = rusterisk_config::Config::parse(
@@ -93,6 +94,7 @@ pub async fn run(
             &mut session,
             application.as_str(),
             Ipv4Addr::LOCALHOST,
+            &format!("http://{address}"),
         )
         .await;
         combine(result, session.shutdown().await)
