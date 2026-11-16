@@ -2335,6 +2335,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
+ "sha2",
  "str0m",
  "subtle",
  "tempfile",
