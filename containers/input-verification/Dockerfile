@@ -33,4 +33,9 @@ RUN timeout 600 rustup toolchain install nightly-2026-08-21 --profile minimal --
     && test "$(cmake --version | head -n 1)" = 'cmake version 4.4.5' \
     && rustc +nightly-2026-08-21 -vV | grep --fixed-strings --line-regexp 'commit-hash: 8925ea358a0f265ca61026aadc7ecc506c545cbe'
 
+RUN timeout 180 apt-get update \
+    && timeout 300 apt-get install --yes --no-install-recommends \
+        libclang-rt-14-dev=1:14.0.6-12 llvm-14=1:14.0.6-12 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /tmp
