@@ -337,7 +337,8 @@ mod tests {
                 })
                 .await
                 .map_err(failure)??;
-                if !matches!(frames.first(), Some((_, frame)) if frame.samples() == [expected; 960]) {
+                if !matches!(frames.first(), Some((_, frame)) if frame.samples() == [expected; 960])
+                {
                     return Err(failure(format!("incorrect audio after {command:?}")));
                 }
             }
