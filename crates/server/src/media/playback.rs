@@ -12,6 +12,9 @@ pub enum PlaybackControl {
     Pause,
     Resume,
     Stop,
+    Restart,
+    Forward,
+    Reverse,
 }
 
 enum State {
@@ -128,13 +131,47 @@ impl Playbacks {
     pub fn control(&mut self, token: MediaTaskToken, operation: PlaybackControl) {
         match operation {
             PlaybackControl::Stop => self.end(token, Ok(())),
+            PlaybackControl::Restart | PlaybackControl::Forward | PlaybackControl::Reverse => {
+                let Some(entry) = self.entries.get_mut(&token) else {
+                    return;
+                };
+                let result = match &mut entry.source {
+                    Source::Waiting => Err(MediaError::InvalidRoute),
+                    Source::Attached { source, .. } => {
+                        let distance = u64::from(source.rate()) * 3;
+                        let sample = match operation {
+                            PlaybackControl::Restart => 0,
+                            PlaybackControl::Forward => {
+                                source.sample_position().saturating_add(distance)
+                            }
+                            PlaybackControl::Reverse => {
+                                source.sample_position().saturating_sub(distance)
+                            }
+                            PlaybackControl::Stop
+                            | PlaybackControl::Pause
+                            | PlaybackControl::Resume => return,
+                        };
+                        source
+                            .seek_sample(sample)
+                            .map_err(|error| MediaError::Transport(error.to_string()))
+                    }
+                };
+                if let Err(error) = result {
+                    self.end(token, Err(error));
+                } else {
+                    entry.progress = Instant::now();
+                }
+            }
             PlaybackControl::Pause | PlaybackControl::Resume => {
                 if let Some(entry) = self.entries.get_mut(&token) {
                     if let Source::Attached { state, .. } = &mut entry.source {
                         *state = match operation {
                             PlaybackControl::Pause => State::Paused,
                             PlaybackControl::Resume => State::Active,
-                            PlaybackControl::Stop => return,
+                            PlaybackControl::Stop
+                            | PlaybackControl::Restart
+                            | PlaybackControl::Forward
+                            | PlaybackControl::Reverse => return,
                         };
                         entry.progress = Instant::now();
                     }
@@ -247,6 +284,77 @@ mod tests {
     use rusterisk_storage::Recorder;
     use std::time::Duration;
     use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn restart_forward_and_reverse_select_audio_from_the_consumed_position(
+    ) -> Result<(), MediaError> {
+        let directory = tempfile::tempdir().map_err(failure)?;
+        let mut recording = Recorder::create(directory.path(), "seeking", 8000).map_err(failure)?;
+        for index in 0..200_i16 {
+            recording
+                .write(Frame::new(&[1000 + index; 160], 8000)?)
+                .map_err(failure)?;
+        }
+        recording.finish().map_err(failure)?;
+        let (storage, worker) = StorageWorker::start(directory.path().to_owned())
+            .await
+            .map_err(failure)?;
+        let operation = async {
+            let source = storage
+                .play(PlaybackMedia::Recording(
+                    ChannelId::try_from("seeking".to_owned()).map_err(failure)?,
+                ))
+                .await
+                .map_err(failure)?;
+            storage.recordings().await.map_err(failure)?;
+            let mut tasks = MediaTasks::new(1);
+            let token = tasks
+                .reserve(MediaTaskKind::Playback)
+                .map_err(|_| MediaError::Capacity)?;
+            let mut playbacks = Playbacks::new();
+            let (completed, completion) = oneshot::channel();
+            playbacks.reserve(token, AudioTarget::Bridge(1), completed)?;
+            playbacks.attach(token, source)?;
+            let initial = playbacks.tick()?;
+            if !matches!(initial.first(), Some((_, frame)) if frame.samples() == &[1000; 960]) {
+                return Err(failure("playback did not start at the first sample"));
+            }
+            for (command, expected) in [
+                (PlaybackControl::Forward, 1151),
+                (PlaybackControl::Reverse, 1002),
+                (PlaybackControl::Restart, 1000),
+            ] {
+                playbacks.control(token, command);
+                storage.recordings().await.map_err(failure)?;
+                let frames = tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        let frames = playbacks.tick()?;
+                        if !frames.is_empty() {
+                            return Ok::<_, MediaError>(frames);
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .map_err(failure)??;
+                if !matches!(frames.first(), Some((_, frame)) if frame.samples() == &[expected; 960]) {
+                    return Err(failure(format!("incorrect audio after {command:?}")));
+                }
+            }
+            playbacks.control(token, PlaybackControl::Stop);
+            completion.await.map_err(failure)??;
+            Ok(())
+        }
+        .await;
+        let cleanup = worker.close().await.map_err(failure);
+        match (operation, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(operation), Err(cleanup)) => Err(failure(format!(
+                "{operation}; storage cleanup failed: {cleanup}"
+            ))),
+        }
+    }
 
     fn failure(error: impl std::fmt::Display) -> MediaError {
         MediaError::Transport(error.to_string())

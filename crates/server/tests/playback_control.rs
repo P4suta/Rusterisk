@@ -12,6 +12,138 @@ fn media(value: &str) -> Result<MediaUri, ControlError> {
 }
 
 #[test]
+fn seek_controls_follow_playback_state_without_replacing_the_owned_task() -> Result<(), ControlError>
+{
+    let mut control = Control::new(4);
+    control.subscribe("calls")?;
+    control.apply(
+        Action::CreateBridge {
+            id: id("seek-mix")?,
+            name: String::new(),
+        },
+        "now",
+        0,
+    )?;
+    let first = control.apply(
+        Action::PlayBridge {
+            bridge: id("seek-mix")?,
+            id: id("seeking")?,
+            media: media("sound:seek")?,
+            language: None,
+        },
+        "now",
+        0,
+    )?;
+    let [Effect::PlayMedia { owner, token, .. }] = first.effects.as_slice() else {
+        return Err(ControlError::Capacity);
+    };
+    let owner = owner.clone();
+    let token = *token;
+    control.apply(
+        Action::PlayBridge {
+            bridge: id("seek-mix")?,
+            id: id("queued")?,
+            media: media("sound:seek")?,
+            language: None,
+        },
+        "now",
+        0,
+    )?;
+    for name in ["seeking", "queued"] {
+        let restarted = control.apply(
+            Action::ControlPlayback {
+                id: id(name)?,
+                operation: PlaybackControl::Restart,
+            },
+            "now",
+            0,
+        )?;
+        assert!(restarted.effects.is_empty());
+        assert!(restarted.events.is_empty());
+        for operation in [PlaybackControl::Forward, PlaybackControl::Reverse] {
+            assert!(matches!(
+                control.apply(
+                    Action::ControlPlayback {
+                        id: id(name)?,
+                        operation
+                    },
+                    "now",
+                    0
+                ),
+                Err(ControlError::Conflict(_))
+            ));
+        }
+    }
+    control.signal(
+        Signal::MediaPlaybackStarted {
+            owner: owner.clone(),
+            token,
+        },
+        "now",
+    )?;
+    for operation in [
+        PlaybackControl::Restart,
+        PlaybackControl::Forward,
+        PlaybackControl::Reverse,
+    ] {
+        let moved = control.apply(
+            Action::ControlPlayback {
+                id: id("seeking")?,
+                operation,
+            },
+            "now",
+            0,
+        )?;
+        assert!(
+            matches!(moved.effects.as_slice(), [Effect::ControlPlayback { token: observed, operation: command }] if *observed == token && *command == operation)
+        );
+        assert!(moved.events.is_empty());
+    }
+    for operation in [PlaybackControl::Pause, PlaybackControl::Stop] {
+        control.apply(
+            Action::ControlPlayback {
+                id: id("seeking")?,
+                operation,
+            },
+            "now",
+            0,
+        )?;
+        for operation in [
+            PlaybackControl::Restart,
+            PlaybackControl::Forward,
+            PlaybackControl::Reverse,
+        ] {
+            assert!(matches!(
+                control.apply(
+                    Action::ControlPlayback {
+                        id: id("seeking")?,
+                        operation
+                    },
+                    "now",
+                    0
+                ),
+                Err(ControlError::Conflict(_))
+            ));
+        }
+    }
+    let ended = control.signal(
+        Signal::MediaPlaybackFinished {
+            owner,
+            token,
+            completion: PlaybackCompletion::Completed,
+        },
+        "now",
+    )?;
+    assert!(
+        matches!(ended.events.first().map(|event| &event.kind), Some(EventKind::PlaybackFinished { playback }) if playback.id == id("seeking")?)
+    );
+    assert!(
+        matches!(ended.effects.as_slice(), [Effect::PlayMedia { token: replacement, .. }] if *replacement != token)
+    );
+    Ok(())
+}
+
+#[test]
 fn empty_bridges_own_playback_and_deletion_cannot_affect_a_replacement_bridge(
 ) -> Result<(), ControlError> {
     use rusterisk_server::MediaOwner;

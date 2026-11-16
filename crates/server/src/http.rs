@@ -240,7 +240,9 @@ fn playback_control(
         "pause" => Ok(PlaybackControl::Pause),
         "unpause" => Ok(PlaybackControl::Resume),
         "stop" => Ok(PlaybackControl::Stop),
-        "restart" | "forward" | "reverse" => Err(ControlError::Unsupported),
+        "restart" => Ok(PlaybackControl::Restart),
+        "forward" => Ok(PlaybackControl::Forward),
+        "reverse" => Ok(PlaybackControl::Reverse),
         _ => Err(ControlError::Invalid("Invalid playback operation")),
     }
 }

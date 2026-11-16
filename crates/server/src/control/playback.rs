@@ -302,6 +302,19 @@ impl Control {
         let phase = playback.phase;
         let mut outcome = Outcome::empty();
         let next = match (operation, phase) {
+            (PlaybackControl::Restart, Phase::Queued | Phase::Loading) => return Ok(outcome),
+            (
+                PlaybackControl::Restart | PlaybackControl::Forward | PlaybackControl::Reverse,
+                Phase::Playing,
+            ) => Phase::Playing,
+            (
+                PlaybackControl::Restart | PlaybackControl::Forward | PlaybackControl::Reverse,
+                Phase::Paused | Phase::Stopping,
+            )
+            | (
+                PlaybackControl::Forward | PlaybackControl::Reverse,
+                Phase::Queued | Phase::Loading,
+            ) => return Err(ControlError::Conflict("Playback not playing")),
             (PlaybackControl::Stop, Phase::Queued) => {
                 return self.finish_playback(
                     &owner,

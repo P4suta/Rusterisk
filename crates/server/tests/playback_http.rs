@@ -86,6 +86,11 @@ async fn http_playback_returns_created_location_and_routes_controls_to_the_owned
             assert_eq!(app.clone().oneshot(request("POST", &format!("/ari/playbacks/fixed/control?operation={operation}"))?).await.map_err(failure)?.status(), StatusCode::NO_CONTENT);
             assert!(matches!(effects.recv().await, Some(Effect::ControlPlayback { .. })));
         }
+        for (operation, expected) in [("restart", rusterisk_server::media::PlaybackControl::Restart), ("forward", rusterisk_server::media::PlaybackControl::Forward), ("reverse", rusterisk_server::media::PlaybackControl::Reverse)] {
+            let status = app.clone().oneshot(request("POST", &format!("/ari/playbacks/fixed/control?operation={operation}"))?).await.map_err(failure)?.status();
+            if status != StatusCode::NO_CONTENT { return Err(failure(format!("{operation} returned {status}"))); }
+            if !matches!(effects.recv().await, Some(Effect::ControlPlayback { token: observed, operation }) if observed == token && operation == expected) { return Err(failure("incorrect playback control effect")); }
+        }
         assert_eq!(app.clone().oneshot(request("POST", "/ari/playbacks/fixed/control?operation=invalid")?).await.map_err(failure)?.status(), StatusCode::BAD_REQUEST);
         assert_eq!(app.clone().oneshot(request("DELETE", "/ari/playbacks/fixed")?).await.map_err(failure)?.status(), StatusCode::NO_CONTENT);
         assert!(matches!(effects.recv().await, Some(Effect::ControlPlayback { operation: rusterisk_server::media::PlaybackControl::Stop, .. })));
