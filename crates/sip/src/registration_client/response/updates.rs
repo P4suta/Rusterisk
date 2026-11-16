@@ -23,7 +23,7 @@ impl RegistrationResponse {
         let source = std::str::from_utf8(&self.request.bytes)?;
         let expiration = expiration(header(source, "Expires"))?.ok_or(SipError::InvalidPacket)?;
         let mut transaction = self.with_expiration(credentials, identity, expiration, now)?;
-        transaction.authentication_attempts = 0;
+        transaction.authentication.attempts = 0;
         Ok(transaction)
     }
 
@@ -57,7 +57,7 @@ impl RegistrationResponse {
             return Err(SipError::Unsupported);
         }
         let mut transaction = self.with_expiration(credentials, identity, expiration, now)?;
-        transaction.authentication_attempts = 0;
+        transaction.authentication.attempts = 0;
         Ok(transaction)
     }
 
@@ -86,7 +86,7 @@ impl RegistrationResponse {
             credentials,
             uri,
             body.as_bytes(),
-            self.origin_encoding,
+            self.authentication.origin.encoding(),
         )?;
         let proxy = renew(
             source,
@@ -94,7 +94,7 @@ impl RegistrationResponse {
             credentials,
             uri,
             body.as_bytes(),
-            self.proxy_encoding,
+            self.authentication.proxy.encoding(),
         )?;
         let bytes = render(
             source,
@@ -112,9 +112,7 @@ impl RegistrationResponse {
             expires,
             observed: now,
             state: State::Ready { at: now },
-            authentication_attempts: self.authentication_attempts,
-            origin_encoding: self.origin_encoding,
-            proxy_encoding: self.proxy_encoding,
+            authentication: self.authentication,
         })
     }
 }

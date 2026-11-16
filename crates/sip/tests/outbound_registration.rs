@@ -2,6 +2,8 @@ use rusterisk_config::{Config, Registration};
 use rusterisk_sip::{
     Datagram, RegistrationIdentity, RegistrationTransaction, RegistrationTransactionEvent, SipError,
 };
+#[path = "outbound_registration/alternate.rs"]
+mod alternate;
 #[path = "outbound_registration/authentication.rs"]
 mod authentication;
 #[path = "outbound_registration/failure_retry.rs"]

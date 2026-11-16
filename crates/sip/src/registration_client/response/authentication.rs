@@ -4,7 +4,10 @@ use super::{
 };
 use crate::{
     digest::{DigestError, Header, Protection},
-    registration_client::{RegistrationIdentity, RegistrationTransaction, State, TIMEOUT},
+    registration_client::{
+        authentication_state::ChallengeState, RegistrationIdentity, RegistrationTransaction, State,
+        TIMEOUT,
+    },
     Datagram, SipError,
 };
 use rusterisk_config::Auth;
@@ -96,7 +99,7 @@ impl RegistrationResponse {
         let expires = now.checked_add(TIMEOUT).ok_or(SipError::Capacity)?;
         let count = format!("{nonce_count:08x}");
         Protection::parse(Some("auth"), Some(client_nonce), Some(&count)).map_err(digest_error)?;
-        if self.authentication_attempts >= 4 {
+        if self.authentication.attempts >= 4 {
             return Ok(None);
         }
         let source = std::str::from_utf8(&self.request.bytes)?;
@@ -104,7 +107,15 @@ impl RegistrationResponse {
         let (_, body) = source
             .split_once("\r\n\r\n")
             .ok_or(SipError::InvalidPacket)?;
-        let previous = header(source, scope.authorization());
+        let challenged = match scope {
+            Scope::Origin => self.authentication.origin,
+            Scope::Proxy => self.authentication.proxy,
+        };
+        let previous = if challenged.challenged_by(self.request.peer) {
+            header(source, scope.authorization())
+        } else {
+            None
+        };
         let selected = match Header::choose_challenge(
             self.header_values(scope.challenge()),
             credentials,
@@ -117,11 +128,16 @@ impl RegistrationResponse {
         let authorization = selected
             .authorization("REGISTER", uri, body.as_bytes(), client_nonce, nonce_count)
             .map_err(digest_error)?;
-        let encoding = selected.encoding();
-        let (origin_encoding, proxy_encoding) = match scope {
-            Scope::Origin => (encoding, self.proxy_encoding),
-            Scope::Proxy => (self.origin_encoding, encoding),
+        let challenged = ChallengeState::Challenged {
+            peer: self.request.peer,
+            encoding: selected.encoding(),
         };
+        let mut authentication = self.authentication;
+        authentication.attempts += 1;
+        match scope {
+            Scope::Origin => authentication.origin = challenged,
+            Scope::Proxy => authentication.proxy = challenged,
+        }
         let other_name = scope.other_authorization();
         let other = if let Some(previous) = header(source, other_name) {
             let previous = Header::parse(previous).map_err(digest_error)?;
@@ -135,8 +151,8 @@ impl RegistrationResponse {
                     uri,
                     body.as_bytes(),
                     match scope {
-                        Scope::Origin => proxy_encoding,
-                        Scope::Proxy => origin_encoding,
+                        Scope::Origin => authentication.proxy.encoding(),
+                        Scope::Proxy => authentication.origin.encoding(),
                     },
                 )
                 .map_err(digest_error)?
@@ -167,9 +183,7 @@ impl RegistrationResponse {
             expires,
             observed: now,
             state: State::Ready { at: now },
-            authentication_attempts: self.authentication_attempts + 1,
-            origin_encoding,
-            proxy_encoding,
+            authentication,
         }))
     }
 }

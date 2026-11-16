@@ -1,11 +1,16 @@
-use super::{RegistrationIdentity, RegistrationTransaction, RegistrationTransactionEvent, State};
+use super::{
+    AuthenticationState, RegistrationIdentity, RegistrationTransaction,
+    RegistrationTransactionEvent, State,
+};
 use crate::{Datagram, SipError, StreamFramingError, MAX_MESSAGE};
 use rsipstack::sip::{
-    headers::untyped::ToTypedHeader, uri::Param, HeadersExt, Method, Request, Response, SipMessage,
-    Version,
+    headers::{untyped::ToTypedHeader, Headers},
+    uri::Param,
+    HeadersExt, Method, Request, Response, SipMessage, Version,
 };
 use rusterisk_config::Protocol;
 use std::net::SocketAddr;
+mod alternate;
 mod authentication;
 mod grant;
 mod minimum_expiration;
@@ -16,19 +21,18 @@ pub use authentication::RegistrationAuthentication;
 pub use grant::RegistrationGrant;
 
 pub struct RegistrationResponse {
-    response: Response,
+    status: u16,
+    headers: Headers,
     request: Datagram,
     identity: RegistrationIdentity,
     protocol: Protocol,
     received: u64,
-    authentication_attempts: u8,
-    origin_encoding: crate::digest::CredentialEncoding,
-    proxy_encoding: crate::digest::CredentialEncoding,
+    authentication: AuthenticationState,
 }
 
 impl RegistrationResponse {
-    pub fn status(&self) -> u16 {
-        self.response.status_code.code()
+    pub const fn status(&self) -> u16 {
+        self.status
     }
 
     pub const fn identity(&self) -> RegistrationIdentity {
@@ -44,8 +48,7 @@ impl RegistrationResponse {
     }
 
     pub fn header_values<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> {
-        self.response
-            .headers
+        self.headers
             .iter()
             .filter(move |header| header.name().eq_ignore_ascii_case(name))
             .map(|header| header.value())
@@ -106,14 +109,13 @@ impl RegistrationTransaction {
         };
         Ok(Some(RegistrationTransactionEvent::Response(
             RegistrationResponse {
-                response,
+                status,
+                headers: response.headers,
                 request: Datagram::new(peer, std::mem::take(&mut self.packet.bytes)),
                 identity: self.identity,
                 protocol: self.protocol,
                 received: now,
-                authentication_attempts: self.authentication_attempts,
-                origin_encoding: self.origin_encoding,
-                proxy_encoding: self.proxy_encoding,
+                authentication: self.authentication,
             },
         )))
     }

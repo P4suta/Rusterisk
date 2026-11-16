@@ -1,7 +1,9 @@
 use crate::{Datagram, SipError, MAX_MESSAGE};
 use rusterisk_config::{Protocol, Registration};
 use std::net::SocketAddr;
+mod authentication_state;
 mod response;
+use authentication_state::AuthenticationState;
 pub use response::{RegistrationAuthentication, RegistrationGrant, RegistrationResponse};
 
 const TIMEOUT: u64 = 32_000;
@@ -62,9 +64,7 @@ pub struct RegistrationTransaction {
     expires: u64,
     observed: u64,
     state: State,
-    authentication_attempts: u8,
-    origin_encoding: crate::digest::CredentialEncoding,
-    proxy_encoding: crate::digest::CredentialEncoding,
+    authentication: AuthenticationState,
 }
 
 impl RegistrationTransaction {
@@ -84,9 +84,7 @@ impl RegistrationTransaction {
             expires,
             observed: now,
             state: State::Ready { at: now },
-            authentication_attempts: 0,
-            origin_encoding: crate::digest::CredentialEncoding::Unspecified,
-            proxy_encoding: crate::digest::CredentialEncoding::Unspecified,
+            authentication: AuthenticationState::new(),
         })
     }
 
