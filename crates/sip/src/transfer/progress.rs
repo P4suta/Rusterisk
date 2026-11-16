@@ -4,7 +4,9 @@ use super::{
     owners::{self, Pending, State, Subscription},
     BlindRefer, DialogRefer, ReferError, ReferFailure, ReferKey, ReferProgress, ReferSubscription,
 };
-use crate::{response, Datagram, Engine, Output, RequestIdentity, SipError, SipEvent};
+use crate::{
+    response, Datagram, DatagramOrigin, Engine, Output, RequestIdentity, SipError, SipEvent,
+};
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Request};
 use std::net::SocketAddr;
 
@@ -133,6 +135,30 @@ impl Engine {
         progress: ReferProgress,
         now: u64,
     ) -> Result<Output, SipError> {
+        let transaction = self
+            .refers
+            .pending
+            .get(&key)
+            .map(|owner| owner.identity.clone());
+        let output = self.advance_refer(key, progress, now);
+        if let Some(transaction) = transaction {
+            if let Some(cached) = self.cache.get_mut(&transaction) {
+                cached.origin = DatagramOrigin::Refer(key);
+            }
+        }
+        let mut output = output?;
+        for packet in &mut output.datagrams {
+            packet.origin = DatagramOrigin::Refer(key);
+        }
+        Ok(output)
+    }
+
+    fn advance_refer(
+        &mut self,
+        key: ReferKey,
+        progress: ReferProgress,
+        now: u64,
+    ) -> Result<Output, SipError> {
         let mut output = empty();
         if let Some(pending) = self.refers.pending.remove(&key) {
             if pending.subscription == ReferSubscription::Suppressed
@@ -172,7 +198,7 @@ impl Engine {
                 status: Status::Provisional(Provisional::Trying),
                 state: notify::State::Active { remaining: 600 },
             };
-            let packet = match self.refer_notification(&pending.dialog, notification) {
+            let packet = match self.refer_notification(key, &pending.dialog, notification) {
                 Ok(packet) => packet,
                 Err(error) => {
                     self.refers.pending.insert(key, pending);
@@ -210,7 +236,7 @@ impl Engine {
         let Some(mut owner) = self.refers.subscriptions.remove(&key) else {
             return Ok(output);
         };
-        let updated = self.update_refer(&mut owner, progress, now);
+        let updated = self.update_refer(key, &mut owner, progress, now);
         self.refers.subscriptions.insert(key, owner);
         output.datagrams.extend(updated?);
         Ok(output)
@@ -239,39 +265,45 @@ impl Engine {
 
     pub(super) fn refer_notification(
         &mut self,
+        key: ReferKey,
         dialog: &Dialog,
         notification: Notification,
     ) -> Result<Datagram, SipError> {
-        self.refer_notification_to(dialog, notification, None)
+        self.refer_notification_to(key, dialog, notification, None)
     }
 
     pub(super) fn refer_notification_to(
         &mut self,
+        key: ReferKey,
         dialog: &Dialog,
         notification: Notification,
         target: Option<&super::dialog::Target>,
     ) -> Result<Datagram, SipError> {
-        if let Some(packet) = self.incoming_notify(
+        let mut packet = if let Some(packet) = self.incoming_notify(
             &dialog.id,
             dialog.generation,
             &dialog.contact,
             notification,
             target,
         )? {
-            return Ok(packet);
-        }
-        self.outgoing_notify(
-            &dialog.id,
-            dialog.generation,
-            &dialog.contact,
-            notification,
-            target,
-        )?
-        .ok_or(SipError::InvalidPacket)
+            packet
+        } else {
+            self.outgoing_notify(
+                &dialog.id,
+                dialog.generation,
+                &dialog.contact,
+                notification,
+                target,
+            )?
+            .ok_or(SipError::InvalidPacket)?
+        };
+        packet.origin = DatagramOrigin::Refer(key);
+        Ok(packet)
     }
 
     fn update_refer(
         &mut self,
+        key: ReferKey,
         owner: &mut Subscription,
         progress: ReferProgress,
         now: u64,
@@ -300,6 +332,7 @@ impl Engine {
                 .checked_add(owners::TRANSACTION)
                 .ok_or(SipError::Capacity)?;
             let packet = self.refer_notification(
+                key,
                 &owner.dialog,
                 Notification {
                     refer_sequence: owner.sequence,
@@ -325,6 +358,7 @@ impl Engine {
             .try_into()
             .map_err(|_| SipError::Capacity)?;
         let packet = self.refer_notification(
+            key,
             &owner.dialog,
             Notification {
                 refer_sequence: owner.sequence,
@@ -372,6 +406,7 @@ impl Engine {
                         .checked_add(owners::TRANSACTION)
                         .ok_or(SipError::Capacity)?;
                     let packet = self.refer_notification(
+                        key,
                         &owner.dialog,
                         Notification {
                             refer_sequence: owner.sequence,
@@ -387,6 +422,7 @@ impl Engine {
                     pending: Some(Provisional::Ringing),
                     ..
                 } => output.datagrams.extend(self.update_refer(
+                    key,
                     &mut owner,
                     ReferProgress::Ringing,
                     now,

@@ -102,10 +102,7 @@ impl RegistrationTransaction {
         Ok(Some(RegistrationTransactionEvent::Response(
             RegistrationResponse {
                 response,
-                request: Datagram {
-                    peer,
-                    bytes: std::mem::take(&mut self.packet.bytes),
-                },
+                request: Datagram::new(peer, std::mem::take(&mut self.packet.bytes)),
                 identity: self.identity,
                 protocol: self.protocol,
                 received: now,

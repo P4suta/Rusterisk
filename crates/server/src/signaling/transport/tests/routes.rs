@@ -10,10 +10,7 @@ fn failure(error: impl std::fmt::Display) -> ControlError {
 }
 
 fn packet(peer: SocketAddr, value: &[u8]) -> Datagram {
-    Datagram {
-        peer,
-        bytes: value.to_vec(),
-    }
+    Datagram::new(peer, value.to_vec())
 }
 
 #[tokio::test]

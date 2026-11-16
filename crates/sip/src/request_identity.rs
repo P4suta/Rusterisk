@@ -6,13 +6,13 @@ use rsipstack::sip::{
 };
 use std::net::SocketAddr;
 
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct RequestIdentity {
     peer: SocketAddr,
     transaction: Transaction,
 }
 
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum Transaction {
     Cookie {
         branch: String,

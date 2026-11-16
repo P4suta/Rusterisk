@@ -1,4 +1,4 @@
-use crate::{Datagram, SipError};
+use crate::{Datagram, DatagramOrigin, SipError};
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Request, Response};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -18,6 +18,7 @@ struct Pending {
     expires: u64,
     retry: Retry,
     notification: Option<crate::transfer::wire::Notification>,
+    origin: DatagramOrigin,
 }
 
 pub(super) enum Receipt {
@@ -63,12 +64,14 @@ impl Transactions {
         bytes: &[u8],
         now: u64,
         reliable: bool,
+        origin: DatagramOrigin,
     ) -> Result<(), SipError> {
         self.requests
             .retain(|_, pending| pending.expires > now || pending.notification.is_some());
         let key = key(&request)?;
         if let Some(pending) = self.requests.get(&key) {
-            return if pending.peer == peer && pending.request == request {
+            return if pending.peer == peer && pending.request == request && pending.origin == origin
+            {
                 Ok(())
             } else {
                 Err(SipError::InvalidPacket)
@@ -93,6 +96,7 @@ impl Transactions {
                     Retry::Backoff
                 },
                 notification,
+                origin,
             },
         );
         Ok(())
@@ -214,6 +218,7 @@ impl Transactions {
                 datagrams.push(Datagram {
                     peer: pending.peer,
                     bytes: pending.bytes.clone(),
+                    origin: pending.origin,
                 });
                 pending.interval = match pending.retry {
                     Retry::Backoff => (pending.interval * 2).min(4000),

@@ -129,10 +129,7 @@ impl Engine {
         if let Some(target) = target {
             dialog.remote_contact = target.uri().clone();
         }
-        Ok(Some(Datagram {
-            peer: dialog.peer,
-            bytes,
-        }))
+        Ok(Some(Datagram::new(dialog.peer, bytes)))
     }
 
     pub(super) fn outgoing_disconnected(&mut self, peer: SocketAddr, events: &mut Vec<SipEvent>) {
@@ -456,10 +453,7 @@ impl Engine {
         let packet = related(dialog, Method::Info, &dialog.remote_to, dialog.cseq, true)?;
         let request = request(std::str::from_utf8(&packet)?)?;
         let bytes = crate::info::encode(request, digit, duration_ms)?;
-        Ok(Some(Datagram {
-            peer: dialog.peer,
-            bytes,
-        }))
+        Ok(Some(Datagram::new(dialog.peer, bytes)))
     }
 
     pub fn originate(&mut self, outbound: Outbound, now: u64) -> Result<Output, SipError> {
@@ -727,10 +721,10 @@ impl Engine {
                     .is_some_and(|answer| answer.deadline <= now)
                 {
                     dialog.cseq = dialog.cseq.checked_add(1).ok_or(SipError::Capacity)?;
-                    output.datagrams.push(Datagram {
-                        peer: dialog.peer,
-                        bytes: related(dialog, Method::Bye, &dialog.remote_to, dialog.cseq, true)?,
-                    });
+                    output.datagrams.push(Datagram::new(
+                        dialog.peer,
+                        related(dialog, Method::Bye, &dialog.remote_to, dialog.cseq, true)?,
+                    ));
                     output.events.push(SipEvent::Ended {
                         id: dialog.id.clone(),
                         generation: dialog.generation,
@@ -743,10 +737,9 @@ impl Engine {
                 }
                 if let Some(answer) = &mut media.pending {
                     if answer.retry <= now {
-                        output.datagrams.push(Datagram {
-                            peer: dialog.peer,
-                            bytes: answer.bytes.clone(),
-                        });
+                        output
+                            .datagrams
+                            .push(Datagram::new(dialog.peer, answer.bytes.clone()));
                         answer.interval = (answer.interval * 2).min(4000);
                         answer.retry = now.saturating_add(answer.interval);
                     }
@@ -761,10 +754,9 @@ impl Engine {
                         > now =>
                 {
                     if *retry <= now && !dialog.reliable {
-                        output.datagrams.push(Datagram {
-                            peer: dialog.peer,
-                            bytes: dialog.bytes.clone(),
-                        });
+                        output
+                            .datagrams
+                            .push(Datagram::new(dialog.peer, dialog.bytes.clone()));
                         *interval = (*interval * 2).min(32_000);
                         *retry = now.saturating_add(*interval);
                     }
@@ -773,10 +765,9 @@ impl Engine {
                     retry, interval, ..
                 } => {
                     if *retry <= now && !dialog.reliable {
-                        output.datagrams.push(Datagram {
-                            peer: dialog.peer,
-                            bytes: dialog.bytes.clone(),
-                        });
+                        output
+                            .datagrams
+                            .push(Datagram::new(dialog.peer, dialog.bytes.clone()));
                         *interval = (*interval * 2).min(32_000);
                         *retry = now.saturating_add(*interval);
                     }
@@ -806,16 +797,16 @@ impl Engine {
                     };
                 }
                 State::Proceeding if dialog.deadline.is_some_and(|deadline| deadline <= now) => {
-                    output.datagrams.push(Datagram {
-                        peer: dialog.peer,
-                        bytes: related(
+                    output.datagrams.push(Datagram::new(
+                        dialog.peer,
+                        related(
                             dialog,
                             Method::Cancel,
                             dialog.invite.to_header()?.value(),
                             dialog.cseq,
                             false,
                         )?,
-                    });
+                    ));
                     output.events.push(SipEvent::Ended {
                         id: dialog.id.clone(),
                         generation: dialog.generation,
@@ -867,16 +858,16 @@ impl Engine {
         let code = response.status_code.code();
         if code < 200 {
             if let State::CancelPending { expires, .. } = dialog.state {
-                output.datagrams.push(Datagram {
+                output.datagrams.push(Datagram::new(
                     peer,
-                    bytes: related(
+                    related(
                         dialog,
                         Method::Cancel,
                         dialog.invite.to_header()?.value(),
                         dialog.cseq,
                         false,
                     )?,
-                });
+                ));
                 dialog.state = State::Cancelling { expires };
                 return Ok(output);
             }
@@ -902,23 +893,23 @@ impl Engine {
                 .ok_or(SipError::InvalidPacket)?;
             dialog.remote_contact = Uri::try_from(contact)?;
         }
-        output.datagrams.push(Datagram {
+        output.datagrams.push(Datagram::new(
             peer,
-            bytes: related(
+            related(
                 dialog,
                 Method::Ack,
                 &dialog.remote_to,
                 dialog.invite.cseq_header()?.typed()?.seq,
                 code < 300,
             )?,
-        });
+        ));
         if let Some(bytes) = authenticate(dialog, &response, now)? {
             dialog.challenges.push(Challenge {
                 response,
                 ack: output.datagrams[0].bytes.clone(),
                 expires: now.saturating_add(32_000),
             });
-            output.datagrams.push(Datagram { peer, bytes });
+            output.datagrams.push(Datagram::new(peer, bytes));
             return Ok(output);
         }
         if code < 300 {
@@ -928,16 +919,10 @@ impl Engine {
                         Ok(media) => media,
                         Err(_) => {
                             dialog.cseq = dialog.cseq.checked_add(1).ok_or(SipError::Capacity)?;
-                            output.datagrams.push(Datagram {
+                            output.datagrams.push(Datagram::new(
                                 peer,
-                                bytes: related(
-                                    dialog,
-                                    Method::Bye,
-                                    &dialog.remote_to,
-                                    dialog.cseq,
-                                    true,
-                                )?,
-                            });
+                                related(dialog, Method::Bye, &dialog.remote_to, dialog.cseq, true)?,
+                            ));
                             output.events.push(SipEvent::Ended {
                                 id: dialog.id.clone(),
                                 generation: dialog.generation,
@@ -958,10 +943,10 @@ impl Engine {
                 }
                 State::CancelPending { .. } | State::Cancelling { .. } => {
                     dialog.cseq = dialog.cseq.checked_add(1).ok_or(SipError::Capacity)?;
-                    output.datagrams.push(Datagram {
+                    output.datagrams.push(Datagram::new(
                         peer,
-                        bytes: related(dialog, Method::Bye, &dialog.remote_to, dialog.cseq, true)?,
-                    });
+                        related(dialog, Method::Bye, &dialog.remote_to, dialog.cseq, true)?,
+                    ));
                     dialog.state = State::Terminated {
                         expires: now.saturating_add(32_000),
                     };

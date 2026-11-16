@@ -160,10 +160,10 @@ impl RegistrationTransaction {
             | State::Completed { .. }
             | State::Terminated => return Ok(None),
         };
-        Ok(Some(RegistrationTransactionEvent::Transmit(Datagram {
-            peer: self.packet.peer,
-            bytes: self.packet.bytes.clone(),
-        })))
+        Ok(Some(RegistrationTransactionEvent::Transmit(Datagram::new(
+            self.packet.peer,
+            self.packet.bytes.clone(),
+        ))))
     }
 
     fn retry_at(&self, now: u64, interval: u64) -> u64 {
@@ -221,10 +221,7 @@ fn request(
     if source.len() > MAX_MESSAGE {
         return Err(SipError::Capacity);
     }
-    Ok(Datagram {
-        peer,
-        bytes: source.into_bytes(),
-    })
+    Ok(Datagram::new(peer, source.into_bytes()))
 }
 
 fn validate_user(source: &str) -> Result<(), SipError> {

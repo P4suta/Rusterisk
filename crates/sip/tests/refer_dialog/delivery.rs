@@ -1,6 +1,14 @@
 use super::support::{notifies, receipt, refer, status, Fixture};
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt};
 use rusterisk_sip::{Datagram, ReferFailure, ReferProgress, SipError, SipEvent};
+use std::net::SocketAddr;
+
+fn changed(packet: &Datagram, peer: SocketAddr, bytes: Vec<u8>) -> Datagram {
+    let mut changed = packet.clone();
+    changed.peer = peer;
+    changed.bytes = bytes;
+    changed
+}
 
 #[test]
 fn delivery_identity_matches_only_its_peer_dialog_and_refer_sequence() -> Result<(), SipError> {
@@ -39,22 +47,21 @@ fn delivery_identity_matches_only_its_peer_dialog_and_refer_sequence() -> Result
             if !text.contains(from) {
                 continue;
             }
-            assert!(!identity.matches(&Datagram {
-                peer: packet.peer,
-                bytes: text.replace(from, to).into_bytes(),
-            })?);
+            assert!(!identity.matches(&changed(
+                packet,
+                packet.peer,
+                text.replace(from, to).into_bytes()
+            ))?);
         }
-        assert!(!identity.matches(&Datagram {
-            peer: "127.0.0.1:5062".parse()?,
-            bytes: packet.bytes.clone(),
-        })?);
+        assert!(!identity.matches(&changed(
+            packet,
+            "127.0.0.1:5062".parse()?,
+            packet.bytes.clone()
+        ))?);
         let mut oversized = packet.bytes.clone();
         oversized.resize(rusterisk_sip::MAX_MESSAGE + 1, 0);
         assert!(matches!(
-            identity.matches(&Datagram {
-                peer: packet.peer,
-                bytes: oversized,
-            }),
+            identity.matches(&changed(packet, packet.peer, oversized)),
             Err(SipError::Capacity)
         ));
         for duplicate in ["From", "To", "Call-ID", "CSeq"] {
@@ -63,12 +70,12 @@ fn delivery_identity_matches_only_its_peer_dialog_and_refer_sequence() -> Result
                 .find(|line| line.starts_with(&format!("{duplicate}:")))
                 .ok_or(SipError::InvalidPacket)?;
             assert!(matches!(
-                identity.matches(&Datagram {
-                    peer: packet.peer,
-                    bytes: text
-                        .replacen("\r\n\r\n", &format!("\r\n{header}\r\n\r\n"), 1)
-                        .into_bytes(),
-                }),
+                identity.matches(&changed(
+                    packet,
+                    packet.peer,
+                    text.replacen("\r\n\r\n", &format!("\r\n{header}\r\n\r\n"), 1)
+                        .into_bytes()
+                )),
                 Err(SipError::InvalidPacket)
             ));
         }

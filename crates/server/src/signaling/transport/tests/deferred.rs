@@ -16,12 +16,7 @@ fn failure(error: impl std::fmt::Display) -> ControlError {
 
 fn answer(key: &CallKey, peer: SocketAddr, bytes: &[u8]) -> Output {
     Output {
-        datagrams: [Datagram {
-            peer,
-            bytes: bytes.to_vec(),
-        }]
-        .into_iter()
-        .collect(),
+        datagrams: [Datagram::new(peer, bytes.to_vec())].into_iter().collect(),
         events: [SipEvent::PeerDirection {
             id: key.id.to_string(),
             generation: key.generation,

@@ -1,9 +1,10 @@
 use super::{dialog, wire, ReferKey};
-use crate::{Datagram, Engine, Output, SipError, SipEvent, MAX_MESSAGE};
+use crate::{Datagram, DatagramOrigin, Engine, Output, SipError, SipEvent, MAX_MESSAGE};
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, SipMessage};
 use std::net::SocketAddr;
 
 pub struct ReferIdentity {
+    key: ReferKey,
     dialog: wire::Dialog,
     peer: SocketAddr,
     sequence: u32,
@@ -28,8 +29,9 @@ fn headers(message: &impl HeadersExt) -> Result<(), SipError> {
 }
 
 impl ReferIdentity {
-    fn capture(dialog: &dialog::Dialog, sequence: u32) -> Self {
+    fn capture(key: ReferKey, dialog: &dialog::Dialog, sequence: u32) -> Self {
         Self {
+            key,
             dialog: dialog.wire.clone(),
             peer: dialog.peer,
             sequence,
@@ -54,14 +56,16 @@ impl ReferIdentity {
                     return Ok(false);
                 };
                 Ok(request.cseq_header()?.typed()?.method == Method::Notify
-                    && notification.for_subscription(&self.dialog, self.sequence))
+                    && notification.for_subscription(&self.dialog, self.sequence)
+                    && packet.origin == DatagramOrigin::Refer(self.key))
             }
             SipMessage::Response(response) => {
                 headers(&response)?;
                 let cseq = response.cseq_header()?.typed()?;
                 Ok(cseq.method == Method::Refer
                     && cseq.seq == self.sequence
-                    && wire::Dialog::remote(&response)? == self.dialog)
+                    && wire::Dialog::remote(&response)? == self.dialog
+                    && packet.origin == DatagramOrigin::Refer(self.key))
             }
         }
     }
@@ -72,12 +76,12 @@ impl Engine {
         self.refers
             .pending
             .get(&key)
-            .map(|owner| ReferIdentity::capture(&owner.dialog, owner.sequence))
+            .map(|owner| ReferIdentity::capture(key, &owner.dialog, owner.sequence))
             .or_else(|| {
                 self.refers
                     .subscriptions
                     .get(&key)
-                    .map(|owner| ReferIdentity::capture(&owner.dialog, owner.sequence))
+                    .map(|owner| ReferIdentity::capture(key, &owner.dialog, owner.sequence))
             })
     }
 
@@ -113,7 +117,10 @@ impl Engine {
     pub fn refer_reply_deadline(&self, identity: &ReferIdentity) -> Result<Option<u64>, SipError> {
         let mut deadline = None;
         for cached in self.cache.values() {
-            if cached.peer != identity.peer || cached.request.method != Method::Refer {
+            if cached.origin != DatagramOrigin::Refer(identity.key)
+                || cached.peer != identity.peer
+                || cached.request.method != Method::Refer
+            {
                 continue;
             }
             let sequence = cached.request.cseq_header()?.typed()?;

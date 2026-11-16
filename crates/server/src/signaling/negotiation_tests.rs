@@ -69,12 +69,9 @@ async fn direction_answers_wait_for_the_current_transport_and_ignore_cached_retr
             .output(
                 0,
                 Output {
-                    datagrams: [Datagram {
-                        peer: address,
-                        bytes: bytes.clone(),
-                    }]
-                    .into_iter()
-                    .collect(),
+                    datagrams: [Datagram::new(address, bytes.clone())]
+                        .into_iter()
+                        .collect(),
                     events: [SipEvent::PeerDirection {
                         id: key.id.to_string(),
                         generation: 1,
@@ -90,12 +87,9 @@ async fn direction_answers_wait_for_the_current_transport_and_ignore_cached_retr
             .output(
                 0,
                 Output {
-                    datagrams: [Datagram {
-                        peer: address,
-                        bytes: bytes.clone(),
-                    }]
-                    .into_iter()
-                    .collect(),
+                    datagrams: [Datagram::new(address, bytes.clone())]
+                        .into_iter()
+                        .collect(),
                     events: Vec::new(),
                 },
                 1,

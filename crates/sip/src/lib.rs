@@ -345,9 +345,31 @@ pub enum SipEvent {
         cause: u16,
     },
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DatagramOrigin {
+    Direct,
+    Refer(ReferKey),
+}
+
+#[derive(Clone)]
 pub struct Datagram {
     pub peer: SocketAddr,
     pub bytes: Vec<u8>,
+    origin: DatagramOrigin,
+}
+
+impl Datagram {
+    pub const fn new(peer: SocketAddr, bytes: Vec<u8>) -> Self {
+        Self {
+            peer,
+            bytes,
+            origin: DatagramOrigin::Direct,
+        }
+    }
+
+    pub const fn origin(&self) -> DatagramOrigin {
+        self.origin
+    }
 }
 pub struct Output {
     pub datagrams: Vec<Datagram>,
@@ -374,7 +396,7 @@ impl DialogReply {
 impl Output {
     fn response(peer: SocketAddr, bytes: Vec<u8>) -> Self {
         Self {
-            datagrams: [Datagram { peer, bytes }].into_iter().collect(),
+            datagrams: [Datagram::new(peer, bytes)].into_iter().collect(),
             events: Vec::new(),
         }
     }
@@ -392,6 +414,7 @@ struct Cached {
     bytes: Vec<u8>,
     expires: Option<u64>,
     retry: Option<ServerRetry>,
+    origin: DatagramOrigin,
 }
 
 struct ServerRetry {
@@ -628,6 +651,7 @@ impl Engine {
                             &datagram.bytes,
                             now,
                             self.protocol != Protocol::Udp,
+                            datagram.origin,
                         )?;
                     }
                 }
@@ -687,7 +711,16 @@ impl Engine {
         let key = RequestIdentity::new(&request, peer)?;
         if let Some(cached) = self.cache.get(&key) {
             if key.accepts(cached, &request) {
-                return Ok(Output::response(peer, cached.bytes.clone()));
+                return Ok(Output {
+                    datagrams: [Datagram {
+                        peer,
+                        bytes: cached.bytes.clone(),
+                        origin: cached.origin,
+                    }]
+                    .into_iter()
+                    .collect(),
+                    events: Vec::new(),
+                });
             }
             return Ok(Output::response(
                 peer,
@@ -945,10 +978,11 @@ impl Engine {
                 bytes: reply.clone(),
                 expires,
                 retry,
+                origin: DatagramOrigin::Direct,
             },
         );
         Ok(Output {
-            datagrams: [Datagram { peer, bytes: reply }].into_iter().collect(),
+            datagrams: [Datagram::new(peer, reply)].into_iter().collect(),
             events,
         })
     }

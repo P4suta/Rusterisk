@@ -71,10 +71,7 @@ impl RegistrationResponse {
         )?;
         Ok(RegistrationTransaction {
             identity,
-            packet: Datagram {
-                peer: self.request.peer,
-                bytes,
-            },
+            packet: Datagram::new(self.request.peer, bytes),
             protocol: self.protocol,
             expires,
             observed: now,

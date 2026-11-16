@@ -124,6 +124,7 @@ impl Engine {
                 }
             };
             let packet = self.refer_notification_to(
+                key,
                 &owner.dialog,
                 Notification {
                     refer_sequence: owner.sequence,

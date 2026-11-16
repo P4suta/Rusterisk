@@ -135,10 +135,7 @@ impl Engine {
         if let Some(target) = target {
             dialog.remote_target = target.uri().clone();
         }
-        Ok(Some(Datagram {
-            peer: dialog.invite.peer,
-            bytes,
-        }))
+        Ok(Some(Datagram::new(dialog.invite.peer, bytes)))
     }
 
     pub(super) fn incoming_disconnected(&mut self, peer: SocketAddr, events: &mut Vec<SipEvent>) {
@@ -220,10 +217,7 @@ impl Engine {
         }
         let request = dialog.request(Method::Info)?;
         let bytes = crate::info::encode(request, digit, duration_ms)?;
-        Ok(Some(Datagram {
-            peer: dialog.invite.peer,
-            bytes,
-        }))
+        Ok(Some(Datagram::new(dialog.invite.peer, bytes)))
     }
 
     pub(crate) fn incoming_cancel(
@@ -262,7 +256,7 @@ impl Engine {
                 "",
             )?;
             self.update_invite_reply(&invite, &bytes, now)?;
-            output.datagrams.push(Datagram { peer, bytes });
+            output.datagrams.push(Datagram::new(peer, bytes));
             output.events.push(SipEvent::IncomingEnded {
                 id: invite.id,
                 cause: 16,
@@ -678,10 +672,9 @@ impl Engine {
         for cached in self.cache.values_mut() {
             if let Some(retry) = &mut cached.retry {
                 if retry.next <= now && self.protocol == rusterisk_config::Protocol::Udp {
-                    output.datagrams.push(Datagram {
-                        peer: cached.peer,
-                        bytes: cached.bytes.clone(),
-                    });
+                    output
+                        .datagrams
+                        .push(Datagram::new(cached.peer, cached.bytes.clone()));
                     retry.interval = (retry.interval * 2).min(4000);
                     retry.next = now.saturating_add(retry.interval);
                 }
@@ -695,18 +688,16 @@ impl Engine {
                         generation: dialog.generation,
                         cause: 102,
                     });
-                    output.datagrams.push(Datagram {
-                        peer: dialog.invite.peer,
-                        bytes: dialog.bye(now)?,
-                    });
+                    output
+                        .datagrams
+                        .push(Datagram::new(dialog.invite.peer, dialog.bye(now)?));
                 }
                 State::AwaitingAck {
                     retry, interval, ..
                 } if *retry <= now => {
-                    output.datagrams.push(Datagram {
-                        peer: dialog.invite.peer,
-                        bytes: dialog.bytes.clone(),
-                    });
+                    output
+                        .datagrams
+                        .push(Datagram::new(dialog.invite.peer, dialog.bytes.clone()));
                     *interval = (*interval * 2).min(4000);
                     *retry = now.saturating_add(*interval);
                 }

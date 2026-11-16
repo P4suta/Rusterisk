@@ -77,13 +77,7 @@ async fn output_saturation_closes_only_the_owning_connection_generation() -> Res
         .key;
     for _ in 0..9 {
         network
-            .send(
-                0,
-                Datagram {
-                    peer: source,
-                    bytes: OPTIONS.to_vec(),
-                },
-            )
+            .send(0, Datagram::new(source, OPTIONS.to_vec()))
             .await?;
     }
     assert!(matches!(
@@ -264,13 +258,7 @@ async fn a_final_frame_and_its_response_precede_half_closed_connection_cleanup(
         };
         assert_eq!(packet.bytes, OPTIONS);
         network
-            .send(
-                0,
-                Datagram {
-                    peer: source,
-                    bytes: b"response".to_vec(),
-                },
-            )
+            .send(0, Datagram::new(source, b"response".to_vec()))
             .await?;
         let Input::Closed { result, .. } = network.next().await? else {
             return Err(ControlError::Invalid("Expected connection cleanup"));
