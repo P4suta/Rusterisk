@@ -43,7 +43,11 @@ impl MediaHub {
         direction: PeerMediaDirection,
     ) -> Result<(), MediaError> {
         self.check_link(&key)?;
-        let (port, channels) = Port::new(direction, DigitSupport::Unsupported);
+        let support = session
+            .telephone()
+            .map(DigitSupport::Rfc4733)
+            .unwrap_or(DigitSupport::Unsupported);
+        let (port, channels) = Port::new(direction, support);
         self.install_link(key.clone(), port, direction)?;
         self.workers
             .spawn(async move { (key, session.run(channels).await.map(|stats| stats.audio)) });

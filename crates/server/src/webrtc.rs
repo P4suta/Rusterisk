@@ -1,11 +1,11 @@
 use crate::rtp::SocketPair;
 use base64::Engine as Base64Engine;
 use rusterisk_config::Codec;
-use rusterisk_media::MediaError;
+use rusterisk_media::{MediaError, TelephoneFormat};
 use std::{fmt, net::SocketAddr, time::Instant};
 use str0m::{
     change::{SdpAnswer, SdpOffer, SdpPendingOffer},
-    media::{Direction, MediaKind, Mid, Pt},
+    media::{Direction, Frequency, MediaKind, Mid, Pt},
     net::Transmit,
     Candidate, Event, IceCreds, Output, Rtc, RtcConfig,
 };
@@ -13,6 +13,9 @@ mod description;
 mod link;
 #[cfg(test)]
 mod rtp_tests;
+#[cfg(test)]
+mod source_tests;
+mod telephone;
 mod transmit_sources;
 pub use link::WebRtcStats;
 
@@ -36,6 +39,7 @@ pub struct WebRtcSession {
     engine: Engine,
     codec: Codec,
     payload: Pt,
+    telephones: Vec<TelephoneFormat>,
 }
 
 fn negotiation_error(_error: impl fmt::Display) -> MediaError {
@@ -94,6 +98,7 @@ impl Engine {
             ufrag: base64::engine::general_purpose::STANDARD_NO_PAD.encode(&entropy[..8]),
             pass: base64::engine::general_purpose::STANDARD_NO_PAD.encode(&entropy[8..40]),
         };
+        let receive_source_limit = std::num::NonZeroUsize::new(4).ok_or(MediaError::Capacity)?;
         let mut config = RtcConfig::new()
             .clear_codecs()
             .set_local_ice_credentials(credentials)
@@ -101,6 +106,7 @@ impl Engine {
             .set_fingerprint_verification(true)
             .set_stats_interval(None)
             .set_rtp_mode(true)
+            .set_rtp_source_limit(receive_source_limit)
             .set_send_buffer_audio(32);
         for codec in allowed {
             config = match codec {
@@ -108,6 +114,22 @@ impl Engine {
                 Codec::Pcma => config.enable_pcma(true, false),
                 Codec::Opus => config.enable_opus(true, false),
             };
+        }
+        for (payload, rate) in [
+            (101_u8, Frequency::EIGHT_KHZ),
+            (102_u8, Frequency::FORTY_EIGHT_KHZ),
+        ] {
+            config.codec_config().add_config(
+                payload.into(),
+                None,
+                str0m::format::Codec::Tele,
+                rate,
+                None,
+                str0m::format::FormatParams {
+                    telephone_event_max: Some(15),
+                    ..Default::default()
+                },
+            );
         }
         let mut engine = Self {
             rtc: config.build(now),
@@ -210,7 +232,7 @@ impl Engine {
         Ok(None)
     }
 
-    fn negotiated(mut self, allowed: &[Codec]) -> Result<WebRtcSession, MediaError> {
+    fn negotiated(mut self, allowed: &[Codec], source: &str) -> Result<WebRtcSession, MediaError> {
         let mid = self.mid.ok_or(MediaError::InvalidRoute)?;
         let selected = {
             let media = self.rtc.media(mid).ok_or(MediaError::InvalidRoute)?;
@@ -227,11 +249,21 @@ impl Engine {
             })
         }
         .ok_or(MediaError::Unsupported)?;
+        let telephones = rusterisk_sip::DtmfFormat::parse_all(source)
+            .map_err(negotiation_error)?
+            .into_iter()
+            .filter(|format| format.payload_type() != *selected.1)
+            .map(|format| {
+                TelephoneFormat::new(format.payload_type(), format.rate())?
+                    .with_events(format.events())
+            })
+            .collect::<Result<Vec<_>, MediaError>>()?;
         self.drain()?;
         Ok(WebRtcSession {
             engine: self,
             codec: selected.0,
             payload: selected.1,
+            telephones,
         })
     }
 }
@@ -264,7 +296,7 @@ impl WebRtcOffer {
 
     pub fn accept_answer(mut self, answer: &str) -> Result<WebRtcSession, MediaError> {
         let checked = checked_description(answer)?;
-        let answer = SdpAnswer::from_sdp_string(&description::for_transport(&checked))
+        let answer = SdpAnswer::from_sdp_string(&description::for_transport(&checked)?)
             .map_err(negotiation_error)?;
         self.engine
             .rtc
@@ -272,7 +304,7 @@ impl WebRtcOffer {
             .accept_answer(self.pending, answer)
             .map_err(negotiation_error)?;
         self.engine.drain()?;
-        self.engine.negotiated(&self.allowed)
+        self.engine.negotiated(&self.allowed, checked.as_str())
     }
 }
 
@@ -286,7 +318,7 @@ impl WebRtcSession {
     ) -> Result<(Self, String), MediaError> {
         let checked = checked_description(offer)?;
         let identify_tls = checked.tls_id().is_some();
-        let offer = SdpOffer::from_sdp_string(&description::for_transport(&checked))
+        let offer = SdpOffer::from_sdp_string(&description::for_transport(&checked)?)
             .map_err(negotiation_error)?;
         let mut engine = Engine::new(sockets, advertised, allowed, now)?;
         let answer = engine
@@ -296,6 +328,7 @@ impl WebRtcSession {
             .map_err(negotiation_error)?
             .to_sdp_string();
         let answer = engine.local_description(answer, identify_tls)?;
+        let answer = description::telephone_answer(&answer, &checked)?;
         let mut mids = answer
             .lines()
             .filter_map(|line| line.strip_prefix("a=mid:"));
@@ -305,11 +338,24 @@ impl WebRtcSession {
         }
         engine.mid = Some(Mid::from(mid));
         engine.drain()?;
-        Ok((engine.negotiated(allowed)?, answer))
+        Ok((engine.negotiated(allowed, &answer)?, answer))
     }
 
     pub fn is_connected(&self) -> bool {
         self.engine.rtc.is_connected()
+    }
+
+    pub fn telephone(&self) -> Option<TelephoneFormat> {
+        let rate = match self.codec {
+            Codec::Pcmu | Codec::Pcma => 8000,
+            Codec::Opus => 48000,
+        };
+        self.telephones
+            .iter()
+            .find(|format| format.rate() == rate)
+            .or_else(|| self.telephones.iter().find(|format| format.rate() == 8000))
+            .or_else(|| self.telephones.first())
+            .copied()
     }
 }
 

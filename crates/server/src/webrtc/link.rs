@@ -1,5 +1,8 @@
-use super::{negotiation_error, transmit_sources::TransmitSources, WebRtcSession};
-use crate::media_link::{Channels, LinkStats};
+use super::{
+    negotiation_error, telephone::TelephoneTransport, transmit_sources::TransmitSources,
+    WebRtcSession,
+};
+use crate::media_link::{Channels, DigitCommand, LinkStats};
 use rusterisk_config::Codec;
 use rusterisk_media::{
     AudioFormat, Frame, MediaError, RtpPacket, RtpReceiver, RtpSender, MAX_PACKET,
@@ -54,6 +57,7 @@ struct Link {
     sender: RtpSender,
     input: Option<AudioInput>,
     sources: TransmitSources,
+    telephone: Option<TelephoneTransport>,
     stats: WebRtcStats,
     started: Instant,
 }
@@ -73,7 +77,7 @@ impl Link {
     }
 
     fn receive(&mut self, data: str0m::rtp::RtpPacket) -> Result<(), MediaError> {
-        if *self.channels.stop.borrow() || !self.channels.direction.borrow().can_send() {
+        if *self.channels.stop.borrow() {
             self.discard_input();
             self.stats.audio.dropped += 1;
             return Ok(());
@@ -100,12 +104,57 @@ impl Link {
             self.stats.audio.dropped += 1;
             return Ok(());
         };
+        let payload = *data.header.payload_type;
+        let source = *data.header.ssrc;
+        let packet = RtpPacket::new(
+            payload,
+            data.header.sequence_number,
+            data.header.timestamp,
+            source,
+            &data.payload,
+        )?
+        .with_marker(data.header.marker);
+        if self
+            .telephone
+            .as_ref()
+            .is_some_and(|telephone| telephone.accepts(payload))
+        {
+            if let Some(input) = &mut self.input {
+                if input.receiver.skip(&packet).is_err() {
+                    self.stats.audio.dropped += 1;
+                }
+            }
+            let now = self.started.elapsed().as_millis() as u64;
+            let telephone = self.telephone.as_mut().ok_or(MediaError::Unsupported)?;
+            match telephone.receive(&packet, now) {
+                Ok(Some(events)) => {
+                    if !self.channels.direction.borrow().can_send() {
+                        telephone.discard_received();
+                        self.discard_input();
+                        self.stats.audio.dropped += 1;
+                        return Ok(());
+                    }
+                    self.stats.audio.packets_received += 1;
+                    for tone in events.into_tones() {
+                        self.channels
+                            .digits
+                            .try_send(tone)
+                            .map_err(|_| MediaError::Capacity)?;
+                    }
+                }
+                Ok(None) | Err(_) => self.stats.audio.dropped += 1,
+            }
+            return Ok(());
+        }
+        if !self.channels.direction.borrow().can_send() {
+            self.discard_input();
+            self.stats.audio.dropped += 1;
+            return Ok(());
+        }
         let Some(format) = format(parameters.spec().codec) else {
             self.stats.audio.dropped += 1;
             return Ok(());
         };
-        let payload = *data.header.payload_type;
-        let source = *data.header.ssrc;
         if self.input.as_ref().is_none_or(|input| {
             input.format != format || input.payload != payload || input.source != source
         }) {
@@ -116,14 +165,6 @@ impl Link {
                 receiver: RtpReceiver::new(format, payload)?,
             });
         }
-        let packet = RtpPacket::new(
-            payload,
-            data.header.sequence_number,
-            data.header.timestamp,
-            source,
-            &data.payload,
-        )?
-        .with_marker(data.header.marker);
         let input = self.input.as_mut().ok_or(MediaError::InvalidRoute)?;
         match input.receiver.push(&packet) {
             Ok(true) => self.stats.audio.packets_received += 1,
@@ -133,6 +174,7 @@ impl Link {
     }
 
     fn playout(&mut self) -> Result<(), MediaError> {
+        self.telephone_tick()?;
         let Some(input) = &mut self.input else {
             return Ok(());
         };
@@ -237,7 +279,26 @@ impl Link {
         let packet = self
             .sender
             .packet_at(frame, now.duration_since(self.started).as_millis() as u64)?;
+        self.write_packet(&packet, now)
+    }
+
+    fn write_packet(&mut self, packet: &RtpPacket, wallclock: Instant) -> Result<(), MediaError> {
         let source = packet.ssrc().into();
+        if !self.sources.contains(packet.ssrc()) {
+            let mid = self.session.engine.mid.ok_or(MediaError::InvalidRoute)?;
+            if self.session.engine.rtc.media(mid).is_none() {
+                return Err(MediaError::InvalidRoute);
+            }
+            self.sources.register(packet.ssrc())?;
+            self.session
+                .engine
+                .rtc
+                .direct_api()
+                .declare_stream_tx(source, None, mid, None);
+            if !self.drain()? {
+                return Err(MediaError::UnknownStream);
+            }
+        }
         let sequence = self.sources.sequence(packet.ssrc(), packet.sequence())?;
         self.session
             .engine
@@ -247,15 +308,93 @@ impl Link {
             .ok_or(MediaError::InvalidRoute)?
             .write_rtp(
                 RtpWrite::new(
-                    self.session.payload,
+                    packet.payload_type().into(),
                     sequence,
                     packet.timestamp(),
-                    now,
+                    wallclock,
                     packet.payload().to_vec(),
                 )
                 .marker(packet.marker()),
             );
         self.stats.audio.packets_sent += 1;
+        Ok(())
+    }
+
+    fn completed(&self, token: rusterisk_core::DtmfToken) -> Result<(), MediaError> {
+        self.channels
+            .completed
+            .try_send(token)
+            .map_err(|_| MediaError::Capacity)
+    }
+
+    fn finish_command(&self, command: DigitCommand) -> Result<(), MediaError> {
+        match command {
+            DigitCommand::Sequence(command) => self.completed(command.token),
+            DigitCommand::Tone(_) => Ok(()),
+        }
+    }
+
+    fn direction_changed(&mut self) -> Result<(), MediaError> {
+        self.discard_input();
+        if !self.channels.direction.borrow().can_send() {
+            if let Some(telephone) = &mut self.telephone {
+                telephone.discard_received();
+            }
+        }
+        if !self.channels.direction.borrow().can_receive() {
+            if let Some(token) = self.telephone.as_mut().and_then(TelephoneTransport::cancel) {
+                self.completed(token)?;
+            }
+            for _ in 0..8 {
+                match self.channels.commands.try_recv() {
+                    Ok(command) => self.finish_command(command)?,
+                    Err(
+                        mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
+                    ) => break,
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn telephone_tick(&mut self) -> Result<(), MediaError> {
+        let now = Instant::now();
+        let elapsed = now.duration_since(self.started).as_millis() as u64;
+        let Some(telephone) = &mut self.telephone else {
+            return Ok(());
+        };
+        for tone in telephone.expire(elapsed)? {
+            if self.channels.direction.borrow().can_send() {
+                self.channels
+                    .digits
+                    .try_send(tone)
+                    .map_err(|_| MediaError::Capacity)?;
+            }
+        }
+        if !self.channels.direction.borrow().can_receive() {
+            if let Some(token) = telephone.cancel() {
+                self.completed(token)?;
+            }
+            return Ok(());
+        }
+        if !self.session.engine.rtc.is_connected() {
+            return Ok(());
+        }
+        let output = telephone.poll(elapsed, &mut self.sender)?;
+        let timestamp = telephone.timestamp_at(elapsed, &self.sender);
+        let rate = telephone.rate();
+        for packet in output.packets {
+            let age = timestamp.wrapping_sub(packet.timestamp());
+            if age >= 1 << 31 {
+                return Err(MediaError::InvalidPacket);
+            }
+            let age = Duration::from_nanos(u64::from(age) * 1_000_000_000 / u64::from(rate));
+            let wallclock = now.checked_sub(age).ok_or(MediaError::InvalidPacket)?;
+            self.write_packet(&packet, wallclock)?;
+        }
+        if let Some(token) = output.completed {
+            self.completed(token)?;
+        }
         Ok(())
     }
 
@@ -278,7 +417,7 @@ impl Link {
             }
             tokio::select! {
                 changed = self.channels.stop.changed() => if changed.is_err() || *self.channels.stop.borrow() { return Ok(()); },
-                changed = self.channels.direction.changed() => { if changed.is_err() { return Ok(()); } self.discard_input(); }
+                changed = self.channels.direction.changed() => { if changed.is_err() { return Ok(()); } self.direction_changed()?; }
                 result = self.session.engine.sockets.data().recv_from(&mut bytes) => {
                     let (size, source) = result.map_err(failure)?;
                     if size > MAX_PACKET { self.stats.audio.dropped += 1; continue; }
@@ -289,7 +428,12 @@ impl Link {
                 }
                 frame = self.channels.outgoing.recv() => { let Some(frame) = frame else { return Ok(()); }; self.write(frame)?; }
                 _instant = playout.tick() => self.playout()?,
-                command = self.channels.commands.recv(), if !self.channels.commands.is_closed() || !self.channels.commands.is_empty() => { if command.is_some() { return Err(MediaError::Unsupported); } }
+                command = self.channels.commands.recv(), if self.telephone.as_ref().is_none_or(TelephoneTransport::idle) && (!self.channels.commands.is_closed() || !self.channels.commands.is_empty()) => {
+                    if let Some(command) = command {
+                        if !self.channels.direction.borrow().can_receive() { self.finish_command(command)?; }
+                        else { self.telephone.as_mut().ok_or(MediaError::Unsupported)?.admit(command)?; }
+                    }
+                }
                 () = tokio::time::sleep_until(tokio::time::Instant::from_std(self.session.engine.timeout)) => self.session.engine.rtc.handle_input(Input::Timeout(Instant::now())).map_err(negotiation_error)?,
                 () = tokio::time::sleep_until(handshake_deadline), if !self.session.engine.rtc.is_connected() => return Err(MediaError::Transport("WebRTC handshake timed out".into())),
             }
@@ -298,6 +442,9 @@ impl Link {
 
     async fn close(&mut self) -> Result<(), MediaError> {
         self.discard_input();
+        if let Some(telephone) = &mut self.telephone {
+            let _cancelled = telephone.cancel();
+        }
         self.session.engine.rtc.close().map_err(negotiation_error)?;
         let _alive = self.drain()?;
         self.flush().await
@@ -324,12 +471,19 @@ impl WebRtcSession {
         getrandom::fill(&mut seed).map_err(failure)?;
         seed[..4].copy_from_slice(&(*source).to_be_bytes());
         let sender = RtpSender::new(format, *session.payload, seed)?;
+        let telephone = session
+            .telephone()
+            .map(|format| TelephoneTransport::new(&sender, *source, format, &session.telephones))
+            .transpose()?;
+        let mut sources = TransmitSources::new();
+        sources.register(*source)?;
         let mut link = Link {
             session,
             channels,
             sender,
             input: None,
-            sources: TransmitSources::new(),
+            sources,
+            telephone,
             stats: WebRtcStats::default(),
             started: Instant::now(),
         };

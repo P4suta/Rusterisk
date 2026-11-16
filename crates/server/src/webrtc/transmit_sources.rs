@@ -3,7 +3,7 @@ use str0m::rtp::SeqNo;
 
 struct Source {
     id: u32,
-    last: u64,
+    last: Option<u64>,
 }
 
 pub(super) struct TransmitSources {
@@ -18,23 +18,39 @@ impl TransmitSources {
     }
 
     pub(super) fn sequence(&mut self, id: u32, sequence: u16) -> Result<SeqNo, MediaError> {
-        if let Some(source) = self.sources.iter_mut().find(|source| source.id == id) {
-            let distance = sequence.wrapping_sub(source.last as u16);
+        self.register(id)?;
+        let source = self
+            .sources
+            .iter_mut()
+            .find(|source| source.id == id)
+            .ok_or(MediaError::InvalidRoute)?;
+        let number = if let Some(last) = source.last {
+            let distance = sequence.wrapping_sub(last as u16);
             if distance == 0 || distance >= 32768 {
                 return Err(MediaError::InvalidPacket);
             }
-            source.last = source
-                .last
-                .checked_add(u64::from(distance))
-                .ok_or(MediaError::Capacity)?;
-            return Ok(source.last.into());
+            last.checked_add(u64::from(distance))
+                .ok_or(MediaError::Capacity)?
+        } else {
+            u64::from(sequence)
+        };
+        source.last = Some(number);
+        Ok(number.into())
+    }
+
+    pub(super) fn contains(&self, id: u32) -> bool {
+        self.sources.iter().any(|source| source.id == id)
+    }
+
+    pub(super) fn register(&mut self, id: u32) -> Result<(), MediaError> {
+        if self.contains(id) {
+            return Ok(());
         }
         if self.sources.len() >= 2 {
             return Err(MediaError::Capacity);
         }
-        let last = u64::from(sequence);
-        self.sources.push(Source { id, last });
-        Ok(last.into())
+        self.sources.push(Source { id, last: None });
+        Ok(())
     }
 }
 

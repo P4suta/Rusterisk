@@ -12,7 +12,7 @@ use str0m::{
     Event, Input, Output,
 };
 
-fn poll(engine: &mut Engine, received: &mut Vec<RtpPacket>) -> Result<(), MediaError> {
+pub(super) fn poll(engine: &mut Engine, received: &mut Vec<RtpPacket>) -> Result<(), MediaError> {
     for _ in 0..256 {
         match engine.rtc.poll_output().map_err(negotiation_error)? {
             Output::Timeout(timeout) => {
@@ -38,7 +38,7 @@ fn poll(engine: &mut Engine, received: &mut Vec<RtpPacket>) -> Result<(), MediaE
     Err(MediaError::Capacity)
 }
 
-fn deliver(
+pub(super) fn deliver(
     receiver: &mut Engine,
     transmit: &Transmit,
     contents: &[u8],
@@ -73,7 +73,7 @@ fn transfer(
     Ok(())
 }
 
-fn advance(
+pub(super) fn advance(
     left: &mut Engine,
     right: &mut Engine,
     now: Instant,
@@ -92,9 +92,7 @@ fn advance(
     transfer(right, left, now, received)
 }
 
-#[tokio::test]
-async fn authenticated_packets_preserve_source_sequence_timestamp_and_marker(
-) -> Result<(), MediaError> {
+pub(super) fn connected() -> Result<(WebRtcSession, WebRtcSession, Instant), MediaError> {
     let first = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(negotiation_error)?;
     let second = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(negotiation_error)?;
     let mut now = Instant::now();
@@ -112,8 +110,19 @@ async fn authenticated_packets_preserve_source_sequence_timestamp_and_marker(
             break;
         }
     }
-    assert!(receiver.engine.rtc.is_connected());
-    assert!(sender.engine.rtc.is_connected());
+    if !receiver.engine.rtc.is_connected() || !sender.engine.rtc.is_connected() {
+        return Err(MediaError::Transport(
+            "Expected connected test transports".into(),
+        ));
+    }
+    Ok((receiver, sender, now))
+}
+
+#[tokio::test]
+async fn authenticated_packets_preserve_source_sequence_timestamp_and_marker(
+) -> Result<(), MediaError> {
+    let (mut receiver, mut sender, mut now) = connected()?;
+    let mut received = Vec::with_capacity(4);
     let mid = sender.engine.mid.ok_or(MediaError::InvalidRoute)?;
     let source = {
         let mut direct = sender.engine.rtc.direct_api();
