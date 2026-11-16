@@ -1,4 +1,4 @@
-use super::{failure, ControlError, Peer};
+use super::{failure, BranchNamespace, ControlError, Peer};
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, Request, SipMessage};
 use std::{net::SocketAddr, time::Duration};
 
@@ -48,7 +48,8 @@ pub(super) async fn end(
     targets: [SocketAddr; 2],
 ) -> Result<(), ControlError> {
     let [target, survivor_target] = targets;
-    let bye = format!("BYE {} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-survivor-bye;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 3 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", local.uri, ending.contact()?, local.from_header().map_err(failure)?.value(), local.to_header().map_err(failure)?.value(), local.call_id_header().map_err(failure)?.value());
+    let branch = BranchNamespace::random()?.branch(0);
+    let bye = format!("BYE {} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch={branch};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 3 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", local.uri, ending.contact()?, local.from_header().map_err(failure)?.value(), local.to_header().map_err(failure)?.value(), local.call_id_header().map_err(failure)?.value());
     ending
         .signal
         .send_to(bye.as_bytes(), target)

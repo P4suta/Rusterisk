@@ -43,7 +43,12 @@ mod transfer_peer;
 mod transfer_reference_configuration;
 #[path = "sip_transfer/signals.rs"]
 mod transfer_signals;
+#[path = "sip_transfer/transaction_tests.rs"]
+mod transfer_transaction_tests;
+#[path = "sip_transfer/transaction_identity.rs"]
+mod transfer_transactions;
 use acknowledgements::AckIdentity;
+use transfer_transactions::BranchNamespace;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
@@ -120,7 +125,8 @@ async fn answer_dialog_at(
         .send_to(reply.as_bytes(), peer)
         .await
         .map_err(failure)?;
-    let ack = format!("ACK sip:rusterisk@{peer} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-ack;rport\r\nFrom: {};tag=phone\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", signal.local_addr().map_err(failure)?, request.to_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value());
+    let branch = BranchNamespace::random()?.branch(0);
+    let ack = format!("ACK sip:rusterisk@{peer} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch={branch};rport\r\nFrom: {};tag=phone\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", signal.local_addr().map_err(failure)?, request.to_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value());
     Ok((offered.remote, ack, acknowledgement))
 }
 
@@ -191,6 +197,8 @@ async fn update_direction(
     version: u64,
     direction: &str,
 ) -> Result<(), ControlError> {
+    use rsipstack::sip::headers::untyped::ToTypedHeader;
+
     let body = Session {
         remote: audio.local_addr().map_err(failure)?,
         codec: Codec::Pcmu,
@@ -203,8 +211,21 @@ async fn update_direction(
     .map_err(failure)?
     .replace("o=rusterisk 1 1 IN", &format!("o=rusterisk 1 {version} IN"))
     .replace("a=sendrecv", &format!("a={direction}"));
-    let offer = ack.replace("ACK sip:", "INVITE sip:")
-        .replace("z9hG4bK-ack", &format!("z9hG4bK-update-{sequence}"))
+    let SipMessage::Request(mut template) = SipMessage::try_from(ack).map_err(failure)? else {
+        return Err(ControlError::Invalid("Expected direction acknowledgement"));
+    };
+    let transactions = BranchNamespace::random()?;
+    let mut packet = |transaction| {
+        let via = template
+            .top_via_header()
+            .map_err(failure)?
+            .typed()
+            .map_err(failure)?
+            .with_branch(transactions.branch(transaction).to_string().into());
+        *template.via_header_mut().map_err(failure)? = via.into();
+        Ok::<_, ControlError>(template.to_string())
+    };
+    let offer = packet(0)?.replace("ACK sip:", "INVITE sip:")
         .replace("CSeq: 2 ACK", &format!("CSeq: {sequence} INVITE"))
         .replace("Content-Length: 0\r\n\r\n", &format!("Contact: <sip:phone@{}>\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", signal.local_addr().map_err(failure)?, body.len()));
     signal
@@ -212,9 +233,7 @@ async fn update_direction(
         .await
         .map_err(failure)?;
     assert_eq!(response(signal).await?.status_code.code(), 200);
-    let ack = ack
-        .replace("z9hG4bK-ack", &format!("z9hG4bK-update-ack-{sequence}"))
-        .replace("CSeq: 2 ACK", &format!("CSeq: {sequence} ACK"));
+    let ack = packet(1)?.replace("CSeq: 2 ACK", &format!("CSeq: {sequence} ACK"));
     signal
         .send_to(ack.as_bytes(), target)
         .await
@@ -692,8 +711,10 @@ async fn start_invitation(
     }
     .answer(audio, 1)
     .map_err(failure)?;
+    let transactions = BranchNamespace::random()?;
     let packet = |sequence: u32, authorization: &str| {
-        format!("INVITE {uri} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK-incoming-{sequence};rport\r\nFrom: <sip:spoofed@localhost>;tag={from_tag}\r\nTo: <{uri}>\r\nCall-ID: {call_id}\r\nCSeq: {sequence} INVITE\r\nContact: <sip:phone@{local}>\r\nMax-Forwards: 70\r\n{authorization}Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", body.len())
+        let branch = transactions.branch(sequence);
+        format!("INVITE {uri} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch={branch};rport\r\nFrom: <sip:spoofed@localhost>;tag={from_tag}\r\nTo: <{uri}>\r\nCall-ID: {call_id}\r\nCSeq: {sequence} INVITE\r\nContact: <sip:phone@{local}>\r\nMax-Forwards: 70\r\n{authorization}Content-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", body.len())
     };
     signal
         .send_to(packet(1, "").as_bytes(), target)
@@ -705,7 +726,8 @@ async fn start_invitation(
             "Missing invitation authentication challenge",
         ));
     }
-    let ack = format!("ACK {uri} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK-incoming-1;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 1 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", challenge.from_header().map_err(failure)?.value(), challenge.to_header().map_err(failure)?.value(), challenge.call_id_header().map_err(failure)?.value());
+    let branch = transactions.branch(1);
+    let ack = format!("ACK {uri} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch={branch};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 1 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", challenge.from_header().map_err(failure)?.value(), challenge.to_header().map_err(failure)?.value(), challenge.call_id_header().map_err(failure)?.value());
     signal
         .send_to(ack.as_bytes(), target)
         .await

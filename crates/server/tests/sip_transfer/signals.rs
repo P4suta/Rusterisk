@@ -1,5 +1,6 @@
 use super::failure;
 use crate::AckIdentity;
+use crate::BranchNamespace;
 use rsipstack::sip::{
     headers::untyped::ToTypedHeader, HeadersExt, Method, Request, Response, SipMessage, Uri,
 };
@@ -341,7 +342,8 @@ impl TransferSignals {
         target: SocketAddr,
         local: SocketAddr,
     ) -> Result<(), ControlError> {
-        let request = format!("BYE {} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK-transferor-bye;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 4 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", self.remote, self.to, self.from, self.call_id);
+        let branch = BranchNamespace::random()?.branch(0);
+        let request = format!("BYE {} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch={branch};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 4 BYE\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", self.remote, self.to, self.from, self.call_id);
         socket
             .send_to(request.as_bytes(), target)
             .await

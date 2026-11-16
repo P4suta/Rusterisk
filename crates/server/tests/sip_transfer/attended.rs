@@ -3,7 +3,7 @@ use super::{
     transfer_lifetime::{combine, finish},
     transfer_peer::Peer,
     transfer_signals::{acknowledge, RequestRoute, TransferSignals},
-    AudioPeer, Invitation,
+    AudioPeer, BranchNamespace, Invitation,
 };
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Request, Response, SipMessage};
 use rusterisk_config::{Codec, Config};
@@ -65,7 +65,8 @@ async fn connect(
         .typed()
         .map_err(failure)?
         .uri;
-    let ack = format!("ACK {remote} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-consultation-ack;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", caller.contact()?, answer.from_header().map_err(failure)?.value(), answer.to_header().map_err(failure)?.value(), answer.call_id_header().map_err(failure)?.value());
+    let branch = BranchNamespace::random()?.branch(0);
+    let ack = format!("ACK {remote} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch={branch};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", caller.contact()?, answer.from_header().map_err(failure)?.value(), answer.to_header().map_err(failure)?.value(), answer.call_id_header().map_err(failure)?.value());
     caller
         .signal
         .send_to(ack.as_bytes(), target)
@@ -217,7 +218,8 @@ async fn exercise(
             .ok_or(ControlError::Invalid("Missing consultation remote tag"))?
             .value(),
     );
-    let refer = format!("REFER {remote} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-attended-refer;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 3 REFER\r\nContact: <sip:phone@{}>\r\nRefer-To: <{referred}?Replaces={replaces}>\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", first.contact()?, initial.answer.from_header().map_err(failure)?.value(), initial.answer.to_header().map_err(failure)?.value(), initial.answer.call_id_header().map_err(failure)?.value(), first.contact()?);
+    let branch = BranchNamespace::random()?.branch(0);
+    let refer = format!("REFER {remote} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch={branch};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 3 REFER\r\nContact: <sip:phone@{}>\r\nRefer-To: <{referred}?Replaces={replaces}>\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", first.contact()?, initial.answer.from_header().map_err(failure)?.value(), initial.answer.to_header().map_err(failure)?.value(), initial.answer.call_id_header().map_err(failure)?.value(), first.contact()?);
     first
         .signal
         .send_to(refer.as_bytes(), target)

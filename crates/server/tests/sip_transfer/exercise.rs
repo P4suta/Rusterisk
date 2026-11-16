@@ -1,5 +1,6 @@
 use super::super::{
     answer_dialog_at, exchange, final_response, invite_at, transfer_peer::Peer, AudioPeer,
+    BranchNamespace,
 };
 use super::{
     combine, failure,
@@ -80,7 +81,8 @@ pub(super) async fn run(
         .typed()
         .map_err(failure)?
         .uri;
-    let ack = format!("ACK {remote} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-transfer-ack;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", alice.contact()?, answered.from_header().map_err(failure)?.value(), answered.to_header().map_err(failure)?.value(), answered.call_id_header().map_err(failure)?.value());
+    let branch = BranchNamespace::random()?.branch(0);
+    let ack = format!("ACK {remote} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch={branch};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", alice.contact()?, answered.from_header().map_err(failure)?.value(), answered.to_header().map_err(failure)?.value(), answered.call_id_header().map_err(failure)?.value());
     alice
         .signal
         .send_to(ack.as_bytes(), target)
@@ -101,7 +103,8 @@ pub(super) async fn run(
     exchange(&mut left, &mut right, (-7000, 4000))
         .await
         .map_err(|error| failure(format!("initial received audio: {error}")))?;
-    let refer = format!("REFER {remote} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-transfer-refer;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 3 REFER\r\nContact: <sip:phone@{}>\r\nRefer-To: <sip:200@{target}>\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", alice.contact()?, answered.from_header().map_err(failure)?.value(), answered.to_header().map_err(failure)?.value(), answered.call_id_header().map_err(failure)?.value(), alice.contact()?);
+    let branch = BranchNamespace::random()?.branch(0);
+    let refer = format!("REFER {remote} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch={branch};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 3 REFER\r\nContact: <sip:phone@{}>\r\nRefer-To: <sip:200@{target}>\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", alice.contact()?, answered.from_header().map_err(failure)?.value(), answered.to_header().map_err(failure)?.value(), answered.call_id_header().map_err(failure)?.value(), alice.contact()?);
     alice
         .signal
         .send_to(refer.as_bytes(), target)
