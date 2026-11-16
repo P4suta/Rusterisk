@@ -228,6 +228,10 @@ impl CapturedSdk {
         self.source.digest()
     }
 
+    pub fn files(&self) -> impl Iterator<Item = (&Path, &[u8])> {
+        self.source.files()
+    }
+
     pub fn build_with(
         &self,
         destination: &Path,
