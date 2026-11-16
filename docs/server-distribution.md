@@ -31,3 +31,19 @@ Candidate verification checks archive contents and executable headers before nat
 Header checks establish the declared format and processor.
 The checks follow the [Executable and Linkable Format header](https://gabi.xinuos.com/elf/02-eheader.html), [Mach-O header](https://github.com/apple-oss-distributions/xnu/blob/main/EXTERNAL_HEADERS/mach-o/loader.h), and [Portable Executable header](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format) definitions.
 Native execution and dependency checks establish runtime compatibility for the selected candidate.
+
+Build and inspect a candidate with the maintained distribution commands.
+
+```sh
+mise x -- just distribution-server-build aarch64-apple-darwin
+mise x -- just distribution-server-check-content <candidate-directory> aarch64-apple-darwin
+mise x -- just distribution-server-check-startup <candidate-directory>
+```
+
+The startup check selects the current Linux or macOS processor.
+It checks system library resolution, version output, and the packaged configuration before starting an extracted executable.
+A separate configuration copy changes only the sample HTTP and SIP listener ports.
+The runner retains bounded command logs under `.cache/distributions/server-startup`.
+It requires a complete readiness record, graceful shutdown, and both listener ports to become available.
+It removes the owned extraction and runtime data after the check.
+The startup check doesn't establish SDK interoperability or verify another operating system.
