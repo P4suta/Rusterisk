@@ -64,6 +64,10 @@ pub struct RunPlan {
 }
 
 impl RunPlan {
+    pub fn image(&self) -> &str {
+        self.image.as_str()
+    }
+
     pub fn new(
         identity: &str,
         source: &str,

@@ -3,13 +3,16 @@ use super::{
     RunPlan, SourceError, SourceSnapshot,
 };
 pub use crate::core_proofs::Execution;
-use crate::process::{run, ProcessError};
+use crate::process::{run, CommandSupervisor, ProcessError};
 use std::{
     io::{self, Read, Write},
-    path::Path,
-    process::Command,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug)]
 pub enum RunError {
@@ -33,6 +36,10 @@ pub enum RunError {
     Artifact {
         operation: String,
         artifact: io::Error,
+    },
+    SupervisorCleanup {
+        operation: String,
+        cleanup: ProcessError,
     },
 }
 impl std::fmt::Display for RunError {
@@ -61,6 +68,10 @@ impl std::fmt::Display for RunError {
             } => write!(
                 formatter,
                 "{operation}; browser artifact preservation failed: {artifact}"
+            ),
+            Self::SupervisorCleanup { operation, cleanup } => write!(
+                formatter,
+                "{operation}; browser process supervisor cleanup failed: {cleanup}"
             ),
         }
     }
@@ -175,7 +186,7 @@ fn copy_tree(
     Ok(())
 }
 
-fn preserve(root: &Path, state: &Path, identity: &str) -> Result<(), io::Error> {
+fn preserve(root: &Path, state: &Path, identity: &str) -> Result<PathBuf, io::Error> {
     let cache = root.join(".cache");
     ensure_directory(&cache)?;
     let cache = cache.join("browser-runs");
@@ -219,7 +230,7 @@ fn preserve(root: &Path, state: &Path, identity: &str) -> Result<(), io::Error> 
         Err(error) => return Err(error),
     }
     println!("browser artifacts: {}", destination.display());
-    Ok(())
+    Ok(destination)
 }
 
 fn version(phase: Phase, bytes: &[u8]) -> Result<(), RunError> {
@@ -260,47 +271,196 @@ fn version(phase: Phase, bytes: &[u8]) -> Result<(), RunError> {
     }
 }
 
-pub fn execute_with(
-    root: &Path,
-    execution: Execution,
-    image: &str,
-    mut perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
-) -> Result<(), RunError> {
-    let snapshot = SourceSnapshot::read(root)?;
-    let identity = match execution {
-        Execution::DryRun => "preview".into(),
-        Execution::Run => format!(
+pub struct PreparedBrowserRun {
+    root: PathBuf,
+    snapshot: SourceSnapshot,
+    identity: String,
+    directory: PathBuf,
+    plan: RunPlan,
+}
+
+/// Native completion requires successful validation and cleanup.
+///
+/// ```compile_fail
+/// use std::path::PathBuf;
+/// use xtask::browser::{BrowserInventory, BrowserOutcome, RunPlan, SourceSnapshot};
+/// fn forge(snapshot: SourceSnapshot, plan: RunPlan, inventory: BrowserInventory, artifacts: PathBuf) -> BrowserOutcome {
+///     BrowserOutcome { snapshot, plan, inventory, artifacts }
+/// }
+/// ```
+pub struct BrowserOutcome {
+    snapshot: SourceSnapshot,
+    plan: RunPlan,
+    inventory: BrowserInventory,
+    artifacts: PathBuf,
+}
+
+impl BrowserOutcome {
+    pub fn inputs(&self) -> impl ExactSizeIterator<Item = (&Path, &[u8])> {
+        self.snapshot.files()
+    }
+
+    pub fn image(&self) -> &str {
+        self.plan.image()
+    }
+
+    pub const fn inventory(&self) -> &BrowserInventory {
+        &self.inventory
+    }
+
+    pub fn artifacts(&self) -> &Path {
+        &self.artifacts
+    }
+}
+
+impl PreparedBrowserRun {
+    pub fn read(root: &Path, image: &str) -> Result<Self, RunError> {
+        let snapshot = SourceSnapshot::read(root)?;
+        let identity = format!(
             "{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_err(io::Error::other)?
                 .as_nanos()
-        ),
-    };
-    let directory = std::env::temp_dir().join(format!("rusterisk-browser-verify-{identity}"));
+        );
+        let directory = std::env::temp_dir().join(format!("rusterisk-browser-verify-{identity}"));
+        let source = directory.join("source");
+        let state = directory.join("state");
+        let plan = RunPlan::new(
+            &identity,
+            source.to_str().ok_or(BrowserError::Plan)?,
+            state.to_str().ok_or(BrowserError::Plan)?,
+            image,
+        )?;
+        Ok(Self {
+            root: root.to_owned(),
+            snapshot,
+            identity,
+            directory,
+            plan,
+        })
+    }
+
+    pub const fn plan(&self) -> &RunPlan {
+        &self.plan
+    }
+
+    pub fn inputs(&self) -> impl ExactSizeIterator<Item = (&Path, &[u8])> {
+        self.snapshot.files()
+    }
+
+    fn reserve(mut self) -> Result<Self, RunError> {
+        let parent = self
+            .directory
+            .parent()
+            .ok_or(BrowserError::Plan)?
+            .to_owned();
+        for attempt in 0..32 {
+            let (identity, directory) = if attempt == 0 {
+                (self.identity.clone(), self.directory.clone())
+            } else {
+                let identity = format!("{}-{attempt}", self.identity);
+                let directory = parent.join(format!("rusterisk-browser-verify-{identity}"));
+                (identity, directory)
+            };
+            let plan = RunPlan::new(
+                &identity,
+                directory
+                    .join("source")
+                    .to_str()
+                    .ok_or(BrowserError::Plan)?,
+                directory.join("state").to_str().ok_or(BrowserError::Plan)?,
+                self.plan.image(),
+            )?;
+            match std::fs::create_dir(&directory) {
+                Ok(()) => {
+                    self.identity = identity;
+                    self.directory = directory;
+                    self.plan = plan;
+                    return Ok(self);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(RunError::Io(error)),
+            }
+        }
+        Err(RunError::Io(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "browser working directory reservation limit exceeded",
+        )))
+    }
+
+    fn print(&self) {
+        println!("browser captured source: {}", self.snapshot.digest());
+        for phase in Phase::ALL {
+            let step = self.plan.step(phase);
+            println!(
+                "phase={} budget={}s docker {}",
+                phase.label(),
+                step.budget.as_secs(),
+                step.arguments.join(" ")
+            );
+        }
+    }
+
+    pub fn run(self) -> Result<BrowserOutcome, RunError> {
+        let mut supervisor = CommandSupervisor::new().map_err(RunError::Process)?;
+        let operation = run_prepared_with(self, |command, budget, mode| match mode {
+            BrowserCommand::Run => supervisor.run(command, budget),
+            BrowserCommand::Cleanup => supervisor.run_cleanup(command, budget),
+        });
+        finish(operation, supervisor.finish())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrowserCommand {
+    Run,
+    Cleanup,
+}
+
+struct CheckedBrowserRun {
+    snapshot: SourceSnapshot,
+    plan: RunPlan,
+    inventory: BrowserInventory,
+    artifacts: PathBuf,
+}
+
+fn finish(
+    operation: Result<CheckedBrowserRun, RunError>,
+    cleanup: Result<(), ProcessError>,
+) -> Result<BrowserOutcome, RunError> {
+    match (operation, cleanup) {
+        (Ok(checked), Ok(())) => Ok(BrowserOutcome {
+            snapshot: checked.snapshot,
+            plan: checked.plan,
+            inventory: checked.inventory,
+            artifacts: checked.artifacts,
+        }),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(RunError::Process(error)),
+        (Err(operation), Err(cleanup)) => Err(RunError::SupervisorCleanup {
+            operation: operation.to_string(),
+            cleanup,
+        }),
+    }
+}
+
+fn run_prepared_with(
+    prepared: PreparedBrowserRun,
+    mut perform: impl FnMut(&mut Command, Duration, BrowserCommand) -> Result<(), ProcessError>,
+) -> Result<CheckedBrowserRun, RunError> {
+    let prepared = prepared.reserve()?;
+    prepared.print();
+    let PreparedBrowserRun {
+        root,
+        snapshot,
+        identity,
+        directory,
+        plan,
+    } = prepared;
     let source = directory.join("source");
     let state = directory.join("state");
-    let plan = RunPlan::new(
-        &identity,
-        source.to_str().ok_or(BrowserError::Plan)?,
-        state.to_str().ok_or(BrowserError::Plan)?,
-        image,
-    )?;
-    println!("browser captured source: {}", snapshot.digest());
-    for phase in Phase::ALL {
-        let step = plan.step(phase);
-        println!(
-            "phase={} budget={}s docker {}",
-            phase.label(),
-            step.budget.as_secs(),
-            step.arguments.join(" ")
-        );
-    }
-    if matches!(execution, Execution::DryRun) {
-        return Ok(());
-    }
-    std::fs::create_dir(&directory)?;
     let operation = (|| {
         snapshot.write(&source, &state)?;
         for name in ["cargo", "tmp", "target", "cache", "home"] {
@@ -321,30 +481,54 @@ pub fn execute_with(
             let mut command = Command::new("docker");
             command
                 .args(&step.arguments)
-                .current_dir(root)
+                .current_dir(&root)
                 .stdout(output.try_clone()?)
                 .stderr(output);
             let started = std::time::Instant::now();
-            let result = perform(&mut command, step.budget);
+            let result = perform(&mut command, step.budget, BrowserCommand::Run);
             println!(
                 "browser phase={} elapsed={:.3}s",
                 phase.label(),
                 started.elapsed().as_secs_f64()
             );
             if let Err(primary) = result {
-                if matches!(&primary, ProcessError::Io(_) | ProcessError::Timeout) {
+                if matches!(
+                    &primary,
+                    ProcessError::Io(_)
+                        | ProcessError::Timeout
+                        | ProcessError::Interrupted
+                        | ProcessError::Cleanup { .. }
+                ) {
                     let step = plan.cleanup(phase);
-                    let output = std::fs::OpenOptions::new()
+                    let capture = std::fs::OpenOptions::new()
                         .write(true)
                         .create_new(true)
-                        .open(state.join(format!("{}-cleanup.txt", phase.label())))?;
+                        .open(state.join(format!("{}-cleanup.txt", phase.label())))
+                        .and_then(|stderr| stderr.try_clone().map(|stdout| (stdout, stderr)));
                     let mut cleanup = Command::new("docker");
-                    cleanup
-                        .args(&step.arguments)
-                        .current_dir(root)
-                        .stdout(output.try_clone()?)
-                        .stderr(output);
-                    if let Err(cleanup) = perform(&mut cleanup, step.budget) {
+                    cleanup.args(&step.arguments).current_dir(&root);
+                    let capture_error = match capture {
+                        Ok((stdout, stderr)) => {
+                            cleanup.stdout(stdout).stderr(stderr);
+                            None
+                        }
+                        Err(error) => {
+                            cleanup.stdout(Stdio::null()).stderr(Stdio::null());
+                            Some(error)
+                        }
+                    };
+                    let cleanup = match (
+                        perform(&mut cleanup, step.budget, BrowserCommand::Cleanup),
+                        capture_error,
+                    ) {
+                        (result, None) => result,
+                        (Ok(()), Some(error)) => Err(ProcessError::Io(error)),
+                        (Err(cleanup), Some(operation)) => Err(ProcessError::Cleanup {
+                            operation: operation.to_string(),
+                            cleanup: cleanup.to_string(),
+                        }),
+                    };
+                    if let Err(cleanup) = cleanup {
                         return Err(RunError::ContainerCleanup {
                             operation: primary.to_string(),
                             cleanup,
@@ -377,33 +561,38 @@ pub fn execute_with(
             snapshot.check_original(&source)?;
             snapshot.check_browser(&state)?;
         }
-        Ok(())
+        inventory.ok_or(RunError::Native(NativeError))
     })();
     let checked = snapshot
         .check_original(&source)
         .and_then(|()| snapshot.check_browser(&state));
     let operation = match (operation, checked) {
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok(inventory), Ok(())) => Ok(inventory),
         (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(RunError::Source(error)),
+        (Ok(_), Err(error)) => Err(RunError::Source(error)),
         (Err(operation), Err(source)) => Err(RunError::SourceChanged {
             operation: operation.to_string(),
             source,
         }),
     };
-    let operation = match (operation, preserve(root, &state, &identity)) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(RunError::Io(error)),
+    let operation = match (operation, preserve(&root, &state, &identity)) {
+        (Ok(inventory), Ok(artifacts)) => Ok((inventory, artifacts)),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err(error)) => Err(RunError::Io(error)),
         (Err(operation), Err(artifact)) => Err(RunError::Artifact {
             operation: operation.to_string(),
             artifact,
         }),
     };
     match (operation, std::fs::remove_dir_all(directory)) {
-        (Ok(()), Ok(())) => Ok(()),
+        (Ok((inventory, artifacts)), Ok(())) => Ok(CheckedBrowserRun {
+            snapshot,
+            plan,
+            inventory,
+            artifacts,
+        }),
         (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(RunError::Io(error)),
+        (Ok(_), Err(error)) => Err(RunError::Io(error)),
         (Err(operation), Err(cleanup)) => Err(RunError::DirectoryCleanup {
             operation: operation.to_string(),
             cleanup,
@@ -411,6 +600,30 @@ pub fn execute_with(
     }
 }
 
+pub fn execute_with(
+    root: &Path,
+    execution: Execution,
+    image: &str,
+    mut perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+) -> Result<(), RunError> {
+    let prepared = PreparedBrowserRun::read(root, image)?;
+    match execution {
+        Execution::DryRun => {
+            prepared.print();
+            Ok(())
+        }
+        Execution::Run => {
+            run_prepared_with(prepared, |command, budget, _| perform(command, budget)).map(|_| ())
+        }
+    }
+}
+
 pub fn execute(execution: Execution, image: &str) -> Result<(), RunError> {
-    execute_with(&std::env::current_dir()?, execution, image, run)
+    match execution {
+        Execution::DryRun => execute_with(&std::env::current_dir()?, execution, image, run),
+        Execution::Run => {
+            let prepared = PreparedBrowserRun::read(&std::env::current_dir()?, image)?;
+            prepared.run().map(|_| ())
+        }
+    }
 }
