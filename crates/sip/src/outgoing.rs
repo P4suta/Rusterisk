@@ -200,6 +200,37 @@ fn authenticate(
         }
     };
     let mut invite = dialog.invite.clone();
+    let other_name = if proxy {
+        "Authorization"
+    } else {
+        "Proxy-Authorization"
+    };
+    let uri = invite.uri.to_string();
+    if let Some(header) = invite
+        .headers
+        .iter_mut()
+        .find(|header| header.name().eq_ignore_ascii_case(other_name))
+    {
+        let renewed = crate::digest::Header::parse(header.value()).and_then(|previous| {
+            previous.renew_authorization(&dialog.credentials, "INVITE", &uri, &invite.body)
+        });
+        let renewed = match renewed {
+            Ok(Some(renewed)) => renewed,
+            Ok(None)
+            | Err(crate::digest::DigestError::Invalid | crate::digest::DigestError::Unsupported) => {
+                return Ok(None);
+            }
+        };
+        *header = if proxy {
+            Header::Authorization(rsipstack::sip::headers::untyped::Authorization::new(
+                renewed,
+            ))
+        } else {
+            Header::ProxyAuthorization(rsipstack::sip::headers::untyped::ProxyAuthorization::new(
+                renewed,
+            ))
+        };
+    }
     let sequence = dialog
         .cseq
         .checked_add(1)

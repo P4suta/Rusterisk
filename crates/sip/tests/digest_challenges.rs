@@ -242,3 +242,45 @@ fn a_stale_challenge_retries_only_with_a_changed_nonce_and_fresh_sequence() -> R
     }
     Ok(())
 }
+
+#[test]
+fn alternating_authentication_scopes_renew_the_existing_nonce_count_and_entity_digest(
+) -> Result<(), SipError> {
+    for proxy_first in [false, true] {
+        let mut engine = engine()?;
+        let initial = originate(&mut engine)?;
+        let first = engine.receive(
+            &challenge(&initial, proxy_first, &["Digest realm=\"provider.example\", nonce=\"first-nonce\", algorithm=SHA-512-256, qop=\"auth-int\", opaque=\"preserved\""] )?,
+            "127.0.0.1:5061".parse()?,
+            1,
+        )?;
+        let first_request = authorized(&first)?;
+        let first_authorization = authorization(&first_request, proxy_first)?;
+        let client_nonce = attribute(first_authorization, "cnonce")?;
+        let second = engine.receive(
+            &challenge(&first.datagrams[1].bytes, !proxy_first, &["Digest realm=\"provider.example\", nonce=\"second-nonce\", algorithm=SHA-256, qop=\"auth\""] )?,
+            "127.0.0.1:5061".parse()?,
+            2,
+        )?;
+        let retried = authorized(&second)?;
+        assert_eq!(retried.cseq_header()?.value(), "3 INVITE");
+        assert_eq!(retried.body, first_request.body);
+        assert!(!retried.body.is_empty());
+        let renewed = authorization(&retried, proxy_first)?;
+        assert_eq!(attribute(renewed, "nonce")?, "first-nonce");
+        assert_eq!(attribute(renewed, "cnonce")?, client_nonce);
+        assert_eq!(attribute(renewed, "nc")?, "00000002");
+        assert_eq!(attribute(renewed, "opaque")?, "preserved");
+        let identity = sha512256("outbound:provider.example:remote-password");
+        let entity = sha512256(&retried.body);
+        let target = sha512256(format!("INVITE:{}:{entity}", retried.uri));
+        let expected = sha512256(format!(
+            "{identity}:first-nonce:00000002:{client_nonce}:auth-int:{target}"
+        ));
+        assert_eq!(attribute(renewed, "response")?, expected);
+        let added = authorization(&retried, !proxy_first)?;
+        assert_eq!(attribute(added, "nonce")?, "second-nonce");
+        assert_eq!(attribute(added, "nc")?, "00000001");
+    }
+    Ok(())
+}
