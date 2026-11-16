@@ -13,28 +13,25 @@ Windows supervision must own descendants after leader exit.
 ## Decision
 
 Require `PROC_THREAD_ATTRIBUTE_JOB_LIST` creation through unchanged windows-spawn 0.1.0.
-Use [published `Job::as_handle()`](https://docs.rs/windows-spawn/0.1.0/windows_spawn/struct.Job.html#impl-AsHandle-for-Job) and one approved [accounting query](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-queryinformationjobobject) with a `BorrowedHandle` and fixed stack buffer.
-Before adoption, replace inherited `unsafe_code = "forbid"` with [`deny`](https://doc.rust-lang.org/rustc/lints/levels.html) only alongside a syntax gate and an exact registered local expectation.
-Admit only the fixed query function.
-Reject other unsafe syntax across [cfg branches](https://doc.rust-lang.org/reference/conditional-compilation.html), macro tokens, and nested suppression attributes.
-Reject dynamic attribute names and [assembly macros](https://doc.rust-lang.org/reference/inline-assembly.html).
-Keep deadlines, zero-process polling, typed streams, and explicit handle cleanup in the supervisor.
+Keep workspace and xtask [`unsafe_code = "forbid"`](https://doc.rust-lang.org/rustc/lints/levels.html).
+Confine the approved [accounting query](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-queryinformationjobobject) to private package `rusterisk-windows-job-accounting`.
+Use [published `Job::as_handle()`](https://docs.rs/windows-spawn/0.1.0/windows_spawn/struct.Job.html#impl-AsHandle-for-Job), a `BorrowedHandle`, and a fixed stack buffer.
+Accept only the query's complete root syntax tree and an exact [manifest](https://doc.rust-lang.org/cargo/reference/manifest.html).
+Require `build = false`, no procedural macros, and only pinned windows-sys.
+Turn off automatic target discovery.
+Mirror [workspace lints](https://doc.rust-lang.org/cargo/reference/workspaces.html#the-lints-table) exactly, except the package's registered `unsafe_code = "deny"`.
 
 ## Alternatives
 
-Patching the publisher adds source provenance obligations for the same query.
-process-wrap erases child ownership.
-command-group assigns jobs after spawning.
+Lowering xtask to `deny` requires checking its generated inputs and macro expansions.
+A published safe accounting API would remove the local exception but delay Windows supervision.
 
 ## Consequences
 
-All other project unsafe code remains prohibited.
-Command migration and scoped console cancellation require separate review.
-Reconsider when the publisher provides a safe accounting API.
+The boundary adds one private package and manifest validation.
+Reconsider when a compatible published accounting API exists.
 
 ## Confirmation
 
-Require rejecting syntax fixtures and native lifecycle tests, including early leader exit, descendants, timeout, cancellation, and handle closure.
-The gate inspects project source.
-External procedural macro expansions require separate validation.
+Require rejecting syntax, manifest, and lint fixtures and native lifecycle tests, including early leader exit, descendants, timeout, cancellation, and handle closure.
 Keep proposed while command migration and graceful shutdown remain unverified.
