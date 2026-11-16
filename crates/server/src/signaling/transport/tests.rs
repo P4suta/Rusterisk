@@ -10,6 +10,7 @@ use tokio::{
 };
 mod deferred;
 mod preparations;
+mod routes;
 mod upgrades;
 
 const OPTIONS: &[u8] = b"OPTIONS sip:localhost SIP/2.0\r\nContent-Length: 0\r\n\r\n";

@@ -40,32 +40,42 @@ pub(super) struct ConnectionKey {
     generation: u64,
 }
 
-pub(super) enum DeferredTransmission {
-    Datagram {
-        listener: usize,
-        packet: Datagram,
-    },
-    Stream {
-        key: ConnectionKey,
-        packet: Datagram,
-    },
-    Closed {
-        listener: usize,
-        packet: Datagram,
-    },
+#[derive(Clone, Copy)]
+enum Route {
+    Datagram { listener: usize, peer: SocketAddr },
+    Stream(ConnectionKey),
+    Closed { listener: usize, peer: SocketAddr },
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct DeliveryRoute(Route);
+
+impl DeliveryRoute {
+    pub(super) const fn listener(self) -> usize {
+        match self.0 {
+            Route::Datagram { listener, .. } | Route::Closed { listener, .. } => listener,
+            Route::Stream(key) => key.listener,
+        }
+    }
+
+    pub(super) const fn peer(self) -> SocketAddr {
+        match self.0 {
+            Route::Datagram { peer, .. } | Route::Closed { peer, .. } => peer,
+            Route::Stream(key) => key.peer,
+        }
+    }
+}
+
+pub(super) struct DeferredTransmission {
+    route: DeliveryRoute,
+    packet: Datagram,
 }
 
 impl DeferredTransmission {
     pub(super) fn matches(&self, listener: usize, packet: &Datagram) -> bool {
-        let (expected_listener, expected) = match self {
-            Self::Datagram { listener, packet } | Self::Closed { listener, packet } => {
-                (*listener, packet)
-            }
-            Self::Stream { key, packet } => (key.listener, packet),
-        };
-        expected_listener == listener
-            && expected.peer == packet.peer
-            && expected.bytes == packet.bytes
+        self.route.listener() == listener
+            && self.packet.peer == packet.peer
+            && self.packet.bytes == packet.bytes
     }
 }
 
@@ -182,6 +192,29 @@ async fn listen(listeners: &[ListenerSocket]) -> Result<ListenerInput, ControlEr
 }
 
 impl Network {
+    pub(super) fn capture(
+        &self,
+        listener: usize,
+        peer: SocketAddr,
+    ) -> Result<DeliveryRoute, ControlError> {
+        let route = match self
+            .listeners
+            .get(listener)
+            .ok_or(ControlError::Invalid("Unknown listener"))?
+        {
+            ListenerSocket::Datagram(_) => Route::Datagram { listener, peer },
+            ListenerSocket::Stream(_)
+            | ListenerSocket::Encrypted { .. }
+            | ListenerSocket::WebSocket { .. } => match self.ports.get(&(listener, peer)) {
+                Some(port) if matches!(port.state, ConnectionState::Open) => {
+                    Route::Stream(port.key)
+                }
+                Some(_) | None => Route::Closed { listener, peer },
+            },
+        };
+        Ok(DeliveryRoute(route))
+    }
+
     pub(super) fn defer(
         &self,
         listener: usize,
@@ -190,33 +223,32 @@ impl Network {
         if packet.bytes.len() > MAX_MESSAGE {
             return Err(ControlError::Capacity);
         }
-        match self
-            .listeners
-            .get(listener)
-            .ok_or(ControlError::Invalid("Unknown listener"))?
-        {
-            ListenerSocket::Datagram(_) => Ok(DeferredTransmission::Datagram { listener, packet }),
-            ListenerSocket::Stream(_)
-            | ListenerSocket::Encrypted { .. }
-            | ListenerSocket::WebSocket { .. } => match self.ports.get(&(listener, packet.peer)) {
-                Some(port) if matches!(port.state, ConnectionState::Open) => {
-                    Ok(DeferredTransmission::Stream {
-                        key: port.key,
-                        packet,
-                    })
-                }
-                Some(_) | None => Ok(DeferredTransmission::Closed { listener, packet }),
-            },
-        }
+        Ok(DeferredTransmission {
+            route: self.capture(listener, packet.peer)?,
+            packet,
+        })
     }
 
     pub(super) async fn send_deferred(
         &mut self,
         deferred: DeferredTransmission,
     ) -> Result<bool, ControlError> {
-        let (listener, packet) = match deferred {
-            DeferredTransmission::Datagram { listener, packet } => (listener, packet),
-            DeferredTransmission::Stream { key, packet } => {
+        self.send_on(deferred.route, deferred.packet).await
+    }
+
+    pub(super) async fn send_on(
+        &mut self,
+        route: DeliveryRoute,
+        packet: Datagram,
+    ) -> Result<bool, ControlError> {
+        if packet.bytes.len() > MAX_MESSAGE {
+            return Err(ControlError::Capacity);
+        }
+        if packet.peer != route.peer() {
+            return Err(ControlError::Invalid("Delivery peer changed"));
+        }
+        match route.0 {
+            Route::Stream(key) => {
                 if !self
                     .ports
                     .get(&(key.listener, key.peer))
@@ -226,11 +258,11 @@ impl Network {
                 {
                     return Ok(false);
                 }
-                (key.listener, packet)
             }
-            DeferredTransmission::Closed { .. } => return Ok(false),
-        };
-        self.send(listener, packet).await?;
+            Route::Closed { .. } => return Ok(false),
+            Route::Datagram { .. } => {}
+        }
+        self.send(route.listener(), packet).await?;
         Ok(true)
     }
 
