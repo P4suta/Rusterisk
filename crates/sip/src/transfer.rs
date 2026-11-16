@@ -6,6 +6,7 @@ pub(crate) mod dialog;
 pub(crate) mod notify;
 pub(crate) mod owners;
 mod progress;
+pub(crate) mod replacement;
 mod replaces;
 mod request;
 mod subscribe;
@@ -13,6 +14,7 @@ pub(crate) mod wire;
 pub use attended::AttendedRefer;
 pub use authority::ReferAuthority;
 pub use delivery::ReferIdentity;
+pub use replacement::ReplacementDialog;
 pub use replaces::Replaces;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

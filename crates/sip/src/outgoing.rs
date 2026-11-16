@@ -74,6 +74,43 @@ struct DialogMedia {
 }
 
 impl Engine {
+    pub(crate) fn outgoing_replacement(
+        &self,
+        selector: &crate::Replaces,
+        selected: &mut crate::transfer::replacement::Selection,
+    ) -> Result<(), SipError> {
+        use crate::transfer::replacement::Eligibility;
+        for dialog in self.outgoing.values() {
+            let from = dialog.invite.from_header()?.typed()?;
+            let to = rsipstack::sip::headers::typed::To::parse(&dialog.remote_to)?;
+            if dialog.invite.call_id_header()?.value() != selector.call_id()
+                || from.tag().map(|tag| tag.value()) != Some(selector.to_tag())
+                || to.tag().map(|tag| tag.value()) != Some(selector.from_tag())
+            {
+                continue;
+            }
+            let eligibility = match dialog.state {
+                State::Established(_) => match dialog.uri_security {
+                    UriSecurity::Sip => Eligibility::Confirmed,
+                    UriSecurity::Sips => Eligibility::Unsupported,
+                },
+                State::Calling { .. } | State::Proceeding => Eligibility::Unsupported,
+                State::CancelPending { .. }
+                | State::Cancelling { .. }
+                | State::Terminated { .. }
+                | State::RejectedTarget { .. } => Eligibility::Ended,
+            };
+            selected.include(
+                selector,
+                &dialog.id,
+                dialog.generation,
+                &dialog.authority,
+                eligibility,
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) fn outgoing_refer_dialog(
         &mut self,
         request: &Request,

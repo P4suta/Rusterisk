@@ -4,6 +4,8 @@ use rusterisk_sip::{ReferFailure, ReferProgress, SipError, SipEvent};
 mod cleanup;
 #[path = "refer_dialog/delivery.rs"]
 mod delivery;
+#[path = "refer_dialog/replacement.rs"]
+mod replacement;
 #[path = "refer_dialog/support.rs"]
 mod support;
 use support::{notifies, receipt, refer, status, Fixture};

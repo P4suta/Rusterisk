@@ -77,6 +77,41 @@ impl Incoming {
 }
 
 impl Engine {
+    pub(crate) fn incoming_replacement(
+        &self,
+        selector: &crate::Replaces,
+        selected: &mut crate::transfer::replacement::Selection,
+    ) -> Result<(), SipError> {
+        use crate::transfer::replacement::Eligibility;
+        for dialog in self.incoming.values() {
+            let request = &dialog.invite.request;
+            let from = request.from_header()?.typed()?;
+            if request.call_id_header()?.value() != selector.call_id()
+                || dialog.invite.local_tag != selector.to_tag()
+                || from.tag().map(|tag| tag.value()) != Some(selector.from_tag())
+            {
+                continue;
+            }
+            let eligibility = match dialog.state {
+                State::Terminated { .. } => Eligibility::Ended,
+                State::AwaitingAck { .. } | State::Established => {
+                    match dialog.invite.uri_security {
+                        crate::transport::UriSecurity::Sip => Eligibility::Confirmed,
+                        crate::transport::UriSecurity::Sips => Eligibility::Unsupported,
+                    }
+                }
+            };
+            selected.include(
+                selector,
+                &dialog.invite.id,
+                dialog.generation,
+                &dialog.invite.authority,
+                eligibility,
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) fn incoming_refer_dialog(
         &mut self,
         request: &Request,
