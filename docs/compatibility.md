@@ -37,8 +37,12 @@ The response preserves process identity, startup time, and the bounded channel l
 Registered JSON body parameters override query values while path identifiers remain authoritative.
 Body values follow the public operation's declared types and bounded conversion rules.
 Channel creation validates initial variables together and applies them before publishing creation events.
-Playback supports start, pause, resume, and stop.
-Seeking and media lists remain unsupported.
+Playback provides start, pause, resume, stop, restart, forward, and reverse.
+Forward and reverse use a three-second step from the current playback position.
+Paused and stopping playbacks reject position changes.
+Queued restart preserves the original request.
+Audio driver tests compare samples after position changes, and reference comparison of position changes remains pending.
+Initial offsets, configurable steps, and media lists remain unsupported.
 Live recording duration statistics remain absent.
 
 ## Signaling and audio
