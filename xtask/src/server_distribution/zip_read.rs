@@ -1,4 +1,4 @@
-use super::{ArchiveFormat, ServerPayload};
+use super::{ArchiveFormat, ServerCandidateName, ServerPayload};
 use std::io::{self, Cursor, Read};
 use zip::{
     read::{ArchiveOffset, Config},
@@ -96,6 +96,34 @@ fn contents(reader: &mut impl Read, expected: &[u8]) -> io::Result<()> {
         }
         position = end;
     }
+}
+
+pub(super) fn binary(name: &ServerCandidateName, bytes: &[u8]) -> io::Result<Vec<u8>> {
+    directory(bytes)?;
+    let mut archive = ZipArchive::with_config(
+        Config {
+            archive_offset: ArchiveOffset::Known(0),
+        },
+        Cursor::new(bytes),
+    )?;
+    let path = format!("{}/{}", name.root(), name.target().binary_path());
+    let mut file = archive.by_name(&path)?;
+    if !file.is_file()
+        || file.is_symlink()
+        || file.encrypted()
+        || file.size() == 0
+        || file.size() > 256 * 1024 * 1024
+        || file.compression() != CompressionMethod::Deflated
+    {
+        return Err(invalid());
+    }
+    let expected = file.size();
+    let mut bytes = Vec::new();
+    file.by_ref().take(expected + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != expected {
+        return Err(invalid());
+    }
+    Ok(bytes)
 }
 
 pub fn check_server_zip(payload: &ServerPayload, bytes: &[u8]) -> io::Result<()> {
