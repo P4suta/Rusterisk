@@ -1,5 +1,6 @@
 use crate::{
-    Call, CallState, TransferDecision, TransferError, TransferOutcome, TransferState, TransferToken,
+    Call, CallPairError, CallState, OwnedCallPair, TransferDecision, TransferError,
+    TransferOutcome, TransferState, TransferToken,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -12,6 +13,7 @@ pub struct AttendedTransfer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AttendedStart {
     pub transfer: AttendedTransfer,
+    pub pair: OwnedCallPair,
     pub transferor: Call,
     pub transferee: Call,
     pub consultation: Call,
@@ -61,12 +63,18 @@ impl AttendedTransfer {
             .leave(second)
             .and_then(|call| call.join(bridge))
             .map_err(|_| TransferError::Bridge)?;
+        let pair = OwnedCallPair::new(transferee, target).map_err(|error| match error {
+            CallPairError::Participants => TransferError::Participants,
+            CallPairError::NotAnswered => TransferError::NotAnswered,
+            CallPairError::Bridge => TransferError::Bridge,
+        })?;
         Ok(AttendedStart {
             transfer: Self {
                 token,
                 survivors: [transferee.generation(), target.generation()],
                 state: TransferState::Proceeding,
             },
+            pair,
             transferor,
             transferee,
             consultation,

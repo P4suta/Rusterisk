@@ -1,7 +1,7 @@
 use rusterisk_core::{
-    AttendedStart, AttendedTransfer, Call, CallEvent, MuteDirection, PeerMediaDirection,
-    StasisApplication, TransferDecision, TransferError, TransferOutcome, TransferState,
-    TransferToken,
+    AttendedStart, AttendedTransfer, Call, CallEvent, CallPairState, MuteDirection,
+    PeerMediaDirection, StasisApplication, TransferDecision, TransferError, TransferOutcome,
+    TransferState, TransferToken,
 };
 
 fn failure(error: impl std::fmt::Debug) -> String {
@@ -92,6 +92,9 @@ fn handoff_joins_the_existing_survivors_and_preserves_each_call_property() -> Re
                 assert_eq!(start.consultation.bridge(), None);
                 assert_eq!(start.transferee.bridge(), Some(40));
                 assert_eq!(start.target.bridge(), Some(40));
+                assert_eq!(start.pair.bridge(), 40);
+                assert_eq!(start.pair.generations(), [12, 14]);
+                assert_eq!(start.pair.state(), CallPairState::Linked);
                 assert_eq!(start.transfer.state(), TransferState::Proceeding);
                 for (before, after) in calls.into_iter().zip([
                     start.transferor,
