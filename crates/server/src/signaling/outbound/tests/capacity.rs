@@ -1,5 +1,13 @@
 use super::{failure, Config, ControlError, Controller, MediaHub, Signaling};
 use crate::{CallKey, Runner};
+use rsipstack::sip::{
+    headers::{
+        auth::{Algorithm, AuthQop},
+        typed::WwwAuthenticate,
+    },
+    services::DigestGenerator,
+    Method, SipMessage, Uri,
+};
 use rusterisk_api::ChannelId;
 
 struct Fixture {
@@ -22,11 +30,79 @@ impl Fixture {
     }
 
     async fn finish(mut self) -> Result<(), ControlError> {
-        self.signaling.finish_native().await?;
-        self.signaling.network.close().await?;
+        let primary = self.signaling.finish_native().await;
+        let cleanup = self.signaling.network.close().await;
         drop((self.runner, self.hub));
-        Ok(())
+        crate::signaling::cleanup::combine(primary, cleanup)
     }
+}
+
+async fn registered_fixture() -> Result<Fixture, ControlError> {
+    let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=password\n[registered]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=registered\nallow=ulaw\n", "", "").map_err(failure)?;
+    let (controller, runner, effects) = Controller::new(config.clone(), 64);
+    let (media, hub, notices) = MediaHub::new(64);
+    let mut signaling = Signaling::bind(config, controller, effects, media, notices).await?;
+    let local = signaling.network.local_addr(0)?;
+    let peer = "127.0.0.2:5070".parse().map_err(failure)?;
+    let uri = Uri::try_from(format!("sip:{local}")).map_err(failure)?;
+    let register = |sequence, authorization| {
+        format!("REGISTER {uri} SIP/2.0\r\nVia: SIP/2.0/UDP {peer};branch=z9hG4bK-capacity-register-{sequence};rport\r\nFrom: <sip:phone@localhost>;tag=phone\r\nTo: <sip:registered@localhost>\r\nCall-ID: registered-capacity\r\nCSeq: {sequence} REGISTER\r\nContact: <sip:phone@{peer};transport=udp>\r\nExpires: 120\r\nMax-Forwards: 70\r\n{authorization}Content-Length: 0\r\n\r\n")
+    };
+    let output = signaling.listeners[0]
+        .engine
+        .receive(register(1, "").as_bytes(), peer, 0)
+        .map_err(failure)?;
+    let packet = output.datagrams.first().ok_or(ControlError::Capacity)?;
+    let SipMessage::Response(response) =
+        SipMessage::try_from(packet.bytes.as_slice()).map_err(failure)?
+    else {
+        return Err(ControlError::Invalid("Expected registration challenge"));
+    };
+    let challenge = response
+        .headers
+        .iter()
+        .find(|header| {
+            header.name().eq_ignore_ascii_case("WWW-Authenticate")
+                && header.value().contains("algorithm=MD5")
+        })
+        .ok_or(ControlError::Invalid("Missing MD5 registration challenge"))?;
+    let challenge = WwwAuthenticate::parse(challenge.value()).map_err(failure)?;
+    let qop = AuthQop::Auth {
+        cnonce: "capacity-client".into(),
+        nc: 1,
+    };
+    let digest = DigestGenerator {
+        username: "phone",
+        password: "password",
+        nonce: &challenge.nonce,
+        uri: &uri,
+        realm: &challenge.realm,
+        method: &Method::Register,
+        qop: Some(&qop),
+        algorithm: Algorithm::Md5,
+    }
+    .compute();
+    let authorization = format!("Authorization: Digest username=\"phone\", realm=\"{}\", nonce=\"{}\", uri=\"{uri}\", response=\"{digest}\", algorithm=MD5, qop=auth, cnonce=\"capacity-client\", nc=00000001\r\n", challenge.realm, challenge.nonce);
+    let output = signaling.listeners[0]
+        .engine
+        .receive(register(2, &authorization).as_bytes(), peer, 0)
+        .map_err(failure)?;
+    let packet = output.datagrams.first().ok_or(ControlError::Capacity)?;
+    let SipMessage::Response(response) =
+        SipMessage::try_from(packet.bytes.as_slice()).map_err(failure)?
+    else {
+        return Err(ControlError::Invalid("Expected registration response"));
+    };
+    if response.status_code.code() != 200 {
+        return Err(ControlError::Invalid(
+            "Registration did not establish the call route",
+        ));
+    }
+    Ok(Fixture {
+        signaling,
+        runner,
+        hub,
+    })
 }
 
 fn key(id: &str, generation: u64) -> Result<CallKey, ControlError> {
@@ -34,6 +110,50 @@ fn key(id: &str, generation: u64) -> Result<CallKey, ControlError> {
         id: ChannelId::try_from(id.to_owned())?,
         generation,
     })
+}
+
+#[tokio::test]
+async fn cancelled_registered_calls_keep_the_shared_setup_slots_until_their_jobs_are_joined(
+) -> Result<(), ControlError> {
+    let mut fixture = registered_fixture().await?;
+    let primary: Result<(), ControlError> = async {
+        for generation in 1..=16 {
+            fixture.signaling.queue_native(
+                key(&format!("registered-{generation}"), generation)?,
+                "PJSIP/phone".into(),
+                "100".into(),
+                Some(30),
+                0,
+            )?;
+        }
+        for generation in 1..=16 {
+            fixture
+                .signaling
+                .cancel_native(&key(&format!("registered-{generation}"), generation)?);
+        }
+        if !fixture.signaling.native_pending.is_empty()
+            || !matches!(
+                fixture.signaling.network.reserve_setup(0),
+                Err(ControlError::Capacity)
+            )
+        {
+            return Err(ControlError::Invalid(
+                "Cancelled registered calls released shared setup capacity",
+            ));
+        }
+        while let Some(completed) = fixture.signaling.native_jobs.join_next().await {
+            fixture
+                .signaling
+                .native_completed(completed.map_err(failure)?, 1)
+                .await?;
+        }
+        let recovered = fixture.signaling.network.reserve_setup(0)?;
+        fixture.signaling.network.finish_resolution(recovered);
+        Ok(())
+    }
+    .await;
+    let cleanup = fixture.finish().await;
+    crate::signaling::cleanup::combine(primary, cleanup)
 }
 
 #[tokio::test]

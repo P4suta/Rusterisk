@@ -115,10 +115,7 @@ impl Network {
         &mut self,
         listener: usize,
     ) -> Result<SetupKey, ControlError> {
-        if self.preparations.len() >= 16
-            || self.ports.len() + self.preparations.len() >= 64
-            || self.jobs.len() >= 64
-        {
+        if self.ports.len() + self.preparations.len() >= 64 || self.jobs.len() >= 64 {
             return Err(ControlError::Capacity);
         }
         if !matches!(
@@ -131,14 +128,7 @@ impl Network {
         ) {
             return Err(ControlError::Unsupported);
         }
-        self.generation = self
-            .generation
-            .checked_add(1)
-            .ok_or(ControlError::Capacity)?;
-        let key = SetupKey {
-            listener,
-            generation: self.generation,
-        };
+        let key = self.reserve_slot(listener)?;
         let (stop, _stopped) = watch::channel(false);
         self.preparations.insert(
             key,
@@ -148,6 +138,32 @@ impl Network {
                 identity: None,
             },
         );
+        Ok(key)
+    }
+
+    pub(in crate::signaling) fn reserve_registered_setup(
+        &mut self,
+        listener: usize,
+    ) -> Result<SetupKey, ControlError> {
+        self.reserve_slot(listener)
+    }
+
+    fn reserve_slot(&mut self, listener: usize) -> Result<SetupKey, ControlError> {
+        if self.setups.len() >= 16 {
+            return Err(ControlError::Capacity);
+        }
+        if self.listeners.get(listener).is_none() {
+            return Err(ControlError::Invalid("Unknown signaling listener"));
+        }
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(ControlError::Capacity)?;
+        let key = SetupKey {
+            listener,
+            generation: self.generation,
+        };
+        self.setups.insert(key);
         Ok(key)
     }
 
@@ -161,9 +177,10 @@ impl Network {
         if self
             .preparations
             .get(&key)
-            .is_some_and(|preparation| matches!(preparation.phase, Phase::Resolving))
+            .is_none_or(|preparation| matches!(preparation.phase, Phase::Resolving))
         {
             self.preparations.remove(&key);
+            self.setups.remove(&key);
         }
     }
 
@@ -278,6 +295,7 @@ impl Network {
             self.ports.remove(&(key.listener, key.peer));
             return Err(ControlError::Conflict("Signaling setup owner closed"));
         }
+        self.setups.remove(&prepared.key);
         Ok(key)
     }
 
@@ -291,6 +309,7 @@ impl Network {
                 }
             }
             SetupEvent::Finished { key, result } => {
+                self.setups.remove(&key);
                 if self.preparations.remove(&key).is_some() {
                     return Some(super::Input::SetupFinished { key, result });
                 }

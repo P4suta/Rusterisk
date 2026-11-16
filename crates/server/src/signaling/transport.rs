@@ -6,7 +6,12 @@ use crate::{
 };
 use rusterisk_config::{Config, Protocol};
 use rusterisk_sip::{Datagram, SipStreamDecoder, StreamItem, MAX_MESSAGE};
-use std::{collections::BTreeMap, net::SocketAddr, task::Poll, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::SocketAddr,
+    task::Poll,
+    time::Duration,
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf},
     net::{TcpListener, TcpStream, UdpSocket},
@@ -148,6 +153,7 @@ pub(super) struct Network {
     upgrades: mpsc::Receiver<UpgradeRequest>,
     upgrade_requests: mpsc::Sender<UpgradeRequest>,
     preparations: BTreeMap<SetupKey, setup::Preparation>,
+    setups: BTreeSet<SetupKey>,
     preparation_sender: mpsc::Sender<setup::SetupEvent>,
     prepared: mpsc::Receiver<setup::SetupEvent>,
 }
@@ -324,6 +330,7 @@ impl Network {
             upgrades,
             upgrade_requests,
             preparations: BTreeMap::new(),
+            setups: BTreeSet::new(),
             preparation_sender,
             prepared,
         })
@@ -566,6 +573,7 @@ impl Network {
         }
         self.ports.clear();
         self.preparations.clear();
+        self.setups.clear();
         match failure {
             Some(error) => Err(error),
             None => Ok(()),

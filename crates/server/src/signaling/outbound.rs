@@ -16,7 +16,7 @@ mod tests;
 #[derive(Clone, Copy)]
 enum Route {
     Registered(RegisteredRoute),
-    Static(SetupKey),
+    Static,
 }
 
 enum Phase {
@@ -29,6 +29,7 @@ pub(super) struct Pending {
     caller: String,
     timeout: Option<u32>,
     listener: usize,
+    setup: SetupKey,
     route: Route,
     phase: Phase,
     cancel: watch::Sender<bool>,
@@ -41,7 +42,7 @@ struct Resolution {
 
 pub(super) struct Completion {
     key: CallKey,
-    setup: Option<SetupKey>,
+    setup: SetupKey,
     result: Result<Resolution, ControlError>,
 }
 
@@ -90,13 +91,14 @@ impl Signaling {
             Destination::Static(target) => self.resolution_cache.get(target, Instant::now()),
         };
         let (route, setup) = match destination {
-            Destination::Registered(peer) => (
-                Route::Registered(self.network.registered_route(listener, peer)?),
-                None,
-            ),
+            Destination::Registered(peer) => {
+                let route = self.network.registered_route(listener, peer)?;
+                let setup = self.network.reserve_registered_setup(listener)?;
+                (Route::Registered(route), setup)
+            }
             Destination::Static(_) => {
                 let setup = self.network.reserve_setup(listener)?;
-                (Route::Static(setup), Some(setup))
+                (Route::Static, setup)
             }
         };
         let (cancel, mut cancelled) = watch::channel(false);
@@ -107,6 +109,7 @@ impl Signaling {
                 caller,
                 timeout,
                 listener,
+                setup,
                 route,
                 phase: Phase::Resolving,
                 cancel,
@@ -130,9 +133,7 @@ impl Signaling {
         now: u64,
     ) -> Result<(), ControlError> {
         let Some(pending) = self.native_pending.get_mut(&completed.key) else {
-            if let Some(setup) = completed.setup {
-                self.network.finish_resolution(setup);
-            }
+            self.network.finish_resolution(completed.setup);
             return Ok(());
         };
         if !matches!(pending.phase, Phase::Resolving) {
@@ -144,21 +145,18 @@ impl Signaling {
             Ok(resolved) if !resolved.lease.is_released() => resolved,
             Ok(_) => {
                 self.cancel_native(&completed.key);
-                if let Some(setup) = completed.setup {
-                    self.network.finish_resolution(setup);
-                }
+                self.network.finish_resolution(completed.setup);
                 return Ok(());
             }
             Err(error) => {
                 self.cancel_native(&completed.key);
-                if let Some(setup) = completed.setup {
-                    self.network.finish_resolution(setup);
-                }
+                self.network.finish_resolution(completed.setup);
                 return self.native_failed(completed.key, error).await;
             }
         };
         match (pending.route, resolved.target) {
             (Route::Registered(route), None) => {
+                self.network.finish_resolution(pending.setup);
                 let name = pending
                     .endpoint
                     .strip_prefix("PJSIP/")
@@ -195,7 +193,8 @@ impl Signaling {
                     self.native_failed(completed.key, error).await?;
                 }
             }
-            (Route::Static(setup), Some(target)) => {
+            (Route::Static, Some(target)) => {
+                let setup = pending.setup;
                 self.resolution_cache
                     .insert(target.clone(), Instant::now())?;
                 match target.protocol() {
@@ -240,7 +239,7 @@ impl Signaling {
                     Protocol::Ws | Protocol::Wss => return Err(ControlError::Unsupported),
                 }
             }
-            (Route::Registered(_), Some(_)) | (Route::Static(_), None) => {
+            (Route::Registered(_), Some(_)) | (Route::Static, None) => {
                 return Err(ControlError::Invalid("Signaling destination changed"))
             }
         }
@@ -253,7 +252,7 @@ impl Signaling {
         now: u64,
     ) -> Result<(), ControlError> {
         let key = self.native_pending.iter().find_map(|(key, pending)| {
-            matches!(pending.route, Route::Static(setup) if setup == prepared.key)
+            (matches!(pending.route, Route::Static) && pending.setup == prepared.key)
                 .then(|| key.clone())
         });
         let Some(key) = key else {
@@ -304,7 +303,7 @@ impl Signaling {
         result: Result<(), ControlError>,
     ) -> Result<(), ControlError> {
         let key = self.native_pending.iter().find_map(|(key, pending)| {
-            matches!(pending.route, Route::Static(ticket) if ticket == setup).then(|| key.clone())
+            (matches!(pending.route, Route::Static) && pending.setup == setup).then(|| key.clone())
         });
         if let Some(key) = key {
             self.cancel_native(&key);
@@ -319,9 +318,7 @@ impl Signaling {
     pub(super) fn cancel_native(&mut self, key: &CallKey) {
         if let Some(pending) = self.native_pending.remove(key) {
             pending.cancel.send_replace(true);
-            if let Route::Static(setup) = pending.route {
-                self.network.cancel_setup(setup);
-            }
+            self.network.cancel_setup(pending.setup);
         }
     }
 
@@ -333,17 +330,13 @@ impl Signaling {
     pub(super) async fn finish_native(&mut self) -> Result<(), ControlError> {
         for (_, pending) in std::mem::take(&mut self.native_pending) {
             pending.cancel.send_replace(true);
-            if let Route::Static(setup) = pending.route {
-                self.network.cancel_setup(setup);
-            }
+            self.network.cancel_setup(pending.setup);
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while !self.native_jobs.is_empty() {
             match tokio::time::timeout_at(deadline, self.native_jobs.join_next()).await {
                 Ok(Some(Ok(completed))) => {
-                    if let Some(setup) = completed.setup {
-                        self.network.finish_resolution(setup);
-                    }
+                    self.network.finish_resolution(completed.setup);
                 }
                 Ok(Some(Err(error))) => return Err(failure(error)),
                 Ok(None) => break,
