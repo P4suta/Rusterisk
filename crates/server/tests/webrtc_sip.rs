@@ -46,9 +46,11 @@ struct Application {
     _direction: watch::Sender<PeerMediaDirection>,
 }
 
+const APPLICATION_FRAME_CAPACITY: usize = 3;
+
 fn channels() -> (Channels, Application) {
-    let (incoming, input) = mpsc::channel(3);
-    let (outgoing, output) = mpsc::channel(3);
+    let (incoming, input) = mpsc::channel(APPLICATION_FRAME_CAPACITY);
+    let (outgoing, output) = mpsc::channel(APPLICATION_FRAME_CAPACITY);
     let (digits, _digits) = mpsc::channel(16);
     let (_commands, commands) = mpsc::channel(8);
     let (completed, _completed) = mpsc::channel(8);

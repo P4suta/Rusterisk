@@ -1,9 +1,9 @@
-use super::{failure, Application};
+use super::{failure, Application, APPLICATION_FRAME_CAPACITY};
 use rsipstack::sip::{headers::typed::Contact, HeadersExt, Request, Response, SipMessage};
 use rusterisk_media::{Frame, MediaError};
 use rusterisk_sip::{Direction, DtlsSetup, WebRtcDescription};
 use std::{net::SocketAddr, time::Duration};
-use tokio::net::UdpSocket;
+use tokio::{net::UdpSocket, sync::mpsc::error::TryRecvError};
 
 pub(super) struct Dialog {
     target: SocketAddr,
@@ -171,6 +171,38 @@ pub(super) async fn cycle(
     Ok(())
 }
 
+fn begin_measurement(
+    left: &mut Application,
+    right: &mut Application,
+) -> Result<tokio::time::Instant, MediaError> {
+    for application in [left, right] {
+        for _ in 0..APPLICATION_FRAME_CAPACITY {
+            match application.incoming.try_recv() {
+                Ok(_frame) => {}
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return Err(MediaError::UnknownStream),
+            }
+        }
+    }
+    Ok(tokio::time::Instant::now())
+}
+
+fn validate_samples(frame: &Frame, expected: Option<i32>) -> Result<(), MediaError> {
+    let expected =
+        expected.ok_or_else(|| MediaError::Transport("Held WebRTC still received audio".into()))?;
+    if frame
+        .samples()
+        .iter()
+        .all(|sample| (i32::from(*sample) - expected).abs() < 300)
+    {
+        Ok(())
+    } else {
+        Err(MediaError::Transport(
+            "WebRTC audio does not match the measured direction".into(),
+        ))
+    }
+}
+
 async fn restricted(
     left: &mut Application,
     right: &mut Application,
@@ -182,7 +214,7 @@ async fn restricted(
         Direction::RecvOnly => (Some(-7000), 0),
         Direction::SendRecv => return Err(MediaError::InvalidRoute),
     };
-    let started = tokio::time::Instant::now();
+    let started = begin_measurement(left, right)?;
     let mut clock = tokio::time::interval(Duration::from_millis(20));
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut received = [0; 2];
@@ -195,15 +227,14 @@ async fn restricted(
             frame = left.incoming.recv() => {
                 let frame = frame.ok_or(MediaError::UnknownStream)?;
                 if started.elapsed() >= Duration::from_millis(100) {
-                    let expected = left_sample.ok_or_else(|| MediaError::Transport("Held WebRTC still received audio".into()))?;
-                    assert!(frame.samples().iter().all(|sample| (i32::from(*sample) - expected).abs() < 300));
+                    validate_samples(&frame, left_sample)?;
                     received[0] += 1;
                 }
             }
             frame = right.incoming.recv() => {
                 let frame = frame.ok_or(MediaError::UnknownStream)?;
                 if started.elapsed() >= Duration::from_millis(100) {
-                    assert!(frame.samples().iter().all(|sample| (i32::from(*sample) - right_sample).abs() < 300));
+                    validate_samples(&frame, Some(right_sample))?;
                     received[1] += 1;
                 }
             }
@@ -217,6 +248,7 @@ async fn restricted(
 }
 
 async fn resumed(left: &mut Application, right: &mut Application) -> Result<(), MediaError> {
+    let _started = begin_measurement(left, right)?;
     let mut clock = tokio::time::interval(Duration::from_millis(20));
     clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut received = [0; 2];
@@ -237,4 +269,60 @@ async fn resumed(left: &mut Application, right: &mut Application) -> Result<(), 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{begin_measurement, failure, validate_samples, Frame, MediaError};
+    use crate::{channels, APPLICATION_FRAME_CAPACITY};
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    #[test]
+    fn pcm_queued_before_measurement_cannot_be_counted_as_new_direction_leakage(
+    ) -> Result<(), MediaError> {
+        for queued in 1..=APPLICATION_FRAME_CAPACITY {
+            let (left_channels, mut left) = channels();
+            let (right_channels, mut right) = channels();
+            for _ in 0..queued {
+                left_channels
+                    .incoming
+                    .try_send(Frame::new(&[4000; 960], 48000)?)
+                    .map_err(failure)?;
+                right_channels
+                    .incoming
+                    .try_send(Frame::new(&[4000; 960], 48000)?)
+                    .map_err(failure)?;
+            }
+            let _started = begin_measurement(&mut left, &mut right)?;
+            for (incoming, expected) in [(&mut left.incoming, None), (&mut right.incoming, Some(0))]
+            {
+                match incoming.try_recv() {
+                    Ok(frame) => validate_samples(&frame, expected)?,
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => return Err(MediaError::UnknownStream),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pcm_arriving_after_measurement_begins_still_fails_the_direction_validator(
+    ) -> Result<(), MediaError> {
+        for expected in [None, Some(0)] {
+            let (_left_channels, mut left) = channels();
+            let (right_channels, mut right) = channels();
+            let _started = begin_measurement(&mut left, &mut right)?;
+            right_channels
+                .incoming
+                .try_send(Frame::new(&[4000; 960], 48000)?)
+                .map_err(failure)?;
+            let frame = right.incoming.try_recv().map_err(failure)?;
+            assert!(matches!(
+                validate_samples(&frame, expected),
+                Err(MediaError::Transport(_))
+            ));
+        }
+        Ok(())
+    }
 }
