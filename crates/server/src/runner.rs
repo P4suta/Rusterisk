@@ -13,6 +13,8 @@ mod history;
 mod media_connections;
 mod recording_admission;
 mod stored_recordings;
+#[cfg(test)]
+mod transfer_tests;
 pub(crate) use call_lifetime::CallLease;
 use history::HistoryRecorder;
 pub use media_connections::{ClaimedMediaConnection, MediaConnectionLease};
@@ -26,7 +28,7 @@ struct StorageServices {
     history: HistoryRecorder,
 }
 
-const MAX_PENDING_EFFECTS: usize = 64 * 2 + 1;
+const MAX_PENDING_EFFECTS: usize = 64 * 3 + 1;
 
 enum Admission {
     Recording {
