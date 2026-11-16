@@ -8,6 +8,8 @@ mod authentication;
 mod grants;
 #[path = "outbound_registration/responses.rs"]
 mod responses;
+#[path = "outbound_registration/updates.rs"]
+mod updates;
 
 fn settings(protocol: &str, extra: &str) -> Result<Registration, SipError> {
     let tls = if protocol == "tls" {

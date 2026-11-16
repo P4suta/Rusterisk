@@ -8,6 +8,8 @@ use rusterisk_config::Protocol;
 use std::net::SocketAddr;
 mod authentication;
 mod grant;
+mod request;
+mod updates;
 pub use grant::RegistrationGrant;
 
 pub struct RegistrationResponse {

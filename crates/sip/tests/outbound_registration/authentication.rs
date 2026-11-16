@@ -8,7 +8,7 @@ use rusterisk_sip::{
 };
 use sha2::{Digest, Sha256, Sha512_256};
 
-fn credentials() -> Result<Vec<Auth>, SipError> {
+pub(super) fn credentials() -> Result<Vec<Auth>, SipError> {
     Ok(Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
         "[app]\ntype=user\npassword=sample\n",
@@ -24,14 +24,14 @@ fn challenge(offer: &str) -> Result<RegistrationResponse, SipError> {
     final_response(pending.receive(&response(&packet, 401, offer)?, packet.peer, 100)?)
 }
 
-fn header<'a>(packet: &'a Datagram, name: &str) -> Result<&'a str, SipError> {
+pub(super) fn header<'a>(packet: &'a Datagram, name: &str) -> Result<&'a str, SipError> {
     std::str::from_utf8(&packet.bytes)?
         .lines()
         .find_map(|line| line.strip_prefix(&format!("{name}: ")))
         .ok_or(SipError::InvalidPacket)
 }
 
-fn hash<D: Digest>(source: &str) -> String {
+pub(super) fn hash<D: Digest>(source: &str) -> String {
     D::digest(source.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))

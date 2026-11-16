@@ -1,8 +1,11 @@
-use super::RegistrationResponse;
+use super::{
+    request::{digest_error, header, render, RequestUpdate},
+    RegistrationResponse,
+};
 use crate::{
     digest::{DigestError, Header, Protection},
     registration_client::{RegistrationIdentity, RegistrationTransaction, State, TIMEOUT},
-    Datagram, SipError, MAX_MESSAGE,
+    Datagram, SipError,
 };
 use rusterisk_config::Auth;
 
@@ -92,7 +95,19 @@ impl RegistrationResponse {
         } else {
             None
         };
-        let bytes = render(source, &scope, &authorization, other.as_deref(), identity)?;
+        let (origin, proxy) = match scope {
+            Scope::Origin => (Some(authorization.as_str()), other.as_deref()),
+            Scope::Proxy => (other.as_deref(), Some(authorization.as_str())),
+        };
+        let bytes = render(
+            source,
+            RequestUpdate {
+                identity,
+                expiration: None,
+                authorization: origin,
+                proxy_authorization: proxy,
+            },
+        )?;
         Ok(Some(RegistrationTransaction {
             identity,
             packet: Datagram {
@@ -105,80 +120,5 @@ impl RegistrationResponse {
             state: State::Ready { at: now },
             authentication_attempts: self.authentication_attempts + 1,
         }))
-    }
-}
-
-fn header<'a>(source: &'a str, name: &str) -> Option<&'a str> {
-    source
-        .split_once("\r\n\r\n")?
-        .0
-        .split("\r\n")
-        .filter_map(|line| line.split_once(':'))
-        .find_map(|(field, value)| {
-            field
-                .eq_ignore_ascii_case(name)
-                .then(|| value.trim_matches([' ', '\t']))
-        })
-}
-
-fn render(
-    source: &str,
-    scope: &Scope,
-    authorization: &str,
-    other: Option<&str>,
-    identity: RegistrationIdentity,
-) -> Result<Vec<u8>, SipError> {
-    let (headers, body) = source
-        .split_once("\r\n\r\n")
-        .ok_or(SipError::InvalidPacket)?;
-    let mut output = String::with_capacity(source.len().min(MAX_MESSAGE));
-    for (index, line) in headers.split("\r\n").enumerate() {
-        if index == 0 {
-            output.push_str(line);
-        } else {
-            let (name, value) = line.split_once(':').ok_or(SipError::InvalidPacket)?;
-            if name.eq_ignore_ascii_case(scope.authorization())
-                || name.eq_ignore_ascii_case(scope.other_authorization())
-            {
-                continue;
-            }
-            if name.eq_ignore_ascii_case("Via") {
-                let (sent_by, _) = value
-                    .rsplit_once(";branch=")
-                    .ok_or(SipError::InvalidPacket)?;
-                output.push_str(&format!(
-                    "Via:{sent_by};branch=z9hG4bK-reg-{:032x}-{}",
-                    identity.branch, identity.sequence
-                ));
-            } else if name.eq_ignore_ascii_case("CSeq") {
-                output.push_str(&format!("CSeq: {} REGISTER", identity.sequence));
-            } else {
-                output.push_str(line);
-            }
-        }
-        output.push_str("\r\n");
-    }
-    output.push_str(scope.authorization());
-    output.push_str(": ");
-    output.push_str(authorization);
-    output.push_str("\r\n");
-    if let Some(other) = other {
-        output.push_str(scope.other_authorization());
-        output.push_str(": ");
-        output.push_str(other);
-        output.push_str("\r\n");
-    }
-    output.push_str("\r\n");
-    output.push_str(body);
-    if output.len() > MAX_MESSAGE {
-        return Err(SipError::Capacity);
-    }
-    Ok(output.into_bytes())
-}
-
-fn digest_error(error: DigestError) -> SipError {
-    match error {
-        DigestError::Invalid => SipError::InvalidPacket,
-        DigestError::Unsupported => SipError::Unsupported,
     }
 }
