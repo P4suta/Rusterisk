@@ -24,7 +24,7 @@ mod setup;
 #[cfg(test)]
 mod tests;
 mod websocket;
-pub(super) use setup::{Prepared, RegisteredRoute, SetupKey};
+pub(super) use setup::{Prepared, RegisteredRoute, SetupKey, SetupLifetime};
 
 enum ListenerSocket {
     Datagram(UdpSocket),
@@ -58,6 +58,10 @@ enum Route {
 pub(super) struct DeliveryRoute(Route);
 
 impl DeliveryRoute {
+    pub(super) fn matches_connection(self, connection: ConnectionKey) -> bool {
+        matches!(self.0, Route::Stream(key) if key == connection)
+    }
+
     pub(super) const fn listener(self) -> usize {
         match self.0 {
             Route::Datagram { listener, .. } | Route::Closed { listener, .. } => listener,

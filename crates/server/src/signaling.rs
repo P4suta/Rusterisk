@@ -1108,12 +1108,19 @@ impl Signaling {
                             }
                         },
                         transport::Input::Closed { key, result } => {
+                            self.registration_closed(key);
                             if let Err(error) = result { tracing::debug!(transport = %self.listeners[key.listener].name, %error, "signaling stream closed"); }
                             let output = self.listeners[key.listener].engine.disconnected(key.peer);
                             self.output(key.listener, output, now).await?;
                         },
-                        transport::Input::Prepared(prepared) => self.native_prepared(prepared, now).await?,
-                        transport::Input::SetupFinished { key, result } => self.native_setup_finished(key, result).await?,
+                        transport::Input::Prepared(prepared) => {
+                            if self.registration_owns_setup(prepared.key) { self.registration_prepared(prepared, now)?; }
+                            else { self.native_prepared(prepared, now).await?; }
+                        },
+                        transport::Input::SetupFinished { key, result } => {
+                            if self.registration_owns_setup(key) { self.registration_setup_finished(key, result); }
+                            else { self.native_setup_finished(key, result).await?; }
+                        },
                     }
                 }
                 notice = self.notices.recv() => match notice {

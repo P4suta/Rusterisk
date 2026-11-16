@@ -1,5 +1,10 @@
-use super::{cleanup, failure, media, transport::SetupKey, Received, Signaling};
+use super::{
+    cleanup, failure, media,
+    transport::{ConnectionKey, DeliveryRoute, Prepared, SetupKey, SetupLifetime},
+    Received, Signaling,
+};
 use crate::ControlError;
+pub(super) use resolution::ConfigurationLease;
 use resolution::{Completion, ConfigurationLifetime};
 use rusterisk_config::{Auth, Config, Protocol, Registration, MAX_REGISTRATIONS};
 use rusterisk_sip::{
@@ -38,34 +43,70 @@ struct Client {
     state: State,
 }
 
+#[derive(Clone, Copy)]
+enum Route {
+    Datagram(SocketAddr),
+    Stream(DeliveryRoute),
+}
+
+impl Route {
+    fn peer(self) -> SocketAddr {
+        match self {
+            Self::Datagram(peer) => peer,
+            Self::Stream(route) => route.peer(),
+        }
+    }
+
+    fn matches_connection(self, connection: ConnectionKey) -> bool {
+        match self {
+            Self::Datagram(_) => false,
+            Self::Stream(route) => route.matches_connection(connection),
+        }
+    }
+}
+
 enum State {
     Waiting {
         at: u64,
     },
     Ready {
         at: u64,
-        peer: SocketAddr,
+        route: Route,
     },
     Resolving {
         setup: SetupKey,
     },
+    Connecting {
+        key: ConfigurationKey,
+        setup: SetupKey,
+        lease: ConfigurationLease,
+    },
     Trying {
         transaction: RegistrationTransaction,
-        peer: SocketAddr,
+        route: Route,
     },
     Registered {
         response: RegistrationResponse,
         refresh_at: u64,
+        route: Route,
     },
     Stopped,
 }
 
 impl State {
     fn peer(&self) -> Option<SocketAddr> {
+        self.route().map(Route::peer)
+    }
+
+    fn route(&self) -> Option<Route> {
         match self {
-            Self::Ready { peer, .. } | Self::Trying { peer, .. } => Some(*peer),
-            Self::Registered { response, .. } => Some(response.peer()),
-            Self::Waiting { .. } | Self::Resolving { .. } | Self::Stopped => None,
+            Self::Ready { route, .. }
+            | Self::Trying { route, .. }
+            | Self::Registered { route, .. } => Some(*route),
+            Self::Waiting { .. }
+            | Self::Resolving { .. }
+            | Self::Connecting { .. }
+            | Self::Stopped => None,
         }
     }
 }
@@ -111,13 +152,14 @@ impl Registrations {
                 .iter()
                 .position(|transport| transport.name == settings.transport)
                 .ok_or(ControlError::NotFound("Registration transport not found"))?;
-            if config.transports[listener].protocol != Protocol::Udp
-                || settings.server_uri.protocol() != Protocol::Udp
+            let protocol = config.transports[listener].protocol;
+            if !matches!(protocol, Protocol::Udp | Protocol::Tcp)
+                || settings.server_uri.protocol() != protocol
             {
                 return Err(ControlError::Unsupported);
             }
-            let target = StaticTarget::from_uri(Protocol::Udp, settings.server_uri.as_str())
-                .map_err(failure)?;
+            let target =
+                StaticTarget::from_uri(protocol, settings.server_uri.as_str()).map_err(failure)?;
             let delay = if settings.max_random_initial_delay == 0 {
                 0
             } else {
@@ -132,7 +174,14 @@ impl Registrations {
                             "Registration address family mismatch",
                         ));
                     }
-                    State::Ready { at, peer }
+                    if protocol == Protocol::Udp {
+                        State::Ready {
+                            at,
+                            route: Route::Datagram(peer),
+                        }
+                    } else {
+                        State::Waiting { at }
+                    }
                 }
                 TargetHost::Name(_) => State::Waiting { at },
             };
@@ -174,14 +223,16 @@ impl Registrations {
                             client.same_registrar(other)
                                 && matches!(
                                     other.state,
-                                    State::Trying { .. } | State::Resolving { .. }
+                                    State::Trying { .. }
+                                        | State::Resolving { .. }
+                                        | State::Connecting { .. }
                                 )
                         })
                 }
                 State::Trying { transaction, .. } => transaction
                     .next_deadline()
                     .is_some_and(|deadline| now >= deadline),
-                State::Resolving { .. } | State::Stopped => false,
+                State::Resolving { .. } | State::Connecting { .. } | State::Stopped => false,
             };
             if due {
                 return Some(index);
@@ -198,21 +249,23 @@ impl Registrations {
     ) -> Result<Option<Datagram>, ControlError> {
         let client = self.clients.get_mut(index).ok_or(ControlError::Capacity)?;
         let transaction = match &client.state {
-            State::Ready { peer, .. } => {
+            State::Ready { route, .. } => {
                 self.identity = self.identity.advance(random()?).map_err(failure)?;
                 Some((
                     RegistrationTransaction::new(
                         &client.settings,
                         local,
-                        *peer,
+                        route.peer(),
                         self.identity,
                         now,
                     )
                     .map_err(failure)?,
-                    *peer,
+                    *route,
                 ))
             }
-            State::Registered { response, .. } => {
+            State::Registered {
+                response, route, ..
+            } => {
                 self.identity = self.identity.advance(random()?).map_err(failure)?;
                 Some((
                     response
@@ -225,16 +278,17 @@ impl Registrations {
                             now,
                         )
                         .map_err(failure)?,
-                    response.peer(),
+                    *route,
                 ))
             }
             State::Waiting { .. }
             | State::Resolving { .. }
+            | State::Connecting { .. }
             | State::Trying { .. }
             | State::Stopped => None,
         };
-        if let Some((transaction, peer)) = transaction {
-            client.state = State::Trying { transaction, peer };
+        if let Some((transaction, route)) = transaction {
+            client.state = State::Trying { transaction, route };
         }
         let State::Trying { transaction, .. } = &mut client.state else {
             return Ok(None);
@@ -260,9 +314,9 @@ impl Registrations {
         now: u64,
     ) -> Result<(), ControlError> {
         let client = self.clients.get_mut(index).ok_or(ControlError::Capacity)?;
-        let peer = client
+        let route = client
             .state
-            .peer()
+            .route()
             .ok_or(ControlError::Invalid("Registration response has no route"))?;
         client.state = match response.status() {
             401 | 407 => {
@@ -277,7 +331,7 @@ impl Registrations {
                     )
                     .map_err(failure)?
                 {
-                    Some(transaction) => State::Trying { transaction, peer },
+                    Some(transaction) => State::Trying { transaction, route },
                     None => return Err(ControlError::Unsupported),
                 }
             }
@@ -285,6 +339,7 @@ impl Registrations {
                 RegistrationGrant::Active { refresh_at, .. } => State::Registered {
                     response,
                     refresh_at,
+                    route,
                 },
                 RegistrationGrant::Removed => State::Stopped,
             },
@@ -347,39 +402,146 @@ impl Signaling {
         completed: Completion,
         now: u64,
     ) -> Result<(), ControlError> {
-        self.network.finish_resolution(completed.setup);
         if !self
             .registrations
             .lifetime
             .is_current(completed.key, &completed.lease)
         {
+            self.network.finish_resolution(completed.setup);
             return Ok(());
         }
         let Some(client) = self.registrations.clients.get_mut(completed.key.index) else {
+            self.network.finish_resolution(completed.setup);
             return Ok(());
         };
         if !matches!(client.state, State::Resolving { setup } if setup == completed.setup) {
+            self.network.finish_resolution(completed.setup);
             return Ok(());
         }
         let resolved = match completed.result {
             Ok(resolved) => resolved,
             Err(error) => {
+                self.network.finish_resolution(completed.setup);
                 client.state = State::Stopped;
                 tracing::debug!(registration = %client.settings.name, %error, "registration resolution failed");
                 return Ok(());
             }
         };
-        let local = self.network.local_addr(client.listener)?;
-        let Some(peer) = resolved
-            .peers()
-            .find(|peer| peer.is_ipv4() == local.is_ipv4())
-        else {
-            client.state = State::Stopped;
+        self.resolution_cache
+            .insert(resolved.clone(), Instant::now())?;
+        match resolved.protocol() {
+            Protocol::Udp => {
+                self.network.finish_resolution(completed.setup);
+                let local = self.network.local_addr(client.listener)?;
+                let Some(peer) = resolved
+                    .peers()
+                    .find(|peer| peer.is_ipv4() == local.is_ipv4())
+                else {
+                    client.state = State::Stopped;
+                    return Ok(());
+                };
+                client.state = State::Ready {
+                    at: now,
+                    route: Route::Datagram(peer),
+                };
+            }
+            Protocol::Tcp | Protocol::Tls => {
+                client.state = State::Connecting {
+                    key: completed.key,
+                    setup: completed.setup,
+                    lease: completed.lease.clone(),
+                };
+                if let Err(error) = self.network.connect_prepared(
+                    completed.setup,
+                    resolved,
+                    SetupLifetime::Configuration(completed.lease),
+                ) {
+                    self.network.cancel_setup(completed.setup);
+                    self.network.finish_resolution(completed.setup);
+                    client.state = State::Stopped;
+                    tracing::debug!(registration = %client.settings.name, %error, "registration connection failed");
+                }
+            }
+            Protocol::Ws | Protocol::Wss => {
+                self.network.finish_resolution(completed.setup);
+                client.state = State::Stopped;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn registration_owns_setup(&self, key: SetupKey) -> bool {
+        self.registrations
+            .clients
+            .iter()
+            .any(|client| matches!(client.state, State::Connecting { setup, .. } if setup == key))
+    }
+
+    pub(super) fn registration_prepared(
+        &mut self,
+        prepared: Prepared,
+        now: u64,
+    ) -> Result<(), ControlError> {
+        let Some(client) = self.registrations.clients.iter_mut().find(|client| matches!(client.state, State::Connecting { setup, .. } if setup == prepared.key)) else {
+            self.network.cancel_setup(prepared.key);
             return Ok(());
         };
-        self.resolution_cache.insert(resolved, Instant::now())?;
-        client.state = State::Ready { at: now, peer };
+        let State::Connecting { key, lease, .. } = &client.state else {
+            return Err(ControlError::Invalid("Unexpected registration preparation"));
+        };
+        if !self.registrations.lifetime.is_current(*key, lease) {
+            self.network.cancel_setup(prepared.key);
+            client.state = State::Stopped;
+            return Ok(());
+        }
+        let setup = prepared.key;
+        match self.network.admit_prepared(prepared) {
+            Ok(connection) => {
+                let route = self.network.capture(connection.listener, connection.peer)?;
+                client.state = State::Ready {
+                    at: now,
+                    route: Route::Stream(route),
+                };
+            }
+            Err(error) => {
+                self.network.cancel_setup(setup);
+                client.state = State::Stopped;
+                tracing::debug!(registration = %client.settings.name, %error, "registration admission failed");
+            }
+        }
         Ok(())
+    }
+
+    pub(super) fn registration_setup_finished(
+        &mut self,
+        key: SetupKey,
+        result: Result<(), ControlError>,
+    ) {
+        if let Some(client) =
+            self.registrations.clients.iter_mut().find(
+                |client| matches!(client.state, State::Connecting { setup, .. } if setup == key),
+            )
+        {
+            client.state = State::Stopped;
+            if let Err(error) = result {
+                tracing::debug!(registration = %client.settings.name, %error, "registration setup stopped");
+            }
+        }
+    }
+
+    pub(super) fn registration_closed(&mut self, key: ConnectionKey) {
+        for client in &mut self.registrations.clients {
+            if client
+                .state
+                .route()
+                .is_some_and(|route| route.matches_connection(key))
+            {
+                if let State::Trying { transaction, .. } = &mut client.state {
+                    transaction.cancel();
+                }
+                client.state = State::Stopped;
+            }
+        }
     }
 
     pub(super) async fn finish_registrations(&mut self) -> Result<(), ControlError> {
@@ -388,7 +550,7 @@ impl Signaling {
             .clients
             .iter()
             .filter_map(|client| match client.state {
-                State::Resolving { setup } => Some(setup),
+                State::Resolving { setup } | State::Connecting { setup, .. } => Some(setup),
                 State::Waiting { .. }
                 | State::Ready { .. }
                 | State::Trying { .. }
@@ -435,6 +597,11 @@ impl Signaling {
         }) else {
             return false;
         };
+        if matches!(self.registrations.clients[index].state.route(), Some(Route::Stream(route)) if !self.network.current(route))
+        {
+            self.registrations.clients[index].state = State::Stopped;
+            return false;
+        }
         let State::Trying { transaction, .. } = &mut self.registrations.clients[index].state else {
             return false;
         };
@@ -480,15 +647,30 @@ impl Signaling {
         }
         let client = &self.registrations.clients[index];
         let listener = client.listener;
+        let route = client
+            .state
+            .route()
+            .ok_or(ControlError::Invalid("Registration has no signaling route"))?;
+        if matches!(route, Route::Stream(route) if !self.network.current(route)) {
+            self.registrations.clients[index].state = State::Stopped;
+            return Ok(());
+        }
         let mut local = self.network.local_addr(listener)?;
-        if let State::Ready { peer, .. } = client.state {
-            if local.ip().is_unspecified() {
-                local.set_ip(media::local_ip(peer)?);
-            }
+        if matches!(client.state, State::Ready { .. }) && local.ip().is_unspecified() {
+            local.set_ip(media::local_ip(route.peer())?);
         }
         let result = async {
             if let Some(packet) = self.registrations.poll(index, local, now)? {
-                self.network.send(listener, packet).await?;
+                match route {
+                    Route::Datagram(_) => self.network.send(listener, packet).await?,
+                    Route::Stream(route) => {
+                        if !self.network.send_on(route, packet).await? {
+                            return Err(ControlError::Conflict(
+                                "Registration signaling flow closed",
+                            ));
+                        }
+                    }
+                }
             }
             Ok::<(), ControlError>(())
         }

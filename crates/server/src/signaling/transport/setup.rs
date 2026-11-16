@@ -3,7 +3,7 @@ use super::{
     Network, Port, Reserved, StreamPacket,
 };
 use crate::runner::CallLease;
-use crate::signaling::resolver::ResolvedTarget;
+use crate::signaling::{registrations::ConfigurationLease, resolver::ResolvedTarget};
 use std::{future::Future, net::SocketAddr, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -60,11 +60,32 @@ pub(super) enum SetupEvent {
 
 struct SetupJob {
     key: SetupKey,
-    lease: CallLease,
+    lease: SetupLifetime,
     setup_sender: mpsc::Sender<SetupEvent>,
     sender: mpsc::Sender<StreamPacket>,
     stop: watch::Receiver<bool>,
     deadline: tokio::time::Instant,
+}
+
+pub(in crate::signaling) enum SetupLifetime {
+    Call(CallLease),
+    Configuration(ConfigurationLease),
+}
+
+impl SetupLifetime {
+    fn is_released(&self) -> bool {
+        match self {
+            Self::Call(lease) => lease.is_released(),
+            Self::Configuration(lease) => lease.is_released(),
+        }
+    }
+
+    async fn released(&self) {
+        match self {
+            Self::Call(lease) => lease.released().await,
+            Self::Configuration(lease) => lease.released().await,
+        }
+    }
 }
 
 impl Network {
@@ -188,13 +209,13 @@ impl Network {
         &mut self,
         key: SetupKey,
         resolved: ResolvedTarget,
-        lease: CallLease,
+        lease: SetupLifetime,
     ) -> Result<(), ControlError> {
         if self.jobs.len() >= 64 {
             return Err(ControlError::Capacity);
         }
         if lease.is_released() {
-            return Err(ControlError::Conflict("Call ended during signaling setup"));
+            return Err(ControlError::Conflict("Signaling setup owner ended"));
         }
         let encryption = match self
             .listeners
@@ -342,7 +363,7 @@ where
 {
     let connected = tokio::select! {
         _changed = job.stop.changed() => Err(ControlError::Conflict("Signaling setup cancelled")),
-        _released = job.lease.released() => Err(ControlError::Conflict("Call ended during signaling setup")),
+        _released = job.lease.released() => Err(ControlError::Conflict("Signaling setup owner ended")),
         result = tokio::time::timeout_at(job.deadline, open(local, &resolved, connector)) => result.map_err(failure).and_then(|result| result),
     };
     match connected {
@@ -427,7 +448,7 @@ async fn admission<S: AsyncRead + AsyncWrite + Unpin>(
     };
     let admitted = tokio::select! {
         _changed = job.stop.changed() => Err(ControlError::Conflict("Signaling setup cancelled")),
-        _released = job.lease.released() => Err(ControlError::Conflict("Call ended during signaling setup")),
+        _released = job.lease.released() => Err(ControlError::Conflict("Signaling setup owner ended")),
         admitted = tokio::time::timeout_at(job.deadline, waiting) => admitted.map_err(failure).and_then(|result| result),
     };
     match admitted {
@@ -437,7 +458,7 @@ async fn admission<S: AsyncRead + AsyncWrite + Unpin>(
                     &job.sender,
                     key,
                     Err(ControlError::Conflict(
-                        "Call ended before signaling admission",
+                        "Signaling setup owner ended before admission",
                     )),
                     &stop,
                 )

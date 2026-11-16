@@ -1,7 +1,7 @@
 use super::{
     failure,
     resolver::{DestinationResolver, ResolvedTarget},
-    transport::{Prepared, RegisteredRoute, SetupKey},
+    transport::{Prepared, RegisteredRoute, SetupKey, SetupLifetime},
     Signaling,
 };
 use crate::{runner::CallLease, CallKey, ControlError, Controller, Signal};
@@ -228,9 +228,11 @@ impl Signaling {
                     }
                     Protocol::Tcp | Protocol::Tls => {
                         pending.phase = Phase::Connecting(resolved.lease.clone());
-                        if let Err(error) =
-                            self.network.connect_prepared(setup, target, resolved.lease)
-                        {
+                        if let Err(error) = self.network.connect_prepared(
+                            setup,
+                            target,
+                            SetupLifetime::Call(resolved.lease),
+                        ) {
                             self.cancel_native(&completed.key);
                             self.network.finish_resolution(setup);
                             self.native_failed(completed.key, error).await?;

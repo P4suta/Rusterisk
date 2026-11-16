@@ -153,32 +153,26 @@ async fn configured_udp_registration_advertises_the_owned_signaling_address(
 }
 
 #[tokio::test]
-async fn stream_registration_profiles_without_connected_adapters_are_identifiably_unsupported(
+async fn tls_registration_without_a_connected_adapter_is_identifiably_unsupported(
 ) -> Result<(), ControlError> {
-    for protocol in [Protocol::Tcp, Protocol::Tls] {
-        let mut config = settings("127.0.0.1:5070".parse().map_err(failure)?)?;
-        let transport = config
-            .transports
-            .first_mut()
-            .ok_or(ControlError::Capacity)?;
-        transport.protocol = protocol;
-        let registration = config
-            .registrations
-            .first_mut()
-            .ok_or(ControlError::Capacity)?;
-        let uri = match protocol {
-            Protocol::Tcp => "sip:127.0.0.1:5070;transport=tcp",
-            Protocol::Tls => "sips:127.0.0.1:5071;transport=tcp",
-            Protocol::Udp | Protocol::Ws | Protocol::Wss => return Err(ControlError::Unsupported),
-        };
-        registration.server_uri = RegistrarUri::parse(protocol, uri).map_err(failure)?;
-        let (controller, _runner, effects) = Controller::new(config.clone(), 16);
-        let (media, _hub, notices) = MediaHub::new(16);
-        assert!(matches!(
-            Signaling::bind(config, controller, effects, media, notices).await,
-            Err(ControlError::Unsupported)
-        ));
-    }
+    let mut config = settings("127.0.0.1:5070".parse().map_err(failure)?)?;
+    config
+        .transports
+        .first_mut()
+        .ok_or(ControlError::Capacity)?
+        .protocol = Protocol::Tls;
+    config
+        .registrations
+        .first_mut()
+        .ok_or(ControlError::Capacity)?
+        .server_uri =
+        RegistrarUri::parse(Protocol::Tls, "sips:127.0.0.1:5071;transport=tcp").map_err(failure)?;
+    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (media, _hub, notices) = MediaHub::new(16);
+    assert!(matches!(
+        Signaling::bind(config, controller, effects, media, notices).await,
+        Err(ControlError::Unsupported)
+    ));
     Ok(())
 }
 

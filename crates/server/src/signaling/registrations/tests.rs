@@ -3,6 +3,8 @@ use crate::ControlError;
 use rusterisk_config::{Config, MAX_REGISTRATIONS};
 mod dns;
 mod generations;
+mod stream;
+mod stream_lifetime;
 
 fn config(peers: &[&str], delay: u32) -> Result<Config, ControlError> {
     let mut pjsip = "[native]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[account]\ntype=auth\nusername=account\npassword=sample\n".to_owned();
