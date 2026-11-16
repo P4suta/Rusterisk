@@ -20,8 +20,8 @@ fn assurance_dry_runs_bind_actual_tests_and_require_no_daemon() -> Result<(), st
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
         for expected in [
-            "18 integration targets",
-            "45 tests",
+            "19 integration targets",
+            "50 tests",
             "--cpus=2",
             "--memory=2g",
             "budget=900s",

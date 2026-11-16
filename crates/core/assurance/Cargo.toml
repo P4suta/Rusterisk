@@ -82,6 +82,10 @@ name = "stasis_ownership"
 path = "../tests/stasis_ownership.rs"
 
 [[test]]
+name = "transfer"
+path = "../tests/transfer.rs"
+
+[[test]]
 name = "transitions"
 path = "../tests/transitions.rs"
 

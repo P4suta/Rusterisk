@@ -10,16 +10,18 @@ enum Invariant {
     Bridge,
     MediaTasks,
     Subscriptions,
+    Transfer,
 }
 
 impl Invariant {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Terminal,
         Self::Connection,
         Self::Stasis,
         Self::Bridge,
         Self::MediaTasks,
         Self::Subscriptions,
+        Self::Transfer,
     ];
 
     fn of(file: &str, function: &str) -> Option<Self> {
@@ -49,6 +51,10 @@ impl Invariant {
             {
                 Some(Self::Subscriptions)
             }
+            (
+                "src/transfer.rs",
+                "Transfer::begin" | "Transfer::finish" | "Transfer::participant_ended",
+            ) => Some(Self::Transfer),
             _ => None,
         }
     }
@@ -61,6 +67,7 @@ impl Invariant {
             Self::Bridge => "bridge exclusivity",
             Self::MediaTasks => "media ownership",
             Self::Subscriptions => "subscription bounds",
+            Self::Transfer => "transfer ownership",
         }
     }
 }

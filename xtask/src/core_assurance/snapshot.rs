@@ -209,3 +209,53 @@ impl Snapshot {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{AssuranceError, Snapshot, Tests};
+    use crate::core_assurance::validate_miri_discovery;
+    use std::{collections::BTreeSet, path::Path};
+    use syn::visit::Visit;
+
+    fn discovery(names: &BTreeSet<String>) -> Result<Vec<u8>, AssuranceError> {
+        let mut source =
+            serde_json::to_string(&serde_json::json!({"type":"suite", "event":"discovery"}))
+                .map_err(AssuranceError::Json)?;
+        source.push('\n');
+        for name in names {
+            source.push_str(&serde_json::to_string(&serde_json::json!({"type":"test", "event":"discovered", "name":name, "ignore":false})).map_err(AssuranceError::Json)?);
+            source.push('\n');
+        }
+        source.push_str(&serde_json::to_string(&serde_json::json!({"type":"suite", "event":"completed", "tests":names.len(), "benchmarks":0, "total":names.len(), "ignored":0})).map_err(AssuranceError::Json)?);
+        source.push('\n');
+        Ok(source.into_bytes())
+    }
+
+    #[test]
+    fn miri_discovery_cannot_omit_transfer_tests_from_the_actual_source(
+    ) -> Result<(), AssuranceError> {
+        let core = Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/core");
+        let snapshot = Snapshot::read(&core)?;
+        let transfer = snapshot
+            .files
+            .iter()
+            .find(|file| file.path == Path::new("tests/transfer.rs"))
+            .ok_or(AssuranceError::Manifest)?;
+        let file = syn::parse_file(
+            std::str::from_utf8(&transfer.bytes).map_err(|_| AssuranceError::Manifest)?,
+        )
+        .map_err(AssuranceError::Syntax)?;
+        let mut selected = Tests::default();
+        selected.visit_file(&file);
+        assert!(!selected.names.is_empty());
+        assert!(selected.names.is_subset(&snapshot.tests));
+        validate_miri_discovery(&discovery(&snapshot.tests)?, &snapshot.tests, 1)?;
+        let missing = snapshot
+            .tests
+            .difference(&selected.names)
+            .cloned()
+            .collect();
+        assert!(validate_miri_discovery(&discovery(&missing)?, &snapshot.tests, 1).is_err());
+        Ok(())
+    }
+}
