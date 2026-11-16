@@ -9,3 +9,5 @@ pub use dependency_paths::{
 };
 mod snapshot;
 pub use snapshot::{SnapshotError, SourceSnapshot};
+mod sdk_build;
+pub use sdk_build::{SdkBuildError, SdkBuildPhase, SdkBuildPlan};
