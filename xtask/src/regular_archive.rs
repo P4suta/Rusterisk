@@ -110,3 +110,9 @@ impl ArchivePath {
         self.0.to_ascii_lowercase()
     }
 }
+
+mod gzip;
+pub use gzip::{
+    read_regular_gzip, ArchiveFile, ArchiveLimit, ArchiveLimits, RegularArchive,
+    RegularArchiveError,
+};
