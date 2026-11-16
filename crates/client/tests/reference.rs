@@ -16,6 +16,8 @@ mod external_streams;
 mod external_websocket_clients;
 #[path = "reference/external_websockets.rs"]
 mod external_websockets;
+#[path = "reference/recording_audio.rs"]
+mod recording_audio;
 #[path = "reference/request_bodies.rs"]
 mod request_bodies;
 #[path = "reference/server_info.rs"]
@@ -24,6 +26,8 @@ mod server_info;
 mod sound_playback;
 #[path = "reference/sounds.rs"]
 mod sounds;
+#[path = "recording_audio/wave.rs"]
+mod wave;
 
 async fn compare_external_admission(
     client: &Client,
@@ -517,6 +521,13 @@ async fn compare_resources(
             Ipv4Addr::LOCALHOST,
         )
         .await?;
+        recording_audio::compare(
+            &actual,
+            &mut actual_session,
+            app.as_str(),
+            Ipv4Addr::LOCALHOST,
+        )
+        .await?;
         external_streams::compare(
             &actual,
             &mut actual_session,
@@ -529,6 +540,13 @@ async fn compare_resources(
             .parse::<Ipv4Addr>()
             .map_err(|_| Error::Invalid("reference callback address"))?;
         sound_playback::compare(
+            &reference,
+            &mut reference_session,
+            app.as_str(),
+            callback_ip,
+        )
+        .await?;
+        recording_audio::compare(
             &reference,
             &mut reference_session,
             app.as_str(),
