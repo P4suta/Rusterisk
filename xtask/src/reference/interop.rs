@@ -1,5 +1,7 @@
 use super::{step, valid_identity, ReferenceError, Step};
 use std::net::SocketAddr;
+mod sipp;
+pub use sipp::SippAdapter;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SipTransferCase {

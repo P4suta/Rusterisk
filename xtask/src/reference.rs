@@ -5,6 +5,7 @@ mod sipp_statistics;
 pub use configuration::copy_configuration;
 pub use interop::{
     callback_address, media_address, published_address, CallbackHost, Interop, SipTransferCase,
+    SippAdapter,
 };
 pub use sipp_statistics::validate_sipp_statistics;
 
