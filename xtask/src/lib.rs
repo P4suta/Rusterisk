@@ -3,6 +3,7 @@ use syn::visit::{self, Visit};
 pub mod browser;
 pub mod core_assurance;
 pub mod core_proofs;
+pub mod distribution;
 pub mod input_fuzz;
 pub mod legacy_audit;
 pub mod process;
