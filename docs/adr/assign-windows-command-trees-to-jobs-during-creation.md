@@ -12,27 +12,26 @@ Windows supervision must own descendants after their leader exits.
 
 ## Decision
 
-Require creation through `PROC_THREAD_ATTRIBUTE_JOB_LIST` using a reviewed publisher's safe interface.
-Prefer [windows-spawn's concrete handles](https://docs.rs/windows-spawn/0.1.0/windows_spawn/struct.Job.html), conditional on a safe `Job::active_processes() -> io::Result<u32>` query.
-Keep deadlines and empty polling in the project guard.
-After normal leader exit, timeout, or cancellation, call `Job::terminate` and poll within a deadline for zero active processes.
-Keep and close process and job handles explicitly.
-Replace opaque `std::process::Command` stream settings with a typed command and stream request before platform spawning.
-Keep console listeners concrete and scoped to the command supervisor.
+Require `PROC_THREAD_ATTRIBUTE_JOB_LIST` creation through unchanged windows-spawn 0.1.0.
+Use [published `Job::as_handle()`](https://docs.rs/windows-spawn/0.1.0/windows_spawn/struct.Job.html#impl-AsHandle-for-Job) and one approved [accounting query](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-queryinformationjobobject) with a `BorrowedHandle` and fixed stack buffer.
+Before adoption, replace inherited `unsafe_code = "forbid"` with [`deny`](https://doc.rust-lang.org/rustc/lints/levels.html) only alongside a syntax gate and an exact registered local expectation.
+Admit only the fixed query function.
+Reject other unsafe syntax across cfg branches, macro tokens, and nested suppression attributes.
+Keep deadlines, zero-process polling, typed streams, and explicit handle cleanup in the supervisor.
 
 ## Alternatives
 
-process-wrap returns erased child ownership.
+Patching the publisher adds source provenance obligations for the same query.
+process-wrap erases child ownership.
 command-group assigns jobs after spawning.
-[Firehazard provides accounting](https://docs.rs/firehazard/latest/firehazard/job/fn.query_information_job_object.html) through a broader interface with publisher soundness reservations.
 
 ## Consequences
 
-Publisher changes and command migration require separate review.
-Reconsider after compatible safe APIs become available.
-The project retains its unsafe prohibition.
+All other project unsafe code remains prohibited.
+Command migration and scoped console cancellation require separate review.
+Reconsider when the publisher provides a safe accounting API.
 
 ## Confirmation
 
-Require native tests for early leader exit, immediate descendants, spawn failure, timeout, console cancellation, and handle closure.
-Keep proposed until API approval and native verification.
+Require rejecting syntax fixtures and native lifecycle tests, including early leader exit, descendants, timeout, cancellation, and handle closure.
+Keep proposed while command migration and graceful shutdown remain unverified.
