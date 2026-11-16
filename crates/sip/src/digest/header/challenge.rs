@@ -29,6 +29,21 @@ pub(crate) struct ChallengeChoice<'a> {
 }
 
 impl Header {
+    pub(crate) fn server_challenge(
+        realm: &str,
+        nonce: &str,
+        algorithm: Algorithm,
+    ) -> Result<String, DigestError> {
+        if !text(realm, 256) {
+            return Err(DigestError::Invalid);
+        }
+        Nonce::new(nonce)?;
+        Ok(format!(
+            "Digest realm={}, nonce={}, algorithm={}, qop=\"auth,auth-int\", charset=UTF-8, userhash=true",
+            quoted(realm), quoted(nonce), algorithm.name()
+        ))
+    }
+
     pub(crate) fn renew_authorization(
         &self,
         credentials: &[Auth],

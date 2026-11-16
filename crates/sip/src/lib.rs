@@ -1,7 +1,5 @@
 use hmac::{Hmac, KeyInit, Mac};
-use rsipstack::sip::{
-    headers::untyped::ToTypedHeader, HeadersExt, Method, Request, SipMessage, Uri,
-};
+use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, Request, SipMessage};
 use rusterisk_config::{Codec, Config, Protocol};
 use rusterisk_core::ContactPresence;
 use sha2::{Digest, Sha256};
@@ -11,6 +9,7 @@ mod contact;
 mod destination;
 mod dialog_target;
 mod digest;
+mod inbound_authentication;
 mod incoming;
 mod info;
 mod media_direction;
@@ -414,6 +413,7 @@ struct Nonce {
     call_id: String,
     expires: u64,
     count: u32,
+    profile: inbound_authentication::ChallengeProfile,
 }
 struct Cached {
     request: Request,
@@ -523,118 +523,6 @@ impl Engine {
         hash.update(self.seed);
         hash.update(self.serial.to_be_bytes());
         hexadecimal(hash.finalize().into())
-    }
-
-    fn authorize(
-        &mut self,
-        request: &Request,
-        peer: SocketAddr,
-        now: u64,
-    ) -> Result<Option<usize>, SipError> {
-        let Some(header) = request.authorization_header() else {
-            return Ok(None);
-        };
-        let header = match digest::Header::parse(header.value()) {
-            Ok(header) => header,
-            Err(_) => return Ok(None),
-        };
-        let authorization = match header.authorization() {
-            Ok(value) => value,
-            Err(_) => return Ok(None),
-        };
-        let Some(nonce) = self.nonces.get(authorization.nonce()) else {
-            return Ok(None);
-        };
-        if nonce.peer != peer
-            || nonce.expires <= now
-            || nonce.call_id != request.call_id_header()?.value()
-            || Uri::try_from(authorization.uri())? != request.uri
-            || authorization.algorithm() != digest::Algorithm::Md5
-            || matches!(authorization.protection(), digest::Protection::Integrity(_))
-        {
-            return Ok(None);
-        }
-        let count = authorization.count();
-        if count == 0 || count <= nonce.count {
-            return Ok(None);
-        }
-        let Some((endpoint_index, auth)) =
-            self.config
-                .endpoints
-                .iter()
-                .enumerate()
-                .find_map(|(index, endpoint)| {
-                    self.config
-                        .auth
-                        .iter()
-                        .find(|auth| {
-                            auth.name == endpoint.auth
-                                && auth.username == authorization.username()
-                                && auth.inbound_realm() == authorization.realm()
-                        })
-                        .map(|auth| (index, auth))
-                })
-        else {
-            return Ok(None);
-        };
-        let method = request.method.to_string();
-        if !matches!(
-            authorization.verify(&method, &request.body, auth.password.expose()),
-            Ok(true)
-        ) {
-            return Ok(None);
-        }
-        let endpoint = &self.config.endpoints[endpoint_index];
-        if self
-            .config
-            .identify
-            .iter()
-            .any(|entry| entry.endpoint == endpoint.name)
-            && !self
-                .config
-                .identify
-                .iter()
-                .any(|entry| entry.endpoint == endpoint.name && entry.address == peer.ip())
-        {
-            return Ok(None);
-        }
-        let nonce = self
-            .nonces
-            .get_mut(authorization.nonce())
-            .ok_or(SipError::InvalidPacket)?;
-        nonce.count = count;
-        Ok(Some(endpoint_index))
-    }
-
-    fn challenge(
-        &mut self,
-        request: &Request,
-        peer: SocketAddr,
-        now: u64,
-    ) -> Result<Vec<u8>, SipError> {
-        if self.nonces.len() >= 128 {
-            return self.render_response(request, 503, "Service Unavailable", "", "");
-        }
-        let nonce = self.token()?;
-        let realm = self
-            .config
-            .auth
-            .first()
-            .map(rusterisk_config::Auth::inbound_realm)
-            .unwrap_or("asterisk");
-        let extra = format!(
-            "WWW-Authenticate: Digest realm=\"{realm}\", nonce=\"{nonce}\", algorithm=MD5, qop=\"auth\"\r\n"
-        );
-        self.nonces.insert(
-            nonce,
-            Nonce {
-                peer,
-                call_id: request.call_id_header()?.value().into(),
-                expires: now.saturating_add(60_000),
-                count: 0,
-            },
-        );
-        self.render_response(request, 401, "Unauthorized", &extra, "")
     }
 
     pub fn receive(

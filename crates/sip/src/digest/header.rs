@@ -161,6 +161,27 @@ pub(crate) struct Authorization<'a> {
 }
 
 impl Authorization<'_> {
+    pub(crate) fn verify_credentials(
+        &self,
+        method: &str,
+        body: &[u8],
+        credentials: &Credentials<'_>,
+        encoding: CredentialEncoding,
+    ) -> Result<bool, DigestError> {
+        if credentials.realm != self.realm
+            || !self.matches_username(credentials.username, encoding)?
+        {
+            return Ok(false);
+        }
+        let prepared = encoding.prepare(credentials)?;
+        let credentials = prepared.credentials()?;
+        let request = DigestRequest::new(method, self.uri.0, self.nonce.0, body)?;
+        Ok(self
+            .algorithm
+            .calculate(&credentials, &request, &self.protection)?
+            .matches(self.response))
+    }
+
     pub(crate) fn matches_username(
         &self,
         username: &str,
@@ -170,6 +191,7 @@ impl Authorization<'_> {
             .matches(username, self.realm, self.algorithm, encoding)
     }
 
+    #[cfg(test)]
     pub(crate) fn username(&self) -> &str {
         self.username.value()
     }
@@ -197,6 +219,7 @@ impl Authorization<'_> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn verify(
         &self,
         method: &str,

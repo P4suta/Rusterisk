@@ -176,6 +176,16 @@ impl Algorithm {
     }
 }
 
+impl From<rusterisk_config::DigestAlgorithm> for Algorithm {
+    fn from(algorithm: rusterisk_config::DigestAlgorithm) -> Self {
+        match algorithm {
+            rusterisk_config::DigestAlgorithm::Md5 => Self::Md5,
+            rusterisk_config::DigestAlgorithm::Sha256 => Self::Sha256,
+            rusterisk_config::DigestAlgorithm::Sha512256 => Self::Sha512256,
+        }
+    }
+}
+
 pub(crate) struct Credentials<'a> {
     username: &'a str,
     password: &'a str,
