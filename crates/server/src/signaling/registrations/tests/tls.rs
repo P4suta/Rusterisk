@@ -15,6 +15,7 @@ use tokio::{
     net::TcpListener,
     task::JoinHandle,
 };
+mod names;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
