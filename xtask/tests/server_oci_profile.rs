@@ -51,6 +51,9 @@ fn runtime_profiles_copy_payloads_into_an_unprivileged_signal_receiving_process(
         }
         assert!(!source.contains("RUN "));
         assert!(!source.contains("cargo "));
+        assert!(source
+            .lines()
+            .all(|line| !line.trim_start().starts_with('+')));
     }
     Ok(())
 }

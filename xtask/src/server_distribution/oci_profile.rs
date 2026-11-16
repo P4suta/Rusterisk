@@ -66,7 +66,7 @@ impl ServerOciProfile {
         format!(
             "FROM {OCI_RUNTIME}\n\
              COPY --chown=65532:65532 payload/ /opt/rusterisk/\n\
-             LABEL org.opencontainers.image.source=\"https://github.com/P4suta/Rusterisk\" \\\n+                 org.opencontainers.image.licenses=\"MIT OR Apache-2.0\" \\\n+                 org.opencontainers.image.version=\"{}\" \\\n+                 io.rusterisk.source.sha256=\"{}\"\n\
+             LABEL org.opencontainers.image.source=\"https://github.com/P4suta/Rusterisk\" \\\n                 org.opencontainers.image.licenses=\"MIT OR Apache-2.0\" \\\n                 org.opencontainers.image.version=\"{}\" \\\n                 io.rusterisk.source.sha256=\"{}\"\n\
              WORKDIR /opt/rusterisk\n\
              USER 65532:65532\n\
              STOPSIGNAL SIGTERM\n\
