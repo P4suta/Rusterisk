@@ -18,6 +18,7 @@ mod recording_silence;
 mod recording_stop_keys;
 mod resource_subscriptions;
 mod stasis;
+mod transfer;
 pub use dial_failure::DialFailure;
 pub use dial_fork::{DialFork, DialForkDecision, DialForkError, DialForkOutcome, DialForkState};
 pub use dialplan::{
@@ -39,6 +40,10 @@ pub use resource_subscriptions::{
     ResourceKind, ResourceSource, ResourceSubscriptions, SubscriptionError,
 };
 pub use stasis::{StasisApplication, StasisMembership};
+pub use transfer::{
+    Transfer, TransferDecision, TransferError, TransferOutcome, TransferStart, TransferState,
+    TransferToken,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContactPresence {
