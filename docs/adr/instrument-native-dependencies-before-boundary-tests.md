@@ -17,6 +17,7 @@ Apply [AddressSanitizer](https://releases.llvm.org/14.0.0/tools/clang/docs/Addre
 Apply [UndefinedBehaviorSanitizer](https://releases.llvm.org/14.0.0/tools/clang/docs/UndefinedBehaviorSanitizer.html#usage) with `-fno-sanitize-recover=all`.
 Use a separate target directory and fail on the first diagnostic.
 Require instrumented native archives, rejecting C probes, and nonempty production boundary tests.
+Use one exit code per process because the [sanitizer runtimes share common flags](https://github.com/llvm/llvm-project/blob/llvmorg-14.0.6/compiler-rt/lib/asan/asan_flags.cpp#L64-L114).
 Run bounded containers with an immutable image, isolated state, and network access only for dependency fetching.
 
 ## Alternatives
