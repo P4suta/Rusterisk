@@ -8,6 +8,9 @@ pub enum ProcessError {
     Timeout,
     InvalidBudget,
     InvalidOutput,
+    Interrupted,
+    UnsupportedSupervision,
+    Cleanup { operation: String, cleanup: String },
 }
 
 impl From<std::io::Error> for ProcessError {
@@ -24,6 +27,13 @@ impl std::fmt::Display for ProcessError {
             Self::Timeout => formatter.write_str("process deadline exceeded"),
             Self::InvalidBudget => formatter.write_str("process budget must be positive"),
             Self::InvalidOutput => formatter.write_str("invalid bounded process output"),
+            Self::Interrupted => formatter.write_str("process interrupted"),
+            Self::UnsupportedSupervision => {
+                formatter.write_str("process tree supervision is unavailable on this platform")
+            }
+            Self::Cleanup { operation, cleanup } => {
+                write!(formatter, "{operation}; process cleanup failed: {cleanup}")
+            }
         }
     }
 }
@@ -40,6 +50,7 @@ fn stop(child: &mut Child) -> Result<(), ProcessError> {
     Ok(())
 }
 
+/// Reaps one child without process group or signal supervision.
 pub fn run(command: &mut Command, budget: Duration) -> Result<(), ProcessError> {
     let deadline = Instant::now()
         .checked_add(budget)
@@ -69,3 +80,6 @@ pub fn run(command: &mut Command, budget: Duration) -> Result<(), ProcessError> 
         std::thread::sleep(remaining.min(Duration::from_millis(10)));
     }
 }
+
+mod supervisor;
+pub use supervisor::CommandSupervisor;

@@ -3,6 +3,10 @@ use std::{
     time::Duration,
 };
 use xtask::process::{run, ProcessError};
+#[cfg(unix)]
+mod process {
+    pub mod descendants;
+}
 
 #[test]
 fn process_fixture() -> Result<(), String> {
@@ -13,8 +17,22 @@ fn process_fixture() -> Result<(), String> {
             Ok(())
         }
         Ok("success") | Err(_) => Ok(()),
+        #[cfg(unix)]
+        Ok(
+            mode @ ("tree-parent" | "tree-worker" | "tree-success" | "tree-failure" | "tree-owner"
+            | "scope-repeat"),
+        ) => process::descendants::fixture(mode),
         Ok(_) => Err("unknown fixture mode".into()),
     }
+}
+
+#[cfg(not(unix))]
+#[test]
+fn unsupported_process_supervision_is_explicit() {
+    assert!(matches!(
+        xtask::process::CommandSupervisor::new(),
+        Err(ProcessError::UnsupportedSupervision)
+    ));
 }
 
 fn fixture(mode: &str) -> Result<Command, std::io::Error> {
