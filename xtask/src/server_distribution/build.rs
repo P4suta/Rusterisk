@@ -91,11 +91,13 @@ impl ServerBuildPlan {
     pub fn step(&self, phase: ServerBuildPhase) -> Step {
         let (arguments, seconds) = match phase {
             ServerBuildPhase::Fetch => (
-                vec!["fetch", "--locked", "--target", self.target.triple()],
+                ["fetch", "--locked", "--target", self.target.triple()]
+                    .map(str::to_owned)
+                    .to_vec(),
                 180,
             ),
             ServerBuildPhase::Build => (
-                vec![
+                [
                     "build",
                     "--locked",
                     "--offline",
@@ -110,12 +112,14 @@ impl ServerBuildPlan {
                     "2",
                     "--target-dir",
                     &self.target_directory,
-                ],
+                ]
+                .map(str::to_owned)
+                .to_vec(),
                 900,
             ),
         };
         Step {
-            arguments: arguments.into_iter().map(str::to_owned).collect(),
+            arguments,
             budget: Duration::from_secs(seconds),
         }
     }
