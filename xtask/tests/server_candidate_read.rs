@@ -54,6 +54,39 @@ fn server_candidates_bind_archive_checksum_source_and_executable_bytes(
         assert!(candidate
             .files()
             .any(|(path, bytes)| path == "bin/rusterisk" && bytes == binary()));
+        let extracted_root = parent.join("extracted");
+        let extracted = candidate.extract(&extracted_root)?;
+        for (path, bytes) in candidate.files() {
+            assert_eq!(std::fs::read(extracted.directory()?.join(path))?, bytes);
+        }
+        assert_eq!(
+            extracted.executable()?,
+            extracted_root.join("bin/rusterisk")
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(extracted.executable()?)?
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o755
+            );
+        }
+        assert!(candidate.extract(&extracted_root).is_err());
+        extracted.close()?;
+        assert!(!extracted_root.exists());
+        let partial = parent.join("failed-extraction");
+        assert!(candidate
+            .extract_with(&partial, |_, _| Err(io::Error::other(
+                "injected write failure"
+            )))
+            .is_err());
+        assert!(!partial.exists());
+        let dropped = parent.join("dropped-extraction");
+        drop(candidate.extract(&dropped)?);
+        assert!(!dropped.exists());
         let checksum = directory.join("SHA256SUMS");
         let sums = std::fs::read(&checksum)?;
         for bytes in [b"".to_vec(), b"fake checksum\n".to_vec()] {

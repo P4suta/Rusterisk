@@ -19,6 +19,8 @@ mod command;
 pub use command::{build_server_with, plan_server};
 mod read;
 pub use read::ServerCandidate;
+mod extraction;
+pub use extraction::ExtractedServer;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveFormat {
