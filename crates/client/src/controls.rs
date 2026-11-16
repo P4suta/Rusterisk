@@ -1,6 +1,16 @@
 use crate::{api, Client, DtmfDigit, DtmfTiming, Error, MuteDirection};
 
 impl Client {
+    pub async fn ring(&self, id: &api::ChannelId) -> Result<(), Error> {
+        self.request("channels.ring", &[("channelId", id.as_str())], &[])
+            .await
+    }
+
+    pub async fn stop_ringing(&self, id: &api::ChannelId) -> Result<(), Error> {
+        self.request("channels.ringStop", &[("channelId", id.as_str())], &[])
+            .await
+    }
+
     pub async fn hold(&self, id: &api::ChannelId) -> Result<(), Error> {
         self.request("channels.hold", &[("channelId", id.as_str())], &[])
             .await
