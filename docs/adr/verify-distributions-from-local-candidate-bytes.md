@@ -12,22 +12,24 @@ Workspace checks don't establish distribution startup.
 
 ## Decision
 
-Use typed xtask operations to create and verify local server archives, Linux OCI images, and core/API/client packages from immutable source.
+Create server archives, Linux OCI images, and core/API/client packages from immutable source through xtask.
 Select Linux/macOS x86_64 and ARM64, plus Windows x86_64.
 Unix uses tar.gz.
 Windows uses zip.
-Include example configuration, both license texts, and package documentation.
+Include example configuration, both licenses, and documentation.
 Keep normal SDK registry versions.
-Omit server/config/media dev-dependencies through path-only declarations and exclude workspace-only tests/examples from client packages.
+Use path-only server/config/media dev-dependencies and exclude client workspace-only tests/examples.
 Preserve checkout tests.
 Build and run an independent consumer using extracted candidates.
+Seed candidate lockfiles for [Cargo's minimal updates](https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html) before locked builds.
+Reject changed registry versions and checksums.
 Smoke-test extracted servers and [OCI exports](https://docs.docker.com/build/exporters/oci-docker/) on native hosts with bounded cleanup.
 Publication remains separate.
 
 ## Alternatives
 
 cargo-dist provides maintained archives and workflows.
-Existing xtask ownership integrates independent verification phases more directly.
+xtask integrates independent verification phases.
 Source-only builds leave packaging defects unchecked.
 
 ## Consequences
