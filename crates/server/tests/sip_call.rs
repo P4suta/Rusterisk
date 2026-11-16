@@ -29,6 +29,9 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tower::ServiceExt;
 
+#[path = "sip_transfer/blind.rs"]
+mod blind_transfer;
+
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
 }
