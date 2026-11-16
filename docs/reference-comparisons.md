@@ -65,6 +65,10 @@ The [audio bridge decision](adr/report-bridge-video-mode-within-supported-media.
 External channel comparisons check bound transport variables and Stasis participation.
 Audio comparisons connect two external channels to a bridge on each server.
 Both directions send distinct known samples and check received sample values for `PCMU` and `PCMA`.
+Recording comparisons use the Rust client to start channel and bridge recordings on each server.
+The client waits for `RecordingFinished` before downloading the completed audio.
+At least 80 milliseconds of consecutive samples must match the received channel input or bridge mix.
+The audio check rejects silence, different samples, brief fragments, and malformed files.
 AudioSocket comparisons check binary session identifiers, Stasis participation, bridge membership, and exact received samples in both directions.
 Incoming and configured outgoing WebSocket comparisons check the media subprotocol, start metadata, known samples in both directions, and JSON and plain text controls.
 Outgoing comparisons also check basic authentication, destination queries, and manual answer.
