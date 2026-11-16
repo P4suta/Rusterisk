@@ -2,7 +2,10 @@ use std::time::Duration;
 mod configuration;
 mod interop;
 pub use configuration::copy_configuration;
-pub use interop::{callback_address, media_address, published_address, CallbackHost, Interop};
+pub use interop::{
+    callback_address, media_address, published_address, validate_sip_transfer_execution,
+    CallbackHost, Interop, SIP_TRANSFER_TEST,
+};
 
 pub struct Step {
     pub arguments: Vec<String>,
@@ -58,6 +61,7 @@ pub enum ReferenceError {
     InvalidIdentity,
     InvalidAddress,
     InvalidConfigPath,
+    IncompleteTransfer,
 }
 
 impl std::fmt::Display for ReferenceError {
@@ -66,6 +70,9 @@ impl std::fmt::Display for ReferenceError {
             Self::InvalidIdentity => formatter.write_str("invalid reference build identity"),
             Self::InvalidAddress => formatter.write_str("invalid local reference address"),
             Self::InvalidConfigPath => formatter.write_str("invalid reference configuration path"),
+            Self::IncompleteTransfer => {
+                formatter.write_str("the required SIP transfer comparison did not pass")
+            }
         }
     }
 }

@@ -1,4 +1,29 @@
-use xtask::reference::{published_address, CallbackHost, Interop, ReferenceError};
+use xtask::reference::{
+    published_address, validate_sip_transfer_execution, CallbackHost, Interop, ReferenceError,
+    SIP_TRANSFER_TEST,
+};
+
+#[test]
+fn transfer_execution_requires_the_named_passing_case_without_skips() -> Result<(), ReferenceError>
+{
+    let output = format!("running 1 test\ntest {SIP_TRANSFER_TEST} ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 1.23s\n");
+    validate_sip_transfer_execution(&output)?;
+    for rejected in [
+        String::new(),
+        output.replace(SIP_TRANSFER_TEST, "different_transfer_test"),
+        output.replace(" ... ok", " ... ignored"),
+        output.replace("1 passed", "0 passed"),
+        output.replace("1 passed", "2 passed"),
+        output.replace("0 ignored", "1 ignored"),
+        output.replace("0 failed", "1 failed"),
+        format!("{output}test unrelated ... ok\n"),
+        format!("{output}{output}"),
+        "x".repeat(65_537),
+    ] {
+        assert!(validate_sip_transfer_execution(&rejected).is_err());
+    }
+    Ok(())
+}
 
 #[test]
 fn native_linux_callbacks_add_the_host_gateway_without_overriding_managed_dns(

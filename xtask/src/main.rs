@@ -305,8 +305,14 @@ fn distribution_sdk_content(candidate: &Path) -> Result<(), TaskError> {
 }
 
 fn node_check() -> Result<(), TaskError> {
+    node_check_with(run)
+}
+
+fn node_check_with(
+    mut command: impl FnMut(&str, &[&str]) -> Result<(), TaskError>,
+) -> Result<(), TaskError> {
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-    run(
+    command(
         npm,
         &[
             "ci",
@@ -317,11 +323,11 @@ fn node_check() -> Result<(), TaskError> {
             "--no-fund",
         ],
     )?;
-    run(
+    command(
         npm,
         &["--prefix", "tests/interop/node-ari-client", "run", "check"],
     )?;
-    run(npm, &["--prefix", "tests/interop/node-ari-client", "test"])
+    command(npm, &["--prefix", "tests/interop/node-ari-client", "test"])
 }
 
 fn execution_identity(execute: bool) -> Result<String, TaskError> {

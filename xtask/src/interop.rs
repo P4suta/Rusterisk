@@ -1,17 +1,41 @@
 use crate::TaskError;
 use std::{io::Read, path::Path, process::Command, time::Duration};
 use xtask::{
-    process::{run, ProcessError},
+    process::{CommandSupervisor, ProcessError},
     reference::{
-        callback_address, copy_configuration, media_address, published_address, Interop, Step,
+        callback_address, copy_configuration, media_address, published_address,
+        validate_sip_transfer_execution, Interop, Step, SIP_TRANSFER_TEST,
     },
 };
 
-fn perform(step: &Step) -> Result<(), ProcessError> {
-    run(Command::new("docker").args(&step.arguments), step.budget)
+fn perform(supervisor: &mut CommandSupervisor, step: &Step) -> Result<(), ProcessError> {
+    supervisor.run(Command::new("docker").args(&step.arguments), step.budget)
 }
 
-fn captured(step: &Step, identity: &str, field: &str) -> Result<String, ProcessError> {
+fn captured(
+    supervisor: &mut CommandSupervisor,
+    step: &Step,
+    identity: &str,
+    field: &str,
+) -> Result<String, ProcessError> {
+    captured_command(
+        supervisor,
+        Command::new("docker").args(&step.arguments),
+        step.budget,
+        identity,
+        field,
+        1025,
+    )
+}
+
+fn captured_command(
+    supervisor: &mut CommandSupervisor,
+    command: &mut Command,
+    budget: Duration,
+    identity: &str,
+    field: &str,
+    limit: u64,
+) -> Result<String, ProcessError> {
     let directory = Path::new("target/interop");
     std::fs::create_dir_all(directory)?;
     let path = directory.join(format!("{identity}.{field}"));
@@ -19,24 +43,37 @@ fn captured(step: &Step, identity: &str, field: &str) -> Result<String, ProcessE
         .write(true)
         .create_new(true)
         .open(&path)?;
-    let result = (|| {
-        run(
-            Command::new("docker").args(&step.arguments).stdout(file),
-            step.budget,
-        )?;
-        let mut output = String::with_capacity(1025);
+    let operation = supervisor.run(command.stdout(file), budget);
+    let output = (|| {
+        let mut output = String::new();
         std::fs::File::open(&path)?
-            .take(1025)
+            .take(limit)
             .read_to_string(&mut output)?;
-        Ok(output)
+        Ok::<_, std::io::Error>(output)
     })();
-    if let Err(error) = std::fs::remove_file(path) {
-        if let Err(primary) = &result {
-            eprintln!("reference inspection failed: {primary}");
+    if operation.is_err() {
+        if let Ok(output) = &output {
+            eprintln!("{output}");
         }
-        return Err(ProcessError::Io(error));
     }
-    result
+    let result = match (operation, output) {
+        (Ok(()), Ok(output)) => Ok(output),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(()), Err(error)) => Err(ProcessError::Io(error)),
+        (Err(operation), Err(cleanup)) => Err(ProcessError::Cleanup {
+            operation: operation.to_string(),
+            cleanup: cleanup.to_string(),
+        }),
+    };
+    match (result, std::fs::remove_file(path)) {
+        (Ok(output), Ok(())) => Ok(output),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(ProcessError::Io(error)),
+        (Err(operation), Err(cleanup)) => Err(ProcessError::Cleanup {
+            operation: operation.to_string(),
+            cleanup: cleanup.to_string(),
+        }),
+    }
 }
 
 pub fn execute(execute: bool) -> Result<(), TaskError> {
@@ -75,6 +112,20 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
         "--ignored",
     ];
     println!("budget=300s cargo {}", arguments.join(" "));
+    let transfer_arguments = [
+        "test",
+        "--locked",
+        "--package",
+        "rusterisk-server",
+        "--test",
+        "sip_call",
+        SIP_TRANSFER_TEST,
+        "--",
+        "--ignored",
+        "--exact",
+        "--show-output",
+    ];
+    println!("budget=180s cargo {}", transfer_arguments.join(" "));
     println!(
         "budget={}s docker {}",
         cleanup.budget.as_secs(),
@@ -83,38 +134,110 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
     if !execute {
         return Ok(());
     }
-    super::node_check()?;
+    let mut supervisor = CommandSupervisor::new().map_err(TaskError::Process)?;
+    let result = (|| {
+        super::node_check_with(|program, arguments| {
+            println!("check: {program} {}", arguments.join(" "));
+            supervisor
+                .run(
+                    Command::new(program).args(arguments),
+                    Duration::from_secs(180),
+                )
+                .map_err(TaskError::Process)
+        })?;
+        execute_owned(
+            &mut supervisor,
+            &plan,
+            &configuration,
+            &identity,
+            &arguments,
+            &transfer_arguments,
+        )
+    })();
+    match (result, supervisor.finish()) {
+        (result, Ok(())) => result,
+        (Ok(()), Err(error)) => Err(TaskError::Process(error)),
+        (Err(operation), Err(cleanup)) => Err(TaskError::Contract(format!(
+            "{operation}; interop supervisor cleanup failed: {cleanup}"
+        ))),
+    }
+}
+
+fn execute_owned(
+    supervisor: &mut CommandSupervisor,
+    plan: &Interop,
+    configuration: &Path,
+    identity: &str,
+    arguments: &[&str],
+    transfer_arguments: &[&str],
+) -> Result<(), TaskError> {
     std::fs::create_dir_all("target/interop")?;
-    copy_configuration(Path::new("tests/interop/asterisk"), &configuration)?;
+    copy_configuration(Path::new("tests/interop/asterisk"), configuration)?;
     let result = (|| {
         std::fs::create_dir(configuration.join("sounds"))?;
-        perform(&start)?;
-        let address = published_address(&captured(&plan.port(), &identity, "port")?)
+        perform(supervisor, &plan.start())?;
+        let address = published_address(&captured(supervisor, &plan.port(), identity, "port")?)
             .map_err(|_| ProcessError::InvalidOutput)?;
-        let media = media_address(&captured(&plan.media_address(), &identity, "media")?)
-            .map_err(|_| ProcessError::InvalidOutput)?;
-        let callback_output = captured(&plan.callback_address(), &identity, "callback")?;
+        let media = media_address(&captured(
+            supervisor,
+            &plan.media_address(),
+            identity,
+            "media",
+        )?)
+        .map_err(|_| ProcessError::InvalidOutput)?;
+        let callback_output = captured(supervisor, &plan.callback_address(), identity, "callback")?;
         let callback = callback_address(&callback_output).map_err(|_| {
             eprintln!("invalid reference callback inspection: {callback_output:?}");
             ProcessError::InvalidOutput
         })?;
         println!("reference callback address: {callback}");
-        run(
+        supervisor.run(
             Command::new("cargo")
                 .args(arguments)
                 .env("RUSTERISK_REFERENCE_URL", format!("http://{address}"))
                 .env("RUSTERISK_REFERENCE_MEDIA_IP", media.to_string())
                 .env("RUSTERISK_REFERENCE_CALLBACK_IP", callback.to_string())
-                .env("RUSTERISK_REFERENCE_CONFIGURATION", &configuration),
+                .env("RUSTERISK_REFERENCE_CONFIGURATION", configuration),
             Duration::from_secs(300),
-        )
+        )?;
+        let output = captured_command(
+            supervisor,
+            Command::new("cargo")
+                .args(transfer_arguments)
+                .env("RUSTERISK_REFERENCE_URL", format!("http://{address}"))
+                .env("RUSTERISK_REFERENCE_MEDIA_IP", media.to_string())
+                .env("RUSTERISK_REFERENCE_CALLBACK_IP", callback.to_string())
+                .env("RUSTERISK_REFERENCE_CONFIGURATION", configuration),
+            Duration::from_secs(180),
+            identity,
+            "sip-transfer",
+            65_537,
+        )?;
+        print!("{output}");
+        validate_sip_transfer_execution(&output).map_err(|_| ProcessError::InvalidOutput)
     })();
+    let mut result = result;
     if result.is_err() {
-        if let Err(error) = perform(&plan.logs()) {
-            eprintln!("reference logs failed: {error}");
+        let logs = plan.logs();
+        if let Err(cleanup) =
+            supervisor.run_cleanup(Command::new("docker").args(&logs.arguments), logs.budget)
+        {
+            if let Err(operation) = result {
+                result = Err(ProcessError::Cleanup {
+                    operation: operation.to_string(),
+                    cleanup: cleanup.to_string(),
+                });
+            }
         }
     }
-    let result = match (result, perform(&cleanup)) {
+    let cleanup = plan.cleanup();
+    let result = match (
+        result,
+        supervisor.run_cleanup(
+            Command::new("docker").args(&cleanup.arguments),
+            cleanup.budget,
+        ),
+    ) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(operation), Err(cleanup)) => Err(TaskError::ReferenceCleanup { operation, cleanup }),
         (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(TaskError::Process(error)),
