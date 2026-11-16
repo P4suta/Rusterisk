@@ -14,6 +14,7 @@ mod websocket_media_options;
 pub use media_events::{MediaEvent, MediaFormat};
 pub use websocket_media_options::WebSocketMediaOptions;
 mod media_uri;
+mod playback_options;
 mod sound_id;
 pub use media_commands::{MediaCommand, MediaCommandError, MediaControlFormat, MediaDirection};
 pub use sound_id::{InvalidSoundId, SoundId};
@@ -24,6 +25,7 @@ pub use event_filter::EventFilterRequest;
 pub use event_source::{EventSource, InvalidEventSource};
 pub use external_rtp::{ExternalRtpTarget, InvalidExternalRtpTarget, StaticRtpCodec};
 pub use media_uri::{InvalidMediaUri, MediaUri};
+pub use playback_options::{InvalidPlaybackOption, PlaybackMilliseconds, PlaybackOptions};
 pub use recording_options::{
     InvalidRecordingOption, RecordingOptions, RecordingSeconds, RecordingTermination,
 };
