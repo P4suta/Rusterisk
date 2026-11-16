@@ -139,7 +139,7 @@ fn malformed_unsupported_or_unmatched_offers_never_fabricate_authentication() ->
         "Digest realm=\"provider.example\", nonce=\"server-nonce\", algorithm=SHA-3",
         "Digest realm=\"provider.example\", nonce=\"server-nonce\", qop=\"extension\"",
         "Digest realm=\"provider.example\", nonce=\"server-nonce\", charset=ISO-8859-1",
-        "Digest realm=\"provider.example\", nonce=\"server-nonce\", userhash=true",
+        "Digest realm=\"provider.example\", nonce=\"server-nonce\", userhash=unknown",
     ] {
         let receipt = challenge(&format!("WWW-Authenticate: {offer}\r\n"))?;
         let identity = receipt.identity().advance(9)?;

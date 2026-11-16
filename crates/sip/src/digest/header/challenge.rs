@@ -1,4 +1,7 @@
-use super::Header;
+use super::{
+    identity::{quoted, UsernameHash},
+    Header,
+};
 use crate::digest::{
     text, Algorithm, CredentialEncoding, Credentials, DigestError, DigestRequest, Nonce, Protection,
 };
@@ -17,6 +20,7 @@ pub(crate) struct Challenge {
     opaque: Option<String>,
     stale: bool,
     encoding: CredentialEncoding,
+    username_hash: UsernameHash,
 }
 
 pub(crate) struct ChallengeChoice<'a> {
@@ -39,12 +43,11 @@ impl Header {
             Protection::Integrity(_) => Quality::Integrity,
             Protection::Legacy => return Err(DigestError::Unsupported),
         };
-        let username = encoding.username(prior.username())?;
         let mut exact = None;
         let mut wildcard = None;
         for candidate in credentials {
             if !candidate.matches_outbound_realm(prior.realm())
-                || encoding.username(&candidate.username)? != username
+                || !prior.matches_username(&candidate.username, encoding)?
             {
                 continue;
             }
@@ -68,6 +71,7 @@ impl Header {
             opaque: self.quoted("opaque")?.map(String::from),
             stale: false,
             encoding,
+            username_hash: prior.username.hash(),
         };
         let count = prior.count().checked_add(1).ok_or(DigestError::Invalid)?;
         let credentials = Credentials::new(
@@ -137,12 +141,7 @@ impl Header {
             Some(_) => return Err(DigestError::Invalid),
         };
         let encoding = CredentialEncoding::parse(self.get("charset"))?;
-        if self
-            .literal("userhash")?
-            .is_some_and(|value| !value.eq_ignore_ascii_case("false"))
-        {
-            return Err(DigestError::Unsupported);
-        }
+        let username_hash = UsernameHash::parse(self.literal("userhash")?)?;
         let opaque = self.quoted("opaque")?;
         if opaque.is_some_and(|value| !text(value, 256)) {
             return Err(DigestError::Invalid);
@@ -155,6 +154,7 @@ impl Header {
             opaque: opaque.map(String::from),
             stale,
             encoding,
+            username_hash,
         })
     }
 }
@@ -198,9 +198,14 @@ impl Challenge {
             .algorithm()
             .calculate(&credentials, request, &protection)?
             .hex();
+        let username = self.username_hash.render(
+            credentials.username,
+            &self.realm,
+            self.algorithm,
+            self.encoding,
+        );
         let mut output = format!(
-            "Digest username={}, realm={}, nonce={}, uri={}, response=\"{response}\", algorithm={}, qop={}, cnonce={}, nc={counter}",
-            quoted(credentials.username),
+            "Digest {username}, realm={}, nonce={}, uri={}, response=\"{response}\", algorithm={}, qop={}, cnonce={}, nc={counter}",
             quoted(&self.realm),
             quoted(&self.nonce),
             quoted(request.uri.0),
@@ -265,17 +270,4 @@ fn quality(value: Option<&str>) -> Result<Quality, DigestError> {
         }
     }
     selected.ok_or(DigestError::Unsupported)
-}
-
-fn quoted(value: &str) -> String {
-    let mut output = String::with_capacity(value.len() + 2);
-    output.push('"');
-    for character in value.chars() {
-        if matches!(character, '"' | '\\') {
-            output.push('\\');
-        }
-        output.push(character);
-    }
-    output.push('"');
-    output
 }

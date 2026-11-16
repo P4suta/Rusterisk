@@ -44,7 +44,8 @@ fn negotiated_utf8_prepares_credentials_and_preserves_case() -> Result<(), Diges
         )?,
         prepared
     );
-    assert!(prepared.contains("username=\"Al\u{00e9} Smith\""));
+    assert!(prepared.contains("username*=UTF-8''Al%C3%A9%20Smith"));
+    assert!(!prepared.contains("username="));
     assert_ne!(
         response("al\u{00e9} Smith", "p\u{00e5}ss word", Some("UTF-8"))?,
         prepared

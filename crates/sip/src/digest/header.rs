@@ -1,7 +1,9 @@
 use super::{
-    lower_hexadecimal, text, Algorithm, Credentials, DigestError, DigestRequest, Nonce, Protection,
-    RequestUri,
+    lower_hexadecimal, text, Algorithm, CredentialEncoding, Credentials, DigestError,
+    DigestRequest, Nonce, Protection, RequestUri,
 };
+mod identity;
+use identity::Username;
 
 enum AttributeValue {
     Quoted(String),
@@ -61,7 +63,7 @@ impl Header {
             rest = whitespace(&rest[end..])
                 .strip_prefix('=')
                 .ok_or(DigestError::Invalid)?;
-            let (value, after) = value(whitespace(rest))?;
+            let (value, after) = value(whitespace(rest), name.eq_ignore_ascii_case("username*"))?;
             attributes[length] = Some(Attribute {
                 name: name.into(),
                 value,
@@ -114,27 +116,14 @@ impl Header {
     }
 
     pub(crate) fn authorization(&self) -> Result<Authorization<'_>, DigestError> {
-        if self.get("username*").is_some()
-            || self
-                .literal("userhash")?
-                .is_some_and(|value| !value.eq_ignore_ascii_case("false"))
-        {
-            return Err(DigestError::Unsupported);
-        }
-        let username = self.required_quoted("username")?;
         let realm = self.required_quoted("realm")?;
-        Credentials::new(username, "", realm)?;
+        let algorithm = Algorithm::parse(self.literal("algorithm")?)?;
+        let username = Username::parse(self, algorithm)?;
+        Credentials::new(username.value(), "", realm)?;
         let nonce = Nonce::new(self.required_quoted("nonce")?)?;
         let uri = RequestUri::new(self.required_quoted("uri")?)?;
-        let algorithm = Algorithm::parse(self.literal("algorithm")?)?;
         let response = self.required_quoted("response")?;
-        let expected = match algorithm {
-            Algorithm::Md5 | Algorithm::Md5Session => 32,
-            Algorithm::Sha256
-            | Algorithm::Sha256Session
-            | Algorithm::Sha512256
-            | Algorithm::Sha512256Session => 64,
-        };
+        let expected = algorithm.hex_length();
         if response.len() != expected || !response.bytes().all(lower_hexadecimal) {
             return Err(DigestError::Invalid);
         }
@@ -162,7 +151,7 @@ impl Header {
 }
 
 pub(crate) struct Authorization<'a> {
-    username: &'a str,
+    username: Username<'a>,
     realm: &'a str,
     nonce: Nonce<'a>,
     uri: RequestUri<'a>,
@@ -172,8 +161,17 @@ pub(crate) struct Authorization<'a> {
 }
 
 impl Authorization<'_> {
-    pub(crate) fn username(&self) -> &str {
+    pub(crate) fn matches_username(
+        &self,
+        username: &str,
+        encoding: CredentialEncoding,
+    ) -> Result<bool, DigestError> {
         self.username
+            .matches(username, self.realm, self.algorithm, encoding)
+    }
+
+    pub(crate) fn username(&self) -> &str {
+        self.username.value()
     }
     pub(crate) fn realm(&self) -> &str {
         self.realm
@@ -205,7 +203,10 @@ impl Authorization<'_> {
         body: &[u8],
         password: &str,
     ) -> Result<bool, DigestError> {
-        let credentials = Credentials::new(self.username, password, self.realm)?;
+        let Username::Plain(username) = &self.username else {
+            return Err(DigestError::Invalid);
+        };
+        let credentials = Credentials::new(username, password, self.realm)?;
         let request = DigestRequest::new(method, self.uri.0, self.nonce.0, body)?;
         Ok(self
             .algorithm
@@ -226,9 +227,12 @@ fn token(byte: u8) -> bool {
         )
 }
 
-fn value(source: &str) -> Result<(AttributeValue, &str), DigestError> {
+fn value(source: &str, extended: bool) -> Result<(AttributeValue, &str), DigestError> {
     let Some(quoted) = source.strip_prefix('"') else {
-        let end = source.bytes().take_while(|byte| token(*byte)).count();
+        let end = source
+            .bytes()
+            .take_while(|byte| token(*byte) || extended && identity::attr(*byte))
+            .count();
         return if end == 0 || end > 2048 {
             Err(DigestError::Invalid)
         } else {

@@ -134,7 +134,7 @@ fn unsupported_profiles_and_invalid_boundaries_cannot_emit_authorization() -> Re
 {
     for source in [
         "Digest realm=\"example.net\", nonce=\"nonce\", charset=ISO-8859-1".to_owned(),
-        "Digest realm=\"example.net\", nonce=\"nonce\", userhash=true".to_owned(),
+        "Digest realm=\"example.net\", nonce=\"nonce\", userhash=unknown".to_owned(),
         format!("Digest realm=\"{}\", nonce=\"nonce\"", "x".repeat(257)),
         format!(
             "Digest realm=\"example.net\", nonce=\"{}\"",

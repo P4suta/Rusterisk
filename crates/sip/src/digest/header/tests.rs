@@ -74,13 +74,20 @@ fn nonce_counts_and_unsupported_algorithms_are_not_silently_normalized() -> Resu
     for input in [
         authorization("").replace("algorithm=SHA-256", "algorithm=SHA-384"),
         authorization("").replace("qop=auth-int", "qop=unknown"),
-        authorization(", userhash=true"),
-        authorization(", username*=UTF-8''alice"),
         authorization("").replacen("Digest ", "Basic ", 1),
     ] {
         assert!(matches!(
             Header::parse(&input).and_then(|header| header.authorization().map(|_| ())),
             Err(DigestError::Unsupported)
+        ));
+    }
+    for input in [
+        authorization(", userhash=true"),
+        authorization(", username*=UTF-8''alice"),
+    ] {
+        assert!(matches!(
+            Header::parse(&input).and_then(|header| header.authorization().map(|_| ())),
+            Err(DigestError::Invalid)
         ));
     }
     Ok(())

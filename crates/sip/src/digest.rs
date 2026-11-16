@@ -10,6 +10,8 @@ pub(crate) use encoding::CredentialEncoding;
 #[cfg(test)]
 mod challenge_tests;
 #[cfg(test)]
+mod identity_tests;
+#[cfg(test)]
 mod utf8_tests;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +31,17 @@ pub(crate) enum Algorithm {
 }
 
 impl Algorithm {
+    fn hex_length(self) -> usize {
+        match self {
+            Self::Md5 | Self::Md5Session => 32,
+            Self::Sha256 | Self::Sha256Session | Self::Sha512256 | Self::Sha512256Session => 64,
+        }
+    }
+
+    fn username_hash(self, username: &str, realm: &str) -> Response {
+        self.hash(&[username.as_bytes(), b":", realm.as_bytes()])
+    }
+
     pub(crate) fn parse(value: Option<&str>) -> Result<Self, DigestError> {
         let value = value.unwrap_or("MD5");
         [
