@@ -101,6 +101,7 @@ struct Port {
     stop: watch::Sender<bool>,
     state: ConnectionState,
     identity: Option<String>,
+    tls_profile: Option<setup::StartingTlsProfile>,
 }
 
 struct StreamPacket {
@@ -391,6 +392,7 @@ impl Network {
                 stop,
                 state: ConnectionState::Open,
                 identity: None,
+                tls_profile: None,
             },
         );
         Ok(Reserved {

@@ -97,7 +97,9 @@ impl Signaling {
                 (Route::Registered(route), setup)
             }
             Destination::Static(_) => {
-                let setup = self.network.reserve_setup(listener)?;
+                let setup = self
+                    .network
+                    .reserve_setup(listener, self.registrations.generation())?;
                 (Route::Static, setup)
             }
         };

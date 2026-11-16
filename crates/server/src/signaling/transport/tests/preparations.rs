@@ -1,4 +1,5 @@
 use super::{failure, network, ControlError, Input, Reserved, OPTIONS};
+use std::num::NonZeroU64;
 use tokio::{io::AsyncWriteExt, net::TcpStream};
 
 #[tokio::test]
@@ -6,25 +7,25 @@ async fn cancelled_resolutions_keep_shared_capacity_until_reaped() -> Result<(),
     let mut network = network().await?;
     let mut pending = Vec::with_capacity(16);
     for _ in 0..16 {
-        pending.push(network.reserve_setup(0)?);
+        pending.push(network.reserve_setup(0, NonZeroU64::MIN)?);
     }
     assert!(matches!(
-        network.reserve_setup(0),
+        network.reserve_setup(0, NonZeroU64::MIN),
         Err(ControlError::Capacity)
     ));
     for key in &pending {
         network.cancel_setup(*key);
     }
     assert!(matches!(
-        network.reserve_setup(0),
+        network.reserve_setup(0, NonZeroU64::MIN),
         Err(ControlError::Capacity)
     ));
     let previous = pending.pop().ok_or(ControlError::Capacity)?;
     network.finish_resolution(previous);
-    let replacement = network.reserve_setup(0)?;
+    let replacement = network.reserve_setup(0, NonZeroU64::MIN)?;
     assert_ne!(previous, replacement);
     assert!(matches!(
-        network.reserve_setup(0),
+        network.reserve_setup(0, NonZeroU64::MIN),
         Err(ControlError::Capacity)
     ));
     network.close().await?;
@@ -43,7 +44,7 @@ async fn registered_setup_slots_share_capacity_without_reserving_more_connection
         receivers.push(network.reserve(0, ([127, 0, 0, 1], port).into())?);
     }
     assert!(matches!(
-        network.reserve_setup(0),
+        network.reserve_setup(0, NonZeroU64::MIN),
         Err(ControlError::Capacity)
     ));
     let mut slots = Vec::with_capacity(16);

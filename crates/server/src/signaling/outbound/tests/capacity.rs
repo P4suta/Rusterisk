@@ -9,6 +9,7 @@ use rsipstack::sip::{
     Method, SipMessage, Uri,
 };
 use rusterisk_api::ChannelId;
+use std::num::NonZeroU64;
 
 struct Fixture {
     signaling: Signaling,
@@ -71,7 +72,10 @@ async fn native_shutdown_drains_every_failed_job_and_recovers_known_setup_slots(
                 "Native shutdown left failed jobs unjoined",
             ));
         }
-        let recovered = fixture.signaling.network.reserve_setup(0)?;
+        let recovered = fixture
+            .signaling
+            .network
+            .reserve_setup(0, NonZeroU64::MIN)?;
         fixture.signaling.network.finish_resolution(recovered);
         Ok(())
     }
@@ -176,7 +180,7 @@ async fn cancelled_registered_calls_keep_the_shared_setup_slots_until_their_jobs
         }
         if !fixture.signaling.native_pending.is_empty()
             || !matches!(
-                fixture.signaling.network.reserve_setup(0),
+                fixture.signaling.network.reserve_setup(0, NonZeroU64::MIN),
                 Err(ControlError::Capacity)
             )
         {
@@ -190,7 +194,10 @@ async fn cancelled_registered_calls_keep_the_shared_setup_slots_until_their_jobs
                 .native_completed(completed.map_err(failure)?, 1)
                 .await?;
         }
-        let recovered = fixture.signaling.network.reserve_setup(0)?;
+        let recovered = fixture
+            .signaling
+            .network
+            .reserve_setup(0, NonZeroU64::MIN)?;
         fixture.signaling.network.finish_resolution(recovered);
         Ok(())
     }

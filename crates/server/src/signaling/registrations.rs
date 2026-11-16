@@ -220,6 +220,10 @@ impl Registrations {
         })
     }
 
+    pub(super) const fn generation(&self) -> NonZeroU64 {
+        self.lifetime.generation()
+    }
+
     fn select(&mut self, now: u64) -> Option<usize> {
         for _ in 0..self.clients.len() {
             let index = self.cursor;
@@ -391,7 +395,9 @@ impl Signaling {
             .ok_or(ControlError::Capacity)?;
         let target = client.target.clone();
         let cached = self.resolution_cache.get(&target, Instant::now());
-        let setup = self.network.reserve_setup(client.listener)?;
+        let setup = self
+            .network
+            .reserve_setup(client.listener, self.registrations.generation())?;
         let key = ConfigurationKey {
             generation: self.registrations.lifetime.generation(),
             index,

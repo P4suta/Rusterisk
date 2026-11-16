@@ -2,15 +2,17 @@ use super::{
     connection, failure, finished, ConnectionKey, ConnectionState, ControlError, ListenerSocket,
     Network, Port, Reserved, StreamPacket, StreamRole,
 };
-use crate::runner::CallLease;
 use crate::signaling::{registrations::ConfigurationLease, resolver::ResolvedTarget};
-use std::{future::Future, net::SocketAddr, time::Duration};
+use crate::{encryption::TlsClientContext, runner::CallLease};
+use std::{future::Future, net::SocketAddr, num::NonZeroU64, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpSocket, TcpStream},
     sync::{mpsc, oneshot, watch},
 };
 use tokio_rustls::rustls::pki_types::ServerName;
+#[cfg(test)]
+mod profile_tests;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct SetupKey {
@@ -38,10 +40,36 @@ pub(super) enum Phase {
     Connecting,
 }
 
+#[derive(Clone)]
+pub(super) struct StartingTlsProfile {
+    configuration: NonZeroU64,
+    context: TlsClientContext,
+}
+
 pub(super) struct Preparation {
     stop: watch::Sender<bool>,
     phase: Phase,
     identity: Option<String>,
+    tls_profile: Option<StartingTlsProfile>,
+}
+
+impl Preparation {
+    fn matches_flow(&self, port: &Port) -> bool {
+        let identities = self.identity == port.identity;
+        let profiles = match (&self.tls_profile, &port.tls_profile) {
+            (None, None) => true,
+            (Some(expected), Some(actual)) => {
+                expected.configuration == actual.configuration
+                    && expected.context.same_profile(&actual.context)
+            }
+            (Some(_), None) | (None, Some(_)) => false,
+        };
+        matches!(port.state, ConnectionState::Open)
+            && !port.packets.is_closed()
+            && !*port.stop.borrow()
+            && identities
+            && profiles
+    }
 }
 
 pub(crate) struct Prepared {
@@ -135,20 +163,19 @@ impl Network {
     pub(in crate::signaling) fn reserve_setup(
         &mut self,
         listener: usize,
+        configuration: NonZeroU64,
     ) -> Result<SetupKey, ControlError> {
         if self.ports.len() + self.preparations.len() >= 64 || self.jobs.len() >= 64 {
             return Err(ControlError::Capacity);
         }
-        if !matches!(
-            self.listeners.get(listener),
-            Some(
-                ListenerSocket::Datagram(_)
-                    | ListenerSocket::Stream(_)
-                    | ListenerSocket::Encrypted { .. }
-            )
-        ) {
-            return Err(ControlError::Unsupported);
-        }
+        let tls_profile = match self.listeners.get(listener) {
+            Some(ListenerSocket::Datagram(_) | ListenerSocket::Stream(_)) => None,
+            Some(ListenerSocket::Encrypted { client, .. }) => Some(StartingTlsProfile {
+                configuration,
+                context: client.clone(),
+            }),
+            Some(ListenerSocket::WebSocket { .. }) | None => return Err(ControlError::Unsupported),
+        };
         let key = self.reserve_slot(listener)?;
         let (stop, _stopped) = watch::channel(false);
         self.preparations.insert(
@@ -157,6 +184,7 @@ impl Network {
                 stop,
                 phase: Phase::Resolving,
                 identity: None,
+                tls_profile,
             },
         );
         Ok(key)
@@ -223,7 +251,14 @@ impl Network {
             .ok_or(ControlError::Invalid("Unknown listener"))?
         {
             ListenerSocket::Stream(_) => None,
-            ListenerSocket::Encrypted { client, .. } => Some(client.clone()),
+            ListenerSocket::Encrypted { .. } => Some(
+                self.preparations
+                    .get(&key)
+                    .and_then(|preparation| preparation.tls_profile.as_ref())
+                    .ok_or(ControlError::Invalid("TLS starting profile missing"))?
+                    .context
+                    .clone(),
+            ),
             ListenerSocket::Datagram(_) | ListenerSocket::WebSocket { .. } => {
                 return Err(ControlError::Unsupported)
             }
@@ -274,9 +309,7 @@ impl Network {
             return Err(ControlError::Conflict("Signaling setup cancelled"));
         }
         if let Some(port) = self.ports.get(&(prepared.key.listener, prepared.peer)) {
-            if !matches!(port.state, ConnectionState::Open)
-                || (preparation.identity.is_some() && preparation.identity != port.identity)
-            {
+            if !preparation.matches_flow(port) {
                 return Err(ControlError::Conflict(
                     "Signaling peer belongs to a different flow identity",
                 ));
@@ -302,6 +335,7 @@ impl Network {
                 stop: preparation.stop,
                 state: ConnectionState::Open,
                 identity: preparation.identity,
+                tls_profile: preparation.tls_profile,
             },
         );
         if prepared

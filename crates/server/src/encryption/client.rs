@@ -13,6 +13,8 @@ use tokio_rustls::{
 
 #[derive(Clone)]
 pub(crate) struct TlsClientContext(tokio_tungstenite::Connector);
+#[cfg(test)]
+mod profile_tests;
 
 fn client_connector(config: ::tokio_rustls::rustls::ClientConfig) -> tokio_tungstenite::Connector {
     #[expect(
@@ -62,6 +64,17 @@ pub(super) fn native_certificates(
 }
 
 impl TlsClientContext {
+    pub(crate) fn same_profile(&self, other: &Self) -> bool {
+        let (
+            tokio_tungstenite::Connector::Rustls(first),
+            tokio_tungstenite::Connector::Rustls(second),
+        ) = (&self.0, &other.0)
+        else {
+            return false;
+        };
+        std::ptr::eq(first.as_ref(), second.as_ref())
+    }
+
     pub(crate) fn websocket_connector(&self) -> tokio_tungstenite::Connector {
         self.0.clone()
     }

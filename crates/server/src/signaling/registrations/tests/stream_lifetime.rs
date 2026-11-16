@@ -152,7 +152,10 @@ async fn cancelled_configuration_cannot_admit_a_prepared_tcp_flow_or_send_regist
                 "Cancelled preparation sent registration bytes",
             ));
         }
-        let recovered = fixture.signaling.network.reserve_setup(0)?;
+        let recovered = fixture
+            .signaling
+            .network
+            .reserve_setup(0, NonZeroU64::MIN)?;
         fixture.signaling.network.finish_resolution(recovered);
         Ok(())
     }
