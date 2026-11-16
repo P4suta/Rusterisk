@@ -1,7 +1,7 @@
 use super::{
     check_sdk_consumer_lock, check_sdk_consumer_metadata, SdkConsumerAction, SdkConsumerLockError,
     SdkConsumerPhase, SdkConsumerScope, SdkConsumerWorkspace, SdkContents, SdkContentsError,
-    SdkMetadataError, SdkPackage,
+    SdkHttpTarget, SdkMetadataError, SdkPackage,
 };
 use crate::process::ProcessError;
 use std::{
@@ -108,7 +108,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), std::io::Error> {
         .open(path)?
         .write_all(bytes)
 }
-fn read(path: &Path, limit: u64) -> Result<Vec<u8>, std::io::Error> {
+pub(super) fn read(path: &Path, limit: u64) -> Result<Vec<u8>, std::io::Error> {
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() || metadata.len() > limit {
         return Err(invalid(
@@ -124,25 +124,25 @@ fn read(path: &Path, limit: u64) -> Result<Vec<u8>, std::io::Error> {
     }
     Ok(bytes)
 }
-fn stdout(phase: SdkConsumerPhase) -> String {
+pub(super) fn stdout(phase: SdkConsumerPhase) -> String {
     let suffix = match phase.action() {
         SdkConsumerAction::Resolve | SdkConsumerAction::Metadata => "json",
         SdkConsumerAction::Build | SdkConsumerAction::Run => "txt",
     };
     format!("{}.stdout.{suffix}", phase.label())
 }
-fn stderr(phase: SdkConsumerPhase) -> String {
+pub(super) fn stderr(phase: SdkConsumerPhase) -> String {
     format!("{}.stderr.txt", phase.label())
 }
 
-fn follow_up(
-    operation: Result<(), SdkConsumerRunError>,
+pub(super) fn follow_up<T>(
+    operation: Result<T, SdkConsumerRunError>,
     follow_up: Result<(), std::io::Error>,
     context: &'static str,
-) -> Result<(), SdkConsumerRunError> {
+) -> Result<T, SdkConsumerRunError> {
     match (operation, follow_up) {
         (operation, Ok(())) => operation,
-        (Ok(()), Err(error)) => Err(error.into()),
+        (Ok(_), Err(error)) => Err(error.into()),
         (Err(operation), Err(source)) => Err(SdkConsumerRunError::FollowUp {
             operation: operation.to_string(),
             context,
@@ -151,13 +151,28 @@ fn follow_up(
     }
 }
 
-fn phase(
+pub(super) fn phase(
     workspace: &SdkConsumerWorkspace<'_>,
     phase: SdkConsumerPhase,
     perform: &mut impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
 ) -> Result<(), SdkConsumerRunError> {
+    phase_with_target(workspace, phase, None, perform)
+}
+
+pub(super) fn phase_with_target(
+    workspace: &SdkConsumerWorkspace<'_>,
+    phase: SdkConsumerPhase,
+    target: Option<&SdkHttpTarget<'_>>,
+    perform: &mut impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+) -> Result<(), SdkConsumerRunError> {
     workspace.check_sources()?;
     let plan = workspace.plan();
+    let http_run = workspace.runtime().is_some()
+        && phase.scope() == SdkConsumerScope::Sdk
+        && phase.action() == SdkConsumerAction::Run;
+    if target.is_some() != http_run {
+        return Err(invalid("HTTP consumer credentials belong only to its runtime phase").into());
+    }
     let output = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -177,8 +192,14 @@ fn phase(
         .stdin(Stdio::null())
         .stdout(output)
         .stderr(diagnostic);
+    let budget = if let Some(target) = target {
+        target.configure(&mut command);
+        Duration::from_secs(60)
+    } else {
+        step.budget
+    };
     let started = Instant::now();
-    let result = perform(&mut command, step.budget)
+    let result = perform(&mut command, budget)
         .map_err(|source| SdkConsumerRunError::Process { phase, source });
     println!(
         "SDK consumer phase={} elapsed={:.3}s",
@@ -192,7 +213,10 @@ fn phase(
     )
 }
 
-fn seed(contents: &SdkContents, scope: SdkConsumerScope) -> Result<&[u8], std::io::Error> {
+pub(super) fn seed(
+    contents: &SdkContents,
+    scope: SdkConsumerScope,
+) -> Result<&[u8], std::io::Error> {
     let package = match scope {
         SdkConsumerScope::CoreMsrv => SdkPackage::Core,
         SdkConsumerScope::Sdk => SdkPackage::Client,
@@ -206,7 +230,7 @@ fn seed(contents: &SdkContents, scope: SdkConsumerScope) -> Result<&[u8], std::i
         .ok_or_else(|| invalid("candidate lockfile missing"))
 }
 
-fn lock_unchanged(
+pub(super) fn lock_unchanged(
     workspace: &SdkConsumerWorkspace<'_>,
     scope: SdkConsumerScope,
     expected: &[u8],
@@ -271,7 +295,10 @@ fn run(
     Ok(())
 }
 
-fn preserve(workspace: &SdkConsumerWorkspace<'_>, artifacts: &Path) -> Result<(), std::io::Error> {
+pub(super) fn preserve(
+    workspace: &SdkConsumerWorkspace<'_>,
+    artifacts: &Path,
+) -> Result<(), std::io::Error> {
     for phase in SdkConsumerPhase::ALL {
         for file in [stdout(phase), stderr(phase)] {
             let path = workspace.plan().state().join(&file);
@@ -304,6 +331,26 @@ pub fn verify_sdk_consumers_with(
     artifacts: &Path,
     perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
 ) -> Result<(), SdkConsumerRunError> {
+    create_artifacts(contents, execution, artifacts)?;
+    let workspace = SdkConsumerWorkspace::create(contents, execution)?;
+    let operation = run(contents, &workspace, perform);
+    let operation = follow_up(
+        operation,
+        preserve(&workspace, artifacts),
+        "consumer artifact preservation failed",
+    );
+    follow_up(
+        operation,
+        workspace.close(),
+        "consumer working copy cleanup failed",
+    )
+}
+
+pub(super) fn create_artifacts(
+    contents: &SdkContents,
+    execution: &Path,
+    artifacts: &Path,
+) -> Result<(), SdkConsumerRunError> {
     check_roots(execution, artifacts)?;
     std::fs::create_dir(artifacts)?;
     write_new(
@@ -322,18 +369,7 @@ pub fn verify_sdk_consumers_with(
         })
         .collect();
     write_new(&artifacts.join("SHA256SUMS"), sums.as_bytes())?;
-    let workspace = SdkConsumerWorkspace::create(contents, execution)?;
-    let operation = run(contents, &workspace, perform);
-    let operation = follow_up(
-        operation,
-        preserve(&workspace, artifacts),
-        "consumer artifact preservation failed",
-    );
-    follow_up(
-        operation,
-        workspace.close(),
-        "consumer working copy cleanup failed",
-    )
+    Ok(())
 }
 
 fn check_roots(execution: &Path, artifacts: &Path) -> Result<(), std::io::Error> {
