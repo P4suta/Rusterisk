@@ -361,10 +361,21 @@ where
     F: FnMut(TcpStream, ServerName<'static>) -> C,
     C: Future<Output = Result<S, ControlError>>,
 {
+    let cancelled = *job.stop.borrow() || job.lease.is_released();
+    if cancelled {
+        return setup_finished(
+            &job.setup_sender,
+            job.key,
+            Err(ControlError::Conflict("Signaling setup owner ended")),
+        )
+        .await;
+    }
+    let stopped = job.stop.clone();
     let connected = tokio::select! {
+        biased;
         _changed = job.stop.changed() => Err(ControlError::Conflict("Signaling setup cancelled")),
         _released = job.lease.released() => Err(ControlError::Conflict("Signaling setup owner ended")),
-        result = tokio::time::timeout_at(job.deadline, open(local, &resolved, connector)) => result.map_err(failure).and_then(|result| result),
+        result = tokio::time::timeout_at(job.deadline, open(local, &resolved, connector, &job.lease, stopped)) => result.map_err(failure).and_then(|result| result),
     };
     match connected {
         Ok((peer, stream)) => admission(stream, peer, job).await,
@@ -376,6 +387,8 @@ async fn open<S, F, C>(
     local: SocketAddr,
     resolved: &ResolvedTarget,
     mut connector: F,
+    lease: &SetupLifetime,
+    stopped: watch::Receiver<bool>,
 ) -> Result<(SocketAddr, S), ControlError>
 where
     F: FnMut(TcpStream, ServerName<'static>) -> C,
@@ -383,6 +396,10 @@ where
 {
     let mut last = ControlError::NotFound("No usable signaling address");
     for peer in resolved.peers() {
+        let cancelled = *stopped.borrow() || lease.is_released();
+        if cancelled {
+            return Err(ControlError::Conflict("Signaling setup owner ended"));
+        }
         if peer.is_ipv4() != local.is_ipv4() {
             continue;
         }
@@ -406,6 +423,10 @@ where
             }
         };
         stream.set_nodelay(true).map_err(failure)?;
+        let cancelled = *stopped.borrow() || lease.is_released();
+        if cancelled {
+            return Err(ControlError::Conflict("Signaling setup owner ended"));
+        }
         let name = ServerName::try_from(resolved.identity().to_owned()).map_err(failure)?;
         match connector(stream, name).await {
             Ok(stream) => return Ok((peer, stream)),
@@ -432,6 +453,15 @@ async fn admission<S: AsyncRead + AsyncWrite + Unpin>(
     peer: SocketAddr,
     mut job: SetupJob,
 ) -> Result<(), ControlError> {
+    let cancelled = *job.stop.borrow() || job.lease.is_released();
+    if cancelled {
+        return setup_finished(
+            &job.setup_sender,
+            job.key,
+            Err(ControlError::Conflict("Signaling setup owner ended")),
+        )
+        .await;
+    }
     let (reply, admitted) = oneshot::channel();
     let waiting = async {
         job.setup_sender
@@ -447,6 +477,7 @@ async fn admission<S: AsyncRead + AsyncWrite + Unpin>(
             .map_err(|_| ControlError::Conflict("Signaling setup superseded"))
     };
     let admitted = tokio::select! {
+        biased;
         _changed = job.stop.changed() => Err(ControlError::Conflict("Signaling setup cancelled")),
         _released = job.lease.released() => Err(ControlError::Conflict("Signaling setup owner ended")),
         admitted = tokio::time::timeout_at(job.deadline, waiting) => admitted.map_err(failure).and_then(|result| result),

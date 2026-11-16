@@ -3,7 +3,7 @@ use crate::{
     media::MediaHub,
     signaling::{
         cleanup,
-        registrations::State,
+        registrations::{resolution::ConfigurationLifetime, State},
         transport::{Input, Prepared},
         Signaling,
     },
@@ -11,7 +11,7 @@ use crate::{
 };
 use rsipstack::sip::HeadersExt;
 use rusterisk_sip::SipStreamDecoder;
-use std::time::Duration;
+use std::{num::NonZeroU64, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -74,6 +74,52 @@ impl Fixture {
         let result = cleanup::combine(primary, self.signaling.finish_registrations().await);
         cleanup::combine(result, self.signaling.network.close().await)
     }
+}
+
+#[tokio::test]
+async fn configuration_cancelled_before_the_connection_job_is_polled_never_connects(
+) -> Result<(), ControlError> {
+    let mut fixture = Fixture::new().await?;
+    let primary: Result<(), ControlError> = async {
+        for generation in 1..=16 {
+            fixture.signaling.registrations.lifetime = ConfigurationLifetime::new(
+                NonZeroU64::new(generation).ok_or(ControlError::Capacity)?,
+            );
+            let now = 1000 + generation;
+            fixture.signaling.registrations.clients[0].state = State::Waiting { at: now };
+            fixture.signaling.registration_tick(now).await?;
+            let completed = tokio::time::timeout(
+                Duration::from_secs(3),
+                fixture.signaling.registrations.completed(),
+            )
+            .await
+            .map_err(failure)??
+            .ok_or(ControlError::Capacity)?;
+            fixture.signaling.registration_completed(completed, now)?;
+            fixture.signaling.registrations.lifetime.cancel();
+            let Input::SetupFinished { key, result } =
+                tokio::time::timeout(Duration::from_secs(3), fixture.signaling.network.next())
+                    .await
+                    .map_err(failure)??
+            else {
+                return Err(ControlError::Invalid(
+                    "Cancelled configuration published a TCP preparation",
+                ));
+            };
+            fixture.signaling.registration_setup_finished(key, result);
+            if tokio::time::timeout(Duration::from_millis(50), fixture.registrar.accept())
+                .await
+                .is_ok()
+            {
+                return Err(ControlError::Invalid(
+                    "Cancelled configuration initiated a TCP connection",
+                ));
+            }
+        }
+        Ok(())
+    }
+    .await;
+    fixture.finish(primary).await
 }
 
 #[tokio::test]

@@ -85,9 +85,16 @@ pub(super) async fn resolve(
             None => resolver?.resolve(&target).await,
         }
     };
-    let result = tokio::select! {
-        _released = lease.released() => Err(ControlError::Conflict("Registration configuration ended during resolution")),
-        resolved = tokio::time::timeout(Duration::from_secs(3), lookup) => resolved.map_err(failure).and_then(|result| result),
+    let result = if lease.is_released() {
+        Err(ControlError::Conflict(
+            "Registration configuration ended during resolution",
+        ))
+    } else {
+        tokio::select! {
+            biased;
+            _released = lease.released() => Err(ControlError::Conflict("Registration configuration ended during resolution")),
+            resolved = tokio::time::timeout(Duration::from_secs(3), lookup) => resolved.map_err(failure).and_then(|result| result),
+        }
     };
     Completion {
         key,

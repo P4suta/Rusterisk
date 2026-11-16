@@ -118,9 +118,15 @@ impl Signaling {
         let resolver = self.resolver.clone();
         let controller = self.controller.clone();
         self.native_jobs.spawn(async move {
-            let result = tokio::select! {
-                _changed = cancelled.changed() => Err(ControlError::Conflict("Signaling resolution cancelled")),
-                result = tokio::time::timeout(Duration::from_secs(3), resolve(controller, key.clone(), destination, cached, resolver)) => result.map_err(failure).and_then(|result| result),
+            let stopped = *cancelled.borrow();
+            let result = if stopped {
+                Err(ControlError::Conflict("Signaling resolution cancelled"))
+            } else {
+                tokio::select! {
+                    biased;
+                    _changed = cancelled.changed() => Err(ControlError::Conflict("Signaling resolution cancelled")),
+                    result = tokio::time::timeout(Duration::from_secs(3), resolve(controller, key.clone(), destination, cached, resolver)) => result.map_err(failure).and_then(|result| result),
+                }
             };
             Completion { key, setup, result }
         });
@@ -379,6 +385,11 @@ async fn resolve(
     resolver: Result<DestinationResolver, ControlError>,
 ) -> Result<Resolution, ControlError> {
     let lease = controller.call_lifetime(key).await?;
+    if lease.is_released() {
+        return Err(ControlError::Conflict(
+            "Call ended during signaling resolution",
+        ));
+    }
     let lookup = async {
         match destination {
             Destination::Registered(_) => Ok(None),
@@ -389,6 +400,7 @@ async fn resolve(
         }
     };
     let target = tokio::select! {
+        biased;
         _released = lease.released() => return Err(ControlError::Conflict("Call ended during signaling resolution")),
         result = lookup => result?,
     };

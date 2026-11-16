@@ -57,6 +57,44 @@ async fn reply(dns: &UdpSocket) -> Result<(), ControlError> {
 }
 
 #[tokio::test]
+async fn configuration_cancelled_before_the_resolution_job_is_polled_never_queries_dns(
+) -> Result<(), ControlError> {
+    let dns = UdpSocket::bind("127.0.0.1:0").await.map_err(failure)?;
+    let mut signaling = signaling(config(&["provider.test:5070"], 0)?, &dns).await?;
+    let primary: Result<(), ControlError> = async {
+        for generation in 1..=16 {
+            signaling.registrations.lifetime = ConfigurationLifetime::new(
+                NonZeroU64::new(generation).ok_or(ControlError::Capacity)?,
+            );
+            let now = 1000 + generation;
+            signaling.registrations.clients[0].state = State::Waiting { at: now };
+            signaling.registration_tick(now).await?;
+            signaling.registrations.lifetime.cancel();
+            let completed =
+                tokio::time::timeout(Duration::from_secs(3), signaling.registrations.completed())
+                    .await
+                    .map_err(failure)??
+                    .ok_or(ControlError::Capacity)?;
+            if completed.result.is_ok() {
+                return Err(ControlError::Invalid(
+                    "Cancelled configuration resolved a destination",
+                ));
+            }
+            signaling.registration_completed(completed, now)?;
+            if tokio::time::timeout(Duration::from_millis(50), dns.recv_from(&mut [0; 2048]))
+                .await
+                .is_ok()
+            {
+                return Err(ControlError::Invalid("Cancelled configuration queried DNS"));
+            }
+        }
+        Ok(())
+    }
+    .await;
+    finish(signaling, primary).await
+}
+
+#[tokio::test]
 async fn released_or_previous_configuration_keys_cannot_cache_or_transmit_completed_resolution(
 ) -> Result<(), ControlError> {
     for previous_key in [false, true] {
