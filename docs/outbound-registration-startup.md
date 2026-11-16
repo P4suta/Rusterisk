@@ -26,6 +26,10 @@ Authentication and refresh keep the same connection generation.
 Preparation distinguishes call lifetimes from configuration lifetimes.
 Configuration cancellation prevents prepared flows from entering the registration driver.
 Disconnection stops refresh on the closed flow.
+Accepted streams require a complete first message within five seconds.
+Initiated streams leave response waits to their transaction.
+Both roles keep five-second assembly deadlines for partial messages.
+More bytes don't extend an assembly deadline.
 
 TLS registration targets return `ControlError::Unsupported` during binding until their adapter connects.
 The driver uses matching provisional and final responses, the shared Digest implementation, and validated Contact grants.
