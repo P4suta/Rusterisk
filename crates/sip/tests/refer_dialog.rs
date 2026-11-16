@@ -1,5 +1,7 @@
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method};
 use rusterisk_sip::{ReferFailure, ReferProgress, SipError, SipEvent};
+#[path = "refer_dialog/attended_request.rs"]
+mod attended_request;
 #[path = "refer_dialog/cleanup.rs"]
 mod cleanup;
 #[path = "refer_dialog/delivery.rs"]

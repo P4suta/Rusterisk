@@ -198,7 +198,8 @@ fn incoming_browser_answers_keep_the_checked_ice_and_dtls_description() -> Resul
             {
                 Some(id.clone())
             }
-            SipEvent::BlindTransferRequested { .. }
+            SipEvent::AttendedTransferRequested { .. }
+            | SipEvent::BlindTransferRequested { .. }
             | SipEvent::ReferSubscriptionEnded { .. }
             | SipEvent::EndpointContact { .. }
             | SipEvent::PeerDirection { .. }

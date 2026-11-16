@@ -42,6 +42,7 @@ pub(crate) struct Dialog {
     pub wire: super::wire::Dialog,
     pub contact: String,
     pub authority: ReferAuthority,
+    pub security: crate::transport::UriSecurity,
     pub usage: Usage,
 }
 

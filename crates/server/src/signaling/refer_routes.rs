@@ -1,6 +1,8 @@
 use super::{failure, key, transport, CallKey, ControlError, Output, Signal, Signaling, SipEvent};
 use rusterisk_core::TransferToken;
-use rusterisk_sip::{DialogRefer, ReferFailure, ReferIdentity, ReferKey, ReferProgress};
+use rusterisk_sip::{
+    AttendedDialogRefer, DialogRefer, ReferFailure, ReferIdentity, ReferKey, ReferProgress,
+};
 
 const PER_ENGINE: usize = 64 + 256;
 
@@ -61,7 +63,8 @@ impl Signaling {
         for event in output.events {
             match event {
                 SipEvent::ReferSubscriptionEnded { refer } => self.settle_refer(listener, refer),
-                SipEvent::BlindTransferRequested { .. }
+                SipEvent::AttendedTransferRequested { .. }
+                | SipEvent::BlindTransferRequested { .. }
                 | SipEvent::EndpointContact { .. }
                 | SipEvent::PeerDirection { .. }
                 | SipEvent::DtmfReceived { .. }
@@ -120,6 +123,57 @@ impl Signaling {
         refer: DialogRefer,
         now: u64,
     ) -> Result<(), ControlError> {
+        let reference = refer.key();
+        let source = key(id, generation)?;
+        if !self.capture_refer(listener, &source, reference, now)? {
+            return Ok(());
+        }
+        if self
+            .controller
+            .signal(Signal::BlindTransferRequested { key: source, refer })
+            .await
+            .is_err()
+        {
+            self.emit_refer(
+                listener,
+                reference,
+                ReferProgress::Rejected(ReferFailure::Unavailable),
+                now,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub(super) async fn admit_attended_refer(
+        &mut self,
+        listener: usize,
+        id: String,
+        generation: u64,
+        refer: AttendedDialogRefer,
+        now: u64,
+    ) -> Result<(), ControlError> {
+        let reference = refer.key();
+        let source = key(id, generation)?;
+        if !self.capture_refer(listener, &source, reference, now)? {
+            return Ok(());
+        }
+        self.emit_refer(
+            listener,
+            reference,
+            ReferProgress::Rejected(ReferFailure::Unsupported),
+            now,
+        )
+        .await
+    }
+
+    fn capture_refer(
+        &mut self,
+        listener: usize,
+        source: &CallKey,
+        reference: ReferKey,
+        now: u64,
+    ) -> Result<bool, ControlError> {
         self.prune_refer_routes(listener, now)?;
         if self
             .refer_routes
@@ -130,11 +184,9 @@ impl Signaling {
         {
             return Err(ControlError::Capacity);
         }
-        let reference = refer.key();
         if self.refer_routes.contains_key(&(listener, reference)) {
             return Err(ControlError::Conflict("REFER route already owned"));
         }
-        let source = key(id, generation)?;
         let identity = self
             .listeners
             .get(listener)
@@ -153,23 +205,10 @@ impl Signaling {
             },
         );
         if !self.network.current(route) || self.controller.is_stopping() {
-            return self.retire_refer(listener, reference, now);
+            self.retire_refer(listener, reference, now)?;
+            return Ok(false);
         }
-        if self
-            .controller
-            .signal(Signal::BlindTransferRequested { key: source, refer })
-            .await
-            .is_err()
-        {
-            self.emit_refer(
-                listener,
-                reference,
-                ReferProgress::Rejected(ReferFailure::Unavailable),
-                now,
-            )
-            .await?;
-        }
-        Ok(())
+        Ok(true)
     }
 
     async fn emit_refer(

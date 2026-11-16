@@ -2,7 +2,9 @@ use super::{
     dialog::{Dialog, MatchError, Usage},
     notify::{self, Notification, Provisional, Status},
     owners::{self, Pending, State, Subscription},
-    BlindRefer, DialogRefer, ReferError, ReferFailure, ReferKey, ReferProgress, ReferSubscription,
+    request::{self, TransferTarget},
+    AttendedDialogRefer, AttendedRefer, BlindRefer, DialogRefer, ReferError, ReferFailure,
+    ReferKey, ReferProgress, ReferSubscription,
 };
 use crate::{
     response, Datagram, DatagramOrigin, Engine, Output, RequestIdentity, SipError, SipEvent,
@@ -67,7 +69,7 @@ impl Engine {
             let bytes = response(&request, code, phrase, "", "")?;
             return self.cache_reply(identity, request, peer, now, bytes, Vec::new());
         }
-        let target = match BlindRefer::parse(&request) {
+        let target = match request::parse_transfer(&request) {
             Ok(target) => target,
             Err(error) => {
                 let (code, phrase) = match error {
@@ -79,6 +81,13 @@ impl Engine {
                 return self.cache_reply(identity, request, peer, now, bytes, Vec::new());
             }
         };
+        if matches!(&target.target, TransferTarget::Attended(_))
+            && (dialog.security == crate::transport::UriSecurity::Sips
+                || matches!(target.uri.scheme, Some(rsipstack::sip::uri::Scheme::Sips)))
+        {
+            let bytes = response(&request, 501, "Not Implemented", "", "")?;
+            return self.cache_reply(identity, request, peer, now, bytes, Vec::new());
+        }
         let Some(deadline) = now
             .checked_add(owners::TRANSACTION)
             .filter(|_| self.refers.len() < owners::CAPACITY)
@@ -89,20 +98,37 @@ impl Engine {
         self.serial = self.serial.checked_add(1).ok_or(SipError::Capacity)?;
         let key = ReferKey(self.serial);
         let sequence = request.cseq_header()?.typed()?.seq;
-        let refer = DialogRefer {
-            key,
-            target,
-            authority: dialog.authority.clone(),
+        let subscription = target.subscription;
+        let event = match target.target {
+            TransferTarget::Blind(extension) => SipEvent::BlindTransferRequested {
+                id: dialog.id.clone(),
+                generation: dialog.generation,
+                refer: DialogRefer {
+                    key,
+                    target: BlindRefer {
+                        extension,
+                        subscription,
+                    },
+                    authority: dialog.authority.clone(),
+                },
+            },
+            TransferTarget::Attended(replaces) => SipEvent::AttendedTransferRequested {
+                id: dialog.id.clone(),
+                generation: dialog.generation,
+                refer: AttendedDialogRefer {
+                    key,
+                    target: AttendedRefer {
+                        uri: target.uri,
+                        replaces,
+                        subscription,
+                    },
+                    authority: dialog.authority.clone(),
+                },
+            },
         };
         let output = Output {
             datagrams: Vec::new(),
-            events: [SipEvent::BlindTransferRequested {
-                id: dialog.id.clone(),
-                generation: dialog.generation,
-                refer: refer.clone(),
-            }]
-            .into_iter()
-            .collect(),
+            events: [event].into_iter().collect(),
         };
         self.refers.pending.insert(
             key,
@@ -110,7 +136,7 @@ impl Engine {
                 dialog,
                 request,
                 identity,
-                subscription: refer.target.subscription(),
+                subscription,
                 sequence,
                 deadline,
             },

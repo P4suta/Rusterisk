@@ -39,6 +39,27 @@ impl DialogRefer {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct AttendedDialogRefer {
+    key: ReferKey,
+    target: AttendedRefer,
+    authority: ReferAuthority,
+}
+
+impl AttendedDialogRefer {
+    pub const fn key(&self) -> ReferKey {
+        self.key
+    }
+
+    pub const fn target(&self) -> &AttendedRefer {
+        &self.target
+    }
+
+    pub const fn authority(&self) -> &ReferAuthority {
+        &self.authority
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReferFailure {
     NotFound,

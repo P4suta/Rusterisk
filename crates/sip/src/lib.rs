@@ -42,8 +42,9 @@ pub use session_description::{DtlsSetup, SessionSecurity, WebRtcDescription};
 pub use stream_framing::{SipStreamDecoder, StreamFramingError, StreamItem};
 pub use telephone::DtmfFormat;
 pub use transfer::{
-    AttendedRefer, BlindRefer, DialogRefer, ReferAuthority, ReferError, ReferFailure,
-    ReferIdentity, ReferKey, ReferProgress, ReferSubscription, ReplacementDialog, Replaces,
+    AttendedDialogRefer, AttendedRefer, BlindRefer, DialogRefer, ReferAuthority, ReferError,
+    ReferFailure, ReferIdentity, ReferKey, ReferProgress, ReferSubscription, ReplacementDialog,
+    Replaces,
 };
 pub use websocket_framing::validate_websocket_message;
 
@@ -294,6 +295,11 @@ impl Session {
 }
 
 pub enum SipEvent {
+    AttendedTransferRequested {
+        id: String,
+        generation: u64,
+        refer: AttendedDialogRefer,
+    },
     BlindTransferRequested {
         id: String,
         generation: u64,

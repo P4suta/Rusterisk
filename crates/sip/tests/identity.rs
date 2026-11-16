@@ -924,7 +924,8 @@ fn rejected_invites_release_admission_and_retransmit_the_tagged_final_response(
     let (incoming, wire, _) = authenticated_invite(&mut engine)?;
     let id = match &incoming.events[0] {
         SipEvent::Incoming { id, .. } => id.clone(),
-        SipEvent::BlindTransferRequested { .. }
+        SipEvent::AttendedTransferRequested { .. }
+        | SipEvent::BlindTransferRequested { .. }
         | SipEvent::ReferSubscriptionEnded { .. }
         | SipEvent::EndpointContact { .. }
         | SipEvent::DtmfReceived { .. }
@@ -964,7 +965,8 @@ fn incoming_id(output: &rusterisk_sip::Output) -> Result<String, SipError> {
     match output.events.first() {
         Some(SipEvent::Incoming { id, .. }) => Ok(id.clone()),
         Some(
-            SipEvent::BlindTransferRequested { .. }
+            SipEvent::AttendedTransferRequested { .. }
+            | SipEvent::BlindTransferRequested { .. }
             | SipEvent::ReferSubscriptionEnded { .. }
             | SipEvent::EndpointContact { .. }
             | SipEvent::DtmfReceived { .. }

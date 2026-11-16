@@ -261,6 +261,14 @@ impl Signaling {
         self.transmit(listener, datagrams).await?;
         for event in output.events {
             match event {
+                SipEvent::AttendedTransferRequested {
+                    id,
+                    generation,
+                    refer,
+                } => {
+                    self.admit_attended_refer(listener, id, generation, refer, now)
+                        .await?;
+                }
                 SipEvent::BlindTransferRequested {
                     id,
                     generation,

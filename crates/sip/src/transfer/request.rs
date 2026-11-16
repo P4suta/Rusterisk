@@ -19,6 +19,30 @@ pub(super) fn parse_attended(request: &Request) -> Result<AttendedRefer, ReferEr
     })
 }
 
+pub(super) enum TransferTarget {
+    Blind(String),
+    Attended(Replaces),
+}
+
+pub(super) struct TransferRequest {
+    pub uri: Uri,
+    pub target: TransferTarget,
+    pub subscription: ReferSubscription,
+}
+
+pub(super) fn parse_transfer(request: &Request) -> Result<TransferRequest, ReferError> {
+    let parsed = parse_request(request, UriPurpose::Attended)?;
+    let target = match parsed.target.replaces {
+        Some(replaces) => TransferTarget::Attended(replaces),
+        None => TransferTarget::Blind(parsed.target.user),
+    };
+    Ok(TransferRequest {
+        uri: parsed.target.uri,
+        target,
+        subscription: parsed.subscription,
+    })
+}
+
 struct ParsedRequest {
     target: CheckedUri,
     subscription: ReferSubscription,

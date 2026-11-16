@@ -246,3 +246,40 @@ fn sip_over_tls_remains_distinct_from_sips_replacement_authorization() -> Result
     }
     Ok(())
 }
+
+#[test]
+fn secure_transport_does_not_erase_the_source_dialogs_sips_authority_boundary() -> Result<(), String>
+{
+    for scheme in ["sip", "sips"] {
+        let mut fixture = Outgoing::new(Protocol::Tls, scheme).map_err(failure)?;
+        fixture.answer().map_err(failure)?;
+        let target = fixture
+            .invite
+            .contact_header()
+            .map_err(failure)?
+            .typed()
+            .map_err(failure)?
+            .uri;
+        let packet = format!(
+            "REFER {target} SIP/2.0\r\nVia: SIP/2.0/TLS 127.0.0.2:5070;branch=z9hG4bK-attended;rport\r\nFrom: {};tag=RemoteCase\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 3 REFER\r\nContact: <{scheme}:phone@127.0.0.2:5070>\r\nMax-Forwards: 70\r\nRefer-To: <sip:target@localhost?Replaces=consultation%3Bto-tag%3DLocal%3Bfrom-tag%3DRemote>\r\nContent-Length: 0\r\n\r\n",
+            fixture.invite.to_header().map_err(failure)?.value(),
+            fixture.invite.from_header().map_err(failure)?.value(),
+            fixture.invite.call_id_header().map_err(failure)?.value(),
+        );
+        let output = fixture
+            .engine
+            .receive(packet.as_bytes(), fixture.peer, 2)
+            .map_err(failure)?;
+        if scheme == "sips" {
+            assert!(status(&output, 501));
+            assert!(output.events.is_empty());
+        } else {
+            assert!(output.datagrams.is_empty());
+            assert!(matches!(
+                output.events.as_slice(),
+                [SipEvent::AttendedTransferRequested { generation: 17, .. }]
+            ));
+        }
+    }
+    Ok(())
+}

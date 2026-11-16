@@ -133,6 +133,7 @@ impl Engine {
                 wire: crate::transfer::wire::Dialog::remote(request)?,
                 contact: dialog.invite.contact_header()?.value().into(),
                 authority: dialog.authority.clone(),
+                security: dialog.uri_security,
                 usage: match dialog.state {
                     State::Established(_) => Usage::Active,
                     State::Calling { .. }

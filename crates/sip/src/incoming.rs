@@ -138,6 +138,7 @@ impl Engine {
                     dialog.invite.uri_security,
                 ),
                 authority: dialog.invite.authority.clone(),
+                security: dialog.invite.uri_security,
                 usage: match dialog.state {
                     State::Terminated { .. } => Usage::Ended,
                     State::AwaitingAck { .. } | State::Established => Usage::Active,
