@@ -39,6 +39,8 @@ fn interop_dry_run_reports_local_ports_deadlines_and_cleanup() -> Result<(), std
         "budget=300s cargo test --locked --package rusterisk-client --test reference -- --ignored"
     ));
     assert!(stdout.contains("budget=180s cargo test --locked --package rusterisk-server --test sip_call blind_transfer::reference_blind_transfer_matches_native_received_audio -- --ignored --exact --show-output"));
+    assert!(stdout.contains("budget=180s cargo test --locked --package rusterisk-server --test sip_call attended_transfer::reference_attended_transfer_matches_native_received_audio -- --ignored --exact --show-output"), "{stdout}");
+    assert_eq!(stdout.matches("budget=180s cargo test ").count(), 2);
     assert!(stdout.contains("docker rm --force rusterisk-interop-preview"));
     Ok(())
 }

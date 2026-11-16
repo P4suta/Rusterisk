@@ -1,43 +1,59 @@
 use super::{step, valid_identity, ReferenceError, Step};
 use std::net::SocketAddr;
 
-pub const SIP_TRANSFER_TEST: &str =
-    "blind_transfer::reference_blind_transfer_matches_native_received_audio";
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SipTransferCase {
+    Blind,
+    Attended,
+}
 
-pub fn validate_sip_transfer_execution(output: &str) -> Result<(), ReferenceError> {
-    if output.len() > 65_536 {
-        return Err(ReferenceError::IncompleteTransfer);
-    }
-    let expected = format!("test {SIP_TRANSFER_TEST} ... ok");
-    let mut passed = false;
-    let mut summarized = false;
-    for line in output.lines() {
-        if line.starts_with("test result:") {
-            let filtered = line
-                .strip_prefix("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")
-                .and_then(|line| line.split_once("; finished in "))
-                .and_then(|(filtered, _time)| filtered.strip_suffix(" filtered out"));
-            if summarized
-                || !filtered.is_some_and(|count| {
-                    !count.is_empty()
-                        && count.bytes().all(|byte| byte.is_ascii_digit())
-                        && count.parse::<usize>().is_ok()
-                })
-            {
-                return Err(ReferenceError::IncompleteTransfer);
+impl SipTransferCase {
+    pub const ALL: [Self; 2] = [Self::Blind, Self::Attended];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Blind => "blind_transfer::reference_blind_transfer_matches_native_received_audio",
+            Self::Attended => {
+                "attended_transfer::reference_attended_transfer_matches_native_received_audio"
             }
-            summarized = true;
-        } else if line.starts_with("test ") {
-            if passed || line != expected {
-                return Err(ReferenceError::IncompleteTransfer);
-            }
-            passed = true;
         }
     }
-    if passed && summarized {
-        Ok(())
-    } else {
-        Err(ReferenceError::IncompleteTransfer)
+
+    pub fn validate_execution(self, output: &str) -> Result<(), ReferenceError> {
+        if output.len() > 65_536 {
+            return Err(ReferenceError::IncompleteTransfer);
+        }
+        let expected = format!("test {} ... ok", self.name());
+        let mut passed = false;
+        let mut summarized = false;
+        for line in output.lines() {
+            if line.starts_with("test result:") {
+                let filtered = line
+                    .strip_prefix("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")
+                    .and_then(|line| line.split_once("; finished in "))
+                    .and_then(|(filtered, _time)| filtered.strip_suffix(" filtered out"));
+                if summarized
+                    || !filtered.is_some_and(|count| {
+                        !count.is_empty()
+                            && count.bytes().all(|byte| byte.is_ascii_digit())
+                            && count.parse::<usize>().is_ok()
+                    })
+                {
+                    return Err(ReferenceError::IncompleteTransfer);
+                }
+                summarized = true;
+            } else if line.starts_with("test ") {
+                if passed || line != expected {
+                    return Err(ReferenceError::IncompleteTransfer);
+                }
+                passed = true;
+            }
+        }
+        if passed && summarized {
+            Ok(())
+        } else {
+            Err(ReferenceError::IncompleteTransfer)
+        }
     }
 }
 

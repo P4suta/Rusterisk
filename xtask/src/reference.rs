@@ -3,8 +3,7 @@ mod configuration;
 mod interop;
 pub use configuration::copy_configuration;
 pub use interop::{
-    callback_address, media_address, published_address, validate_sip_transfer_execution,
-    CallbackHost, Interop, SIP_TRANSFER_TEST,
+    callback_address, media_address, published_address, CallbackHost, Interop, SipTransferCase,
 };
 
 pub struct Step {

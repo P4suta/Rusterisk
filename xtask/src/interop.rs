@@ -3,8 +3,8 @@ use std::{io::Read, path::Path, process::Command, time::Duration};
 use xtask::{
     process::{CommandSupervisor, ProcessError},
     reference::{
-        callback_address, copy_configuration, media_address, published_address,
-        validate_sip_transfer_execution, Interop, Step, SIP_TRANSFER_TEST,
+        callback_address, copy_configuration, media_address, published_address, Interop,
+        SipTransferCase, Step,
     },
 };
 
@@ -76,6 +76,22 @@ fn captured_command(
     }
 }
 
+fn transfer_arguments(case: SipTransferCase) -> [&'static str; 11] {
+    [
+        "test",
+        "--locked",
+        "--package",
+        "rusterisk-server",
+        "--test",
+        "sip_call",
+        case.name(),
+        "--",
+        "--ignored",
+        "--exact",
+        "--show-output",
+    ]
+}
+
 pub fn execute(execute: bool) -> Result<(), TaskError> {
     let identity = super::execution_identity(execute)?;
     let configuration = std::env::current_dir()?
@@ -112,20 +128,9 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
         "--ignored",
     ];
     println!("budget=300s cargo {}", arguments.join(" "));
-    let transfer_arguments = [
-        "test",
-        "--locked",
-        "--package",
-        "rusterisk-server",
-        "--test",
-        "sip_call",
-        SIP_TRANSFER_TEST,
-        "--",
-        "--ignored",
-        "--exact",
-        "--show-output",
-    ];
-    println!("budget=180s cargo {}", transfer_arguments.join(" "));
+    for case in SipTransferCase::ALL {
+        println!("budget=180s cargo {}", transfer_arguments(case).join(" "));
+    }
     println!(
         "budget={}s docker {}",
         cleanup.budget.as_secs(),
@@ -151,7 +156,6 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
             &configuration,
             &identity,
             &arguments,
-            &transfer_arguments,
         )
     })();
     match (result, supervisor.finish()) {
@@ -169,11 +173,10 @@ fn execute_owned(
     configuration: &Path,
     identity: &str,
     arguments: &[&str],
-    transfer_arguments: &[&str],
 ) -> Result<(), TaskError> {
     std::fs::create_dir_all("target/interop")?;
     copy_configuration(Path::new("tests/interop/asterisk"), configuration)?;
-    let result = (|| {
+    let result: Result<(), ProcessError> = (|| {
         std::fs::create_dir(configuration.join("sounds"))?;
         perform(supervisor, &plan.start())?;
         let address = published_address(&captured(supervisor, &plan.port(), identity, "port")?)
@@ -200,21 +203,29 @@ fn execute_owned(
                 .env("RUSTERISK_REFERENCE_CONFIGURATION", configuration),
             Duration::from_secs(300),
         )?;
-        let output = captured_command(
-            supervisor,
-            Command::new("cargo")
-                .args(transfer_arguments)
-                .env("RUSTERISK_REFERENCE_URL", format!("http://{address}"))
-                .env("RUSTERISK_REFERENCE_MEDIA_IP", media.to_string())
-                .env("RUSTERISK_REFERENCE_CALLBACK_IP", callback.to_string())
-                .env("RUSTERISK_REFERENCE_CONFIGURATION", configuration),
-            Duration::from_secs(180),
-            identity,
-            "sip-transfer",
-            65_537,
-        )?;
-        print!("{output}");
-        validate_sip_transfer_execution(&output).map_err(|_| ProcessError::InvalidOutput)
+        for case in SipTransferCase::ALL {
+            let field = match case {
+                SipTransferCase::Blind => "sip-transfer-blind",
+                SipTransferCase::Attended => "sip-transfer-attended",
+            };
+            let output = captured_command(
+                supervisor,
+                Command::new("cargo")
+                    .args(transfer_arguments(case))
+                    .env("RUSTERISK_REFERENCE_URL", format!("http://{address}"))
+                    .env("RUSTERISK_REFERENCE_MEDIA_IP", media.to_string())
+                    .env("RUSTERISK_REFERENCE_CALLBACK_IP", callback.to_string())
+                    .env("RUSTERISK_REFERENCE_CONFIGURATION", configuration),
+                Duration::from_secs(180),
+                identity,
+                field,
+                65_537,
+            )?;
+            print!("{output}");
+            case.validate_execution(&output)
+                .map_err(|_| ProcessError::InvalidOutput)?;
+        }
+        Ok(())
     })();
     let mut result = result;
     if result.is_err() {
