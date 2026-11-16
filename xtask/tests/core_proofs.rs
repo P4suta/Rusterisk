@@ -13,6 +13,25 @@ const ATTENDED_HARNESSES: [&str; 3] = [
     "proofs::attended_progress_stays_in_the_current_generation",
     "proofs::attended_completion_is_absorbing",
 ];
+const PAIR_HARNESSES: [&str; 2] = [
+    "proofs::owned_pair_departures_stay_with_the_current_bridge_and_generations",
+    "proofs::owned_pair_release_is_absorbing",
+];
+
+#[test]
+fn the_native_plan_selects_every_owned_pair_contract() -> Result<(), ProofError> {
+    let plan = CoreProofPlan::new("fixture", "/project/core", "/project/results", IMAGE)?;
+    for harness in PAIR_HARNESSES {
+        assert!(
+            plan.run()
+                .arguments
+                .iter()
+                .any(|argument| argument == harness),
+            "{harness}"
+        );
+    }
+    Ok(())
+}
 
 #[test]
 fn the_native_plan_selects_every_attended_transfer_contract() -> Result<(), ProofError> {
@@ -129,15 +148,35 @@ fn results_without_the_attended_contracts_are_rejected() -> Result<(), ProofErro
         .as_array_mut()
         .ok_or(ProofError::Results)?;
     results.retain(|result| {
-        result["harness_id"]
-            .as_str()
-            .is_some_and(|name| !ATTENDED_HARNESSES.contains(&name))
+        result["harness_id"].as_str().is_some_and(|name| {
+            !ATTENDED_HARNESSES.contains(&name) && !PAIR_HARNESSES.contains(&name)
+        })
     });
     let count = results.len();
     for field in ["total_harnesses", "executed", "successful"] {
         prior["verification_results"]["summary"][field] = serde_json::json!(count);
     }
     assert_eq!(count, 9);
+    assert!(validate_results(&serde_json::to_vec(&prior).map_err(ProofError::Json)?).is_err());
+    Ok(())
+}
+
+#[test]
+fn results_without_owned_pair_contracts_are_rejected() -> Result<(), ProofError> {
+    let mut prior = complete();
+    let results = prior["verification_results"]["results"]
+        .as_array_mut()
+        .ok_or(ProofError::Results)?;
+    results.retain(|result| {
+        result["harness_id"]
+            .as_str()
+            .is_some_and(|name| !PAIR_HARNESSES.contains(&name))
+    });
+    let count = results.len();
+    for field in ["total_harnesses", "executed", "successful"] {
+        prior["verification_results"]["summary"][field] = serde_json::json!(count);
+    }
+    assert_eq!(count, 12);
     assert!(validate_results(&serde_json::to_vec(&prior).map_err(ProofError::Json)?).is_err());
     Ok(())
 }
@@ -150,7 +189,9 @@ fn results_for_only_the_original_six_contracts_are_rejected() -> Result<(), Proo
         .ok_or(ProofError::Results)?;
     results.retain(|result| {
         result["harness_id"].as_str().is_some_and(|name| {
-            !TRANSFER_HARNESSES.contains(&name) && !ATTENDED_HARNESSES.contains(&name)
+            !TRANSFER_HARNESSES.contains(&name)
+                && !ATTENDED_HARNESSES.contains(&name)
+                && !PAIR_HARNESSES.contains(&name)
         })
     });
     let count = results.len();

@@ -1,8 +1,9 @@
 use crate::{
-    AttendedStart, AttendedTransfer, AudioGate, Call, CallEvent, CallState, ConnectionClaim,
-    CoreError, MediaConnection, MediaState, MediaTaskError, MediaTaskKind, MediaTaskState,
-    MediaTasks, MuteDirection, PeerMediaDirection, StasisApplication, StasisMembership, Transfer,
-    TransferDecision, TransferError, TransferOutcome, TransferState, TransferToken, Transition,
+    AttendedStart, AttendedTransfer, AudioGate, Call, CallEvent, CallPairDecision, CallPairError,
+    CallPairState, CallState, ConnectionClaim, CoreError, MediaConnection, MediaState,
+    MediaTaskError, MediaTaskKind, MediaTaskState, MediaTasks, MuteDirection, OwnedCallPair,
+    PeerMediaDirection, StasisApplication, StasisMembership, Transfer, TransferDecision,
+    TransferError, TransferOutcome, TransferState, TransferToken, Transition,
 };
 
 #[derive(Clone, Copy, kani::Arbitrary)]
@@ -591,7 +592,7 @@ fn attended_arbitrary_call() -> Call {
 }
 
 #[kani::proof]
-#[kani::unwind(12)]
+#[kani::unwind(17)]
 fn attended_handoff_preserves_calls_and_bridge_ownership() {
     let transferor = attended_arbitrary_call();
     let transferee = attended_arbitrary_call();
@@ -651,6 +652,12 @@ fn attended_handoff_preserves_calls_and_bridge_ownership() {
                     ..target
                 }
             );
+            assert_eq!(start.pair.bridge(), bridge);
+            assert_eq!(
+                start.pair.generations(),
+                [transferee.generation(), target.generation()]
+            );
+            assert_eq!(start.pair.state(), CallPairState::Linked);
             assert_eq!(start.transfer.state(), TransferState::Proceeding);
         }
         Err(TransferError::Participants) => assert!(!distinct),
@@ -700,7 +707,7 @@ impl AttendedOutcome {
 }
 
 #[kani::proof]
-#[kani::unwind(12)]
+#[kani::unwind(17)]
 fn attended_progress_stays_in_the_current_generation() {
     let generations: [u64; 4] = kani::any();
     let token = TransferToken::new(kani::any());
@@ -831,4 +838,176 @@ fn attended_completion_is_absorbing() {
     kani::cover!(finished == Some(TransferOutcome::Failed));
     kani::cover!(finished == Some(TransferOutcome::Cancelled));
     kani::cover!(foreign);
+}
+
+#[kani::proof]
+#[kani::unwind(17)]
+fn owned_pair_departures_stay_with_the_current_bridge_and_generations() {
+    let left = attended_arbitrary_call();
+    let right = attended_arbitrary_call();
+    let distinct = left.generation() != right.generation();
+    let answered = left.state() == CallState::Up && right.state() == CallState::Up;
+    let bridged = left.bridge().is_some() && left.bridge() == right.bridge();
+    let result = OwnedCallPair::new(left, right);
+    let mut ended_peer = false;
+    let mut released_bridge = false;
+    let mut ignored = false;
+    match result {
+        Ok(mut pair) => {
+            assert!(distinct && answered && bridged);
+            assert_eq!(Some(pair.bridge()), left.bridge());
+            assert_eq!(pair.generations(), [left.generation(), right.generation()]);
+            assert_eq!(pair.state(), CallPairState::Linked);
+            let before = pair;
+            let observed_bridge = kani::any();
+            let generation = kani::any();
+            let current_peer = if kani::any::<bool>() {
+                Some(attended_arbitrary_call())
+            } else {
+                None
+            };
+            let current = observed_bridge == pair.bridge()
+                && (generation == left.generation() || generation == right.generation());
+            let peer = if generation == left.generation() {
+                right.generation()
+            } else {
+                left.generation()
+            };
+            let can_end = current_peer.is_some_and(|call| {
+                call.generation() == peer
+                    && call.bridge() == left.bridge()
+                    && call.state() == CallState::Up
+            });
+            let decision = pair.participant_ended(observed_bridge, generation, current_peer);
+            if current && can_end {
+                assert_eq!(
+                    decision,
+                    CallPairDecision::EndPeer {
+                        peer,
+                        release: before.bridge()
+                    }
+                );
+                assert_eq!(pair.state(), CallPairState::Released);
+                ended_peer = true;
+            } else if current {
+                assert_eq!(
+                    decision,
+                    CallPairDecision::ReleaseBridge {
+                        release: before.bridge()
+                    }
+                );
+                assert_eq!(pair.state(), CallPairState::Released);
+                released_bridge = true;
+            } else {
+                assert_eq!(decision, CallPairDecision::Ignore);
+                assert_eq!(pair, before);
+                ignored = true;
+            }
+            assert_eq!(pair.bridge(), before.bridge());
+            assert_eq!(pair.generations(), before.generations());
+        }
+        Err(CallPairError::Participants) => assert!(!distinct),
+        Err(CallPairError::NotAnswered) => assert!(distinct && !answered),
+        Err(CallPairError::Bridge) => assert!(distinct && answered && !bridged),
+    }
+    kani::cover!(result.is_ok());
+    kani::cover!(result == Err(CallPairError::Participants));
+    kani::cover!(result == Err(CallPairError::NotAnswered));
+    kani::cover!(result == Err(CallPairError::Bridge));
+    kani::cover!(ended_peer);
+    kani::cover!(released_bridge);
+    kani::cover!(ignored);
+}
+
+#[kani::proof]
+#[kani::unwind(17)]
+fn owned_pair_release_is_absorbing() {
+    let generations: [u64; 2] = kani::any();
+    let bridge = kani::any();
+    let call = |generation| Call {
+        state: CallState::Up,
+        bridge: Some(bridge),
+        ..Call::outgoing(generation)
+    };
+    let result = OwnedCallPair::new(call(generations[0]), call(generations[1]));
+    let Ok(mut pair) = result else {
+        assert_eq!(result, Err(CallPairError::Participants));
+        return;
+    };
+    let mut released = false;
+    let mut releases = 0;
+    let mut ended_peer = false;
+    let mut retired = false;
+    let mut moved_peer = false;
+    for _ in 0..4 {
+        let observed_bridge = kani::any();
+        let generation = kani::any();
+        let retire: bool = kani::any();
+        let current_peer = if kani::any::<bool>() {
+            Some(attended_arbitrary_call())
+        } else {
+            None
+        };
+        let member = generation == generations[0] || generation == generations[1];
+        let current = !released && observed_bridge == bridge && (retire || member);
+        let peer = if generation == generations[0] {
+            generations[1]
+        } else {
+            generations[0]
+        };
+        let can_end = current_peer.is_some_and(|call| {
+            call.generation() == peer
+                && call.bridge() == Some(bridge)
+                && call.state() == CallState::Up
+        });
+        let decision = if retire {
+            pair.retire(observed_bridge)
+        } else {
+            pair.participant_ended(observed_bridge, generation, current_peer)
+        };
+        if current {
+            if !retire && can_end {
+                assert_eq!(
+                    decision,
+                    CallPairDecision::EndPeer {
+                        peer,
+                        release: bridge
+                    }
+                );
+                ended_peer = true;
+            } else {
+                assert_eq!(
+                    decision,
+                    CallPairDecision::ReleaseBridge { release: bridge }
+                );
+            }
+            retired |= retire;
+            moved_peer |= !retire
+                && current_peer.is_some_and(|call| {
+                    call.generation() == peer
+                        && call.bridge() != Some(bridge)
+                        && call.state() == CallState::Up
+                });
+            released = true;
+            releases += 1;
+        } else {
+            assert_eq!(decision, CallPairDecision::Ignore);
+        }
+        assert_eq!(
+            pair.state(),
+            if released {
+                CallPairState::Released
+            } else {
+                CallPairState::Linked
+            }
+        );
+        assert_eq!(pair.bridge(), bridge);
+        assert_eq!(pair.generations(), generations);
+        assert!(releases <= 1);
+    }
+    assert_eq!(releases, usize::from(released));
+    kani::cover!(ended_peer);
+    kani::cover!(retired);
+    kani::cover!(moved_peer);
+    kani::cover!(releases == 0);
 }
