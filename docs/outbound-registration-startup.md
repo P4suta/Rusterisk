@@ -31,7 +31,10 @@ Initiated streams leave response waits to their transaction.
 Both roles keep five-second assembly deadlines for partial messages.
 More bytes don't extend an assembly deadline.
 
-TLS registration targets return `ControlError::Unsupported` during binding until their adapter connects.
+TLS registrations with numeric addresses verify certificate chains and peer names through the shared encrypted transport.
+Untrusted or mismatched peers receive no registration request.
+Authentication and refresh reuse the verified connection.
+TLS uses port 5061 when the registrar URI omits a port.
 The driver uses matching provisional and final responses, the shared Digest implementation, and validated Contact grants.
 Successful grants schedule refresh requests with renewed authorization counters.
 Retry policy and configuration replacement remain pending in the driver.
