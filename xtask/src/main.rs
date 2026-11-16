@@ -194,6 +194,8 @@ fn execute() -> Result<(), TaskError> {
         [task, mode] if task == "reference-build" && mode == "--run" => reference_build(true),
         [task, mode] if task == "verification-build" && mode == "--dry-run" => verification_build(false),
         [task, mode] if task == "verification-build" && mode == "--run" => verification_build(true),
+        [task, mode] if task == "core-proofs-build" && mode == "--dry-run" => core_proof_build(false),
+        [task, mode] if task == "core-proofs-build" && mode == "--run" => core_proof_build(true),
         [task, mode] if task == "browser-build" && mode == "--dry-run" => browser_build(false),
         [task, mode] if task == "browser-build" && mode == "--run" => browser_build(true),
         [task] if task == "policy" => policy(),
@@ -243,7 +245,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
         )),
     }
 }
@@ -289,6 +291,13 @@ fn reference_build(execute: bool) -> Result<(), TaskError> {
 fn verification_build(execute: bool) -> Result<(), TaskError> {
     let identity = execution_identity(execute)?;
     let plan = xtask::reference::VerificationBuild::new(&identity)
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
+    image_build(execute, plan.steps(), plan.cleanup())
+}
+
+fn core_proof_build(execute: bool) -> Result<(), TaskError> {
+    let identity = execution_identity(execute)?;
+    let plan = xtask::reference::CoreProofBuild::new(&identity)
         .map_err(|error| TaskError::Contract(error.to_string()))?;
     image_build(execute, plan.steps(), plan.cleanup())
 }
