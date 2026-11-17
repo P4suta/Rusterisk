@@ -2,7 +2,7 @@ use sha2::{Digest, Sha256};
 use std::path::Path;
 use xtask::distribution::{CapturedSdk, SdkPackage};
 
-use crate::{archive_fixture::Fixture, captured_fixture};
+use super::{archive_fixture::Fixture, captured_fixture};
 
 pub fn digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
