@@ -573,7 +573,16 @@ impl Scenario<'_> {
                 observed.diagnostics()
             )));
         }
-        validate_sipp_statistics(&observed.stdout).map_err(io::Error::other)
+        validate_sipp_statistics(&observed.stdout).map_err(|error| {
+            let adapter = match adapter {
+                SippAdapter::Asterisk => "Asterisk",
+                SippAdapter::Rusterisk => "Rusterisk",
+            };
+            io::Error::other(format!(
+                "{adapter} SIPp statistics: {error}; {}",
+                observed.diagnostics()
+            ))
+        })
     }
 }
 
