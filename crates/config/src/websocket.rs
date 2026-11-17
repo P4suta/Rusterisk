@@ -110,6 +110,45 @@ fn client(section: Section) -> Result<WebSocketClient, ConfigError> {
     })
 }
 
+impl WebSocketConfig {
+    pub(super) fn validate_runtime(&self) -> Result<(), ConfigError> {
+        let file = "websocket_client.conf";
+        let invalid = |issue: validation::InvalidClient| ConfigError::at(file, 0, issue.reason);
+        if self.clients.len() > 64 {
+            return Err(ConfigError::at(file, 0, "media client capacity exceeded"));
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for client in &self.clients {
+            validation::name(&client.name).map_err(invalid)?;
+            if !names.insert(client.name.as_str()) {
+                return Err(ConfigError::at(file, 0, "duplicate media connection id"));
+            }
+            let uri = validation::uri(client.uri.expose()).map_err(invalid)?;
+            if uri.as_str() != client.uri.expose() {
+                return Err(ConfigError::at(
+                    file,
+                    0,
+                    "media URI requires normalized spelling",
+                ));
+            }
+            validation::ca(client.ca_list_file.as_deref(), uri.scheme() == "wss")
+                .map_err(invalid)?;
+            validation::credentials(
+                client.username.as_ref().map(Secret::expose),
+                client.password.as_ref().map(Secret::expose),
+            )
+            .map_err(invalid)?;
+            validation::timing(
+                client.connection_timeout_ms,
+                client.reconnect_interval_ms,
+                client.reconnect_attempts,
+            )
+            .map_err(invalid)?;
+        }
+        Ok(())
+    }
+}
+
 impl Config {
     pub fn with_websocket_configuration(
         mut self,

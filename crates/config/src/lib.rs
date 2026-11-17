@@ -7,6 +7,7 @@ mod ini_comments;
 mod music_on_hold;
 mod registration;
 mod registration_uri;
+mod runtime_validation;
 mod wait_duration;
 mod websocket;
 pub use digest_algorithms::{DigestAlgorithm, DigestAlgorithms, InvalidDigestAlgorithms};
@@ -641,10 +642,7 @@ impl Config {
                     .map(|value| Secret(value.into())),
             };
         }
-        if config.rtp.start < 1024
-            || !config.rtp.start.is_multiple_of(2)
-            || config.rtp.end <= config.rtp.start
-        {
+        if !runtime_validation::valid_rtp_range(config.rtp.start, config.rtp.end) {
             return Err(ConfigError::at(
                 "rtp.conf",
                 1,
@@ -977,19 +975,7 @@ impl Config {
                     },
                 )
             };
-            let target = registration_uri::ContactTarget::parse(source).map_err(error)?;
-            for endpoint in self
-                .endpoints
-                .iter()
-                .filter(|endpoint| endpoint.aors.contains(&section.name))
-            {
-                let transport = self
-                    .transports
-                    .iter()
-                    .find(|transport| transport.name == endpoint.transport)
-                    .ok_or_else(|| error(RegistrationUriError::TransportConflict))?;
-                target.for_transport(transport.protocol).map_err(error)?;
-            }
+            runtime_validation::static_contact(self, &section.name, source).map_err(error)?;
         }
         Ok(())
     }
@@ -1244,12 +1230,7 @@ impl Dialplan {
                         .split('&')
                         .map(String::from)
                         .collect();
-                    if destinations.is_empty()
-                        || destinations.len() > 16
-                        || destinations
-                            .iter()
-                            .any(|value| !value.starts_with("PJSIP/") || value.len() <= 6)
-                    {
+                    if !runtime_validation::valid_dial_destinations(&destinations) {
                         return Err(error("Dial requires PJSIP destinations"));
                     }
                     let timeout = parts
