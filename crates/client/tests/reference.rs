@@ -504,6 +504,13 @@ async fn compare_resources(
             Ipv4Addr::LOCALHOST,
         )
         .await?;
+        music_on_hold::compare(
+            actual,
+            &mut actual_session,
+            app.as_str(),
+            Ipv4Addr::LOCALHOST,
+        )
+        .await?;
         playback_position::compare(
             actual,
             &mut actual_session,
@@ -530,6 +537,13 @@ async fn compare_resources(
             .parse::<Ipv4Addr>()
             .map_err(|_| Error::Invalid("reference callback address"))?;
         sound_playback::compare(
+            &reference,
+            &mut reference_session,
+            app.as_str(),
+            callback_ip,
+        )
+        .await?;
+        music_on_hold::compare(
             &reference,
             &mut reference_session,
             app.as_str(),
