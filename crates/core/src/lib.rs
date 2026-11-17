@@ -19,6 +19,7 @@ mod recording_gate;
 mod recording_silence;
 mod recording_stop_keys;
 mod resource_subscriptions;
+mod settings_lifetimes;
 mod stasis;
 mod transfer;
 pub use attended_transfer::{AttendedStart, AttendedTransfer};
@@ -42,6 +43,10 @@ pub use recording_silence::RecordingSilence;
 pub use recording_stop_keys::RecordingStopKey;
 pub use resource_subscriptions::{
     ResourceKind, ResourceSource, ResourceSubscriptions, SubscriptionError,
+};
+pub use settings_lifetimes::{
+    SettingsCandidate, SettingsError, SettingsGeneration, SettingsLifetimes, SettingsPublication,
+    SettingsReference, SettingsSlot,
 };
 pub use stasis::{StasisApplication, StasisMembership};
 pub use transfer::{
