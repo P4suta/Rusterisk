@@ -20,6 +20,16 @@ fn invalid(message: &str) -> std::io::Error {
     std::io::Error::other(message)
 }
 
+fn check_run_output(directory: &Path) -> Result<(), SdkConsumerRunError> {
+    let phase = SdkConsumerPhase::new(SdkConsumerScope::Sdk, SdkConsumerAction::Run);
+    let output = io::read(&directory.join(io::stdout(phase)), 4096)?;
+    let diagnostic = io::read(&directory.join(io::stderr(phase)), 4096)?;
+    if output != b"SDK HTTP candidate consumer passed\n" || !diagnostic.is_empty() {
+        return Err(SdkConsumerRunError::Output);
+    }
+    Ok(())
+}
+
 fn prepare(
     contents: &SdkContents,
     workspace: &SdkConsumerWorkspace<'_>,
@@ -106,12 +116,7 @@ impl<'a> PreparedSdkHttpConsumer<'a> {
         let phase = SdkConsumerPhase::new(scope, SdkConsumerAction::Run);
         io::phase_with_target(workspace, phase, Some(target), &mut perform)?;
         io::lock_unchanged(workspace, scope, &self.lock)?;
-        let output = io::read(&workspace.plan().state().join(io::stdout(phase)), 4096)?;
-        let diagnostic = io::read(&workspace.plan().state().join(io::stderr(phase)), 4096)?;
-        if output != b"SDK HTTP candidate consumer passed\n" || !diagnostic.is_empty() {
-            return Err(SdkConsumerRunError::Output);
-        }
-        Ok(())
+        check_run_output(workspace.plan().state())
     }
 
     pub fn run_with(

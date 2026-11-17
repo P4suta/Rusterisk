@@ -86,6 +86,12 @@ where
     supervisor
         .run(command, Duration::from_secs(15))
         .map_err(io::Error::other)?;
+    check_command_output(artifacts, label, expected)
+}
+
+fn check_command_output(artifacts: &Path, label: &str, expected: &[u8]) -> io::Result<()> {
+    let stdout = artifacts.join(format!("{label}.stdout.txt"));
+    let stderr = artifacts.join(format!("{label}.stderr.txt"));
     if read(&stdout, 4096)? != expected || !read(&stderr, 4096)?.is_empty() {
         return Err(io::Error::other(
             "server command output changed its contract",
