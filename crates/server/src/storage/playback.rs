@@ -1,4 +1,7 @@
-use super::{receive, StoragePort, WorkerError};
+use super::music::{MusicBuffer, MusicReader};
+#[cfg(test)]
+use super::PreparedMusic;
+use super::{receive, MusicCursor, MusicSelection, StoragePort, WorkerError};
 use rusterisk_api::{ChannelId, SoundId};
 use rusterisk_media::Frame;
 use rusterisk_storage::{StorageError, WaveReader};
@@ -14,9 +17,18 @@ pub enum PlaybackMedia {
     LocalizedSound { name: SoundId, language: ChannelId },
 }
 
+pub(super) enum Input {
+    Finite(PlaybackMedia),
+    Music {
+        selection: MusicSelection,
+        cursor: Option<MusicCursor>,
+    },
+}
+
 pub(super) struct Packet {
     epoch: u64,
     frame: Option<Frame>,
+    music: Option<MusicCursor>,
 }
 
 pub(super) struct Seek {
@@ -27,6 +39,8 @@ pub(super) struct Seek {
 pub(super) struct Metadata {
     rate: u32,
     samples: u64,
+    music: Option<MusicCursor>,
+    position: u64,
 }
 
 enum State {
@@ -56,6 +70,7 @@ pub struct PlaybackSource {
     metadata: Metadata,
     epoch: u64,
     position: u64,
+    music: Option<MusicCursor>,
 }
 
 impl PlaybackSource {
@@ -69,6 +84,10 @@ impl PlaybackSource {
 
     pub fn sample_position(&self) -> u64 {
         self.position
+    }
+
+    pub(crate) fn music_cursor(&self) -> Option<MusicCursor> {
+        self.music
     }
 
     pub fn seek_sample(&mut self, sample: u64) -> Result<(), WorkerError> {
@@ -85,6 +104,7 @@ impl PlaybackSource {
             })?;
         self.epoch = epoch;
         self.position = sample;
+        self.music = self.music.map(|cursor| cursor.with_sample(sample));
         self.lease.port.wake();
         Ok(())
     }
@@ -94,6 +114,7 @@ impl PlaybackSource {
         if packet.epoch != self.epoch {
             return None;
         }
+        self.music = packet.music;
         match packet.frame {
             Some(frame) => {
                 self.position += frame.samples().len() as u64;
@@ -178,6 +199,29 @@ impl Drop for PlaybackSource {
 
 impl StoragePort {
     pub async fn play(&self, media: PlaybackMedia) -> Result<PlaybackSource, WorkerError> {
+        self.play_input(Input::Finite(media)).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn play_music(
+        &self,
+        catalog: &PreparedMusic,
+        class: &str,
+        cursor: Option<MusicCursor>,
+    ) -> Result<PlaybackSource, WorkerError> {
+        self.play_selected_music(catalog.select(class).ok_or(WorkerError::Invalid)?, cursor)
+            .await
+    }
+
+    pub(crate) async fn play_selected_music(
+        &self,
+        selection: MusicSelection,
+        cursor: Option<MusicCursor>,
+    ) -> Result<PlaybackSource, WorkerError> {
+        self.play_input(Input::Music { selection, cursor }).await
+    }
+
+    async fn play_input(&self, media: Input) -> Result<PlaybackSource, WorkerError> {
         let (output, frames) = mpsc::channel(3);
         let (seek, seeks) = mpsc::channel(8);
         let (completed, completion) = oneshot::channel();
@@ -196,21 +240,72 @@ impl StoragePort {
             reply,
         })?;
         let metadata = receive(response).await?;
+        let position = metadata.position;
         Ok(PlaybackSource {
             frames,
             seeks: seek,
             completed: completion,
             state: State::Active,
             lease,
+            music: metadata.music,
             metadata,
             epoch: 0,
-            position: 0,
+            position,
         })
     }
 }
 
+enum Reader {
+    Finite(WaveReader),
+    Music(MusicReader),
+}
+
+impl Reader {
+    fn metadata(&self) -> Result<Metadata, StorageError> {
+        match self {
+            Self::Finite(reader) => Ok(Metadata {
+                rate: reader.rate(),
+                samples: reader.sample_count(),
+                position: reader.sample_position(),
+                music: None,
+            }),
+            Self::Music(reader) => Ok(Metadata {
+                rate: 48000,
+                samples: reader.sample_count()?,
+                position: reader.sample_position()?,
+                music: Some(reader.cursor()),
+            }),
+        }
+    }
+
+    fn cursor(&self) -> Option<MusicCursor> {
+        match self {
+            Self::Finite(_) => None,
+            Self::Music(reader) => Some(reader.cursor()),
+        }
+    }
+
+    fn seek_sample(&mut self, sample: u64, buffer: &mut MusicBuffer) -> Result<(), StorageError> {
+        match self {
+            Self::Finite(reader) => reader.seek_sample(sample).map(|_| ()),
+            Self::Music(reader) => reader.seek_sample(sample, buffer),
+        }
+    }
+
+    fn read_frame(
+        &mut self,
+        buffer: &mut MusicBuffer,
+    ) -> Result<Poll<Option<Frame>>, StorageError> {
+        match self {
+            Self::Finite(reader) => reader.read_frame().map(Poll::Ready),
+            Self::Music(reader) => reader.read_frame(buffer),
+        }
+    }
+}
+
 struct Entry {
-    reader: WaveReader,
+    reader: Reader,
+    buffer: MusicBuffer,
     output: mpsc::Sender<Packet>,
     seeks: mpsc::Receiver<Seek>,
     epoch: u64,
@@ -231,7 +326,7 @@ impl Entry {
             if command.epoch <= self.epoch {
                 return Err(StorageError::InvalidState);
             }
-            self.reader.seek_sample(command.sample)?;
+            self.reader.seek_sample(command.sample, &mut self.buffer)?;
             self.epoch = command.epoch;
             self.ended = false;
         }
@@ -254,9 +349,15 @@ impl PlaybackSet {
         }
     }
 
+    pub fn is_preparing(&self) -> bool {
+        self.entries
+            .values()
+            .any(|entry| !entry.ended && entry.output.capacity() > 0 && entry.buffer.is_preparing())
+    }
+
     pub fn begin(
         &mut self,
-        media: PlaybackMedia,
+        media: Input,
         output: mpsc::Sender<Packet>,
         seeks: mpsc::Receiver<Seek>,
         lifetime: oneshot::Receiver<()>,
@@ -269,12 +370,17 @@ impl PlaybackSet {
             .generation
             .checked_add(1)
             .ok_or(StorageError::Capacity)?;
-        let reader = match &media {
-            PlaybackMedia::Sound(name) => super::sounds::open(&self.root, name, "en")?,
-            PlaybackMedia::LocalizedSound { name, language } => {
-                super::sounds::open(&self.root, name, language.as_str())?
+        let reader = match media {
+            Input::Music { selection, cursor } => {
+                Reader::Music(MusicReader::new(selection, cursor)?)
             }
-            PlaybackMedia::Recording(name) => {
+            Input::Finite(PlaybackMedia::Sound(name)) => {
+                Reader::Finite(super::sounds::open(&self.root, &name, "en")?)
+            }
+            Input::Finite(PlaybackMedia::LocalizedSound { name, language }) => {
+                Reader::Finite(super::sounds::open(&self.root, &name, language.as_str())?)
+            }
+            Input::Finite(PlaybackMedia::Recording(name)) => {
                 let directory = self.root.join("recordings");
                 if !std::fs::symlink_metadata(&directory)?.is_dir() {
                     return Err(StorageError::InvalidName);
@@ -283,17 +389,15 @@ impl PlaybackSet {
                 if !std::fs::symlink_metadata(&path)?.is_file() {
                     return Err(StorageError::InvalidName);
                 }
-                WaveReader::open(&path)?
+                Reader::Finite(WaveReader::open(&path)?)
             }
         };
-        let metadata = Metadata {
-            rate: reader.rate(),
-            samples: reader.sample_count(),
-        };
+        let metadata = reader.metadata()?;
         self.entries.insert(
             generation,
             Entry {
                 reader,
+                buffer: MusicBuffer::new(),
                 output,
                 seeks,
                 epoch: 0,
@@ -324,12 +428,14 @@ impl PlaybackSet {
                 continue;
             }
             for _ in 0..entry.output.capacity().min(3) {
-                let result = match entry.reader.read_frame() {
-                    Ok(frame) => {
+                let result = match entry.reader.read_frame(&mut entry.buffer) {
+                    Ok(Poll::Pending) => break,
+                    Ok(Poll::Ready(frame)) => {
                         let ended = frame.is_none();
                         match entry.output.try_send(Packet {
                             epoch: entry.epoch,
                             frame,
+                            music: entry.reader.cursor(),
                         }) {
                             Ok(()) if ended => {
                                 entry.ended = true;
@@ -440,6 +546,8 @@ mod seek_tests {
             .send(Ok(Metadata {
                 rate: 8000,
                 samples: 1600,
+                music: None,
+                position: 0,
             }))
             .map_err(|_| WorkerError::Invalid)?;
         let mut source = opening.await?;
@@ -464,7 +572,11 @@ mod seek_tests {
             ),
         ] {
             output
-                .try_send(Packet { epoch, frame })
+                .try_send(Packet {
+                    epoch,
+                    frame,
+                    music: None,
+                })
                 .map_err(|_| WorkerError::Invalid)?;
         }
         assert!(matches!(source.try_read()?, Poll::Pending));
@@ -474,6 +586,7 @@ mod seek_tests {
                 frame: Some(
                     rusterisk_media::Frame::new(&[3200; 160], 8000).map_err(StorageError::from)?,
                 ),
+                music: None,
             })
             .map_err(|_| WorkerError::Invalid)?;
         assert_eq!(

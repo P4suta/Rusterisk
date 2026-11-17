@@ -6,7 +6,7 @@ use crate::storage::StorageWorker;
 use crate::{ControlError, Controller, Runner};
 use rusterisk_config::Config;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::task::JoinSet;
 
@@ -33,6 +33,13 @@ fn failure(error: impl std::fmt::Display) -> ControlError {
 
 impl Server {
     pub async fn validate(config: &Config) -> Result<(), ControlError> {
+        Self::validate_with_data_directory(config, Path::new("data")).await
+    }
+
+    pub async fn validate_with_data_directory(
+        config: &Config,
+        data_directory: &Path,
+    ) -> Result<(), ControlError> {
         if let Some(files) = &config.http.tls {
             TlsContext::load(files).await?;
         }
@@ -59,6 +66,8 @@ impl Server {
                 native_roots_loaded |= roots.is_none();
             }
         }
+        crate::storage::check_music(data_directory, config.music_on_hold.clone())
+            .map_err(failure)?;
         Ok(())
     }
 
@@ -73,7 +82,13 @@ impl Server {
         let (controller, control, effects) = Controller::new(config.clone(), capacity);
         let (media_port, media, notices) = MediaHub::new(capacity);
         let listeners: Result<(Runner, Signaling, HttpServer), ControlError> = async {
-            let control = control.with_storage(storage_port.clone())?;
+            let music = storage_port
+                .prepare_music(config.music_on_hold.clone())
+                .await
+                .map_err(failure)?;
+            let control = control
+                .with_music(music)
+                .with_storage(storage_port.clone())?;
             let http = HttpServer::bind(&config.http, controller.clone())
                 .await?
                 .with_media(media_port.clone());
@@ -95,7 +110,9 @@ impl Server {
             Ok(listeners) => listeners,
             Err(primary) => {
                 if let Err(error) = storage.close().await {
-                    tracing::error!(%error, "storage startup cleanup failed");
+                    return Err(failure(format!(
+                        "{primary}; storage startup cleanup failed: {error}"
+                    )));
                 }
                 return Err(primary);
             }

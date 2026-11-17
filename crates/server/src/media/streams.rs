@@ -41,6 +41,13 @@ impl Port {
                 digit_support,
                 stop,
                 direction,
+                generated_audio_gate: match initial_direction {
+                    PeerMediaDirection::SendReceive => Gate::Open,
+                    PeerMediaDirection::SendOnly => Gate::OutgoingMuted,
+                    PeerMediaDirection::ReceiveOnly => Gate::IncomingMuted,
+                    PeerMediaDirection::Inactive => Gate::Closed,
+                },
+                saved_music: None,
                 connection: Connection::Waiting,
             },
             RtpChannels {

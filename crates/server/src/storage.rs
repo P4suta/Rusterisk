@@ -6,8 +6,11 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 mod history;
+mod music;
 mod playback;
 pub use history::HistoryReceipt;
+pub use music::MusicSelection;
+pub(crate) use music::{MusicCursor, MusicPreparationError, PreparedMusic};
 mod copy;
 mod file;
 mod recording;
@@ -21,6 +24,13 @@ pub use recording::RecordingSink;
 use recording::{RecordingKey, RecordingSet};
 use rusterisk_media::Frame;
 use stored::StoredCommand;
+
+pub(crate) fn check_music(
+    root: &std::path::Path,
+    classes: rusterisk_config::MusicOnHold,
+) -> Result<(), MusicPreparationError> {
+    music::prepare(root, classes, || Ok(())).map(drop)
+}
 
 #[derive(Debug)]
 pub enum WorkerError {
@@ -66,7 +76,7 @@ enum Command {
         reply: oneshot::Sender<Result<Vec<CallRecord>, StorageError>>,
     },
     Play {
-        media: PlaybackMedia,
+        media: playback::Input,
         output: mpsc::Sender<playback::Packet>,
         seeks: mpsc::Receiver<playback::Seek>,
         lifetime: oneshot::Receiver<()>,
@@ -365,7 +375,11 @@ fn serve(
             files.close();
             break;
         }
-        if !recordings.is_preparing() && !files.is_copying() && wakes.blocking_recv().is_none() {
+        if !recordings.is_preparing()
+            && !playbacks.is_preparing()
+            && !files.is_copying()
+            && wakes.blocking_recv().is_none()
+        {
             files.close();
             break;
         }

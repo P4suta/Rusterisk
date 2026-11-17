@@ -77,6 +77,8 @@ struct Received {
     bytes: Vec<u8>,
 }
 
+type PlaybackResult = (MediaOwner, MediaTaskToken, Result<(), ControlError>);
+
 pub struct Signaling {
     config: Config,
     controller: Controller,
@@ -99,7 +101,7 @@ pub struct Signaling {
     websocket_jobs: JoinSet<websocket::Completion>,
     websocket_clients: websocket::PreparedClients,
     storage: Option<StoragePort>,
-    playbacks: JoinSet<(MediaOwner, MediaTaskToken, Result<(), ControlError>)>,
+    playbacks: JoinSet<PlaybackResult>,
     recordings: JoinSet<recording::Completion>,
 }
 
@@ -119,6 +121,15 @@ fn peer_direction(direction: rusterisk_sip::Direction) -> PeerMediaDirection {
         rusterisk_sip::Direction::SendOnly => PeerMediaDirection::SendOnly,
         rusterisk_sip::Direction::RecvOnly => PeerMediaDirection::ReceiveOnly,
         rusterisk_sip::Direction::Inactive => PeerMediaDirection::Inactive,
+    }
+}
+
+fn audio_gate(gate: AudioGate) -> Gate {
+    match gate {
+        AudioGate::Open => Gate::Open,
+        AudioGate::IncomingMuted => Gate::IncomingMuted,
+        AudioGate::OutgoingMuted => Gate::OutgoingMuted,
+        AudioGate::Closed => Gate::Closed,
     }
 }
 
@@ -724,29 +735,33 @@ impl Signaling {
                 })
                 .await?;
             }
-            Effect::Gate { key, gate } => {
-                let gate = match gate {
-                    AudioGate::Open => Gate::Open,
-                    AudioGate::IncomingMuted => Gate::IncomingMuted,
-                    AudioGate::OutgoingMuted => Gate::OutgoingMuted,
-                    AudioGate::Closed => Gate::Closed,
-                };
-                self.media.gate(key, gate).map_err(failure)?;
+            Effect::Gate {
+                key,
+                gate,
+                generated_audio_gate,
+            } => {
+                self.media
+                    .gate_with_generated_audio(
+                        key,
+                        audio_gate(gate),
+                        audio_gate(generated_audio_gate),
+                    )
+                    .map_err(failure)?;
             }
             Effect::PeerDirection {
                 key,
                 direction,
                 gate,
+                generated_audio_gate,
             } => {
-                let gate = match gate {
-                    AudioGate::Open => Gate::Open,
-                    AudioGate::IncomingMuted => Gate::IncomingMuted,
-                    AudioGate::OutgoingMuted => Gate::OutgoingMuted,
-                    AudioGate::Closed => Gate::Closed,
-                };
                 let applied = self
                     .media
-                    .peer_direction(key.clone(), direction, gate)
+                    .peer_direction_with_generated_audio(
+                        key.clone(),
+                        direction,
+                        audio_gate(gate),
+                        audio_gate(generated_audio_gate),
+                    )
                     .await
                     .map_err(failure)?;
                 if let Some(call) = self.calls.get_mut(&key) {
@@ -826,6 +841,16 @@ impl Signaling {
                 self.start_playback_with_options(owner, token, media, options)
                     .await?;
             }
+            Effect::StartMusic {
+                key,
+                token,
+                selection,
+            } => {
+                self.start_music(key, token, selection).await?;
+            }
+            Effect::MusicClassUnavailable { key } => {
+                tracing::warn!(channel = %key.id, generation = key.generation, "music class lookup failed; current source retained");
+            }
             Effect::ControlPlayback { token, operation } => self
                 .media
                 .control_playback(token, operation)
@@ -881,6 +906,113 @@ impl Signaling {
             .await
     }
 
+    async fn music_failed(
+        &self,
+        owner: MediaOwner,
+        token: MediaTaskToken,
+        error: ControlError,
+    ) -> Result<(), ControlError> {
+        tracing::warn!(?owner, ?token, %error, "music source admission failed");
+        self.notify(Signal::MediaPlaybackFinished {
+            owner,
+            token,
+            completion: crate::PlaybackCompletion::Failed,
+        })
+        .await
+    }
+
+    async fn playback_completed(
+        &self,
+        (owner, token, result): PlaybackResult,
+    ) -> Result<(), ControlError> {
+        let completion = match result {
+            Ok(()) => crate::PlaybackCompletion::Completed,
+            Err(error) => {
+                tracing::warn!(?owner, ?token, %error, "playback failed");
+                crate::PlaybackCompletion::Failed
+            }
+        };
+        self.notify(Signal::MediaPlaybackFinished {
+            owner,
+            token,
+            completion,
+        })
+        .await
+    }
+
+    async fn reap_ready_playback(&mut self) -> Result<(), ControlError> {
+        if let Some(completed) = self.playbacks.try_join_next() {
+            self.playback_completed(completed.map_err(failure)?).await?;
+        }
+        Ok(())
+    }
+
+    async fn start_music(
+        &mut self,
+        key: CallKey,
+        token: MediaTaskToken,
+        selection: Result<crate::storage::MusicSelection, ControlError>,
+    ) -> Result<(), ControlError> {
+        let owner = MediaOwner::Channel(key.clone());
+        let selection = match selection {
+            Ok(selection) => selection,
+            Err(error) => return self.music_failed(owner, token, error).await,
+        };
+        if !self.calls.contains_key(&key) && !self.external_media.contains(&key) {
+            return self
+                .music_failed(
+                    owner,
+                    token,
+                    ControlError::NotFound("Channel media unavailable"),
+                )
+                .await;
+        }
+        if self.playbacks.len() >= 64 {
+            self.reap_ready_playback().await?;
+        }
+        if self.playbacks.len() >= 64 {
+            return self
+                .music_failed(owner, token, ControlError::Capacity)
+                .await;
+        }
+        let Some(storage) = self.storage.clone() else {
+            return self
+                .music_failed(owner, token, ControlError::Unsupported)
+                .await;
+        };
+        let class = selection.class_name().to_owned();
+        let (cursor, completed) = match self.media.reserve_music(key, token, class).await {
+            Ok(admission) => admission,
+            Err(error) => return self.music_failed(owner, token, failure(error)).await,
+        };
+        let port = self.media.clone();
+        let controller = self.controller.clone();
+        self.playbacks.spawn(async move {
+            let result = async {
+                let source = storage
+                    .play_selected_music(selection, cursor)
+                    .await
+                    .map_err(failure)?;
+                port.attach_playback(token, source).await.map_err(failure)?;
+                controller
+                    .signal(Signal::MediaPlaybackStarted {
+                        owner: owner.clone(),
+                        token,
+                    })
+                    .await?;
+                completed.await.map_err(failure)?.map_err(failure)
+            }
+            .await;
+            if result.is_err() {
+                if let Err(error) = port.stop_playback(token) {
+                    tracing::warn!(?owner, ?token, %error, "music reservation cleanup deferred");
+                }
+            }
+            (owner, token, result)
+        });
+        Ok(())
+    }
+
     async fn start_playback_with_options(
         &mut self,
         owner: MediaOwner,
@@ -894,6 +1026,9 @@ impl Signaling {
             }
             MediaOwner::Bridge { .. } => true,
         };
+        if self.playbacks.len() >= 64 {
+            self.reap_ready_playback().await?;
+        }
         match &self.storage {
             Some(storage) if self.playbacks.len() < 64 && available => {
                 let storage = storage.clone();
@@ -1167,15 +1302,8 @@ impl Signaling {
                     None => { if !*stop.borrow() { return Err(ControlError::Adapter("Media task stopped".into())); } break; }
                 },
                 result = self.playbacks.join_next(), if !self.playbacks.is_empty() => {
-                    let (owner, token, result) = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
-                    let completion = match result {
-                        Ok(()) => crate::PlaybackCompletion::Completed,
-                        Err(error) => {
-                            tracing::warn!(?owner, ?token, %error, "playback failed");
-                            crate::PlaybackCompletion::Failed
-                        }
-                    };
-                    self.notify(Signal::MediaPlaybackFinished { owner, token, completion }).await?;
+                    let completed = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
+                    self.playback_completed(completed).await?;
                 },
                 result = self.recordings.join_next(), if !self.recordings.is_empty() => {
                     let completed = result.ok_or(ControlError::Capacity)?.map_err(failure)?;

@@ -18,6 +18,7 @@ mod dialplan;
 mod endpoints;
 mod external_media;
 mod initial_variables;
+mod music;
 mod playback;
 mod recording;
 mod stasis;
@@ -227,6 +228,11 @@ pub enum Action {
         id: ChannelId,
         operation: PlaybackControl,
     },
+    StartMusic {
+        channel: ChannelId,
+        class: Option<String>,
+    },
+    StopMusic(ChannelId),
     SendDtmf {
         channel: ChannelId,
         digits: String,
@@ -333,7 +339,13 @@ impl Action {
             | Self::GetBridge(_)
             | Self::CreateBridge { .. }
             | Self::Move { .. } => 0,
-            Self::Hangup(_) | Self::Continue { .. } | Self::DestroyBridge(_) => 2,
+            Self::Hangup(_)
+            | Self::Continue { .. }
+            | Self::DestroyBridge(_)
+            | Self::StartMusic { .. }
+            | Self::StopMusic(_)
+            | Self::PlayChannel { .. } => 2,
+            Self::Hold(_) | Self::Unhold(_) => 3,
             Self::Originate { .. }
             | Self::ExternalWebSocket { .. }
             | Self::ExternalWebSocketClient { .. }
@@ -344,13 +356,10 @@ impl Action {
             | Self::ControlRecording { .. }
             | Self::EndRecording { .. }
             | Self::PlayBridge { .. }
-            | Self::PlayChannel { .. }
             | Self::ControlPlayback { .. }
             | Self::SendDtmf { .. }
             | Self::Answer(_)
             | Self::Ring(_)
-            | Self::Hold(_)
-            | Self::Unhold(_)
             | Self::Mute { .. }
             | Self::Unmute { .. }
             | Self::AddChannels { .. }
@@ -385,6 +394,8 @@ impl Action {
             | Self::EndRecording { .. }
             | Self::PlayBridge { .. }
             | Self::PlayChannel { .. }
+            | Self::StartMusic { .. }
+            | Self::StopMusic(_)
             | Self::ControlPlayback { .. }
             | Self::SendDtmf { .. }
             | Self::SetVariable { .. }
@@ -456,6 +467,14 @@ pub enum Effect {
         language: String,
         options: rusterisk_api::PlaybackOptions,
     },
+    StartMusic {
+        key: CallKey,
+        token: MediaTaskToken,
+        selection: Result<crate::storage::MusicSelection, ControlError>,
+    },
+    MusicClassUnavailable {
+        key: CallKey,
+    },
     ControlPlayback {
         token: MediaTaskToken,
         operation: PlaybackControl,
@@ -472,11 +491,13 @@ pub enum Effect {
     Gate {
         key: CallKey,
         gate: AudioGate,
+        generated_audio_gate: AudioGate,
     },
     PeerDirection {
         key: CallKey,
         direction: PeerMediaDirection,
         gate: AudioGate,
+        generated_audio_gate: AudioGate,
     },
     Answer {
         key: CallKey,
@@ -696,6 +717,7 @@ struct ChannelEntry {
     dtmf: Option<DtmfOutbox>,
     dialplan: Option<DialplanFrame>,
     media_tasks: MediaTasks,
+    music: Option<music::MusicTask>,
 }
 
 impl ChannelEntry {
@@ -805,6 +827,7 @@ pub struct Control {
     event_filters: BTreeMap<StasisApplication, stasis::EventFilters>,
     resource_subscriptions: BTreeMap<StasisApplication, rusterisk_core::ResourceSubscriptions<128>>,
     playbacks: BTreeMap<ChannelId, playback::PlaybackEntry>,
+    music_catalog: Option<crate::storage::PreparedMusic>,
     recordings: BTreeMap<ChannelId, recording::RecordingEntry>,
     dialplan_program: rusterisk_config::Dialplan,
     endpoints: Endpoints,
@@ -934,6 +957,7 @@ impl Control {
                 dtmf: None,
                 dialplan: Some(DialplanFrame::dormant(self.dialplan_program.clone())),
                 media_tasks: MediaTasks::new(call.generation()),
+                music: None,
             },
         );
         Ok(outcome)
@@ -970,6 +994,7 @@ impl Control {
             event_filters: BTreeMap::new(),
             resource_subscriptions: BTreeMap::new(),
             playbacks: BTreeMap::new(),
+            music_catalog: None,
             recordings: BTreeMap::new(),
             dialplan_program: program,
             endpoints: Endpoints::default(),
@@ -1205,6 +1230,8 @@ impl Control {
                 language,
                 options,
             } => self.play_channel(channel, id, media, language, options),
+            Action::StartMusic { channel, class } => self.start_music(channel, class),
+            Action::StopMusic(channel) => self.stop_music(channel),
             Action::GetPlayback(id) => self.get_playback(&id),
             Action::ControlPlayback { id, operation } => {
                 self.control_playback(&id, operation, timestamp)
@@ -1392,6 +1419,7 @@ impl Control {
                         dtmf: None,
                         dialplan: Some(DialplanFrame::dormant(self.dialplan_program.clone())),
                         media_tasks: MediaTasks::new(generation),
+                        music: None,
                     },
                 );
                 Ok(outcome)
@@ -1874,53 +1902,60 @@ impl Control {
     ) -> Result<Outcome, ControlError> {
         let entry = self
             .channels
-            .get_mut(id)
+            .get(id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
         if !matches!(entry.call.stasis(), StasisMembership::Entered(_)) {
             return Err(ControlError::Conflict("Channel not in Stasis application"));
         }
-        let mut outcome = Outcome::empty();
         let call = match operation {
-            MediaOperation::Hold if entry.call.media() == MediaState::Held => return Ok(outcome),
-            MediaOperation::Unhold if entry.call.media() == MediaState::Active => {
-                return Ok(outcome)
-            }
+            MediaOperation::Hold if entry.call.media() == MediaState::Held => entry.call,
+            MediaOperation::Unhold if entry.call.media() == MediaState::Active => entry.call,
             MediaOperation::Hold => entry.call.hold()?,
             MediaOperation::Unhold => entry.call.resume()?,
             MediaOperation::Mute(direction) => entry.call.mute(direction)?,
             MediaOperation::Unmute(direction) => entry.call.unmute(direction)?,
         };
-        if entry.call == call {
-            return Ok(outcome);
-        }
-        entry.call = call;
-        if call.state() == CallState::Up {
-            outcome.effects.push(Effect::Gate {
-                key: CallKey {
-                    id: id.clone(),
-                    generation: call.generation(),
-                },
-                gate: call.audio_gate(),
-            });
+        let key = CallKey {
+            id: id.clone(),
+            generation: call.generation(),
+        };
+        let mut outcome = Outcome::empty();
+        if entry.call != call {
+            if call.state() == CallState::Up {
+                outcome.effects.push(Effect::Gate {
+                    key: key.clone(),
+                    gate: call.audio_gate(),
+                    generated_audio_gate: call.generated_audio_gate(),
+                });
+            }
+            match operation {
+                MediaOperation::Hold => outcome.optional_event(
+                    application_name(&self.applications, entry.call.stasis())?,
+                    timestamp,
+                    EventKind::ChannelHold {
+                        channel: entry.snapshot.clone(),
+                        musicclass: Some("N/A".into()),
+                    },
+                ),
+                MediaOperation::Unhold => outcome.optional_event(
+                    application_name(&self.applications, entry.call.stasis())?,
+                    timestamp,
+                    EventKind::ChannelUnhold {
+                        channel: entry.snapshot.clone(),
+                    },
+                ),
+                MediaOperation::Mute(_) | MediaOperation::Unmute(_) => {}
+            }
         }
         match operation {
-            MediaOperation::Hold => outcome.optional_event(
-                application_name(&self.applications, entry.call.stasis())?,
-                timestamp,
-                EventKind::ChannelHold {
-                    channel: entry.snapshot.clone(),
-                    musicclass: Some("N/A".into()),
-                },
-            ),
-            MediaOperation::Unhold => outcome.optional_event(
-                application_name(&self.applications, entry.call.stasis())?,
-                timestamp,
-                EventKind::ChannelUnhold {
-                    channel: entry.snapshot.clone(),
-                },
-            ),
+            MediaOperation::Hold => outcome.append(self.start_default_music(id.clone())?),
+            MediaOperation::Unhold => self.stop_music_for_playback(&key, &mut outcome)?,
             MediaOperation::Mute(_) | MediaOperation::Unmute(_) => {}
         }
+        self.channels
+            .get_mut(id)
+            .ok_or(ControlError::NotFound("Channel not found"))?
+            .call = call;
         Ok(outcome)
     }
 
@@ -1978,6 +2013,7 @@ impl Control {
                                 key,
                                 direction,
                                 gate: entry.call.audio_gate(),
+                                generated_audio_gate: entry.call.generated_audio_gate(),
                             });
                             let held = !direction.can_receive();
                             if held != was_held {
@@ -2141,6 +2177,7 @@ impl Control {
                                 outcome.effects.push(Effect::Gate {
                                     key: key.clone(),
                                     gate: entry.call.audio_gate(),
+                                    generated_audio_gate: entry.call.generated_audio_gate(),
                                 });
                             }
                             outcome.optional_event(

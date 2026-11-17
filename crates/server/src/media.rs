@@ -1,6 +1,6 @@
 use crate::audiosocket::AudioSocketLink;
 use crate::rtp::{LinkStats, RtpChannels, RtpDigitCommand, RtpLink, RtpSession, SocketPair};
-use crate::storage::{PlaybackSource, RecordingSink, WorkerError};
+use crate::storage::{MusicCursor, PlaybackSource, RecordingSink, WorkerError};
 use crate::CallKey;
 use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone, MediaTaskToken, PeerMediaDirection};
 use rusterisk_media::{AudioTarget, Frame, Gate, MediaError, Mixer, TelephoneFormat};
@@ -51,6 +51,13 @@ enum Command {
         completed: oneshot::Sender<Result<(), MediaError>>,
         options: rusterisk_api::PlaybackOptions,
         reply: oneshot::Sender<Result<(), MediaError>>,
+    },
+    ReserveMusic {
+        key: CallKey,
+        token: MediaTaskToken,
+        class: String,
+        completed: oneshot::Sender<Result<(), MediaError>>,
+        reply: oneshot::Sender<Result<Option<MusicCursor>, MediaError>>,
     },
     AttachPlayback {
         token: MediaTaskToken,
@@ -114,11 +121,13 @@ enum Command {
     Gate {
         key: CallKey,
         gate: Gate,
+        generated_audio_gate: Gate,
     },
     PeerDirection {
         key: CallKey,
         direction: PeerMediaDirection,
         gate: Gate,
+        generated_audio_gate: Gate,
         reply: oneshot::Sender<Result<bool, MediaError>>,
     },
 }
@@ -132,6 +141,35 @@ pub struct MediaPort {
 }
 
 impl MediaPort {
+    pub(crate) async fn reserve_music(
+        &self,
+        key: CallKey,
+        token: MediaTaskToken,
+        class: String,
+    ) -> Result<
+        (
+            Option<MusicCursor>,
+            oneshot::Receiver<Result<(), MediaError>>,
+        ),
+        MediaError,
+    > {
+        let (completed, completion) = oneshot::channel();
+        let (reply, response) = oneshot::channel();
+        self.commands
+            .try_send(Command::ReserveMusic {
+                key,
+                token,
+                class,
+                completed,
+                reply,
+            })
+            .map_err(|_| MediaError::Capacity)?;
+        let cursor = tokio::time::timeout(Duration::from_secs(5), response)
+            .await
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+            .map_err(|error| MediaError::Transport(error.to_string()))??;
+        Ok((cursor, completion))
+    }
     pub async fn received_digit(
         &self,
         key: CallKey,
@@ -408,8 +446,20 @@ impl MediaPort {
             .map_err(|_| MediaError::Capacity)
     }
     pub fn gate(&self, key: CallKey, gate: Gate) -> Result<(), MediaError> {
+        self.gate_with_generated_audio(key, gate, gate)
+    }
+    pub(crate) fn gate_with_generated_audio(
+        &self,
+        key: CallKey,
+        gate: Gate,
+        generated_audio_gate: Gate,
+    ) -> Result<(), MediaError> {
         self.commands
-            .try_send(Command::Gate { key, gate })
+            .try_send(Command::Gate {
+                key,
+                gate,
+                generated_audio_gate,
+            })
             .map_err(|_| MediaError::Capacity)
     }
     pub async fn peer_direction(
@@ -418,12 +468,24 @@ impl MediaPort {
         direction: PeerMediaDirection,
         gate: Gate,
     ) -> Result<bool, MediaError> {
+        self.peer_direction_with_generated_audio(key, direction, gate, gate)
+            .await
+    }
+
+    pub(crate) async fn peer_direction_with_generated_audio(
+        &self,
+        key: CallKey,
+        direction: PeerMediaDirection,
+        gate: Gate,
+        generated_audio_gate: Gate,
+    ) -> Result<bool, MediaError> {
         let (reply, response) = oneshot::channel();
         self.commands
             .try_send(Command::PeerDirection {
                 key,
                 direction,
                 gate,
+                generated_audio_gate,
                 reply,
             })
             .map_err(|_| MediaError::Capacity)?;
@@ -443,6 +505,10 @@ enum DigitSupport {
     Rfc4733(TelephoneFormat),
     Stream,
 }
+struct SavedMusic {
+    class: String,
+    cursor: MusicCursor,
+}
 struct Port {
     connection_lease: Option<crate::MediaConnectionLease>,
     answers: Option<mpsc::Receiver<()>>,
@@ -454,6 +520,8 @@ struct Port {
     digit_support: DigitSupport,
     stop: watch::Sender<bool>,
     direction: watch::Sender<PeerMediaDirection>,
+    generated_audio_gate: Gate,
+    saved_music: Option<SavedMusic>,
     connection: Connection,
 }
 
@@ -473,6 +541,21 @@ pub struct MediaHub {
 }
 
 impl MediaHub {
+    fn remember_music(&mut self) {
+        for (key, class, cursor) in self.playbacks.music_cursors() {
+            if let Some(port) = self.ports.get_mut(key) {
+                match &mut port.saved_music {
+                    Some(saved) if saved.class.eq_ignore_ascii_case(class) => saved.cursor = cursor,
+                    saved => {
+                        *saved = Some(SavedMusic {
+                            class: class.to_owned(),
+                            cursor,
+                        })
+                    }
+                }
+            }
+        }
+    }
     pub fn new(capacity: usize) -> (MediaPort, Self, mpsc::Receiver<MediaNotice>) {
         let (commands, receiver) = mpsc::channel(128);
         let (websocket, websocket_receiver) = mpsc::channel(8);
@@ -555,6 +638,7 @@ impl MediaHub {
     }
 
     fn command(&mut self, command: Command) -> Result<(), MediaError> {
+        self.remember_music();
         match command {
             Command::ReceivedDigit { key, digit } => {
                 if self.ports.contains_key(&key) {
@@ -578,6 +662,33 @@ impl MediaHub {
                         self.playbacks.reserve(token, target, completed, options)
                     } else {
                         Err(MediaError::UnknownStream)
+                    };
+                    let admitted = result.is_ok();
+                    if reply.send(result).is_err() && admitted {
+                        self.playbacks.end(token, Ok(()));
+                    }
+                }
+            }
+            Command::ReserveMusic {
+                key,
+                token,
+                class,
+                completed,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let result = match self.ports.get(&key) {
+                        Some(port) => {
+                            let cursor = port
+                                .saved_music
+                                .as_ref()
+                                .filter(|saved| saved.class.eq_ignore_ascii_case(&class))
+                                .map(|saved| saved.cursor);
+                            self.playbacks
+                                .reserve_music(token, key, class, completed)
+                                .map(|()| cursor)
+                        }
+                        None => Err(MediaError::UnknownStream),
                     };
                     let admitted = result.is_ok();
                     if reply.send(result).is_err() && admitted {
@@ -730,23 +841,32 @@ impl MediaHub {
                 }
                 self.mixer.bridge(id, &active)?;
             }
-            Command::Gate { key, gate } => {
-                if self.ports.contains_key(&key) {
-                    self.mixer.gate(&key, gate)?;
+            Command::Gate {
+                key,
+                gate,
+                generated_audio_gate,
+            } => {
+                if let Some(port) = self.ports.get_mut(&key) {
+                    self.mixer.gates(&key, gate, generated_audio_gate)?;
+                    port.generated_audio_gate = generated_audio_gate;
                 }
             }
             Command::PeerDirection {
                 key,
                 direction,
                 gate,
+                generated_audio_gate,
                 reply,
             } => {
                 if !reply.is_closed() {
-                    let result = if let Some(port) = self.ports.get(&key) {
-                        self.mixer.gate(&key, gate).map(|()| {
-                            port.direction.send_replace(direction);
-                            true
-                        })
+                    let result = if let Some(port) = self.ports.get_mut(&key) {
+                        self.mixer
+                            .gates(&key, gate, generated_audio_gate)
+                            .map(|()| {
+                                port.generated_audio_gate = generated_audio_gate;
+                                port.direction.send_replace(direction);
+                                true
+                            })
                     } else {
                         Ok(false)
                     };
@@ -838,8 +958,22 @@ impl MediaHub {
                 }
             }
         }
-        let playback = self.playbacks.tick()?;
-        let audio = self.mixer.tick_with_playback(&playback)?;
+        self.remember_music();
+        let frames = self.playbacks.tick()?;
+        let mut playback = Vec::with_capacity(frames.len());
+        let mut music = Vec::with_capacity(frames.len());
+        for (target, frame) in frames {
+            if self.playbacks.is_music(&target) {
+                let AudioTarget::Channel(key) = target else {
+                    return Err(MediaError::InvalidRoute);
+                };
+                let port = self.ports.get(&key).ok_or(MediaError::UnknownStream)?;
+                music.push((key, port.generated_audio_gate, frame));
+            } else {
+                playback.push((target, frame));
+            }
+        }
+        let audio = self.mixer.tick_with_music(&playback, &music)?;
         self.recordings.bridges(&audio.bridges)?;
         for (key, frame) in audio.channels {
             let port = self.ports.get(&key).ok_or(MediaError::UnknownStream)?;

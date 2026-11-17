@@ -149,6 +149,8 @@ fn all_failed_attempts_resume_once_and_late_failures_do_not_end_the_parent(
             | Effect::Dtmf { .. }
             | Effect::Playback { .. }
             | Effect::PlayMedia { .. }
+            | Effect::StartMusic { .. }
+            | Effect::MusicClassUnavailable { .. }
             | Effect::RecordMedia { .. }
             | Effect::ControlRecording { .. }
             | Effect::EndRecording { .. }

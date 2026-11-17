@@ -128,6 +128,8 @@ async fn check_dial_capacity(connected: bool) -> Result<(), ControlError> {
                     | rusterisk_server::Effect::ConnectAudioSocket { .. }
                     | rusterisk_server::Effect::Playback { .. }
                     | rusterisk_server::Effect::PlayMedia { .. }
+                    | rusterisk_server::Effect::StartMusic { .. }
+                    | rusterisk_server::Effect::MusicClassUnavailable { .. }
                     | rusterisk_server::Effect::RecordMedia { .. }
                     | rusterisk_server::Effect::ControlRecording { .. }
                     | rusterisk_server::Effect::EndRecording { .. }

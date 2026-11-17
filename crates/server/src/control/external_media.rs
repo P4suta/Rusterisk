@@ -195,6 +195,7 @@ impl Control {
                 dtmf: None,
                 dialplan: None,
                 media_tasks: MediaTasks::new(generation),
+                music: None,
             },
         );
         Ok(outcome)

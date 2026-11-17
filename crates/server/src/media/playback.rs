@@ -1,4 +1,4 @@
-use crate::storage::PlaybackSource;
+use crate::storage::{MusicCursor, PlaybackSource};
 use crate::CallKey;
 use rusterisk_core::MediaTaskToken;
 use rusterisk_media::{AudioTarget, Frame, MediaError};
@@ -30,12 +30,18 @@ enum Source {
     },
 }
 
+enum Purpose {
+    Playback,
+    Music(String),
+}
+
 struct Playback {
     target: AudioTarget<CallKey>,
     source: Source,
     completed: oneshot::Sender<Result<(), MediaError>>,
     progress: Instant,
     options: rusterisk_api::PlaybackOptions,
+    purpose: Purpose,
 }
 
 pub(super) struct Playbacks {
@@ -56,6 +62,33 @@ impl Playbacks {
         completed: oneshot::Sender<Result<(), MediaError>>,
         options: rusterisk_api::PlaybackOptions,
     ) -> Result<(), MediaError> {
+        self.reserve_source(token, target, completed, options, Purpose::Playback)
+    }
+
+    pub fn reserve_music(
+        &mut self,
+        token: MediaTaskToken,
+        key: CallKey,
+        class: String,
+        completed: oneshot::Sender<Result<(), MediaError>>,
+    ) -> Result<(), MediaError> {
+        self.reserve_source(
+            token,
+            AudioTarget::Channel(key),
+            completed,
+            Default::default(),
+            Purpose::Music(class),
+        )
+    }
+
+    fn reserve_source(
+        &mut self,
+        token: MediaTaskToken,
+        target: AudioTarget<CallKey>,
+        completed: oneshot::Sender<Result<(), MediaError>>,
+        options: rusterisk_api::PlaybackOptions,
+        purpose: Purpose,
+    ) -> Result<(), MediaError> {
         if completed.is_closed() {
             return Err(MediaError::UnknownStream);
         }
@@ -75,9 +108,31 @@ impl Playbacks {
                 completed,
                 progress: Instant::now(),
                 options,
+                purpose,
             },
         );
         Ok(())
+    }
+
+    pub fn music_cursors(&self) -> impl Iterator<Item = (&CallKey, &str, MusicCursor)> {
+        self.entries.values().filter_map(|entry| {
+            match (&entry.target, &entry.purpose, &entry.source) {
+                (
+                    AudioTarget::Channel(key),
+                    Purpose::Music(class),
+                    Source::Attached { source, .. },
+                ) => source
+                    .music_cursor()
+                    .map(|cursor| (key, class.as_str(), cursor)),
+                _ => None,
+            }
+        })
+    }
+
+    pub fn is_music(&self, target: &AudioTarget<CallKey>) -> bool {
+        self.entries
+            .values()
+            .any(|entry| &entry.target == target && matches!(entry.purpose, Purpose::Music(_)))
     }
 
     pub fn attach(

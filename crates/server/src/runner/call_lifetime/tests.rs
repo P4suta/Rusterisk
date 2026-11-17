@@ -123,6 +123,7 @@ async fn control_cleanup_closes_the_lease_before_a_pending_release_effect_is_del
             .try_send(Effect::Gate {
                 key: fixture.key.clone(),
                 gate: rusterisk_core::AudioGate::Closed,
+                generated_audio_gate: rusterisk_core::AudioGate::Closed,
             })
             .map_err(failure)?;
     }

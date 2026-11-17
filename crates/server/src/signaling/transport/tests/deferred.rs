@@ -86,6 +86,7 @@ async fn media_acknowledgements_never_send_old_answers_on_replacement_connection
                     key: key.clone(),
                     direction: PeerMediaDirection::SendOnly,
                     gate: AudioGate::OutgoingMuted,
+                    generated_audio_gate: AudioGate::OutgoingMuted,
                 },
                 1,
             )
@@ -103,6 +104,7 @@ async fn media_acknowledgements_never_send_old_answers_on_replacement_connection
                     key,
                     direction: PeerMediaDirection::SendOnly,
                     gate: AudioGate::OutgoingMuted,
+                    generated_audio_gate: AudioGate::OutgoingMuted,
                 },
                 3,
             )

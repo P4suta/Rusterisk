@@ -125,7 +125,15 @@ impl Control {
             || entry.snapshot.language.clone(),
             |value| value.to_string(),
         );
-        self.enqueue_playback(MediaOwner::Channel(key), id, media, language, options)
+        let mut outcome = self.enqueue_playback(
+            MediaOwner::Channel(key.clone()),
+            id,
+            media,
+            language,
+            options,
+        )?;
+        self.stop_music_for_playback(&key, &mut outcome)?;
+        Ok(outcome)
     }
 
     pub(super) fn play_bridge(
@@ -164,7 +172,7 @@ impl Control {
         if self.playbacks.contains_key(&id) {
             return Err(ControlError::Conflict("Playback already exists"));
         }
-        if self.playbacks.len() >= 64 {
+        if self.music_source_count() >= 64 {
             return Err(ControlError::Capacity);
         }
         let token = self.media_tasks(&owner)?.reserve(MediaTaskKind::Playback)?;
@@ -184,12 +192,15 @@ impl Control {
         Ok(outcome)
     }
 
-    fn next_playback(
+    pub(super) fn next_playback(
         &mut self,
         owner: &MediaOwner,
         outcome: &mut Outcome,
     ) -> Result<(), ControlError> {
         if let Some(token) = self.media_tasks(owner)?.next_playback() {
+            if self.next_music(owner, token, outcome)? {
+                return Ok(());
+            }
             let (id, playback) = self
                 .playbacks
                 .iter()
@@ -229,6 +240,9 @@ impl Control {
         token: MediaTaskToken,
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
+        if self.owns_music(owner, token) {
+            return Ok(Outcome::empty());
+        }
         let mut outcome = Outcome::empty();
         if let Some((id, playback)) = self
             .playbacks
@@ -256,6 +270,9 @@ impl Control {
         completion: PlaybackCompletion,
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
+        if let Some(outcome) = self.finish_music(owner, token)? {
+            return Ok(outcome);
+        }
         let id = self.playbacks.iter().find_map(|(id, playback)| {
             (playback.owner == *owner && playback.token == token).then_some(id.clone())
         });

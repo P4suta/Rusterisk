@@ -110,6 +110,7 @@ async fn direction_answers_wait_for_the_current_transport_and_ignore_cached_retr
                     },
                     direction: PeerMediaDirection::SendOnly,
                     gate: AudioGate::OutgoingMuted,
+                    generated_audio_gate: AudioGate::OutgoingMuted,
                 },
                 2,
             )
@@ -121,6 +122,7 @@ async fn direction_answers_wait_for_the_current_transport_and_ignore_cached_retr
                     key,
                     direction: PeerMediaDirection::SendOnly,
                     gate: AudioGate::OutgoingMuted,
+                    generated_audio_gate: AudioGate::OutgoingMuted,
                 },
                 3,
             )

@@ -1,10 +1,14 @@
 use super::file::FileSet;
-use super::{respond, StoragePort, WorkerError};
+use super::{respond, MusicPreparationError, PreparedMusic, StoragePort, WorkerError};
 use rusterisk_api::{ChannelId, Sound, StoredRecording};
 use rusterisk_storage::{RecordingChunk, StorageError, Store};
 use tokio::sync::{mpsc, oneshot};
 
 pub(super) enum StoredCommand {
+    PrepareMusic {
+        classes: rusterisk_config::MusicOnHold,
+        reply: oneshot::Sender<Result<PreparedMusic, MusicPreparationError>>,
+    },
     Sounds {
         language: Option<String>,
         format: Option<String>,
@@ -57,6 +61,27 @@ pub(super) fn execute(
     mut service: impl FnMut(&mut Store, &mut FileSet) -> Result<(), StorageError>,
 ) {
     match command {
+        StoredCommand::PrepareMusic { classes, reply } => {
+            if !reply.is_closed() {
+                let result = super::music::prepare(root, classes, || {
+                    if reply.is_closed() {
+                        return Err(StorageError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "music requester disconnected",
+                        )));
+                    }
+                    service(store, files)
+                });
+                if !reply.is_closed() {
+                    if let Err(error) = &result {
+                        tracing::warn!(%error, "music preparation failed");
+                    }
+                    if reply.send(result).is_err() {
+                        tracing::debug!("music requester disconnected");
+                    }
+                }
+            }
+        }
         StoredCommand::Sounds {
             language,
             format,

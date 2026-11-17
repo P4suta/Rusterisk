@@ -33,7 +33,7 @@ fn direction(
         "now",
     )?;
     assert!(
-        matches!(&outcome.effects[..], [Effect::PeerDirection { key: actual, direction: actual_direction, gate: actual_gate }] if actual == key && *actual_direction == direction && *actual_gate == gate)
+        matches!(&outcome.effects[..], [Effect::PeerDirection { key: actual, direction: actual_direction, gate: actual_gate, .. }] if actual == key && *actual_direction == direction && *actual_gate == gate)
     );
     Ok(())
 }

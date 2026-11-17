@@ -566,6 +566,7 @@ impl Control {
                         self.dialplan_program.clone(),
                     )),
                     media_tasks: rusterisk_core::MediaTasks::new(generation),
+                    music: None,
                 },
             );
             outcome.effects.push(Effect::Start {

@@ -335,6 +335,8 @@ mod tests {
                         ..
                     }
                     | Effect::PlayMedia { .. }
+                    | Effect::StartMusic { .. }
+                    | Effect::MusicClassUnavailable { .. }
                     | Effect::ControlPlayback { .. }
                     | Effect::Playback { .. }
                     | Effect::Dtmf { .. }

@@ -362,6 +362,11 @@ fn timestamp() -> String {
 }
 
 impl Runner {
+    pub(crate) fn with_music(mut self, music: crate::storage::PreparedMusic) -> Self {
+        self.control = self.control.with_music(music);
+        self
+    }
+
     pub fn with_storage(mut self, storage: StoragePort) -> Result<Self, ControlError> {
         self.storage = Some(StorageServices {
             history: HistoryRecorder::new(storage.clone())?,
@@ -606,6 +611,8 @@ impl Runner {
                             | Effect::ReserveWebSocket { .. }
                             | Effect::EndRecording { .. }
                             | Effect::PlayMedia { .. }
+                            | Effect::StartMusic { .. }
+                            | Effect::MusicClassUnavailable { .. }
                             | Effect::ControlPlayback { .. }
                             | Effect::Playback { .. }
                             | Effect::Dtmf { .. }
