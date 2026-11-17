@@ -15,6 +15,7 @@ enum Counter {
 
 #[derive(Clone, Copy)]
 enum Field {
+    Timestamp,
     Value,
     Count(Counter),
 }
@@ -23,12 +24,12 @@ use Counter::{
     Created, Current, Outgoing, OutgoingPeriod, Retransmissions, RetransmissionsPeriod, Successful,
     SuccessfulPeriod, Zero,
 };
-use Field::{Count, Value};
+use Field::{Count, Timestamp, Value};
 
 const COLUMNS: [(&str, Field); 72] = [
-    ("StartTime", Value),
-    ("LastResetTime", Value),
-    ("CurrentTime", Value),
+    ("StartTime", Timestamp),
+    ("LastResetTime", Timestamp),
+    ("CurrentTime", Timestamp),
     ("ElapsedTime(P)", Value),
     ("ElapsedTime(C)", Value),
     ("TargetRate", Value),
@@ -114,6 +115,57 @@ fn fields(line: &str) -> Result<impl Iterator<Item = &str>, ReferenceError> {
         .ok_or(ReferenceError::IncompleteSippStatistics)
 }
 
+fn digits(value: &str, width: usize) -> bool {
+    value.len() == width && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn component(value: &str, minimum: u32, maximum: u32) -> bool {
+    digits(value, 2)
+        && value
+            .parse::<u32>()
+            .is_ok_and(|number| (minimum..=maximum).contains(&number))
+}
+
+fn timestamp(value: &str) -> bool {
+    let mut parts = value.split('\t');
+    let (Some(date), Some(time), Some(epoch), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let mut date = date.split('-');
+    let (Some(year), Some(month), Some(day), None) =
+        (date.next(), date.next(), date.next(), date.next())
+    else {
+        return false;
+    };
+    let Some((clock, micros)) = time.split_once('.') else {
+        return false;
+    };
+    let mut clock = clock.split(':');
+    let (Some(hour), Some(minute), Some(second), None) =
+        (clock.next(), clock.next(), clock.next(), clock.next())
+    else {
+        return false;
+    };
+    let Some((seconds, epoch_micros)) = epoch.split_once('.') else {
+        return false;
+    };
+    let magnitude = seconds.strip_prefix('-').unwrap_or(seconds);
+    year.len() >= 4
+        && year.bytes().all(|byte| byte.is_ascii_digit())
+        && component(month, 1, 12)
+        && component(day, 1, 31)
+        && component(hour, 0, 23)
+        && component(minute, 0, 59)
+        && component(second, 0, 60)
+        && digits(micros, 6)
+        && magnitude.len() >= 10
+        && magnitude.bytes().all(|byte| byte.is_ascii_digit())
+        && seconds.parse::<i64>().is_ok()
+        && epoch_micros == micros
+}
+
 fn sample(line: &str) -> Result<Sample, ReferenceError> {
     let mut fields = fields(line)?;
     let mut sample = Sample::default();
@@ -125,11 +177,16 @@ fn sample(line: &str) -> Result<Sample, ReferenceError> {
         let value = fields
             .next()
             .filter(|value| {
-                !value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control)
+                !value.is_empty()
+                    && value.len() <= 128
+                    && match kind {
+                        Timestamp => timestamp(value),
+                        Value | Count(_) => !value.chars().any(char::is_control),
+                    }
             })
             .ok_or(ReferenceError::IncompleteSippStatistics)?;
         match kind {
-            Value => {}
+            Timestamp | Value => {}
             Count(counter) => {
                 if !value.bytes().all(|byte| byte.is_ascii_digit()) {
                     return Err(ReferenceError::IncompleteSippStatistics);

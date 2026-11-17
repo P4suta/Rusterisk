@@ -5,9 +5,18 @@ const HEADER: &str = "StartTime;LastResetTime;CurrentTime;ElapsedTime(P);Elapsed
 fn row(changes: &[(&str, &str)]) -> String {
     let mut fields: Vec<&str> = HEADER.split_terminator(';').map(|_| "0").collect();
     for (name, value) in [
-        ("StartTime", "2026-11-17T04:00:00.000000+09:00"),
-        ("LastResetTime", "2026-11-17T04:00:00.000000+09:00"),
-        ("CurrentTime", "2026-11-17T04:00:00.100000+09:00"),
+        (
+            "StartTime",
+            "2026-11-17\t04:39:44.640190\t1794890384.640190",
+        ),
+        (
+            "LastResetTime",
+            "2026-11-17\t04:39:44.640533\t1794890384.640533",
+        ),
+        (
+            "CurrentTime",
+            "2026-11-17\t04:39:45.642135\t1794890385.642135",
+        ),
         ("ElapsedTime(P)", "00:00:00:100000"),
         ("ElapsedTime(C)", "00:00:00:100000"),
         ("TargetRate", "1.000"),
@@ -123,4 +132,45 @@ fn statistics_require_unique_complete_native_columns_and_bounded_records() {
     assert!(
         validate_sipp_statistics(&statistics(&[row(&[("SuccessfulCall(C)", "1.0")])])).is_err()
     );
+}
+
+#[test]
+fn every_timestamp_column_requires_the_native_date_clock_and_epoch_components() {
+    for name in ["StartTime", "LastResetTime", "CurrentTime"] {
+        for value in [
+            "2026-11-17 04:39:44.640190",
+            "\t04:39:44.640190\t1794890384.640190",
+            "2026-11-17\t\t1794890384.640190",
+            "2026-11-17\t04:39:44.640190\t",
+            "202x-11-17\t04:39:44.640190\t1794890384.640190",
+            "2026-13-17\t04:39:44.640190\t1794890384.640190",
+            "2026-11-00\t04:39:44.640190\t1794890384.640190",
+            "2026-11-17\t25:39:44.640190\t1794890384.640190",
+            "2026-11-17\t04:60:44.640190\t1794890384.640190",
+            "2026-11-17\t04:39:44.64019\t1794890384.64019",
+            "2026-11-17\t04:39:44.640190\t1794890384.640191",
+            "2026-11-17\t04:39:44.640190\tnan.640190",
+            "2026-11-17\t04:39:44.640190\t179489038.640190",
+            "2026-11-17\t04:39:44.640190\t1794890384.640190\textra",
+            "2026-11-17\t04:39:44.640190\t1794890384.640190\r",
+            "2026-11-17\t04:39:44.640190\t1794890384.640190\0",
+        ] {
+            assert!(
+                validate_sipp_statistics(&statistics(&[row(&[(name, value)])])).is_err(),
+                "Malformed {name} was accepted"
+            );
+        }
+    }
+}
+
+#[test]
+fn control_characters_remain_forbidden_outside_the_three_timestamp_columns() {
+    for name in HEADER.split_terminator(';').skip(3) {
+        for value in ["0\t0", "0\r0", "0\n0", "0\0", "0\x1b", "0\u{0085}"] {
+            assert!(
+                validate_sipp_statistics(&statistics(&[row(&[(name, value)])])).is_err(),
+                "Control characters were accepted in {name}"
+            );
+        }
+    }
 }
