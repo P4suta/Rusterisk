@@ -103,10 +103,16 @@ fn execute(command: Command) -> Result<(), AppError> {
             println!("rusterisk {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Command::Check { directory } => {
+        Command::Check {
+            directory,
+            data_directory,
+        } => {
             let config = Config::load(&directory).map_err(AppError::Config)?;
             runtime()?
-                .block_on(Server::validate(&config))
+                .block_on(Server::validate_with_data_directory(
+                    &config,
+                    &data_directory,
+                ))
                 .map_err(AppError::Control)?;
             println!("Configuration valid.");
             Ok(())

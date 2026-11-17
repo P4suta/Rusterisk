@@ -7,6 +7,7 @@ pub enum Command {
     Version,
     Check {
         directory: PathBuf,
+        data_directory: PathBuf,
     },
     Run {
         directory: PathBuf,
@@ -95,7 +96,10 @@ impl Command {
                 directory,
                 data_directory,
             },
-            Mode::Check => Self::Check { directory },
+            Mode::Check => Self::Check {
+                directory,
+                data_directory,
+            },
         })
     }
 }

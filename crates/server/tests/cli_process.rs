@@ -4,6 +4,9 @@ use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
+#[path = "cli_process/music.rs"]
+mod music;
+
 fn run(directory: &Path, arguments: &[&OsStr]) -> Result<Output, io::Error> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rusterisk"))
         .current_dir(directory)
