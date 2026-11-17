@@ -347,6 +347,20 @@ impl Controller {
 }
 
 impl Runner {
+    #[cfg(test)]
+    pub(crate) fn begin_loading_for_shutdown_test<F>(
+        &mut self,
+        directory: PathBuf,
+        reply: oneshot::Sender<Result<(), ControlError>>,
+        primary: ControlError,
+        load: F,
+    ) where
+        F: FnOnce(&Path) -> Result<Config, ConfigError> + Send + 'static,
+    {
+        self.reload.begin_loading(directory, reply, load);
+        self.retain_reload_failure(&primary);
+    }
+
     pub(crate) fn with_reload(
         self,
         native: NativePreparation,

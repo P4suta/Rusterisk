@@ -29,6 +29,8 @@ pub struct Server {
     media: MediaHub,
     http: HttpServer,
     storage: StorageWorker,
+    #[cfg(test)]
+    shutdown_checkpoint: Option<tokio::sync::oneshot::Sender<tokio::time::Instant>>,
 }
 
 struct StartupConfiguration {
@@ -220,6 +222,8 @@ impl Server {
             media,
             http,
             storage,
+            #[cfg(test)]
+            shutdown_checkpoint: None,
         })
     }
 
@@ -241,6 +245,8 @@ impl Server {
             media,
             http,
             storage,
+            #[cfg(test)]
+            shutdown_checkpoint,
         } = self;
         let mut tasks = JoinSet::new();
         tasks.spawn(async move { (Component::Control, control.run().await) });
@@ -271,6 +277,12 @@ impl Server {
         };
         controller.shutdown();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        #[cfg(test)]
+        if let Some(checkpoint) = shutdown_checkpoint {
+            if checkpoint.send(deadline).is_err() {
+                tracing::debug!("Shutdown deadline observer disconnected");
+            }
+        }
         while !tasks.is_empty() {
             match tokio::time::timeout_at(deadline, tasks.join_next()).await {
                 Ok(Some(Ok((_, Ok(()))))) | Ok(None) => {}

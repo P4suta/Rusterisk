@@ -8,6 +8,9 @@ use tokio::task::JoinHandle;
 
 const PRIMARY: &str = "Native publication acknowledgement failed after the first swap";
 
+#[path = "reload_failure_tests/loader_shutdown.rs"]
+mod loader_shutdown;
+
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
 }

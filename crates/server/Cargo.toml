@@ -63,6 +63,7 @@ tower-http = { version = "0.6.8", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 sha2 = "0.11.0"
 rusqlite = { version = "=0.42.0", features = ["bundled"] }
 opus = "=0.4.0"
