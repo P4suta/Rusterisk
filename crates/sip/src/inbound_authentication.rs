@@ -1,7 +1,6 @@
-use crate::{digest, Engine, Nonce, SipError};
+use crate::{digest, Engine, Nonce, SignalingRoute, SipError};
 use rsipstack::sip::{HeadersExt, Request, Uri};
 use rusterisk_config::{Auth, DigestAlgorithm};
-use std::net::SocketAddr;
 
 #[derive(PartialEq, Eq)]
 pub(super) struct ChallengeProfile {
@@ -30,7 +29,7 @@ impl Engine {
     pub(super) fn authorize(
         &mut self,
         request: &Request,
-        peer: SocketAddr,
+        route: SignalingRoute,
         now: u64,
     ) -> Result<Option<usize>, SipError> {
         let Some(header) = request.authorization_header() else {
@@ -45,7 +44,7 @@ impl Engine {
         let Some(nonce) = self.nonces.get(authorization.nonce()) else {
             return Ok(None);
         };
-        if nonce.peer != peer
+        if nonce.route != route
             || nonce.expires <= now
             || nonce.call_id != request.call_id_header()?.value()
             || Uri::try_from(authorization.uri())? != request.uri
@@ -114,7 +113,7 @@ impl Engine {
                 .config
                 .identify
                 .iter()
-                .any(|entry| entry.endpoint == endpoint.name && entry.address == peer.ip())
+                .any(|entry| entry.endpoint == endpoint.name && entry.address == route.peer.ip())
         {
             return Ok(None);
         }
@@ -128,7 +127,7 @@ impl Engine {
     pub(super) fn challenge(
         &mut self,
         request: &Request,
-        peer: SocketAddr,
+        route: SignalingRoute,
         now: u64,
     ) -> Result<Vec<u8>, SipError> {
         let mut profiles = Vec::with_capacity(3);
@@ -178,7 +177,7 @@ impl Engine {
             issued.push((
                 nonce,
                 Nonce {
-                    peer,
+                    route,
                     call_id: request.call_id_header()?.value().into(),
                     expires,
                     count: 0,

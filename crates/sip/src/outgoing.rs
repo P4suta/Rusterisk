@@ -1,6 +1,6 @@
 use crate::{
-    dialog_target::DialogTarget, transport::UriSecurity, Datagram, DialogReply, Engine, Output,
-    Session, SessionSecurity, SipError, SipEvent,
+    dialog_target::DialogTarget, transport::UriSecurity, Datagram, DialogReply, Disconnection,
+    Engine, Output, Session, SessionSecurity, SignalingRoute, SipError, SipEvent, StreamFlowId,
 };
 use rsipstack::sip::{
     headers::untyped::ToTypedHeader, Header, HeadersExt, Method, Request, Response, SipMessage,
@@ -56,7 +56,7 @@ enum State {
 pub(crate) struct Outgoing {
     id: String,
     generation: u64,
-    peer: SocketAddr,
+    route: SignalingRoute,
     reliable: bool,
     protocol: Protocol,
     uri_security: UriSecurity,
@@ -129,11 +129,11 @@ impl Engine {
     pub(crate) fn outgoing_refer_dialog(
         &mut self,
         request: &Request,
-        peer: SocketAddr,
+        route: SignalingRoute,
     ) -> Result<crate::transfer::dialog::Dialog, crate::transfer::dialog::MatchError> {
         use crate::transfer::dialog::{Dialog, MatchError, Usage};
         for dialog in self.outgoing.values_mut() {
-            if !dialog.matches(request, peer)? {
+            if !dialog.matches(request, route)? {
                 continue;
             }
             let sequence = request.cseq_header()?.typed()?.seq;
@@ -144,7 +144,7 @@ impl Engine {
             return Ok(Dialog {
                 id: dialog.id.clone(),
                 generation: dialog.generation,
-                peer: dialog.peer,
+                route: dialog.route,
                 wire: crate::transfer::wire::Dialog::remote(request)?,
                 contact: dialog.invite.contact_header()?.value().into(),
                 authority: dialog.authority.clone(),
@@ -197,12 +197,16 @@ impl Engine {
         if let Some(target) = target {
             dialog.remote_contact = target;
         }
-        Ok(Some(Datagram::new(dialog.peer, bytes)))
+        Ok(Some(Datagram::on_route(dialog.route, bytes)))
     }
 
-    pub(super) fn outgoing_disconnected(&mut self, peer: SocketAddr, events: &mut Vec<SipEvent>) {
+    pub(super) fn outgoing_disconnected(
+        &mut self,
+        closed: Disconnection,
+        events: &mut Vec<SipEvent>,
+    ) {
         self.outgoing.retain(|_, dialog| {
-            if dialog.peer != peer {
+            if !closed.matches(dialog.route) {
                 return true;
             }
             match dialog.state {
@@ -258,9 +262,9 @@ impl Outgoing {
         })
     }
 
-    fn matches(&self, request: &Request, peer: SocketAddr) -> Result<bool, SipError> {
+    fn matches(&self, request: &Request, route: SignalingRoute) -> Result<bool, SipError> {
         let remote = rsipstack::sip::headers::typed::To::parse(&self.remote_to)?;
-        Ok(self.peer == peer
+        Ok(self.route == route
             && remote.tag().is_some()
             && request.call_id_header()?.value() == self.invite.call_id_header()?.value()
             && request.from_header()?.typed()?.tag() == remote.tag()
@@ -562,7 +566,7 @@ impl Engine {
         let packet = related(dialog, Method::Info, &dialog.remote_to, dialog.cseq, true)?;
         let request = request(std::str::from_utf8(&packet)?)?;
         let bytes = crate::info::encode(request, digit, duration_ms)?;
-        Ok(Some(Datagram::new(dialog.peer, bytes)))
+        Ok(Some(Datagram::on_route(dialog.route, bytes)))
     }
 
     pub fn originate(&mut self, outbound: Outbound, now: u64) -> Result<Output, SipError> {
@@ -611,7 +615,7 @@ impl Engine {
             None => RouteSelection::RegisteredFirst,
         };
         let selected = profile.select(&self.contacts, selection, now)?;
-        self.originate_selected(request, selected, resolved_peer, sdp)
+        self.originate_selected(request, selected, resolved_peer, sdp, None)
     }
 
     pub fn prepare_outbound(
@@ -632,12 +636,47 @@ impl Engine {
         description: Option<&crate::WebRtcDescription>,
         now: u64,
     ) -> Result<Output, SipError> {
+        self.originate_prepared_inner(outbound, prepared, resolved_peer, description, None, now)
+    }
+
+    pub fn originate_prepared_on_flow(
+        &mut self,
+        outbound: Outbound,
+        prepared: PreparedOutbound,
+        resolved_peer: Option<SocketAddr>,
+        description: Option<&crate::WebRtcDescription>,
+        flow: StreamFlowId,
+        now: u64,
+    ) -> Result<Output, SipError> {
+        if self.protocol == Protocol::Udp {
+            return Err(SipError::Unsupported);
+        }
+        self.originate_prepared_inner(
+            outbound,
+            prepared,
+            resolved_peer,
+            description,
+            Some(flow),
+            now,
+        )
+    }
+
+    fn originate_prepared_inner(
+        &mut self,
+        outbound: Outbound,
+        prepared: PreparedOutbound,
+        resolved_peer: Option<SocketAddr>,
+        description: Option<&crate::WebRtcDescription>,
+        flow: Option<StreamFlowId>,
+        now: u64,
+    ) -> Result<Output, SipError> {
         let request = self.validate_outbound(outbound, now)?;
         self.originate_selected(
             request,
             prepared.into_selected(),
             resolved_peer,
             description.map(crate::WebRtcDescription::as_str),
+            flow,
         )
     }
 
@@ -686,6 +725,7 @@ impl Engine {
         selected: SelectedOutbound,
         resolved_peer: Option<SocketAddr>,
         sdp: Option<&str>,
+        flow: Option<StreamFlowId>,
     ) -> Result<Output, SipError> {
         let ValidatedOutbound {
             outbound,
@@ -696,7 +736,7 @@ impl Engine {
         if outbound.endpoint != selected.profile.endpoint.name {
             return Err(SipError::InvalidPacket);
         }
-        let peer = selected.peer(resolved_peer)?;
+        let route = selected.route(&self.contacts, resolved_peer, flow, now)?;
         let profile = selected.profile;
         let endpoint = profile.endpoint;
         if endpoint.webrtc != sdp.is_some() {
@@ -740,7 +780,7 @@ impl Engine {
             authority: profile.authority,
             id: outbound.id,
             generation: outbound.generation,
-            peer,
+            route,
             reliable: protocol != rusterisk_config::Protocol::Udp,
             protocol,
             uri_security,
@@ -767,7 +807,7 @@ impl Engine {
             session_id: self.serial,
         };
         self.outgoing.insert(call_id, dialog);
-        Ok(Output::response(peer, bytes.into_bytes()))
+        Ok(Output::response(route, bytes.into_bytes()))
     }
 
     pub fn cancel(&mut self, id: &str, generation: u64, now: u64) -> Result<Output, SipError> {
@@ -833,7 +873,7 @@ impl Engine {
                 });
             }
         };
-        Ok(Output::response(dialog.peer, packet))
+        Ok(Output::response(dialog.route, packet))
     }
 
     pub fn tick(&mut self, now: u64) -> Result<Output, SipError> {
@@ -877,8 +917,8 @@ impl Engine {
                     .is_some_and(|answer| answer.deadline <= now)
                 {
                     dialog.cseq = dialog.cseq.checked_add(1).ok_or(SipError::Capacity)?;
-                    output.datagrams.push(Datagram::new(
-                        dialog.peer,
+                    output.datagrams.push(Datagram::on_route(
+                        dialog.route,
                         related(dialog, Method::Bye, &dialog.remote_to, dialog.cseq, true)?,
                     ));
                     output.events.push(SipEvent::Ended {
@@ -895,7 +935,7 @@ impl Engine {
                     if answer.retry <= now {
                         output
                             .datagrams
-                            .push(Datagram::new(dialog.peer, answer.bytes.clone()));
+                            .push(Datagram::on_route(dialog.route, answer.bytes.clone()));
                         answer.interval = (answer.interval * 2).min(4000);
                         answer.retry = now.saturating_add(answer.interval);
                     }
@@ -912,7 +952,7 @@ impl Engine {
                     if *retry <= now && !dialog.reliable {
                         output
                             .datagrams
-                            .push(Datagram::new(dialog.peer, dialog.bytes.clone()));
+                            .push(Datagram::on_route(dialog.route, dialog.bytes.clone()));
                         *interval = (*interval * 2).min(32_000);
                         *retry = now.saturating_add(*interval);
                     }
@@ -923,7 +963,7 @@ impl Engine {
                     if *retry <= now && !dialog.reliable {
                         output
                             .datagrams
-                            .push(Datagram::new(dialog.peer, dialog.bytes.clone()));
+                            .push(Datagram::on_route(dialog.route, dialog.bytes.clone()));
                         *interval = (*interval * 2).min(32_000);
                         *retry = now.saturating_add(*interval);
                     }
@@ -953,8 +993,8 @@ impl Engine {
                     };
                 }
                 State::Proceeding if dialog.deadline.is_some_and(|deadline| deadline <= now) => {
-                    output.datagrams.push(Datagram::new(
-                        dialog.peer,
+                    output.datagrams.push(Datagram::on_route(
+                        dialog.route,
                         related(
                             dialog,
                             Method::Cancel,
@@ -986,7 +1026,7 @@ impl Engine {
     pub(crate) fn receive_response(
         &mut self,
         response: Response,
-        peer: SocketAddr,
+        route: SignalingRoute,
         now: u64,
     ) -> Result<Output, SipError> {
         let mut output = Output {
@@ -996,16 +1036,16 @@ impl Engine {
         let Some(dialog) = self.outgoing.get_mut(response.call_id_header()?.value()) else {
             return Ok(output);
         };
-        if dialog.peer == peer {
+        if dialog.route == route {
             if let Some(challenge) = dialog
                 .challenges
                 .iter()
                 .find(|challenge| challenge.expires > now && challenge.response == response)
             {
-                return Ok(Output::response(peer, challenge.ack.clone()));
+                return Ok(Output::response(route, challenge.ack.clone()));
             }
         }
-        if dialog.peer != peer
+        if dialog.route != route
             || response.cseq_header()?.value() != dialog.invite.cseq_header()?.value()
             || response.transaction_id()? != dialog.invite.transaction_id()?
             || response.from_header()?.value() != dialog.invite.from_header()?.value()
@@ -1022,7 +1062,7 @@ impl Engine {
                 {
                     output
                         .datagrams
-                        .push(Datagram::new(peer, previous.ack.clone()));
+                        .push(Datagram::on_route(route, previous.ack.clone()));
                 } else if (200..300).contains(&previous.response.status_code.code())
                     && (200..300).contains(&response.status_code.code())
                     && previous.response.to_header()?.typed()?.tag()
@@ -1048,8 +1088,8 @@ impl Engine {
         let code = response.status_code.code();
         if code < 200 {
             if let State::CancelPending { expires, .. } = dialog.state {
-                output.datagrams.push(Datagram::new(
-                    peer,
+                output.datagrams.push(Datagram::on_route(
+                    route,
                     related(
                         dialog,
                         Method::Cancel,
@@ -1108,14 +1148,16 @@ impl Engine {
             dialog.remote_contact = target;
         }
         dialog.remote_to = remote_to;
-        output.datagrams.push(Datagram::new(peer, ack.clone()));
+        output
+            .datagrams
+            .push(Datagram::on_route(route, ack.clone()));
         if let Some(bytes) = authenticate(dialog, &response, now)? {
             dialog.challenges.push(AcknowledgedResponse {
                 response,
                 ack,
                 expires: now.saturating_add(32_000),
             });
-            output.datagrams.push(Datagram::new(peer, bytes));
+            output.datagrams.push(Datagram::on_route(route, bytes));
             return Ok(output);
         }
         dialog.final_response = FinalResponse::Acknowledged(AcknowledgedResponse {
@@ -1130,8 +1172,8 @@ impl Engine {
                         Ok(media) => media,
                         Err(_) => {
                             dialog.cseq = dialog.cseq.checked_add(1).ok_or(SipError::Capacity)?;
-                            output.datagrams.push(Datagram::new(
-                                peer,
+                            output.datagrams.push(Datagram::on_route(
+                                route,
                                 related(dialog, Method::Bye, &dialog.remote_to, dialog.cseq, true)?,
                             ));
                             output.events.push(SipEvent::Ended {
@@ -1154,8 +1196,8 @@ impl Engine {
                 }
                 State::CancelPending { .. } | State::Cancelling { .. } => {
                     dialog.cseq = dialog.cseq.checked_add(1).ok_or(SipError::Capacity)?;
-                    output.datagrams.push(Datagram::new(
-                        peer,
+                    output.datagrams.push(Datagram::on_route(
+                        route,
                         related(dialog, Method::Bye, &dialog.remote_to, dialog.cseq, true)?,
                     ));
                     dialog.state = State::Terminated {
@@ -1197,7 +1239,7 @@ impl Engine {
     pub(crate) fn outgoing_request(
         &mut self,
         request: &Request,
-        peer: SocketAddr,
+        route: SignalingRoute,
         now: u64,
     ) -> Result<Option<DialogReply>, SipError> {
         if !matches!(request.method, Method::Bye | Method::Info | Method::Invite) {
@@ -1206,7 +1248,7 @@ impl Engine {
         let Some(dialog) = self.outgoing.get_mut(request.call_id_header()?.value()) else {
             return Ok(None);
         };
-        if !dialog.matches(request, peer)? {
+        if !dialog.matches(request, route)? {
             return Ok(None);
         }
         let sequence = request.cseq_header()?.typed()?.seq;
@@ -1356,11 +1398,11 @@ impl Engine {
     pub(crate) fn outgoing_ack(
         &mut self,
         request: &Request,
-        peer: SocketAddr,
+        route: SignalingRoute,
     ) -> Result<(), SipError> {
         let sequence = request.cseq_header()?.typed()?.seq;
         if let Some(dialog) = self.outgoing.get_mut(request.call_id_header()?.value()) {
-            if dialog.matches(request, peer)? {
+            if dialog.matches(request, route)? {
                 if let State::Established(media) = &mut dialog.state {
                     if media
                         .pending

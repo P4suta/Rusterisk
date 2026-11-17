@@ -1,7 +1,7 @@
 use super::{related_to, request, Outgoing};
 use crate::{
     dialog_target::DialogTarget, transactions::Transactions, Datagram, DatagramOrigin, Output,
-    SipError, SipEvent, MAX_MESSAGE,
+    SignalingRoute, SipError, SipEvent, MAX_MESSAGE,
 };
 use rsipstack::sip::{headers::untyped::ToTypedHeader, Header, HeadersExt, Method, Response};
 use sha2::{Digest, Sha256};
@@ -27,6 +27,7 @@ struct RetainedAck {
     until: u64,
     ack: Vec<u8>,
     teardown: Teardown,
+    route: SignalingRoute,
 }
 
 pub(crate) struct Forks {
@@ -70,7 +71,13 @@ impl Forks {
             .find(|retained| retained.fingerprint == fingerprint)
     }
 
-    fn retain(&mut self, fingerprint: [u8; 32], until: u64, ack: Vec<u8>) -> Retention<'_> {
+    fn retain(
+        &mut self,
+        fingerprint: [u8; 32],
+        until: u64,
+        ack: Vec<u8>,
+        route: SignalingRoute,
+    ) -> Retention<'_> {
         let Some(retained_bytes) = self
             .retained_bytes
             .checked_add(ack.capacity())
@@ -86,6 +93,7 @@ impl Forks {
                     until,
                     ack,
                     teardown: Teardown::Pending,
+                    route,
                 }))
             }
             None => Retention::Refused(ack),
@@ -162,6 +170,9 @@ pub(super) fn receive(
     let fingerprint = fingerprint(dialog, response)?;
     forks.expire(now)?;
     if let Some(retained) = forks.retained(fingerprint) {
+        if retained.route != dialog.route {
+            return Err(SipError::InvalidPacket);
+        }
         return Ok(acknowledge(dialog, retained, transactions, now));
     }
     let target = DialogTarget::from_response(dialog.protocol, dialog.uri_security, response)?
@@ -169,10 +180,10 @@ pub(super) fn receive(
     let remote = response.to_header()?.value();
     let sequence = dialog.invite.cseq_header()?.typed()?.seq;
     let ack = packet(dialog, Method::Ack, remote, sequence, &target, fingerprint)?;
-    match forks.retain(fingerprint, until, ack) {
+    match forks.retain(fingerprint, until, ack, dialog.route) {
         Retention::Stored(retained) => Ok(acknowledge(dialog, retained, transactions, now)),
         Retention::Refused(ack) => {
-            let mut output = Output::response(dialog.peer, ack);
+            let mut output = Output::response(dialog.route, ack);
             failed(dialog, &mut output, ForkTeardownFailure::RetentionCapacity);
             Ok(output)
         }
@@ -185,7 +196,7 @@ fn acknowledge(
     transactions: &mut Transactions,
     now: u64,
 ) -> Output {
-    let mut output = Output::response(dialog.peer, retained.ack.clone());
+    let mut output = Output::response(retained.route, retained.ack.clone());
     match retained.teardown {
         Teardown::Sent => return output,
         Teardown::Pending => {}
@@ -223,7 +234,7 @@ fn acknowledge(
     let tracked = (|| {
         transactions.track(
             request(std::str::from_utf8(&bye)?)?,
-            dialog.peer,
+            retained.route,
             &bye,
             now,
             dialog.reliable,
@@ -233,7 +244,9 @@ fn acknowledge(
     match tracked {
         Ok(()) => {
             retained.teardown = Teardown::Sent;
-            output.datagrams.push(Datagram::new(dialog.peer, bye));
+            output
+                .datagrams
+                .push(Datagram::on_route(retained.route, bye));
         }
         Err(SipError::Capacity) => failed(
             dialog,

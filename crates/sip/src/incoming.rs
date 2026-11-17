@@ -1,6 +1,6 @@
 use crate::{
-    dialog_target::DialogTarget, response, Datagram, DialogReply, Engine, Output, PendingInvite,
-    RequestIdentity, Session, SipError, SipEvent,
+    dialog_target::DialogTarget, response, Datagram, DialogReply, Disconnection, Engine, Output,
+    PendingInvite, RequestIdentity, Session, SignalingRoute, SipError, SipEvent,
 };
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, Request, SipMessage};
 use std::net::SocketAddr;
@@ -121,8 +121,8 @@ pub(crate) struct Incoming {
 }
 
 impl Incoming {
-    fn matches(&self, request: &Request, peer: SocketAddr) -> Result<bool, SipError> {
-        Ok(self.invite.peer == peer
+    fn matches(&self, request: &Request, route: SignalingRoute) -> Result<bool, SipError> {
+        Ok(self.invite.route() == route
             && request.call_id_header()?.value() == self.invite.request.call_id_header()?.value()
             && request.from_header()?.typed()?.tag()
                 == self.invite.request.from_header()?.typed()?.tag()
@@ -203,11 +203,11 @@ impl Engine {
     pub(crate) fn incoming_refer_dialog(
         &mut self,
         request: &Request,
-        peer: SocketAddr,
+        route: SignalingRoute,
     ) -> Result<crate::transfer::dialog::Dialog, crate::transfer::dialog::MatchError> {
         use crate::transfer::dialog::{Dialog, MatchError, Usage};
         for dialog in self.incoming.values_mut() {
-            if !dialog.matches(request, peer)? {
+            if !dialog.matches(request, route)? {
                 continue;
             }
             let sequence = request.cseq_header()?.typed()?.seq;
@@ -218,7 +218,7 @@ impl Engine {
             return Ok(Dialog {
                 id: dialog.invite.id.clone(),
                 generation: dialog.generation,
-                peer: dialog.invite.peer,
+                route: dialog.invite.route(),
                 wire: crate::transfer::wire::Dialog::remote(request)?,
                 contact: crate::transport::contact(
                     dialog.invite.protocol,
@@ -268,12 +268,16 @@ impl Engine {
         if let Some(target) = target {
             dialog.remote_target = target;
         }
-        Ok(Some(Datagram::new(dialog.invite.peer, bytes)))
+        Ok(Some(Datagram::on_route(dialog.invite.route(), bytes)))
     }
 
-    pub(super) fn incoming_disconnected(&mut self, peer: SocketAddr, events: &mut Vec<SipEvent>) {
+    pub(super) fn incoming_disconnected(
+        &mut self,
+        closed: Disconnection,
+        events: &mut Vec<SipEvent>,
+    ) {
         self.incoming.retain(|_, dialog| {
-            if dialog.invite.peer != peer {
+            if !closed.matches(dialog.invite.route()) {
                 return true;
             }
             match dialog.state {
@@ -318,14 +322,14 @@ pub(super) fn tagged(request: &Request, tag: &str) -> Result<Request, SipError> 
 fn same_invite(
     invite: &PendingInvite,
     request: &Request,
-    peer: SocketAddr,
+    route: SignalingRoute,
 ) -> Result<bool, SipError> {
-    Ok(invite.peer == peer
+    Ok(invite.route() == route
         && invite.request.call_id_header()?.value() == request.call_id_header()?.value()
         && invite.request.uri == request.uri
         && invite.request.cseq_header()?.typed()?.seq == request.cseq_header()?.typed()?.seq
-        && RequestIdentity::for_invite(&invite.request, peer)?
-            == RequestIdentity::for_invite(request, peer)?
+        && RequestIdentity::for_invite(&invite.request, route)?
+            == RequestIdentity::for_invite(request, route)?
         && invite.request.from_header()?.typed()? == request.from_header()?.typed()?
         && invite.request.to_header()?.typed()? == request.to_header()?.typed()?)
 }
@@ -350,14 +354,14 @@ impl Engine {
         }
         let request = dialog.request(Method::Info)?;
         let bytes = crate::info::encode(request, digit, duration_ms)?;
-        Ok(Some(Datagram::new(dialog.invite.peer, bytes)))
+        Ok(Some(Datagram::on_route(dialog.invite.route(), bytes)))
     }
 
     pub(crate) fn incoming_cancel(
         &mut self,
         key: RequestIdentity,
         request: Request,
-        peer: SocketAddr,
+        route: SignalingRoute,
         now: u64,
     ) -> Result<Output, SipError> {
         let mut invite = None;
@@ -366,20 +370,20 @@ impl Engine {
             .values()
             .chain(self.incoming.values().map(|dialog| &dialog.invite))
         {
-            if same_invite(candidate, &request, peer)? {
+            if same_invite(candidate, &request, route)? {
                 invite = Some(candidate);
                 break;
             }
         }
         let Some(invite) = invite else {
             return Ok(Output::response(
-                peer,
+                route,
                 self.render_response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
             ));
         };
         let id = invite.id.clone();
         let bytes = response(&tagged(&request, &invite.local_tag)?, 200, "OK", "", "")?;
-        let mut output = self.cache_reply(key, request, peer, now, bytes, Vec::new())?;
+        let mut output = self.cache_reply(key, request, route, now, bytes, Vec::new())?;
         if let Some(invite) = self.pending.remove(&id) {
             let bytes = response(
                 &tagged(&invite.request, &invite.local_tag)?,
@@ -389,7 +393,9 @@ impl Engine {
                 "",
             )?;
             self.update_invite_reply(&invite, &bytes, now)?;
-            output.datagrams.push(Datagram::new(peer, bytes));
+            output
+                .datagrams
+                .push(Datagram::on_route(invite.route(), bytes));
             output.events.push(SipEvent::IncomingEnded {
                 id: invite.id,
                 cause: 16,
@@ -407,7 +413,7 @@ impl Engine {
         for cached in self
             .cache
             .values_mut()
-            .filter(|cached| cached.peer == invite.peer && cached.request == invite.request)
+            .filter(|cached| cached.route == invite.route() && cached.request == invite.request)
         {
             cached.bytes = bytes.into();
             cached.expires = Some(now.saturating_add(32_000));
@@ -434,17 +440,17 @@ impl Engine {
             "",
             "",
         )?;
-        let peer = invite.peer;
+        let route = invite.route();
         for cached in self
             .cache
             .values_mut()
-            .filter(|cached| cached.peer == peer && cached.request == invite.request)
+            .filter(|cached| cached.route == route && cached.request == invite.request)
         {
             cached.bytes = bytes.clone();
             cached.expires = None;
             cached.retry = Some(crate::ServerRetry::Provisional { next });
         }
-        Ok(Output::response(peer, bytes))
+        Ok(Output::response(route, bytes))
     }
 
     pub fn progress(
@@ -486,13 +492,13 @@ impl Engine {
         for cached in self
             .cache
             .values_mut()
-            .filter(|cached| cached.peer == invite.peer && cached.request == invite.request)
+            .filter(|cached| cached.route == invite.route() && cached.request == invite.request)
         {
             cached.bytes = bytes.clone();
             cached.expires = None;
             cached.retry = Some(crate::ServerRetry::Provisional { next });
         }
-        Ok(Output::response(invite.peer, bytes))
+        Ok(Output::response(invite.route(), bytes))
     }
 
     pub fn answer(
@@ -550,7 +556,7 @@ impl Engine {
         } = invite.early_answer.take().unwrap_or(prepared);
         invite.session.telephone = telephone;
         self.update_invite_reply(&invite, &bytes, now)?;
-        let mut output = Output::response(invite.peer, bytes.clone());
+        let mut output = Output::response(invite.route(), bytes.clone());
         output.events.push(SipEvent::Answered {
             id: id.into(),
             generation,
@@ -583,16 +589,16 @@ impl Engine {
     pub(crate) fn incoming_ack(
         &mut self,
         request: &Request,
-        peer: SocketAddr,
+        route: SignalingRoute,
     ) -> Result<(), SipError> {
         for cached in self.cache.values_mut() {
             if let Some(crate::ServerRetry::Final { tag, .. }) = &cached.retry {
-                if cached.peer == peer
+                if cached.route == route
                     && cached.request.call_id_header()?.value() == request.call_id_header()?.value()
                     && cached.request.cseq_header()?.typed()?.seq
                         == request.cseq_header()?.typed()?.seq
-                    && RequestIdentity::for_invite(&cached.request, peer)?
-                        == RequestIdentity::for_invite(request, peer)?
+                    && RequestIdentity::for_invite(&cached.request, route)?
+                        == RequestIdentity::for_invite(request, route)?
                     && cached.request.from_header()?.typed()? == request.from_header()?.typed()?
                     && request.to_header()?.typed()?.tag().map(|tag| tag.value())
                         == Some(tag.as_str())
@@ -602,7 +608,7 @@ impl Engine {
             }
         }
         for dialog in self.incoming.values_mut() {
-            if dialog.matches(request, peer)?
+            if dialog.matches(request, route)?
                 && matches!(dialog.state, State::AwaitingAck { sequence, .. } if request.cseq_header()?.typed()?.seq == sequence)
             {
                 dialog.state = State::Established;
@@ -614,7 +620,7 @@ impl Engine {
     pub(crate) fn incoming_request(
         &mut self,
         request: &Request,
-        peer: SocketAddr,
+        route: SignalingRoute,
         now: u64,
     ) -> Result<Option<DialogReply>, SipError> {
         if !matches!(request.method, Method::Bye | Method::Info | Method::Invite) {
@@ -623,7 +629,7 @@ impl Engine {
         let retry_after = self.seed[0] % 11;
         let mut matched = None;
         for dialog in self.incoming.values_mut() {
-            if dialog.matches(request, peer)? {
+            if dialog.matches(request, route)? {
                 matched = Some(dialog);
                 break;
             }
@@ -812,9 +818,10 @@ impl Engine {
             return Ok(None);
         };
         match dialog.state {
-            State::AwaitingAck { .. } | State::Established => {
-                Ok(Some(Output::response(dialog.invite.peer, dialog.bye(now)?)))
-            }
+            State::AwaitingAck { .. } | State::Established => Ok(Some(Output::response(
+                dialog.invite.route(),
+                dialog.bye(now)?,
+            ))),
             State::Terminated { .. } => Ok(Some(Output {
                 datagrams: Vec::new(),
                 events: Vec::new(),
@@ -845,9 +852,10 @@ impl Engine {
                 if let Some(crate::ServerRetry::Provisional { next }) = &mut cached.retry {
                     if *next <= now {
                         output.datagrams.push(Datagram {
-                            peer: cached.peer,
+                            peer: cached.route.peer,
                             bytes: cached.bytes.clone(),
                             origin: cached.origin,
+                            flow: cached.route.flow,
                         });
                         *next = provisional_next;
                     }
@@ -859,7 +867,7 @@ impl Engine {
                 if *next <= now && self.protocol == rusterisk_config::Protocol::Udp {
                     output
                         .datagrams
-                        .push(Datagram::new(cached.peer, cached.bytes.clone()));
+                        .push(Datagram::on_route(cached.route, cached.bytes.clone()));
                     *interval = (*interval * 2).min(4000);
                     *next = now.saturating_add(*interval);
                 }
@@ -875,14 +883,15 @@ impl Engine {
                     });
                     output
                         .datagrams
-                        .push(Datagram::new(dialog.invite.peer, dialog.bye(now)?));
+                        .push(Datagram::on_route(dialog.invite.route(), dialog.bye(now)?));
                 }
                 State::AwaitingAck {
                     retry, interval, ..
                 } if *retry <= now => {
-                    output
-                        .datagrams
-                        .push(Datagram::new(dialog.invite.peer, dialog.bytes.clone()));
+                    output.datagrams.push(Datagram::on_route(
+                        dialog.invite.route(),
+                        dialog.bytes.clone(),
+                    ));
                     *interval = (*interval * 2).min(4000);
                     *retry = now.saturating_add(*interval);
                 }
@@ -904,6 +913,6 @@ impl Engine {
         let request = tagged(&invite.request, &invite.local_tag)?;
         let bytes = response(&request, code, phrase, "", "")?;
         self.update_invite_reply(&invite, &bytes, now)?;
-        Ok(Output::response(invite.peer, bytes))
+        Ok(Output::response(invite.route(), bytes))
     }
 }

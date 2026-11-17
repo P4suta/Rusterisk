@@ -5,9 +5,8 @@ use super::{
     progress::notification_sequence,
     wire,
 };
-use crate::{response, Engine, Output, RequestIdentity, SipError};
+use crate::{response, Engine, Output, RequestIdentity, SignalingRoute, SipError};
 use rsipstack::sip::Request;
-use std::net::SocketAddr;
 
 fn expiration(request: &Request) -> Result<u32, SipError> {
     let mut values = request
@@ -35,24 +34,24 @@ impl Engine {
         &mut self,
         identity: RequestIdentity,
         request: Request,
-        peer: SocketAddr,
+        route: SignalingRoute,
         now: u64,
     ) -> Result<Output, SipError> {
-        let context = match self.incoming_refer_dialog(&request, peer) {
-            Err(MatchError::Missing) => self.outgoing_refer_dialog(&request, peer),
+        let context = match self.incoming_refer_dialog(&request, route) {
+            Err(MatchError::Missing) => self.outgoing_refer_dialog(&request, route),
             context => context,
         };
         let dialog = match context {
             Ok(dialog) => dialog,
             Err(MatchError::Missing) => {
                 return Ok(Output::response(
-                    peer,
+                    route,
                     self.render_response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
                 ))
             }
             Err(MatchError::Rejected(code, phrase)) => {
                 return Ok(Output::response(
-                    peer,
+                    route,
                     response(&request, code, phrase, "", "")?,
                 ))
             }
@@ -62,19 +61,19 @@ impl Engine {
             Ok(wire::Event::Refer(Some(sequence))) => sequence,
             Ok(wire::Event::Unsupported) => {
                 let bytes = response(&request, 489, "Bad Event", "", "")?;
-                return self.cache_reply(identity, request, peer, now, bytes, Vec::new());
+                return self.cache_reply(identity, request, route, now, bytes, Vec::new());
             }
             Ok(wire::Event::Refer(None)) => {
                 let bytes = response(&request, 481, "Call/Transaction Does Not Exist", "", "")?;
-                return self.cache_reply(identity, request, peer, now, bytes, Vec::new());
+                return self.cache_reply(identity, request, route, now, bytes, Vec::new());
             }
             Err(_) => {
                 let bytes = response(&request, 400, "Bad Request", "", "")?;
-                return self.cache_reply(identity, request, peer, now, bytes, Vec::new());
+                return self.cache_reply(identity, request, route, now, bytes, Vec::new());
             }
         };
         let key = self.refers.subscriptions.iter().find_map(|(key, owner)| {
-            (owner.dialog.peer == peer
+            (owner.dialog.route == route
                 && owner.dialog.wire == dialog.wire
                 && owner.sequence == sequence
                 && matches!(owner.state, State::Active { .. }))
@@ -82,13 +81,13 @@ impl Engine {
         });
         let Some(key) = key else {
             let bytes = response(&request, 481, "Call/Transaction Does Not Exist", "", "")?;
-            return self.cache_reply(identity, request, peer, now, bytes, Vec::new());
+            return self.cache_reply(identity, request, route, now, bytes, Vec::new());
         };
         let duration = match expiration(&request) {
             Ok(duration) => duration,
             Err(_) => {
                 let bytes = response(&request, 400, "Bad Request", "", "")?;
-                return self.cache_reply(identity, request, peer, now, bytes, Vec::new());
+                return self.cache_reply(identity, request, route, now, bytes, Vec::new());
             }
         };
         let target = match super::dialog::Target::from_subscribe(&request) {
@@ -100,7 +99,7 @@ impl Engine {
                     crate::ContactError::Capacity => (503, "Service Unavailable"),
                 };
                 let bytes = response(&request, code, phrase, "", "")?;
-                return self.cache_reply(identity, request, peer, now, bytes, Vec::new());
+                return self.cache_reply(identity, request, route, now, bytes, Vec::new());
             }
         };
         let mut owner = self
@@ -160,7 +159,7 @@ impl Engine {
             &format!("Expires: {duration}\r\nContact: {}\r\n", dialog.contact),
             "",
         )?;
-        let mut output = self.cache_reply(identity, request, peer, now, bytes, Vec::new())?;
+        let mut output = self.cache_reply(identity, request, route, now, bytes, Vec::new())?;
         output.datagrams.push(packet);
         Ok(output)
     }

@@ -1,5 +1,5 @@
 use super::ReferAuthority;
-use std::net::SocketAddr;
+use crate::SignalingRoute;
 
 pub(crate) struct Target(rsipstack::sip::Uri);
 
@@ -38,7 +38,7 @@ impl Target {
 pub(crate) struct Dialog {
     pub id: String,
     pub generation: u64,
-    pub peer: SocketAddr,
+    pub route: SignalingRoute,
     pub wire: super::wire::Dialog,
     pub contact: String,
     pub authority: ReferAuthority,

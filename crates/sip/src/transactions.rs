@@ -1,7 +1,6 @@
-use crate::{Datagram, DatagramOrigin, SipError};
+use crate::{Datagram, DatagramOrigin, Disconnection, SignalingRoute, SipError};
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Request, Response};
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 
 enum Retry {
     Backoff,
@@ -11,7 +10,7 @@ enum Retry {
 
 struct Pending {
     request: Request,
-    peer: SocketAddr,
+    route: SignalingRoute,
     bytes: Vec<u8>,
     next: u64,
     interval: u64,
@@ -34,13 +33,13 @@ pub(crate) enum NotificationOutcome {
 
 pub(crate) struct NotificationReceipt {
     pub notification: crate::transfer::wire::Notification,
-    pub peer: SocketAddr,
+    pub route: SignalingRoute,
     pub outcome: NotificationOutcome,
 }
 
 #[derive(Default)]
 pub(crate) struct Transactions {
-    requests: BTreeMap<String, Pending>,
+    requests: BTreeMap<(SignalingRoute, String), Pending>,
 }
 
 fn key(message: &impl HeadersExt) -> Result<String, SipError> {
@@ -53,14 +52,15 @@ fn key(message: &impl HeadersExt) -> Result<String, SipError> {
 }
 
 impl Transactions {
-    pub(super) fn disconnected(&mut self, peer: SocketAddr) {
-        self.requests.retain(|_, pending| pending.peer != peer);
+    pub(super) fn disconnected(&mut self, closed: Disconnection) {
+        self.requests
+            .retain(|_, pending| !closed.matches(pending.route));
     }
 
     pub fn track(
         &mut self,
         request: Request,
-        peer: SocketAddr,
+        route: SignalingRoute,
         bytes: &[u8],
         now: u64,
         reliable: bool,
@@ -68,9 +68,11 @@ impl Transactions {
     ) -> Result<(), SipError> {
         self.requests
             .retain(|_, pending| pending.expires > now || pending.notification.is_some());
-        let key = key(&request)?;
+        let key = (route, key(&request)?);
         if let Some(pending) = self.requests.get(&key) {
-            return if pending.peer == peer && pending.request == request && pending.origin == origin
+            return if pending.route == route
+                && pending.request == request
+                && pending.origin == origin
             {
                 Ok(())
             } else {
@@ -85,7 +87,7 @@ impl Transactions {
             key,
             Pending {
                 request,
-                peer,
+                route,
                 bytes: bytes.into(),
                 next: now.saturating_add(500),
                 interval: 500,
@@ -105,14 +107,14 @@ impl Transactions {
     pub fn receive(
         &mut self,
         response: &Response,
-        peer: SocketAddr,
+        route: SignalingRoute,
         now: u64,
     ) -> Result<Receipt, SipError> {
-        let key = key(response)?;
+        let key = (route, key(response)?);
         let Some(pending) = self.requests.get_mut(&key) else {
             return Ok(Receipt::Unmatched);
         };
-        if pending.peer != peer
+        if pending.route != route
             || pending.expires <= now
             || pending.request.from_header()?.typed()? != response.from_header()?.typed()?
         {
@@ -142,13 +144,13 @@ impl Transactions {
         } else if (200..700).contains(&code) {
             if let Some(Pending {
                 notification: Some(notification),
-                peer,
+                route,
                 ..
             }) = self.requests.remove(&key)
             {
                 return Ok(Receipt::Notification(NotificationReceipt {
                     notification,
-                    peer,
+                    route,
                     outcome: NotificationOutcome::Response(code),
                 }));
             }
@@ -161,10 +163,10 @@ impl Transactions {
     pub fn cancel_notification(
         &mut self,
         notification: &crate::transfer::wire::Notification,
-        peer: SocketAddr,
+        route: SignalingRoute,
     ) {
         self.requests.retain(|_, pending| {
-            pending.peer != peer
+            pending.route != route
                 || !pending
                     .notification
                     .as_ref()
@@ -176,10 +178,10 @@ impl Transactions {
         &mut self,
         dialog: &crate::transfer::wire::Dialog,
         sequence: u32,
-        peer: SocketAddr,
+        route: SignalingRoute,
     ) {
         self.requests.retain(|_, pending| {
-            pending.peer != peer
+            pending.route != route
                 || !pending
                     .notification
                     .as_ref()
@@ -197,13 +199,13 @@ impl Transactions {
         for key in expired {
             if let Some(Pending {
                 notification: Some(notification),
-                peer,
+                route,
                 ..
             }) = self.requests.remove(&key)
             {
                 notifications.push(NotificationReceipt {
                     notification,
-                    peer,
+                    route,
                     outcome: NotificationOutcome::Timeout,
                 });
             }
@@ -216,9 +218,10 @@ impl Transactions {
         for pending in self.requests.values_mut() {
             if pending.next <= now && !matches!(pending.retry, Retry::Reliable) {
                 datagrams.push(Datagram {
-                    peer: pending.peer,
+                    peer: pending.route.peer,
                     bytes: pending.bytes.clone(),
                     origin: pending.origin,
+                    flow: pending.route.flow,
                 });
                 pending.interval = match pending.retry {
                     Retry::Backoff => (pending.interval * 2).min(4000),

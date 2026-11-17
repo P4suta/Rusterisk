@@ -1,11 +1,12 @@
-use crate::{parse_registration_contacts, ContactError, Engine, SipError, SipEvent};
+use crate::{
+    parse_registration_contacts, ContactError, Engine, SignalingRoute, SipError, SipEvent,
+};
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Request, Uri};
 use rusterisk_config::{Aor, Config, Endpoint};
 use rusterisk_core::ContactPresence;
-use std::net::SocketAddr;
 mod bindings;
 mod security;
-pub(super) use bindings::Bindings;
+pub(super) use bindings::{BindingIdentity, Bindings};
 
 pub(super) enum Rejection {
     Forbidden,
@@ -70,7 +71,7 @@ impl Engine {
         &mut self,
         request: &Request,
         endpoint: &Endpoint,
-        peer: SocketAddr,
+        route: SignalingRoute,
         now: u64,
         events: &mut Vec<SipEvent>,
     ) -> Result<Vec<u8>, SipError> {
@@ -124,7 +125,7 @@ impl Engine {
             let candidate = self.contacts.prepare(
                 &bindings::Update {
                     address,
-                    peer,
+                    route,
                     now,
                     call_id,
                     sequence,

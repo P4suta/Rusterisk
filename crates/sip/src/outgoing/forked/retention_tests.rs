@@ -1,5 +1,5 @@
 use super::{Forks, Retention, CAPACITY};
-use crate::{SipError, MAX_MESSAGE};
+use crate::{SignalingRoute, SipError, MAX_MESSAGE};
 
 const BUFFER_CAPACITY: usize = 2 * 1024 * 1024;
 
@@ -15,7 +15,12 @@ fn retained(
     until: u64,
     ack: Vec<u8>,
 ) -> Result<(), SipError> {
-    match forks.retain(fingerprint, until, ack) {
+    match forks.retain(
+        fingerprint,
+        until,
+        ack,
+        SignalingRoute::legacy(([127, 0, 0, 1], 5060).into()),
+    ) {
         Retention::Stored(_) => Ok(()),
         Retention::Refused(_) => Err(SipError::Capacity),
     }
@@ -27,7 +32,12 @@ fn refused(
     until: u64,
     ack: Vec<u8>,
 ) -> Result<Vec<u8>, SipError> {
-    match forks.retain(fingerprint, until, ack) {
+    match forks.retain(
+        fingerprint,
+        until,
+        ack,
+        SignalingRoute::legacy(([127, 0, 0, 1], 5060).into()),
+    ) {
         Retention::Refused(ack) => Ok(ack),
         Retention::Stored(_) => Err(SipError::Io(std::io::Error::other(
             "An ACK allocation was admitted beyond its retention boundary",

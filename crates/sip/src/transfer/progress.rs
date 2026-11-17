@@ -7,10 +7,10 @@ use super::{
     ReferKey, ReferProgress, ReferSubscription,
 };
 use crate::{
-    response, Datagram, DatagramOrigin, Engine, Output, RequestIdentity, SipError, SipEvent,
+    response, Datagram, DatagramOrigin, Engine, Output, RequestIdentity, SignalingRoute, SipError,
+    SipEvent,
 };
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Request};
-use std::net::SocketAddr;
 
 fn empty() -> Output {
     Output {
@@ -24,7 +24,7 @@ impl Engine {
         &mut self,
         identity: RequestIdentity,
         request: Request,
-        peer: SocketAddr,
+        route: SignalingRoute,
         now: u64,
     ) -> Result<Output, SipError> {
         if self
@@ -35,8 +35,8 @@ impl Engine {
         {
             return Ok(empty());
         }
-        let context = match self.incoming_refer_dialog(&request, peer) {
-            Err(MatchError::Missing) => self.outgoing_refer_dialog(&request, peer),
+        let context = match self.incoming_refer_dialog(&request, route) {
+            Err(MatchError::Missing) => self.outgoing_refer_dialog(&request, route),
             context => context,
         };
         let dialog = match context {
@@ -48,13 +48,13 @@ impl Engine {
                     (501, "Not Implemented")
                 };
                 return Ok(Output::response(
-                    peer,
+                    route,
                     self.render_response(&request, code, phrase, "", "")?,
                 ));
             }
             Err(MatchError::Rejected(code, phrase)) => {
                 return Ok(Output::response(
-                    peer,
+                    route,
                     response(&request, code, phrase, "", "")?,
                 ))
             }
@@ -67,7 +67,7 @@ impl Engine {
         };
         if let Some((code, phrase)) = rejection {
             let bytes = response(&request, code, phrase, "", "")?;
-            return self.cache_reply(identity, request, peer, now, bytes, Vec::new());
+            return self.cache_reply(identity, request, route, now, bytes, Vec::new());
         }
         let target = match request::parse_transfer(&request) {
             Ok(target) => target,
@@ -78,7 +78,7 @@ impl Engine {
                     ReferError::Capacity => (503, "Service Unavailable"),
                 };
                 let bytes = response(&request, code, phrase, "", "")?;
-                return self.cache_reply(identity, request, peer, now, bytes, Vec::new());
+                return self.cache_reply(identity, request, route, now, bytes, Vec::new());
             }
         };
         if matches!(&target.target, TransferTarget::Attended(_))
@@ -86,14 +86,14 @@ impl Engine {
                 || matches!(target.uri.scheme, Some(rsipstack::sip::uri::Scheme::Sips)))
         {
             let bytes = response(&request, 501, "Not Implemented", "", "")?;
-            return self.cache_reply(identity, request, peer, now, bytes, Vec::new());
+            return self.cache_reply(identity, request, route, now, bytes, Vec::new());
         }
         let Some(deadline) = now
             .checked_add(owners::TRANSACTION)
             .filter(|_| self.refers.len() < owners::CAPACITY)
         else {
             let bytes = response(&request, 503, "Service Unavailable", "", "")?;
-            return self.cache_reply(identity, request, peer, now, bytes, Vec::new());
+            return self.cache_reply(identity, request, route, now, bytes, Vec::new());
         };
         self.serial = self.serial.checked_add(1).ok_or(SipError::Capacity)?;
         let key = ReferKey(self.serial);
@@ -251,7 +251,7 @@ impl Engine {
             output = self.cache_reply(
                 pending.identity,
                 pending.request,
-                owner.dialog.peer,
+                owner.dialog.route,
                 now,
                 bytes,
                 Vec::new(),
@@ -280,7 +280,7 @@ impl Engine {
         self.cache_reply(
             pending.identity,
             pending.request,
-            pending.dialog.peer,
+            pending.dialog.route,
             now,
             bytes,
             [SipEvent::ReferSubscriptionEnded { refer: key }]
@@ -471,7 +471,7 @@ impl Engine {
         use crate::transactions::NotificationOutcome;
         let mut output = empty();
         let matched = self.refers.subscriptions.iter().find_map(|(key, owner)| {
-            if owner.dialog.peer != receipt.peer || owner.dialog.wire != receipt.notification.dialog || owner.sequence != receipt.notification.refer { return None; }
+            if owner.dialog.route != receipt.route || owner.dialog.wire != receipt.notification.dialog || owner.sequence != receipt.notification.refer { return None; }
             let terminal = matches!(owner.state, State::Terminal { sequence, .. } if sequence == receipt.notification.sequence);
             let ended = match receipt.outcome {
                 NotificationOutcome::Timeout => true,
@@ -482,7 +482,7 @@ impl Engine {
         if let Some(key) = matched {
             self.refers.subscriptions.remove(&key);
             self.transactions
-                .cancel_notification(&receipt.notification, receipt.peer);
+                .cancel_notification(&receipt.notification, receipt.route);
             output
                 .events
                 .push(SipEvent::ReferSubscriptionEnded { refer: key });

@@ -1,12 +1,14 @@
 use super::{dialog, wire, ReferKey};
-use crate::{Datagram, DatagramOrigin, Engine, Output, SipError, SipEvent, MAX_MESSAGE};
+use crate::{
+    Datagram, DatagramOrigin, Engine, Output, SignalingRoute, SipError, SipEvent, MAX_MESSAGE,
+};
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, SipMessage};
 use std::net::SocketAddr;
 
 pub struct ReferIdentity {
     key: ReferKey,
     dialog: wire::Dialog,
-    peer: SocketAddr,
+    route: SignalingRoute,
     sequence: u32,
 }
 
@@ -33,20 +35,20 @@ impl ReferIdentity {
         Self {
             key,
             dialog: dialog.wire.clone(),
-            peer: dialog.peer,
+            route: dialog.route,
             sequence,
         }
     }
 
     pub const fn peer(&self) -> SocketAddr {
-        self.peer
+        self.route.peer
     }
 
     pub fn matches(&self, packet: &Datagram) -> Result<bool, SipError> {
         if packet.bytes.len() > MAX_MESSAGE {
             return Err(SipError::Capacity);
         }
-        if packet.peer != self.peer {
+        if packet.route() != self.route {
             return Ok(false);
         }
         match SipMessage::try_from(packet.bytes.as_slice())? {
@@ -99,7 +101,7 @@ impl Engine {
             });
         let events = if let Some((dialog, sequence)) = owner {
             self.transactions
-                .cancel_refer(&dialog.wire, sequence, dialog.peer);
+                .cancel_refer(&dialog.wire, sequence, dialog.route);
             [SipEvent::ReferSubscriptionEnded { refer: key }]
                 .into_iter()
                 .collect()
@@ -118,7 +120,7 @@ impl Engine {
         let mut deadline = None;
         for cached in self.cache.values() {
             if cached.origin != DatagramOrigin::Refer(identity.key)
-                || cached.peer != identity.peer
+                || cached.route != identity.route
                 || cached.request.method != Method::Refer
             {
                 continue;

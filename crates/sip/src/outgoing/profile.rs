@@ -1,6 +1,7 @@
 use crate::{
-    registrar::Bindings, transport::UriSecurity, Destination, ReferAuthority, SipError,
-    StaticTarget,
+    registrar::{BindingIdentity, Bindings},
+    transport::UriSecurity,
+    Destination, ReferAuthority, SignalingRoute, SipError, StaticTarget, StreamFlowId,
 };
 use rsipstack::sip::Uri;
 use rusterisk_config::{Auth, Config, Endpoint, Transport};
@@ -39,9 +40,8 @@ pub(super) enum RouteSelection {
     Static,
 }
 
-#[derive(Clone, Copy)]
 enum SelectedRoute {
-    Registered(SocketAddr),
+    Registered(BindingIdentity),
     Static,
 }
 
@@ -130,7 +130,7 @@ impl OutboundProfile {
         let (uri, route) = match registered {
             Some(binding) => (
                 binding.contact.uri().clone(),
-                SelectedRoute::Registered(binding.peer),
+                SelectedRoute::Registered(binding.identity()),
             ),
             None => (
                 self.contact.clone().ok_or(SipError::InvalidPacket)?,
@@ -149,8 +149,8 @@ impl OutboundProfile {
 
 impl SelectedOutbound {
     pub(super) fn prepare(self) -> Result<PreparedOutbound, SipError> {
-        let destination = match self.route {
-            SelectedRoute::Registered(peer) => Destination::Registered(peer),
+        let destination = match &self.route {
+            SelectedRoute::Registered(binding) => Destination::Registered(binding.route.peer),
             SelectedRoute::Static => Destination::Static(StaticTarget::from_uri(
                 self.profile.transport.protocol,
                 &self.uri.to_string(),
@@ -162,25 +162,46 @@ impl SelectedOutbound {
         })
     }
 
-    pub(super) fn peer(&self, resolved: Option<SocketAddr>) -> Result<SocketAddr, SipError> {
-        let peer = match (&self.route, resolved) {
-            (SelectedRoute::Registered(peer), None) => *peer,
-            (SelectedRoute::Registered(_), Some(_)) => return Err(SipError::InvalidPacket),
-            (SelectedRoute::Static, Some(peer)) => peer,
-            (SelectedRoute::Static, None) => {
-                self.uri.host_with_port.to_string().parse::<SocketAddr>()?
+    pub(super) fn route(
+        &self,
+        contacts: &Bindings,
+        resolved: Option<SocketAddr>,
+        flow: Option<StreamFlowId>,
+        now: u64,
+    ) -> Result<SignalingRoute, SipError> {
+        let route = match (&self.route, resolved) {
+            (SelectedRoute::Registered(binding), None)
+                if binding.route.flow == flow && contacts.contains(binding, now) =>
+            {
+                binding.route
             }
+            (SelectedRoute::Registered(_), _) => return Err(SipError::InvalidPacket),
+            (SelectedRoute::Static, Some(peer)) => SignalingRoute { peer, flow },
+            (SelectedRoute::Static, None) => SignalingRoute {
+                peer: self.uri.host_with_port.to_string().parse::<SocketAddr>()?,
+                flow,
+            },
         };
+        let peer = route.peer;
         if peer.port() == 0 || peer.ip().is_unspecified() || peer.ip().is_multicast() {
             return Err(SipError::InvalidPacket);
         }
-        Ok(peer)
+        Ok(route)
     }
 }
 
 impl PreparedOutbound {
     pub fn destination(&self) -> &Destination {
         &self.destination
+    }
+
+    /// Returns the captured registration's stream flow.
+    /// Static destinations and legacy bindings return `None`.
+    pub fn flow(&self) -> Option<StreamFlowId> {
+        match &self.selected.route {
+            SelectedRoute::Registered(binding) => binding.route.flow,
+            SelectedRoute::Static => None,
+        }
     }
 
     pub(super) fn into_selected(self) -> SelectedOutbound {

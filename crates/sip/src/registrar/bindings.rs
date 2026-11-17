@@ -1,13 +1,12 @@
 use super::Rejection;
-use crate::{RegistrationContact, RegistrationContacts};
+use crate::{Disconnection, RegistrationContact, RegistrationContacts, SignalingRoute};
 use rusterisk_config::{Aor, Protocol};
-use std::net::SocketAddr;
 
 #[derive(Clone)]
 pub(crate) struct Binding {
     pub(super) address: String,
     pub(crate) contact: RegistrationContact,
-    pub(crate) peer: SocketAddr,
+    pub(crate) route: SignalingRoute,
     pub(super) expires: u64,
     call_id: String,
     sequence: u32,
@@ -20,11 +19,27 @@ pub(crate) struct Bindings {
 
 pub(super) struct Update<'a> {
     pub(super) address: &'a Aor,
-    pub(super) peer: SocketAddr,
+    pub(super) route: SignalingRoute,
     pub(super) now: u64,
     pub(super) call_id: &'a str,
     pub(super) sequence: u32,
     pub(super) protocol: Protocol,
+}
+
+pub(crate) struct BindingIdentity {
+    address: String,
+    contact: String,
+    pub(crate) route: SignalingRoute,
+}
+
+impl Binding {
+    pub(crate) fn identity(&self) -> BindingIdentity {
+        BindingIdentity {
+            address: self.address.clone(),
+            contact: self.contact.source_uri().into(),
+            route: self.route,
+        }
+    }
 }
 
 impl Bindings {
@@ -51,8 +66,17 @@ impl Bindings {
     pub(crate) fn expire(&mut self, now: u64) {
         self.values.retain(|binding| binding.expires > now);
     }
-    pub(crate) fn disconnected(&mut self, peer: SocketAddr) {
-        self.values.retain(|binding| binding.peer != peer);
+    pub(crate) fn disconnected(&mut self, closed: Disconnection) {
+        self.values.retain(|binding| !closed.matches(binding.route));
+    }
+
+    pub(crate) fn contains(&self, identity: &BindingIdentity, now: u64) -> bool {
+        self.values.iter().any(|binding| {
+            binding.address == identity.address
+                && binding.contact.source_uri() == identity.contact
+                && binding.route == identity.route
+                && binding.expires > now
+        })
     }
 
     fn matching(
@@ -158,7 +182,7 @@ impl Bindings {
             candidate.values.push(Binding {
                 address: update.address.name.clone(),
                 contact: contact.clone(),
-                peer: update.peer,
+                route: update.route,
                 expires,
                 call_id: update.call_id.into(),
                 sequence: update.sequence,

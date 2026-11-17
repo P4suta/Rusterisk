@@ -20,9 +20,12 @@ mod registration_client;
 mod request_identity;
 mod required_options;
 mod session_description;
+mod signaling_flow;
 mod stream_framing;
 mod telephone;
 mod transactions;
+pub use signaling_flow::StreamFlowId;
+use signaling_flow::{Disconnection, SignalingRoute};
 mod transfer;
 mod transport;
 mod websocket_framing;
@@ -369,6 +372,7 @@ pub struct Datagram {
     pub peer: SocketAddr,
     pub bytes: Vec<u8>,
     origin: DatagramOrigin,
+    flow: Option<StreamFlowId>,
 }
 
 impl Datagram {
@@ -377,11 +381,32 @@ impl Datagram {
             peer,
             bytes,
             origin: DatagramOrigin::Direct,
+            flow: None,
         }
     }
 
     pub const fn origin(&self) -> DatagramOrigin {
         self.origin
+    }
+
+    pub const fn flow(&self) -> Option<StreamFlowId> {
+        self.flow
+    }
+
+    const fn route(&self) -> SignalingRoute {
+        SignalingRoute {
+            peer: self.peer,
+            flow: self.flow,
+        }
+    }
+
+    fn on_route(route: SignalingRoute, bytes: Vec<u8>) -> Self {
+        Self {
+            peer: route.peer,
+            bytes,
+            origin: DatagramOrigin::Direct,
+            flow: route.flow,
+        }
     }
 }
 pub struct Output {
@@ -407,16 +432,16 @@ impl DialogReply {
 }
 
 impl Output {
-    fn response(peer: SocketAddr, bytes: Vec<u8>) -> Self {
+    fn response(route: SignalingRoute, bytes: Vec<u8>) -> Self {
         Self {
-            datagrams: [Datagram::new(peer, bytes)].into_iter().collect(),
+            datagrams: [Datagram::on_route(route, bytes)].into_iter().collect(),
             events: Vec::new(),
         }
     }
 }
 
 struct Nonce {
-    peer: SocketAddr,
+    route: SignalingRoute,
     call_id: String,
     expires: u64,
     count: u32,
@@ -424,7 +449,7 @@ struct Nonce {
 }
 struct Cached {
     request: Request,
-    peer: SocketAddr,
+    route: SignalingRoute,
     bytes: Vec<u8>,
     expires: Option<u64>,
     retry: Option<ServerRetry>,
@@ -470,6 +495,7 @@ impl ServerRetry {
 pub struct PendingInvite {
     pub id: String,
     pub peer: SocketAddr,
+    flow: Option<StreamFlowId>,
     pub request: Request,
     pub session: Session,
     pub local_tag: String,
@@ -479,6 +505,15 @@ pub struct PendingInvite {
     remote_target: dialog_target::DialogTarget,
     authority: ReferAuthority,
     early_answer: Option<incoming::LocalAnswer>,
+}
+
+impl PendingInvite {
+    const fn route(&self) -> SignalingRoute {
+        SignalingRoute {
+            peer: self.peer,
+            flow: self.flow,
+        }
+    }
 }
 
 pub struct Engine {
@@ -507,7 +542,7 @@ impl Engine {
             .find(|entry| entry.name == endpoint)?;
         self.contacts
             .best(&endpoint.aors, now)
-            .map(|contact| contact.peer)
+            .map(|contact| contact.route.peer)
     }
 
     pub fn new(config: Config, seed: [u8; 32]) -> Self {
@@ -550,7 +585,29 @@ impl Engine {
         peer: SocketAddr,
         now: u64,
     ) -> Result<Output, SipError> {
-        let output = self.receive_inner(bytes, peer, now)?;
+        self.receive_routed(bytes, SignalingRoute::legacy(peer), now)
+    }
+
+    pub fn receive_on_flow(
+        &mut self,
+        bytes: &[u8],
+        peer: SocketAddr,
+        flow: StreamFlowId,
+        now: u64,
+    ) -> Result<Output, SipError> {
+        if self.protocol == Protocol::Udp {
+            return Err(SipError::Unsupported);
+        }
+        self.receive_routed(bytes, SignalingRoute::stream(peer, flow), now)
+    }
+
+    fn receive_routed(
+        &mut self,
+        bytes: &[u8],
+        route: SignalingRoute,
+        now: u64,
+    ) -> Result<Output, SipError> {
+        let output = self.receive_inner(bytes, route, now)?;
         self.track_output(&output, now)?;
         Ok(output)
     }
@@ -562,7 +619,7 @@ impl Engine {
                     if !matches!(request.method, Method::Invite | Method::Ack) {
                         self.transactions.track(
                             request,
-                            datagram.peer,
+                            datagram.route(),
                             &datagram.bytes,
                             now,
                             self.protocol != Protocol::Udp,
@@ -579,7 +636,7 @@ impl Engine {
     fn receive_inner(
         &mut self,
         bytes: &[u8],
-        peer: SocketAddr,
+        route: SignalingRoute,
         now: u64,
     ) -> Result<Output, SipError> {
         if bytes.len() > MAX_MESSAGE {
@@ -591,7 +648,7 @@ impl Engine {
         let mut request = match SipMessage::try_from(bytes)? {
             SipMessage::Request(request) => request,
             SipMessage::Response(response) => {
-                match self.transactions.receive(&response, peer, now)? {
+                match self.transactions.receive(&response, route, now)? {
                     transactions::Receipt::Unmatched => {}
                     transactions::Receipt::Consumed => {
                         return Ok(Output {
@@ -603,7 +660,7 @@ impl Engine {
                         return Ok(self.refer_receipt(receipt))
                     }
                 }
-                return self.receive_response(response, peer, now);
+                return self.receive_response(response, route, now);
             }
         };
         request_identity::prepare_request(&mut request, bytes)?;
@@ -616,21 +673,22 @@ impl Engine {
             return Err(SipError::InvalidPacket);
         }
         if request.method == Method::Ack {
-            self.incoming_ack(&request, peer)?;
-            self.outgoing_ack(&request, peer)?;
+            self.incoming_ack(&request, route)?;
+            self.outgoing_ack(&request, route)?;
             return Ok(Output {
                 datagrams: Vec::new(),
                 events: Vec::new(),
             });
         }
-        let key = RequestIdentity::new(&request, peer)?;
+        let key = RequestIdentity::new(&request, route)?;
         if let Some(cached) = self.cache.get(&key) {
             if key.accepts(cached, &request) {
                 return Ok(Output {
                     datagrams: [Datagram {
-                        peer,
+                        peer: cached.route.peer,
                         bytes: cached.bytes.clone(),
                         origin: cached.origin,
+                        flow: cached.route.flow,
                     }]
                     .into_iter()
                     .collect(),
@@ -638,13 +696,13 @@ impl Engine {
                 });
             }
             return Ok(Output::response(
-                peer,
+                route,
                 self.render_response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
             ));
         }
         if self.cache.len() + self.refers.pending.len() >= 256 {
             return Ok(Output::response(
-                peer,
+                route,
                 self.render_response(&request, 503, "Service Unavailable", "", "")?,
             ));
         }
@@ -667,44 +725,44 @@ impl Engine {
                         }
                     };
                     let reply = self.render_response(&request, code, reason, extra, "")?;
-                    return self.cache_reply(key, request, peer, now, reply, Vec::new());
+                    return self.cache_reply(key, request, route, now, reply, Vec::new());
                 }
             }
         } else {
             None
         };
         if request.method == Method::Refer {
-            return self.receive_refer(key, request, peer, now);
+            return self.receive_refer(key, request, route, now);
         }
         if request.method == Method::Subscribe {
-            return self.receive_refer_subscription(key, request, peer, now);
+            return self.receive_refer_subscription(key, request, route, now);
         }
-        if self.merged_request(&request)? {
+        if self.merged_request(&request, route)? {
             let reply = self.render_response(&request, 482, "Loop Detected", "", "")?;
-            return self.cache_reply(key, request, peer, now, reply, Vec::new());
+            return self.cache_reply(key, request, route, now, reply, Vec::new());
         }
         if request.method == Method::Cancel {
-            return self.incoming_cancel(key, request, peer, now);
+            return self.incoming_cancel(key, request, route, now);
         }
-        if let Some(reply) = self.outgoing_request(&request, peer, now)? {
+        if let Some(reply) = self.outgoing_request(&request, route, now)? {
             match reply {
                 DialogReply::Accepted { bytes, events } => {
-                    return self.cache_reply(key, request, peer, now, bytes, events);
+                    return self.cache_reply(key, request, route, now, bytes, events);
                 }
-                DialogReply::Rejected(bytes) => return Ok(Output::response(peer, bytes)),
+                DialogReply::Rejected(bytes) => return Ok(Output::response(route, bytes)),
             }
         }
-        if let Some(reply) = self.incoming_request(&request, peer, now)? {
+        if let Some(reply) = self.incoming_request(&request, route, now)? {
             match reply {
                 DialogReply::Accepted { bytes, events } => {
-                    return self.cache_reply(key, request, peer, now, bytes, events);
+                    return self.cache_reply(key, request, route, now, bytes, events);
                 }
-                DialogReply::Rejected(bytes) => return Ok(Output::response(peer, bytes)),
+                DialogReply::Rejected(bytes) => return Ok(Output::response(route, bytes)),
             }
         }
         if request.method == Method::Invite && request.to_header()?.typed()?.tag().is_some() {
             return Ok(Output::response(
-                peer,
+                route,
                 self.render_response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
             ));
         }
@@ -718,7 +776,7 @@ impl Engine {
                 "",
             )?,
             Method::Invite | Method::Register => {
-                if let Some(index) = self.authorize(&request, peer, now)? {
+                if let Some(index) = self.authorize(&request, route, now)? {
                     let endpoint = self.config.endpoints[index].clone();
                     if request.method == Method::Invite {
                         let rejected = match required_options::unsupported(&request) {
@@ -748,11 +806,11 @@ impl Engine {
                             ),
                         };
                         if let Some(reply) = rejected {
-                            return self.cache_reply(key, request, peer, now, reply, events);
+                            return self.cache_reply(key, request, route, now, reply, events);
                         }
                     }
                     if request.method == Method::Register {
-                        self.register(&request, &endpoint, peer, now, &mut events)?
+                        self.register(&request, &endpoint, route, now, &mut events)?
                     } else if self.pending.len() + self.incoming.len() >= 64 {
                         self.render_response(&request, 486, "Busy Here", "", "")?
                     } else {
@@ -768,7 +826,7 @@ impl Engine {
                             }
                             Ok(_) | Err(SipError::Unsupported) => {
                                 return Ok(Output::response(
-                                    peer,
+                                    route,
                                     self.render_response(
                                         &request,
                                         488,
@@ -819,7 +877,8 @@ impl Engine {
                             id.clone(),
                             PendingInvite {
                                 id,
-                                peer,
+                                peer: route.peer,
+                                flow: route.flow,
                                 request: request.clone(),
                                 session,
                                 local_tag,
@@ -834,12 +893,12 @@ impl Engine {
                         self.render_response(&request, 100, "Trying", "", "")?
                     }
                 } else {
-                    self.challenge(&request, peer, now)?
+                    self.challenge(&request, route, now)?
                 }
             }
             Method::Bye | Method::Cancel | Method::Info => {
                 return Ok(Output::response(
-                    peer,
+                    route,
                     self.render_response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
                 ));
             }
@@ -853,7 +912,7 @@ impl Engine {
             | Method::Update
             | Method::Other(_) => self.render_response(&request, 501, "Not Implemented", "", "")?,
         };
-        self.cache_reply(key, request, peer, now, reply, events)
+        self.cache_reply(key, request, route, now, reply, events)
     }
 
     fn expire_contacts(&mut self, now: u64, events: &mut Vec<SipEvent>) {
@@ -882,12 +941,13 @@ impl Engine {
         response(&request, code, phrase, extra, body)
     }
 
-    fn merged_request(&self, request: &Request) -> Result<bool, SipError> {
+    fn merged_request(&self, request: &Request, route: SignalingRoute) -> Result<bool, SipError> {
         if request.to_header()?.typed()?.tag().is_some() {
             return Ok(false);
         }
         for cached in self.cache.values() {
-            if cached.request.method == request.method
+            if cached.route.flow == route.flow
+                && cached.request.method == request.method
                 && cached.request.call_id_header()?.value() == request.call_id_header()?.value()
                 && cached.request.from_header()?.typed()?.tag()
                     == request.from_header()?.typed()?.tag()
@@ -903,7 +963,7 @@ impl Engine {
         &mut self,
         key: RequestIdentity,
         request: Request,
-        peer: SocketAddr,
+        route: SignalingRoute,
         now: u64,
         reply: Vec<u8>,
         events: Vec<SipEvent>,
@@ -913,7 +973,7 @@ impl Engine {
             && self
                 .pending
                 .values()
-                .any(|invite| invite.request == request)
+                .any(|invite| invite.route() == route && invite.request == request)
         {
             None
         } else {
@@ -923,7 +983,7 @@ impl Engine {
             key,
             Cached {
                 request,
-                peer,
+                route,
                 bytes: reply.clone(),
                 expires,
                 retry,
@@ -931,7 +991,7 @@ impl Engine {
             },
         );
         Ok(Output {
-            datagrams: [Datagram::new(peer, reply)].into_iter().collect(),
+            datagrams: [Datagram::on_route(route, reply)].into_iter().collect(),
             events,
         })
     }

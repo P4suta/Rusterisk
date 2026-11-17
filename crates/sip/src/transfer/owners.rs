@@ -1,8 +1,7 @@
 use super::{dialog::Dialog, notify::Provisional, ReferKey, ReferSubscription};
-use crate::{RequestIdentity, SipEvent};
+use crate::{Disconnection, RequestIdentity, SipEvent};
 use rsipstack::sip::Request;
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
 
 pub(crate) const CAPACITY: usize = 64;
 pub(crate) const LIFETIME: u64 = 600_000;
@@ -57,16 +56,16 @@ impl Owners {
                 .any(|owner| owner.dialog.id == id && owner.dialog.generation == generation)
     }
 
-    pub fn disconnected(&mut self, peer: SocketAddr, events: &mut Vec<SipEvent>) {
+    pub fn disconnected(&mut self, closed: Disconnection, events: &mut Vec<SipEvent>) {
         self.pending.retain(|key, owner| {
-            if owner.dialog.peer != peer {
+            if !closed.matches(owner.dialog.route) {
                 return true;
             }
             events.push(SipEvent::ReferSubscriptionEnded { refer: *key });
             false
         });
         self.subscriptions.retain(|key, owner| {
-            if owner.dialog.peer != peer {
+            if !closed.matches(owner.dialog.route) {
                 return true;
             }
             events.push(SipEvent::ReferSubscriptionEnded { refer: *key });

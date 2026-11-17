@@ -1,14 +1,13 @@
-use crate::{Cached, SipError};
+use crate::{Cached, SignalingRoute, SipError};
 use rsipstack::sip::{
     headers::untyped::ToTypedHeader,
     uri::{Host, HostWithPort},
     HeadersExt, Method, Request,
 };
-use std::net::SocketAddr;
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct RequestIdentity {
-    peer: SocketAddr,
+    route: SignalingRoute,
     transaction: Transaction,
 }
 
@@ -70,8 +69,8 @@ pub(super) fn prepare_request(request: &mut Request, wire: &[u8]) -> Result<(), 
 }
 
 impl RequestIdentity {
-    pub(super) fn for_invite(request: &Request, peer: SocketAddr) -> Result<Self, SipError> {
-        let mut identity = Self::new(request, peer)?;
+    pub(super) fn for_invite(request: &Request, route: SignalingRoute) -> Result<Self, SipError> {
+        let mut identity = Self::new(request, route)?;
         match &mut identity.transaction {
             Transaction::Cookie { method, .. } => *method = "INVITE".into(),
             Transaction::Legacy { cseq, .. } => {
@@ -81,7 +80,7 @@ impl RequestIdentity {
         Ok(identity)
     }
 
-    pub(super) fn new(request: &Request, peer: SocketAddr) -> Result<Self, SipError> {
+    pub(super) fn new(request: &Request, route: SignalingRoute) -> Result<Self, SipError> {
         let via = request.top_via_header()?.typed()?;
         let transaction = if let Some(branch) = via
             .branch()
@@ -103,7 +102,7 @@ impl RequestIdentity {
                 via: request.top_via_header()?.value().into(),
             }
         };
-        Ok(Self { peer, transaction })
+        Ok(Self { route, transaction })
     }
 
     pub(super) fn accepts(&self, cached: &Cached, request: &Request) -> bool {
@@ -126,7 +125,10 @@ mod tests {
             return Err(SipError::InvalidPacket);
         };
         prepare_request(&mut request, wire.as_bytes())?;
-        RequestIdentity::new(&request, ([127, 0, 0, 1], peer).into())
+        RequestIdentity::new(
+            &request,
+            crate::SignalingRoute::legacy(([127, 0, 0, 1], peer).into()),
+        )
     }
 
     #[test]
