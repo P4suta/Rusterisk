@@ -14,7 +14,7 @@ pub(crate) struct ResolutionCache {
 impl Default for ResolutionCache {
     fn default() -> Self {
         Self {
-            entries: std::array::from_fn(|_| None),
+            entries: [const { None }; 64],
             cursor: 0,
         }
     }
