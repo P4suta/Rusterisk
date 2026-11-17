@@ -34,6 +34,8 @@ mod transfer;
 #[cfg(test)]
 mod transfer_tests;
 mod websocket_profiles;
+#[cfg(test)]
+mod websocket_profiles_tests;
 use dialplan::DialplanFrame;
 pub use endpoints::EndpointKey;
 use endpoints::Endpoints;

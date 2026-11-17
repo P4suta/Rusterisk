@@ -13,6 +13,9 @@ use rusterisk_sip::{AdmissionMode, PreparedEngineConfiguration};
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, watch};
 
+#[cfg(test)]
+mod shutdown_tests;
+
 #[derive(Clone)]
 pub(crate) struct NativePreparation {
     bindings: BoundNativeProfiles,

@@ -7,6 +7,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 #[path = "runtime/music.rs"]
 mod music;
+#[path = "runtime/reload.rs"]
+mod reload;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())

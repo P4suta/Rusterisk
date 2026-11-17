@@ -207,3 +207,7 @@ impl Control {
             .collect()
     }
 }
+
+#[cfg(test)]
+#[path = "reload_tests.rs"]
+mod reload_tests;

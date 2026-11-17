@@ -265,6 +265,16 @@ impl Signaling {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) async fn output_for_test(
+        &mut self,
+        listener: usize,
+        output: Output,
+        now: u64,
+    ) -> Result<(), ControlError> {
+        self.output(listener, output, now).await
+    }
+
     async fn output(
         &mut self,
         listener: usize,

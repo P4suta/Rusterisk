@@ -21,7 +21,7 @@ impl CallSettings {
         }
     }
 
-    pub(super) fn configured(config: &rusterisk_config::Config) -> Self {
+    pub(crate) fn configured(config: &rusterisk_config::Config) -> Self {
         Self {
             native_profiles: Some(NativeProfileCatalog::new(config)),
             music_catalog: None,

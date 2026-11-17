@@ -76,6 +76,11 @@ impl Retiring {
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn len(&self) -> usize {
+        self.slots.iter().flatten().count()
+    }
+
     pub(super) fn check_clock(&self, now: u64) -> Result<(), ControlError> {
         if now < self.observed {
             Err(ControlError::Invalid("Registration clock moved backwards"))

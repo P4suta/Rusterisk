@@ -9,6 +9,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 mod call_lifetime;
 mod endpoint_queries;
+#[cfg(test)]
+mod endpoint_queries_tests;
 mod external_admission;
 mod history;
 mod media_connections;

@@ -5,6 +5,9 @@ use tokio::sync::{mpsc, oneshot};
 
 pub(crate) const PUBLICATION_BUDGET: Duration = Duration::from_secs(5);
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PublicationKey {
     candidate: SettingsCandidate,

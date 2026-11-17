@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::task::JoinSet;
 
+#[cfg(test)]
+#[path = "runtime/reload_failure_tests.rs"]
+mod reload_failure_tests;
+
 #[derive(Clone, Copy, Debug)]
 enum Component {
     Control,

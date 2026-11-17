@@ -8,6 +8,9 @@ use rusterisk_core::SettingsGeneration;
 use std::net::SocketAddr;
 use tokio::sync::watch;
 
+#[cfg(test)]
+mod shutdown_tests;
+
 pub(crate) struct PreparedHttpSettings {
     bind: SocketAddr,
     encryption: Option<TlsContext>,

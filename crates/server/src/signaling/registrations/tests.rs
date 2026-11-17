@@ -6,6 +6,8 @@ mod dns;
 mod generations;
 mod minimum_expiration;
 mod peer_waits;
+mod publication_barrier;
+mod retirement;
 mod retry;
 mod reuse;
 mod reuse_capacity;

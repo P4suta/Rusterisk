@@ -11,6 +11,7 @@ use tokio::{
 mod deadlines;
 mod deferred;
 mod preparations;
+mod registration_retirement;
 mod routes;
 mod upgrades;
 
