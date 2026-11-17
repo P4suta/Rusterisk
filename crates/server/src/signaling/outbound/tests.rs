@@ -18,6 +18,7 @@ use std::{
 use tokio::net::{TcpListener, UdpSocket};
 mod authentication;
 mod capacity;
+mod starting_profile;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
