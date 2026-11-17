@@ -38,6 +38,33 @@ pub(crate) struct ReferenceRunner {
 }
 
 impl ReferenceRunner {
+    #[cfg(unix)]
+    pub(crate) fn configuration_path(source: &Path, owner: &str) -> io::Result<PathBuf> {
+        if !source.is_absolute()
+            || source.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            })
+        {
+            return Err(io::Error::other(
+                "reference source must be an absolute path",
+            ));
+        }
+        let configuration = source
+            .join("target/interop")
+            .join(format!("{owner}.configuration"));
+        Interop::new(
+            owner,
+            configuration
+                .to_str()
+                .ok_or_else(|| io::Error::other("reference configuration path is not UTF-8"))?,
+        )
+        .map_err(io::Error::other)?;
+        Ok(configuration)
+    }
+
     pub(crate) fn new(state: PathBuf) -> Result<Self, ProcessError> {
         Ok(Self {
             state,
@@ -113,8 +140,8 @@ impl ReferenceRunner {
         image: &ReferenceImage,
         commands: &mut Commands<'_>,
     ) -> io::Result<()> {
-        let configuration = commands.directory.join("asterisk");
         let owner = identity()?;
+        let configuration = Self::configuration_path(source, &owner)?;
         let plan = Interop::new(
             &owner,
             configuration
@@ -125,6 +152,7 @@ impl ReferenceRunner {
         let mut reference =
             Reference::new(&owner, commands.directory.join("reference.cid"), &plan)?;
         let operation = (|| {
+            fs::create_dir_all(source.join("target/interop"))?;
             copy_configuration(&source.join("tests/interop/asterisk"), &configuration)?;
             fs::create_dir(configuration.join("sounds"))?;
             let id = start_reference(

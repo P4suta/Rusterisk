@@ -1,7 +1,7 @@
 use super::{verify_reference_with, ReferencePort};
 use crate::{
     process::ProcessError,
-    reference::ReferenceImage,
+    reference::{Interop, ReferenceImage, ReferenceRunner},
     release_check::{CapturedReleaseSource, SourceInputs},
 };
 use std::{
@@ -52,6 +52,45 @@ fn require(valid: bool, reason: &'static str) -> io::Result<()> {
     }
 }
 
+fn configuration_path(source: &Path, identity: &str) -> io::Result<PathBuf> {
+    ReferenceRunner::configuration_path(source, identity).map_err(io::Error::other)
+}
+
+fn checked_configuration(source: &Path) -> io::Result<()> {
+    let configuration = configuration_path(source, "fixture")?;
+    let parent = source.join("target/interop");
+    require(
+        configuration.parent() == Some(parent.as_path())
+            && configuration.file_name() == Some(std::ffi::OsStr::new("fixture.configuration")),
+        "Reference configuration escaped the captured source transfer guard",
+    )?;
+    let configuration = configuration
+        .to_str()
+        .ok_or_else(|| io::Error::other("Reference configuration path is not UTF-8"))?;
+    let plan = Interop::new("fixture", configuration).map_err(io::Error::other)?;
+    let start = plan.start();
+    let expected = format!("type=bind,source={configuration},target=/etc/asterisk,readonly");
+    require(
+        start
+            .arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "--mount" && pair[1] == expected)
+            .count()
+            == 1,
+        "Reference container mount differs from the checked transfer configuration",
+    )?;
+    for invalid in ["", "../foreign", "-foreign"] {
+        require(
+            configuration_path(source, invalid).is_err(),
+            "Invalid execution identity selected a reference configuration",
+        )?;
+    }
+    require(
+        configuration_path(Path::new("relative/source"), "fixture").is_err(),
+        "Relative source selected a reference configuration",
+    )
+}
+
 impl Port<'_> {
     fn check_request(&self, source: &Path, image: &ReferenceImage) -> io::Result<()> {
         require(
@@ -99,6 +138,7 @@ impl ReferencePort for Port<'_> {
 
     fn compare(&mut self, source: &Path, image: &ReferenceImage) -> Result<(), ProcessError> {
         self.check_request(source, image)?;
+        checked_configuration(source)?;
         self.fixture.comparisons += 1;
         require(
             self.fixture.inspections == 1 && self.fixture.comparisons == 1,
