@@ -1,6 +1,7 @@
 use super::{dialog, wire, ReferKey};
 use crate::{
-    Datagram, DatagramOrigin, Engine, Output, SignalingRoute, SipError, SipEvent, MAX_MESSAGE,
+    Datagram, DatagramOrigin, Engine, Output, SignalingRoute, SipError, SipEvent, StreamFlowId,
+    MAX_MESSAGE,
 };
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, SipMessage};
 use std::net::SocketAddr;
@@ -42,6 +43,10 @@ impl ReferIdentity {
 
     pub const fn peer(&self) -> SocketAddr {
         self.route.peer
+    }
+
+    pub const fn flow(&self) -> Option<StreamFlowId> {
+        self.route.flow
     }
 
     pub fn matches(&self, packet: &Datagram) -> Result<bool, SipError> {
