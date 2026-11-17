@@ -2,7 +2,7 @@ use super::fixtures::{assert_rejected, policy, using_fixture, write};
 use std::{io, path::Path};
 use toml::Value;
 
-fn replace_member(root: &Path, member: &str) -> io::Result<()> {
+pub(super) fn replace_member(root: &Path, member: &str) -> io::Result<()> {
     let path = root.join("Cargo.toml");
     let mut manifest: toml::Table =
         toml::from_str(&std::fs::read_to_string(&path)?).map_err(io::Error::other)?;
@@ -16,6 +16,15 @@ fn replace_member(root: &Path, member: &str) -> io::Result<()> {
 
 fn ordinary_member(root: &Path) -> io::Result<()> {
     replace_member(root, "crates/ordinary")?;
+    ordinary_package(root)
+}
+
+pub(super) fn ordinary_package(root: &Path) -> io::Result<()> {
+    write(
+        root,
+        "crates/ordinary/Cargo.toml",
+        "[package]\nname = \"ordinary\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lints]\nworkspace = true\n",
+    )?;
     write(
         root,
         "crates/ordinary/src/lib.rs",

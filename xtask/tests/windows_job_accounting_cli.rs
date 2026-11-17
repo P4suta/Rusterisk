@@ -2,3 +2,5 @@
 mod applicability;
 #[path = "windows_job_accounting/cli.rs"]
 mod fixtures;
+#[path = "windows_job_accounting/inheritance.rs"]
+mod inheritance;

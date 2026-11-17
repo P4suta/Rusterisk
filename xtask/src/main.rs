@@ -132,6 +132,44 @@ fn windows_job_accounting_policy(
     Ok(())
 }
 
+fn compiler_lint_policy(workspace: &toml::Value, members: &[toml::Value]) -> Result<(), TaskError> {
+    let level = workspace
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+        .and_then(|lints| lints.get("rust"))
+        .and_then(|rust| rust.get("unsafe_code"))
+        .and_then(toml::Value::as_str);
+    if level != Some("forbid") {
+        return Err(TaskError::Contract(
+            "Cargo.toml: workspace unsafe_code must remain forbid".into(),
+        ));
+    }
+    for member in members {
+        let member = member
+            .as_str()
+            .ok_or_else(|| TaskError::Contract("invalid workspace member".into()))?;
+        if member == "crates/windows-job-accounting" {
+            continue;
+        }
+        let path = Path::new(member).join("Cargo.toml");
+        let source = std::fs::read_to_string(&path)
+            .map_err(|error| TaskError::Contract(format!("{}: {error}", path.display())))?;
+        let manifest: toml::Value = toml::from_str(&source)
+            .map_err(|error| TaskError::Contract(format!("{}: {error}", path.display())))?;
+        let inherited = manifest
+            .get("lints")
+            .and_then(|lints| lints.get("workspace"))
+            .and_then(toml::Value::as_bool);
+        if inherited != Some(true) {
+            return Err(TaskError::Contract(format!(
+                "{}: members must inherit workspace lints",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn policy() -> Result<(), TaskError> {
     let exceptions: xtask::Exceptions =
         toml::from_str(&std::fs::read_to_string("api/policy-exceptions.toml")?)?;
@@ -153,6 +191,7 @@ fn policy() -> Result<(), TaskError> {
     let members = manifest["workspace"]["members"]
         .as_array()
         .ok_or_else(|| TaskError::Contract("workspace members missing".into()))?;
+    compiler_lint_policy(&manifest, members)?;
     windows_job_accounting_policy(&workspace_source, members, &exceptions.exceptions)?;
     let mut files = Vec::new();
     for member in members {

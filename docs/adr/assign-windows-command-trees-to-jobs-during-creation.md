@@ -20,6 +20,7 @@ Accept only the query's complete root syntax tree and an exact [manifest](https:
 Require `build = false`, no procedural macros, and only pinned windows-sys.
 Turn off automatic target discovery.
 Mirror [workspace lints](https://doc.rust-lang.org/cargo/reference/workspaces.html#the-lints-table) exactly, except the package's registered `unsafe_code = "deny"`.
+Require all other workspace members to inherit workspace lints.
 
 ## Alternatives
 
