@@ -3,8 +3,12 @@ use rusterisk_config::{Protocol, Registration};
 use std::net::SocketAddr;
 mod authentication_state;
 mod response;
+mod retirement;
 use authentication_state::AuthenticationState;
 pub use response::{RegistrationAuthentication, RegistrationGrant, RegistrationResponse};
+pub use retirement::{
+    RegistrationRetirement, RegistrationRetirementReceipt, RegistrationRetirementStatus,
+};
 
 const TIMEOUT: u64 = 32_000;
 const INITIAL_RETRY: u64 = 500;

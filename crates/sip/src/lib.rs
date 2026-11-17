@@ -35,6 +35,7 @@ pub use incoming::RejectReason;
 pub use outgoing::{ForkTeardownFailure, Outbound, OutboundProfile, PreparedOutbound};
 pub use registration_client::{
     RegistrationAuthentication, RegistrationGrant, RegistrationIdentity, RegistrationResponse,
+    RegistrationRetirement, RegistrationRetirementReceipt, RegistrationRetirementStatus,
     RegistrationTransaction, RegistrationTransactionEvent,
 };
 use request_identity::RequestIdentity;

@@ -3,15 +3,12 @@ use super::{
     RegistrationTransactionEvent, State,
 };
 use crate::{Datagram, SipError, StreamFramingError, MAX_MESSAGE};
-use rsipstack::sip::{
-    headers::{untyped::ToTypedHeader, Headers},
-    uri::Param,
-    HeadersExt, Method, Request, Response, SipMessage, Version,
-};
+use rsipstack::sip::{headers::Headers, SipMessage, Version};
 use rusterisk_config::Protocol;
 use std::net::SocketAddr;
 mod alternate;
 mod authentication;
+mod correlation;
 mod grant;
 mod minimum_expiration;
 mod request;
@@ -19,6 +16,7 @@ mod resolved_retry;
 mod retry_after;
 mod updates;
 pub use authentication::RegistrationAuthentication;
+pub(super) use correlation::RegistrationCorrelation;
 pub use grant::RegistrationGrant;
 
 pub struct RegistrationResponse {
@@ -89,7 +87,7 @@ impl RegistrationTransaction {
             SipMessage::Request(request) => request,
             SipMessage::Response(_) => return Err(SipError::InvalidPacket),
         };
-        if !matches_request(&response, &request)? {
+        if !RegistrationCorrelation::matches_request(&response, &request)? {
             return Ok(None);
         }
         let status = response.status_code.code();
@@ -122,7 +120,7 @@ impl RegistrationTransaction {
     }
 }
 
-fn parse(bytes: &[u8], protocol: Protocol) -> Result<SipMessage, SipError> {
+pub(super) fn parse(bytes: &[u8], protocol: Protocol) -> Result<SipMessage, SipError> {
     if bytes.len() > MAX_MESSAGE {
         return Err(SipError::Capacity);
     }
@@ -143,37 +141,4 @@ fn framing_error(error: StreamFramingError) -> SipError {
     } else {
         SipError::InvalidPacket
     }
-}
-
-fn matches_request(response: &Response, request: &Request) -> Result<bool, SipError> {
-    for name in ["Call-ID", "CSeq", "From", "To"] {
-        if response
-            .headers
-            .iter()
-            .filter(|header| header.name().eq_ignore_ascii_case(name))
-            .count()
-            != 1
-        {
-            return Err(SipError::InvalidPacket);
-        }
-    }
-    let via = response.top_via_header()?.typed()?;
-    if via
-        .params
-        .iter()
-        .filter(|parameter| matches!(parameter, Param::Branch(_)))
-        .count()
-        != 1
-    {
-        return Err(SipError::InvalidPacket);
-    }
-    let expected = request.top_via_header()?.typed()?;
-    let sequence = response.cseq_header()?.typed()?;
-    Ok(via.branch() == expected.branch()
-        && via.sent_by() == expected.sent_by()
-        && via.transport == expected.transport
-        && sequence.method == Method::Register
-        && sequence.seq == request.cseq_header()?.typed()?.seq
-        && response.call_id_header()?.value() == request.call_id_header()?.value()
-        && response.from_header()?.typed()?.tag() == request.from_header()?.typed()?.tag())
 }

@@ -16,6 +16,8 @@ mod identity;
 mod minimum_expiration;
 #[path = "outbound_registration/resolved_retry.rs"]
 mod resolved_retry;
+#[path = "outbound_registration/retirement.rs"]
+mod retirement;
 #[path = "outbound_registration/responses.rs"]
 mod responses;
 #[path = "outbound_registration/retry_after.rs"]
