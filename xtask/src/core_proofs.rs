@@ -6,7 +6,7 @@ mod runner;
 pub use capture::CapturedCoreProofs;
 pub use runner::{execute, plan, CoreProofOutcome, Execution};
 
-pub const HARNESSES: [&str; 14] = [
+pub const HARNESSES: [&str; 18] = [
     "proofs::terminal_release_is_absorbing",
     "proofs::connection_claims_are_exclusive",
     "proofs::stasis_tracks_the_current_app",
@@ -21,6 +21,10 @@ pub const HARNESSES: [&str; 14] = [
     "proofs::attended_completion_is_absorbing",
     "proofs::owned_pair_departures_stay_with_the_current_bridge_and_generations",
     "proofs::owned_pair_release_is_absorbing",
+    "proofs::settings_references_preserve_their_generation_until_release",
+    "proofs::settings_candidates_cannot_cross_domains_or_replace_later_candidates",
+    "proofs::settings_foreign_references_leave_both_domains_unchanged",
+    "proofs::settings_publication_preserves_saturated_references",
 ];
 
 #[derive(Deserialize)]
@@ -387,18 +391,29 @@ pub fn validate_harnesses(source: &str) -> Result<(), ProofError> {
             {
                 continue;
             }
+            let name = format!("proofs::{}", function.sig.ident);
+            let settings = matches!(
+                name.as_str(),
+                "proofs::settings_references_preserve_their_generation_until_release"
+                    | "proofs::settings_candidates_cannot_cross_domains_or_replace_later_candidates"
+                    | "proofs::settings_foreign_references_leave_both_domains_unchanged"
+                    | "proofs::settings_publication_preserves_saturated_references"
+            );
             let bounded = function.attrs.iter().any(|attribute| {
                 kani_attribute(attribute, "unwind")
                     && attribute
                         .parse_args::<syn::LitInt>()
                         .ok()
                         .is_some_and(|value| {
-                            value
-                                .base10_parse::<u16>()
-                                .is_ok_and(|bound| (1..=32).contains(&bound))
+                            value.base10_parse::<u16>().is_ok_and(|bound| {
+                                if settings {
+                                    bound == 66
+                                } else {
+                                    (1..=32).contains(&bound)
+                                }
+                            })
                         })
             });
-            let name = format!("proofs::{}", function.sig.ident);
             let mut body = HarnessBody::default();
             body.visit_block(&function.block);
             if !bounded

@@ -3,6 +3,8 @@ use xtask::core_proofs::{
 };
 
 const IMAGE: &str = "registry.example/core-proofs@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+#[path = "core_proofs/settings.rs"]
+mod settings;
 const TRANSFER_HARNESSES: [&str; 3] = [
     "proofs::transfer_completion_is_absorbing",
     "proofs::transfer_observations_stay_in_their_generation",
@@ -149,7 +151,9 @@ fn results_without_the_attended_contracts_are_rejected() -> Result<(), ProofErro
         .ok_or(ProofError::Results)?;
     results.retain(|result| {
         result["harness_id"].as_str().is_some_and(|name| {
-            !ATTENDED_HARNESSES.contains(&name) && !PAIR_HARNESSES.contains(&name)
+            !ATTENDED_HARNESSES.contains(&name)
+                && !PAIR_HARNESSES.contains(&name)
+                && !name.starts_with("proofs::settings_")
         })
     });
     let count = results.len();
@@ -168,9 +172,9 @@ fn results_without_owned_pair_contracts_are_rejected() -> Result<(), ProofError>
         .as_array_mut()
         .ok_or(ProofError::Results)?;
     results.retain(|result| {
-        result["harness_id"]
-            .as_str()
-            .is_some_and(|name| !PAIR_HARNESSES.contains(&name))
+        result["harness_id"].as_str().is_some_and(|name| {
+            !PAIR_HARNESSES.contains(&name) && !name.starts_with("proofs::settings_")
+        })
     });
     let count = results.len();
     for field in ["total_harnesses", "executed", "successful"] {
@@ -192,6 +196,7 @@ fn results_for_only_the_original_six_contracts_are_rejected() -> Result<(), Proo
             !TRANSFER_HARNESSES.contains(&name)
                 && !ATTENDED_HARNESSES.contains(&name)
                 && !PAIR_HARNESSES.contains(&name)
+                && !name.starts_with("proofs::settings_")
         })
     });
     let count = results.len();
