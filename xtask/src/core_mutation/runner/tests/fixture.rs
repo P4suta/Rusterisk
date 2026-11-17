@@ -75,6 +75,7 @@ fn mutants() -> Vec<Mutant> {
         ("src/transfer.rs", "Transfer::begin"),
         ("src/attended_transfer.rs", "AttendedTransfer::begin"),
         ("src/owned_call_pair.rs", "OwnedCallPair::new"),
+        ("src/settings_lifetimes.rs", "SettingsLifetimes::slot"),
     ]
     .into_iter()
     .enumerate()

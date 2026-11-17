@@ -5,6 +5,8 @@ use xtask::core_assurance::{
 };
 
 const IMAGE: &str = "registry.example/core-assurance@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+#[path = "core_assurance/settings.rs"]
+mod settings;
 
 #[test]
 fn core_assurance_phases_bound_resources_and_own_cleanup() -> Result<(), AssuranceError> {
@@ -84,7 +86,8 @@ fn core_assurance_phases_bound_resources_and_own_cleanup() -> Result<(), Assuran
         "src/transfer.rs",
         "src/attended_transfer.rs",
         "src/owned_call_pair.rs",
-        "(Call::(apply|claim_connection|reserve_stasis|enter_stasis|move_stasis|leave_stasis|join|leave)|MediaTasks::(reserve|index|cancel|finish)|ResourceSubscriptions.*::(subscribe|unsubscribe|expire)|Transfer::(begin|finish|participant_ended)|AttendedTransfer::(begin|finish|participant_ended)|OwnedCallPair::(new|participant_ended|retire))\\b",
+        "src/settings_lifetimes.rs",
+        "(Call::(apply|claim_connection|reserve_stasis|enter_stasis|move_stasis|leave_stasis|join|leave)|MediaTasks::(reserve|index|cancel|finish)|ResourceSubscriptions.*::(subscribe|unsubscribe|expire)|Transfer::(begin|finish|participant_ended)|AttendedTransfer::(begin|finish|participant_ended)|OwnedCallPair::(new|participant_ended|retire)|SettingsLifetimes::(slot|available|prepare|cancel|commit|retain|release)|SettingsError::into_reference)\\b",
     ] {
         assert!(
             mutation
@@ -181,7 +184,7 @@ fn miri_requires_every_discovered_test_to_run_without_skips() -> Result<(), Assu
 }
 
 fn mutants() -> Vec<serde_json::Value> {
-    [("src/lib.rs", "Call::apply"), ("src/lib.rs", "Call::claim_connection"), ("src/stasis.rs", "Call::enter_stasis"), ("src/lib.rs", "Call::join"), ("src/media_tasks.rs", "MediaTasks::cancel"), ("src/resource_subscriptions.rs", "ResourceSubscriptions<N>::subscribe"), ("src/transfer.rs", "Transfer::begin"), ("src/transfer.rs", "Transfer::finish"), ("src/transfer.rs", "Transfer::participant_ended"), ("src/attended_transfer.rs", "AttendedTransfer::begin"), ("src/attended_transfer.rs", "AttendedTransfer::finish"), ("src/attended_transfer.rs", "AttendedTransfer::participant_ended"), ("src/owned_call_pair.rs", "OwnedCallPair::new"), ("src/owned_call_pair.rs", "OwnedCallPair::participant_ended"), ("src/owned_call_pair.rs", "OwnedCallPair::retire")]
+    [("src/lib.rs", "Call::apply"), ("src/lib.rs", "Call::claim_connection"), ("src/stasis.rs", "Call::enter_stasis"), ("src/lib.rs", "Call::join"), ("src/media_tasks.rs", "MediaTasks::cancel"), ("src/resource_subscriptions.rs", "ResourceSubscriptions<N>::subscribe"), ("src/transfer.rs", "Transfer::begin"), ("src/transfer.rs", "Transfer::finish"), ("src/transfer.rs", "Transfer::participant_ended"), ("src/attended_transfer.rs", "AttendedTransfer::begin"), ("src/attended_transfer.rs", "AttendedTransfer::finish"), ("src/attended_transfer.rs", "AttendedTransfer::participant_ended"), ("src/owned_call_pair.rs", "OwnedCallPair::new"), ("src/owned_call_pair.rs", "OwnedCallPair::participant_ended"), ("src/owned_call_pair.rs", "OwnedCallPair::retire"), ("src/settings_lifetimes.rs", "SettingsLifetimes::slot"), ("src/settings_lifetimes.rs", "SettingsLifetimes::available"), ("src/settings_lifetimes.rs", "SettingsLifetimes::prepare"), ("src/settings_lifetimes.rs", "SettingsLifetimes::cancel"), ("src/settings_lifetimes.rs", "SettingsLifetimes::commit"), ("src/settings_lifetimes.rs", "SettingsLifetimes::retain"), ("src/settings_lifetimes.rs", "SettingsLifetimes::release"), ("src/settings_lifetimes.rs", "SettingsError::into_reference")]
         .into_iter().enumerate().map(|(index, (file, function))| serde_json::json!({"name":format!("{file}:{}:1: representative {function}", index + 1), "file":file, "function":{"function_name":function}, "replacement":"false"})).collect()
 }
 

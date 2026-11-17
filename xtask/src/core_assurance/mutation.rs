@@ -13,10 +13,11 @@ enum Invariant {
     Transfer,
     AttendedTransfer,
     OwnedCallPair,
+    Settings,
 }
 
 impl Invariant {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Terminal,
         Self::Connection,
         Self::Stasis,
@@ -26,6 +27,7 @@ impl Invariant {
         Self::Transfer,
         Self::AttendedTransfer,
         Self::OwnedCallPair,
+        Self::Settings,
     ];
 
     fn of(file: &str, function: &str) -> Option<Self> {
@@ -69,6 +71,17 @@ impl Invariant {
                 "src/owned_call_pair.rs",
                 "OwnedCallPair::new" | "OwnedCallPair::participant_ended" | "OwnedCallPair::retire",
             ) => Some(Self::OwnedCallPair),
+            (
+                "src/settings_lifetimes.rs",
+                "SettingsLifetimes::slot"
+                | "SettingsLifetimes::available"
+                | "SettingsLifetimes::prepare"
+                | "SettingsLifetimes::cancel"
+                | "SettingsLifetimes::commit"
+                | "SettingsLifetimes::retain"
+                | "SettingsLifetimes::release"
+                | "SettingsError::into_reference",
+            ) => Some(Self::Settings),
             _ => None,
         }
     }
@@ -84,6 +97,7 @@ impl Invariant {
             Self::Transfer => "transfer ownership",
             Self::AttendedTransfer => "attended transfer ownership",
             Self::OwnedCallPair => "paired call ownership",
+            Self::Settings => "settings ownership",
         }
     }
 }
