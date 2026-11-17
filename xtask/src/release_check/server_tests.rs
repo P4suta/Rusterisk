@@ -4,9 +4,12 @@ use super::{verify_server_with, ServerRequest};
 use crate::{
     process::CommandSupervisor,
     release_check::candidate_fixtures::{native_target, require, using},
-    server_distribution::ServerTarget,
+    server_distribution::{ServerExecutionMode, ServerTarget},
 };
 use std::{io, process::Command, time::Duration};
+
+#[path = "server_execution_tests.rs"]
+mod execution;
 
 #[test]
 fn server_source_changes_cannot_start_native_or_sdk_commands() -> io::Result<()> {
@@ -19,6 +22,7 @@ fn server_source_changes_cannot_start_native_or_sdk_commands() -> io::Result<()>
             ServerRequest {
                 candidate: &paths.server,
                 target: paths.target,
+                mode: ServerExecutionMode::Native,
                 sdk_candidate: &paths.sdk,
                 execution: &paths.execution,
                 consumer_execution: &paths.consumer_execution,
@@ -60,6 +64,7 @@ fn same_version_sdk_source_changes_cannot_start_server_verification() -> io::Res
             ServerRequest {
                 candidate: &paths.server,
                 target: paths.target,
+                mode: ServerExecutionMode::Native,
                 sdk_candidate: &paths.sdk,
                 execution: &paths.execution,
                 consumer_execution: &paths.consumer_execution,
@@ -113,6 +118,7 @@ fn a_foreign_native_target_cannot_start_sdk_preparation() -> io::Result<()> {
                 ServerRequest {
                     candidate: &paths.server,
                     target: paths.target,
+                    mode: ServerExecutionMode::Native,
                     sdk_candidate: &paths.sdk,
                     execution: &paths.execution,
                     consumer_execution: &paths.consumer_execution,
@@ -151,6 +157,7 @@ fn a_real_sdk_preparation_spawn_failure_cannot_return_a_server_outcome() -> io::
             ServerRequest {
                 candidate: &paths.server,
                 target: paths.target,
+                mode: ServerExecutionMode::Native,
                 sdk_candidate: &paths.sdk,
                 execution: &paths.execution,
                 consumer_execution: &paths.consumer_execution,

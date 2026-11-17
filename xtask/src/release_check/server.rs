@@ -1,7 +1,10 @@
 use super::{candidate_run::RunError, CapturedReleaseSource, InputKey};
 #[cfg(not(unix))]
 use crate::process::ProcessError;
-use crate::{distribution::SdkPackage, server_distribution::ServerTarget};
+use crate::{
+    distribution::SdkPackage,
+    server_distribution::{ServerExecutionMode, ServerTarget},
+};
 use std::path::Path;
 
 #[cfg(unix)]
@@ -10,9 +13,7 @@ use super::candidate_run::{combine, conclude, Loaded, Paths, Workspace};
 use crate::{
     distribution::{PreparedSdkHttpConsumer, SdkHttpTarget},
     process::CommandSupervisor,
-    server_distribution::{
-        runtime_commands::RuntimeCommands, verify_loaded_server_configured, ServerExecutionMode,
-    },
+    server_distribution::{runtime_commands::RuntimeCommands, verify_loaded_server_configured},
 };
 #[cfg(unix)]
 use std::{
@@ -26,6 +27,7 @@ pub struct ServerOutcome<'a> {
     projection: InputKey,
     sdk_projection: InputKey,
     target: ServerTarget,
+    execution: ServerExecutionMode,
     version: String,
     checksum: String,
     source_digest: String,
@@ -44,6 +46,9 @@ impl ServerOutcome<'_> {
     }
     pub const fn target(&self) -> ServerTarget {
         self.target
+    }
+    pub const fn execution_mode(&self) -> ServerExecutionMode {
+        self.execution
     }
     pub fn version(&self) -> &str {
         &self.version
@@ -81,6 +86,7 @@ impl std::error::Error for ServerRunError {}
 struct ServerRequest<'a> {
     candidate: &'a Path,
     target: ServerTarget,
+    mode: ServerExecutionMode,
     sdk_candidate: &'a Path,
     execution: &'a Path,
     consumer_execution: &'a Path,
@@ -88,20 +94,21 @@ struct ServerRequest<'a> {
 }
 
 #[cfg(unix)]
-fn native(request: &ServerRequest<'_>) -> Result<(), RunError> {
-    match ServerExecutionMode::select(
+fn execution(request: &ServerRequest<'_>) -> Result<(), RunError> {
+    let mode = ServerExecutionMode::select(
         request.target,
         std::env::consts::OS,
         std::env::consts::ARCH,
-        false,
+        request.mode == ServerExecutionMode::Rosetta,
     )
-    .map_err(|error| RunError::io("native server target", error))?
-    {
-        ServerExecutionMode::Native => Ok(()),
-        ServerExecutionMode::Rosetta => Err(RunError::contract(
-            "native server target",
-            "release verification requires a native host target",
-        )),
+    .map_err(|error| RunError::io("server execution target", error))?;
+    if mode == request.mode {
+        Ok(())
+    } else {
+        Err(RunError::contract(
+            "server execution target",
+            "requested execution mode does not match the host and target",
+        ))
     }
 }
 
@@ -113,7 +120,7 @@ fn verify_server_with<'a>(
     mut configure: impl FnMut(&mut Command, Duration) -> io::Result<()>,
 ) -> Result<ServerOutcome<'a>, ServerRunError> {
     let operation = (|| {
-        native(&request)?;
+        execution(&request)?;
         Loaded::read(
             captured,
             request.candidate,
@@ -163,6 +170,13 @@ fn verify_server_with<'a>(
         output
             .flush()
             .map_err(|error| RunError::io("server artifact output", error))?;
+        writeln!(
+            output,
+            "Server verification target={} execution={}",
+            request.target.triple(),
+            request.mode.label(),
+        )
+        .map_err(|error| RunError::io("server execution output", error))?;
         let mut commands = RuntimeCommands::new(&mut supervisor, &mut configure);
         let mut prepared = Some(
             PreparedSdkHttpConsumer::prepare_with(
@@ -215,6 +229,7 @@ fn verify_server_with<'a>(
         projection: loaded.server_projection,
         sdk_projection: loaded.sdk_projection,
         target: request.target,
+        execution: request.mode,
         version: loaded.server.name().version().to_owned(),
         checksum: loaded.server.checksum().to_owned(),
         source_digest: loaded.server.source_digest().to_owned(),
@@ -231,6 +246,22 @@ impl CapturedReleaseSource {
         target: ServerTarget,
         sdk_candidate: &Path,
     ) -> Result<ServerOutcome<'_>, ServerRunError> {
+        self.verify_server_with_execution(
+            candidate,
+            target,
+            sdk_candidate,
+            ServerExecutionMode::Native,
+        )
+    }
+
+    /// Checks distributed server bytes under an explicit execution mode.
+    pub fn verify_server_with_execution(
+        &self,
+        candidate: &Path,
+        target: ServerTarget,
+        sdk_candidate: &Path,
+        mode: ServerExecutionMode,
+    ) -> Result<ServerOutcome<'_>, ServerRunError> {
         #[cfg(unix)]
         {
             let paths = Paths::new(candidate, "server").map_err(ServerRunError)?;
@@ -241,6 +272,7 @@ impl CapturedReleaseSource {
                 ServerRequest {
                     candidate,
                     target,
+                    mode,
                     sdk_candidate,
                     execution: &paths.execution,
                     consumer_execution: &paths.consumer_execution,
@@ -252,7 +284,7 @@ impl CapturedReleaseSource {
         }
         #[cfg(not(unix))]
         {
-            let _ = (candidate, target, sdk_candidate);
+            let _ = (candidate, target, sdk_candidate, mode);
             Err(ServerRunError(RunError::process(
                 "server supervisor",
                 ProcessError::UnsupportedSupervision,

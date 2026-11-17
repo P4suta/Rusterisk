@@ -1,4 +1,4 @@
-//! Server verification binds distributed bytes and executes the selected native target.
+//! Server verification binds distributed bytes and records the selected execution mode.
 //!
 //! ```no_run
 //! use std::path::Path;
@@ -16,7 +16,31 @@
 //! }
 //! ```
 //!
-//! Server outcomes require native execution.
+//! Translated execution requires an explicit mode and remains visible in its outcome.
+//!
+//! ```no_run
+//! use std::path::Path;
+//! use xtask::{
+//!     release_check::{CapturedReleaseSource, ServerOutcome, ServerRunError},
+//!     server_distribution::{ServerExecutionMode, ServerTarget},
+//! };
+//! fn translated<'a>(
+//!     captured: &'a CapturedReleaseSource,
+//!     candidate: &Path,
+//!     sdk_candidate: &Path,
+//! ) -> Result<ServerOutcome<'a>, ServerRunError> {
+//!     let outcome = captured.verify_server_with_execution(
+//!         candidate,
+//!         ServerTarget::MacOsX86_64,
+//!         sdk_candidate,
+//!         ServerExecutionMode::Rosetta,
+//!     )?;
+//!     assert_eq!(outcome.execution_mode(), ServerExecutionMode::Rosetta);
+//!     Ok(outcome)
+//! }
+//! ```
+//!
+//! Server outcomes require supervised candidate execution.
 //!
 //! ```compile_fail
 //! use xtask::{
