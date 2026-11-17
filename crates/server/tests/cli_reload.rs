@@ -102,16 +102,18 @@ fn reload_preserves_argument_capacity_and_rejects_ambiguous_options() {
         &["reload"],
     ];
     for extra in cases {
-        let mut arguments = vec![
+        let arguments = [
             "reload",
             "--server",
             "http://127.0.0.1:8088",
             "--username",
             "operator",
             "--password-stdin",
-        ];
-        arguments.extend_from_slice(extra);
-        assert!(parse(&arguments).is_err(), "{arguments:?}");
+        ]
+        .into_iter()
+        .chain(extra.iter().copied())
+        .map(OsString::from);
+        assert!(Command::parse(arguments).is_err(), "{extra:?}");
     }
     assert_eq!(parse(&["reload"; 17]), Err(CliError::Capacity));
     for option in ["--server", "--username"] {
