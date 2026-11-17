@@ -40,7 +40,7 @@ fn within_directory(operation: impl FnOnce(&Path) -> Result<(), String>) -> Resu
     }
 }
 
-fn run(request: SupervisedCommand) -> Result<(), ProcessError> {
+pub(super) fn run(request: SupervisedCommand) -> Result<(), ProcessError> {
     let mut supervisor = CommandSupervisor::new()?;
     let result = supervisor.run(&mut request.into_std(), Duration::from_secs(5));
     match (result, supervisor.finish()) {

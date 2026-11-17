@@ -1,6 +1,9 @@
 use std::{ffi::OsStr, fmt};
 use xtask::process::{CommandField, CommandRequestError, CommandStream, SupervisedCommand};
 
+#[path = "supervised_command/environment.rs"]
+mod environment;
+
 #[cfg(unix)]
 #[path = "supervised_command/unix.rs"]
 mod unix;
