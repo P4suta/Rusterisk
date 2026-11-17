@@ -5,7 +5,7 @@ use rusterisk_client::{
     },
     Client, Error,
 };
-use std::{future::IntoFuture, net::Ipv4Addr, time::Duration};
+use std::{net::Ipv4Addr, time::Duration};
 #[path = "reference/external_audio.rs"]
 mod external_audio;
 #[path = "reference/external_opus.rs"]
@@ -24,6 +24,8 @@ mod playback_position;
 mod recording_audio;
 #[path = "reference/request_bodies.rs"]
 mod request_bodies;
+#[path = "reference/runtime.rs"]
+mod runtime;
 #[path = "reference/server_info.rs"]
 mod server_info;
 #[path = "reference/sound_playback.rs"]
@@ -317,7 +319,7 @@ async fn compare_resources(
     outgoing: &mut external_websocket_clients::Fixture,
 ) -> Result<(), Error> {
     outgoing.configure_reference(&reference_address).await?;
-    let configuration = rusterisk_config::Config::parse(
+    let mut configuration = rusterisk_config::Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
         "[app]\ntype=user\npassword=test-password\n",
         &include_str!("../../../tests/interop/asterisk/pjsip.conf")
@@ -328,60 +330,30 @@ async fn compare_resources(
     .map_err(|_| Error::Invalid("reference configuration"))?
     .with_websocket_configuration("", &outgoing.configuration("127.0.0.1"))
     .map_err(|_| Error::Invalid("native WebSocket configuration"))?;
+    configuration.http.bind.set_port(0);
     let fixture_root = std::env::var("RUSTERISK_REFERENCE_CONFIGURATION")
         .map_err(|_| Error::Invalid("reference configuration directory is required"))?;
-    let native_data = std::path::Path::new(&fixture_root).join("native-data");
-    let (storage, storage_worker) =
-        sounds::prepare(std::path::Path::new(&fixture_root), &native_data).await?;
-    let (controller, runner, effects) = rusterisk_server::Controller::new(configuration.clone(), 4);
-    let (media, hub, notices) = rusterisk_server::media::MediaHub::new(4);
-    let signaling = rusterisk_server::signaling::Signaling::bind(
-        configuration,
-        controller.clone(),
-        effects,
-        media.clone(),
-        notices,
-    )
-    .await
-    .map_err(|_| Error::Invalid("native signaling"))?
-    .with_storage(storage.clone());
-    let signal_stop = controller.shutdown_signal();
-    let media_stop = controller.shutdown_signal();
-    let runner = tokio::spawn(
-        runner
-            .with_storage(storage)
-            .map_err(|_| Error::Invalid("reference storage"))?
-            .run(),
-    );
-    let hub = tokio::spawn(hub.run(media_stop));
-    let signaling = tokio::spawn(signaling.run(signal_stop));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let server = tokio::spawn(
-        axum::serve(
-            listener,
-            rusterisk_server::http::router_with_media(controller.clone(), media),
-        )
-        .into_future(),
-    );
+    let fixture =
+        runtime::Fixture::start(configuration, std::path::Path::new(&fixture_root)).await?;
+    let address = fixture.address();
+    let actual = fixture.client();
     let result = async {
-        let actual = Client::new(&format!("http://{address}"), "app", "test-password")?;
         server_info::compare(
-            &actual,
+            actual,
             &format!("http://{address}"),
             &reference,
             &reference_address,
         )
         .await?;
-        sounds::compare(&actual, &reference).await?;
+        sounds::compare(actual, &reference).await?;
         assert_eq!(actual.channels().await?, reference.channels().await?);
         assert_eq!(
             actual.applications().await?,
             reference.applications().await?
         );
-        compare_bridges(&actual, &reference).await?;
+        compare_bridges(actual, &reference).await?;
         request_bodies::compare(
-            &actual,
+            actual,
             &format!("http://{address}"),
             &reference,
             &reference_address,
@@ -494,19 +466,19 @@ async fn compare_resources(
             rejection(actual.application("missing").await)?,
             rejection(reference.application("missing").await)?
         );
-        compare_external_admission(&actual, &mut actual_session, app.as_str()).await?;
+        compare_external_admission(actual, &mut actual_session, app.as_str()).await?;
         compare_external_admission(&reference, &mut reference_session, app.as_str()).await?;
-        request_bodies::originate_with_id(&actual, &format!("http://{address}"), app.as_str())
+        request_bodies::originate_with_id(actual, &format!("http://{address}"), app.as_str())
             .await?;
         request_bodies::originate_with_id(&reference, &reference_address, app.as_str()).await?;
-        request_bodies::initial_variables(&actual, &format!("http://{address}"), app.as_str())
+        request_bodies::initial_variables(actual, &format!("http://{address}"), app.as_str())
             .await?;
         request_bodies::initial_variables(&reference, &reference_address, app.as_str()).await?;
-        request_bodies::websocket_variables(&actual, &format!("http://{address}"), app.as_str())
+        request_bodies::websocket_variables(actual, &format!("http://{address}"), app.as_str())
             .await?;
         request_bodies::websocket_variables(&reference, &reference_address, app.as_str()).await?;
         external_audio::compare(
-            &actual,
+            actual,
             &mut actual_session,
             app.as_str(),
             Ipv4Addr::LOCALHOST,
@@ -524,28 +496,28 @@ async fn compare_resources(
         )
         .await?;
         sound_playback::compare(
-            &actual,
+            actual,
             &mut actual_session,
             app.as_str(),
             Ipv4Addr::LOCALHOST,
         )
         .await?;
         playback_position::compare(
-            &actual,
+            actual,
             &mut actual_session,
             app.as_str(),
             Ipv4Addr::LOCALHOST,
         )
         .await?;
         recording_audio::compare(
-            &actual,
+            actual,
             &mut actual_session,
             app.as_str(),
             Ipv4Addr::LOCALHOST,
         )
         .await?;
         external_streams::compare(
-            &actual,
+            actual,
             &mut actual_session,
             app.as_str(),
             Ipv4Addr::LOCALHOST,
@@ -591,7 +563,7 @@ async fn compare_resources(
         )
         .await?;
         external_websockets::compare(
-            &actual,
+            actual,
             &format!("http://{address}"),
             &mut actual_session,
             app.as_str(),
@@ -607,7 +579,7 @@ async fn compare_resources(
         )
         .await?;
         external_opus::compare(
-            &actual,
+            actual,
             &format!("http://{address}"),
             &mut actual_session,
             app.as_str(),
@@ -620,38 +592,14 @@ async fn compare_resources(
             outgoing,
         )
         .await?;
-        external_websocket_clients::compare(&actual, &mut actual_session, app.as_str(), outgoing)
+        external_websocket_clients::compare(actual, &mut actual_session, app.as_str(), outgoing)
             .await?;
-        compare_subscriptions(&actual, &reference, app.as_str()).await?;
+        compare_subscriptions(actual, &reference, app.as_str()).await?;
         reference_session.shutdown().await?;
         actual_session.shutdown().await?;
         compare_existing_client(&format!("http://{address}"), &reference_address).await?;
         Ok(())
     }
     .await;
-    controller.shutdown();
-    runner
-        .await
-        .map_err(|_| Error::Closed)?
-        .map_err(|_| Error::Closed)?;
-    signaling
-        .await
-        .map_err(|_| Error::Closed)?
-        .map_err(|_| Error::Closed)?;
-    hub.await
-        .map_err(|_| Error::Closed)?
-        .map_err(|_| Error::Closed)?;
-    server.abort();
-    assert!(server.await.is_err());
-    let cleanup = storage_worker
-        .close()
-        .await
-        .map_err(|error| Error::Io(std::io::Error::other(error.to_string())));
-    match (result, cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-        (Err(primary), Err(cleanup)) => Err(Error::Cleanup(format!(
-            "{primary}; reference storage cleanup failed: {cleanup}"
-        ))),
-    }
+    fixture.finish(result).await
 }
