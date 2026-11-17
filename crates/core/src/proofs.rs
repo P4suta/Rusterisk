@@ -97,6 +97,7 @@ fn terminal_release_is_absorbing() {
     assert_eq!(call.media_connection(), MediaConnection::Released);
     assert_eq!(call.connection_claim(), ConnectionClaim::Released);
     assert_eq!(call.audio_gate(), AudioGate::Closed);
+    assert_eq!(call.music_gate(), AudioGate::Closed);
     assert_eq!(call.bridge(), None);
     assert_eq!(call.stasis(), StasisMembership::Released);
     let ended = call;
@@ -530,6 +531,7 @@ fn transfer_detachment_preserves_live_calls() {
                 assert_eq!(after.media_connection(), before.media_connection());
                 assert_eq!(after.connection_claim(), before.connection_claim());
                 assert_eq!(after.audio_gate(), before.audio_gate());
+                assert_eq!(after.music_gate(), before.music_gate());
                 assert_eq!(after.peer_direction(), before.peer_direction());
                 assert_eq!(after.stasis(), before.stasis());
             }
