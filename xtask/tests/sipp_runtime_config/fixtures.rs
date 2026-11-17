@@ -1,3 +1,4 @@
+use rusterisk_config::Config;
 use std::{
     io,
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -10,6 +11,45 @@ fn read(path: &str) -> io::Result<Vec<u8>> {
         .parent()
         .ok_or_else(|| io::Error::other("workspace missing"))?;
     std::fs::read(root.join(path))
+}
+
+#[test]
+fn all_generated_registration_settings_pass_the_native_configuration_parser() -> io::Result<()> {
+    let http = SocketAddr::from((Ipv4Addr::LOCALHOST, 49152));
+    let runtime = ServerRuntimeConfig::for_registration_comparison(http, 49153, read)?;
+    let source = |name: &str| -> io::Result<&str> {
+        let mut files = runtime.files().filter(|(path, _)| *path == name);
+        let (_, bytes) = files
+            .next()
+            .ok_or_else(|| io::Error::other(format!("Generated {name} is missing")))?;
+        if files.next().is_some() {
+            return Err(io::Error::other(format!("Generated {name} is ambiguous")));
+        }
+        std::str::from_utf8(bytes).map_err(io::Error::other)
+    };
+    let parsed = Config::parse(
+        source("config/http.conf")?,
+        source("config/ari.conf")?,
+        source("config/pjsip.conf")?,
+        source("config/rtp.conf")?,
+        source("config/extensions.conf")?,
+    )
+    .map_err(io::Error::other)?;
+    assert_eq!(parsed.http.bind, http);
+    let [transport] = parsed.transports.as_slice() else {
+        return Err(io::Error::other(
+            "The comparison SIP listener is not unique",
+        ));
+    };
+    assert_eq!(
+        transport.bind,
+        SocketAddr::from((Ipv4Addr::UNSPECIFIED, 49153))
+    );
+    assert!(parsed
+        .endpoints
+        .iter()
+        .any(|endpoint| endpoint.name == "phone" && endpoint.transport == transport.name));
+    Ok(())
 }
 
 #[test]
