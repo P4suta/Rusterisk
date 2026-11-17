@@ -1,6 +1,8 @@
 mod control;
 #[cfg(feature = "media")]
 mod packets;
+#[cfg(feature = "signaling")]
+mod registration_responses;
 mod settings;
 #[cfg(feature = "signaling")]
 mod signaling;
@@ -11,6 +13,8 @@ mod targets;
 pub use control::controls;
 #[cfg(feature = "media")]
 pub use packets::media;
+#[cfg(feature = "signaling")]
+pub use registration_responses::registration_responses;
 pub use settings::settings;
 #[cfg(feature = "signaling")]
 pub use signaling::sip;
@@ -28,6 +32,12 @@ pub enum OracleError {
     SessionEncoding,
     SessionChanged,
     SignalingCapacity,
+    RegistrationSetup,
+    RegistrationReceipt,
+    RegistrationClock,
+    RegistrationDeadline,
+    RegistrationCancellation,
+    RegistrationSettlement,
     AudioEncoding,
     AudioChanged,
     PacketEncoding,

@@ -1,4 +1,4 @@
-use crate::{stream, OracleError, MAX_INPUT};
+use crate::{registration_responses, stream, OracleError, MAX_INPUT};
 use rusterisk_config::{Codec, Config};
 use rusterisk_sip::{
     Direction, Engine, Session, SessionSecurity, SipStreamDecoder, StreamFramingError,
@@ -35,7 +35,7 @@ pub fn sip(bytes: &[u8]) -> Result<usize, OracleError> {
             return Err(OracleError::StreamChanged);
         }
     }
-    let mut accepted = expected.messages.len();
+    let mut accepted = expected.messages.len() + registration_responses(bytes)?;
     let config = Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
         "[fuzzer]\ntype=user\npassword=fuzz-password\n",

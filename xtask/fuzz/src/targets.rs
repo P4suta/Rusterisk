@@ -12,6 +12,10 @@ pub struct Seed {
     pub valid: bool,
 }
 
+pub(crate) const REGISTRATION_UDP: &[u8] = b"SIP/2.0 200 Response\r\nVia: SIP/2.0/UDP 127.0.0.1:5068;rport;branch=z9hG4bK-reg-00000000000000000000000000005678-7\r\nFrom: <sip:account@provider.example>;tag=reg-00000000000000000000000000005678\r\nTo: <sip:account@provider.example>;tag=registrar\r\nCall-ID: reg-00000000000000000000000000001234@rusterisk\r\nCSeq: 7 REGISTER\r\nContent-Length: 0\r\n\r\n";
+pub(crate) const REGISTRATION_TCP: &[u8] = b"SIP/2.0 200 Response\r\nVia: SIP/2.0/TCP 127.0.0.1:5068;rport;branch=z9hG4bK-reg-00000000000000000000000000005678-7\r\nFrom: <sip:account@provider.example>;tag=reg-00000000000000000000000000005678\r\nTo: <sip:account@provider.example>;tag=registrar\r\nCall-ID: reg-00000000000000000000000000001234@rusterisk\r\nCSeq: 7 REGISTER\r\nContent-Length: 0\r\n\r\n";
+pub(crate) const REGISTRATION_TLS: &[u8] = b"SIP/2.0 200 Response\r\nVia: SIP/2.0/TLS 127.0.0.1:5068;rport;branch=z9hG4bK-reg-00000000000000000000000000005678-7\r\nFrom: <sips:account@provider.example>;tag=reg-00000000000000000000000000005678\r\nTo: <sips:account@provider.example>;tag=registrar\r\nCall-ID: reg-00000000000000000000000000001234@rusterisk\r\nCSeq: 7 REGISTER\r\nContent-Length: 0\r\n\r\n";
+
 impl Target {
     pub const ALL: [Self; 4] = [Self::Settings, Self::Controls, Self::Sip, Self::Media];
 
@@ -63,6 +67,13 @@ impl Target {
                 Seed { name: "duplicate-length", bytes: b"OPTIONS sip:fuzzer SIP/2.0\r\nContent-Length: 0\r\nl: 0\r\n\r\n", valid: false },
                 Seed { name: "incomplete", bytes: b"OPTIONS sip:fuzzer SIP/2.0\r\nContent-Length: 9\r\n\r\nshort", valid: false },
                 Seed { name: "capacity", bytes: &[b'A'; 16385], valid: false },
+                Seed { name: "registration-udp-final", bytes: REGISTRATION_UDP, valid: true },
+                Seed { name: "registration-tcp-final", bytes: REGISTRATION_TCP, valid: true },
+                Seed { name: "registration-tls-final", bytes: REGISTRATION_TLS, valid: true },
+                Seed { name: "registration-incomplete", bytes: b"SIP/2.0 200 Response\r\nVia: ", valid: false },
+                Seed { name: "registration-invalid-status", bytes: b"SIP/2.0 ??? Response\r\nContent-Length: 0\r\n\r\n", valid: false },
+                Seed { name: "registration-invalid-line", bytes: b"SIP/2.0 200 Response\nContent-Length: 0\n\n", valid: false },
+                Seed { name: "registration-message-capacity", bytes: &[b'A'; 16385], valid: false },
             ],
             Self::Media => &[
                 Seed { name: "terminate", bytes: b"\0\0\0", valid: true },
