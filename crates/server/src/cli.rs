@@ -5,6 +5,10 @@ use std::path::PathBuf;
 pub enum Command {
     Help,
     Version,
+    Reload {
+        server: String,
+        username: String,
+    },
     Check {
         directory: PathBuf,
         data_directory: PathBuf,
@@ -21,6 +25,8 @@ pub enum CliError {
     MissingDirectory,
     DuplicateOption,
     Capacity,
+    MissingReloadArgument,
+    InvalidReloadArgument,
 }
 
 impl std::fmt::Display for CliError {
@@ -30,6 +36,10 @@ impl std::fmt::Display for CliError {
             Self::MissingDirectory => "A directory path is required",
             Self::DuplicateOption => "Duplicate option",
             Self::Capacity => "Command arguments exceed capacity",
+            Self::MissingReloadArgument => {
+                "Reload requires --server, --username, and --password-stdin"
+            }
+            Self::InvalidReloadArgument => "Invalid reload argument",
         })
     }
 }
@@ -57,6 +67,9 @@ impl Command {
         }
         if arguments.len() > 16 {
             return Err(CliError::Capacity);
+        }
+        if arguments.first().is_some_and(|value| value == "reload") {
+            return Self::parse_reload(arguments.into_iter().skip(1));
         }
         let mut arguments = arguments.into_iter();
         let mut directory = None;
@@ -102,6 +115,52 @@ impl Command {
             },
         })
     }
+
+    fn parse_reload(mut arguments: impl Iterator<Item = OsString>) -> Result<Self, CliError> {
+        let mut server = None;
+        let mut username = None;
+        let mut password_stdin = false;
+        while let Some(argument) = arguments.next() {
+            match argument.to_str() {
+                Some(option @ ("--server" | "--username")) => {
+                    let (destination, maximum) = if option == "--server" {
+                        (&mut server, 2048)
+                    } else {
+                        (&mut username, 128)
+                    };
+                    if destination.is_some() {
+                        return Err(CliError::DuplicateOption);
+                    }
+                    let value = arguments.next().ok_or(CliError::MissingReloadArgument)?;
+                    if value.is_empty() {
+                        return Err(CliError::MissingReloadArgument);
+                    }
+                    if value.as_encoded_bytes().len() > maximum {
+                        return Err(CliError::Capacity);
+                    }
+                    *destination = Some(
+                        value
+                            .into_string()
+                            .map_err(|_| CliError::InvalidReloadArgument)?,
+                    );
+                }
+                Some("--password-stdin") => {
+                    if password_stdin {
+                        return Err(CliError::DuplicateOption);
+                    }
+                    password_stdin = true;
+                }
+                Some(_) | None => return Err(CliError::UnknownOption),
+            }
+        }
+        if !password_stdin {
+            return Err(CliError::MissingReloadArgument);
+        }
+        Ok(Self::Reload {
+            server: server.ok_or(CliError::MissingReloadArgument)?,
+            username: username.ok_or(CliError::MissingReloadArgument)?,
+        })
+    }
 }
 
-pub const HELP: &str = "Rusterisk call server.\n\nUsage: rusterisk [--config-dir PATH] [--data-dir PATH] [--check-config]\n\n--config-dir PATH  Read Asterisk configuration from PATH (default: config).\n--data-dir PATH    Store calls and recordings in PATH (default: data).\n--check-config     Validate configuration and exit.\n-h, --help         Print usage and exit.\n-V, --version      Print the version and exit.\n";
+pub const HELP: &str = "Rusterisk call server.\n\nUsage: rusterisk [--config-dir PATH] [--data-dir PATH] [--check-config]\n       rusterisk reload --server URL --username USER --password-stdin\n\n--config-dir PATH  Read Asterisk configuration from PATH (default: config).\n--data-dir PATH    Store calls and recordings in PATH (default: data).\n--check-config     Validate configuration and exit.\n--server URL       Address the running server using HTTPS or loopback HTTP.\n--username USER    Authenticate reload with the current server user.\n--password-stdin   Read the current password from nonterminal standard input.\n-h, --help         Print usage and exit.\n-V, --version      Print the version and exit.\n";

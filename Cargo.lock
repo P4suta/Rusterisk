@@ -2423,6 +2423,7 @@ dependencies = [
  "rsipstack",
  "rusqlite",
  "rusterisk-api",
+ "rusterisk-client",
  "rusterisk-config",
  "rusterisk-core",
  "rusterisk-media",

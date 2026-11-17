@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 rusterisk-api = { version = "0.1.0", path = "../api" }
+rusterisk-client = { version = "0.1.0", path = "../client" }
 rusterisk-core = { version = "0.1.0", path = "../core" }
 rusterisk-config = { version = "0.1.0", path = "../config" }
 rusterisk-media = { version = "0.1.0", path = "../media" }
