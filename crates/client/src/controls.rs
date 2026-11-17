@@ -19,6 +19,24 @@ impl Client {
         self.request("channels.unhold", &[("channelId", id.as_str())], &[])
             .await
     }
+    pub async fn start_music_on_hold(
+        &self,
+        id: &api::ChannelId,
+        class: Option<&str>,
+    ) -> Result<(), Error> {
+        let path = [("channelId", id.as_str())];
+        match class {
+            Some(class) => {
+                self.request("channels.startMoh", &path, &[("mohClass", class)])
+                    .await
+            }
+            None => self.request("channels.startMoh", &path, &[]).await,
+        }
+    }
+    pub async fn stop_music_on_hold(&self, id: &api::ChannelId) -> Result<(), Error> {
+        self.request("channels.stopMoh", &[("channelId", id.as_str())], &[])
+            .await
+    }
     pub async fn mute(&self, id: &api::ChannelId, direction: MuteDirection) -> Result<(), Error> {
         self.audio_direction("channels.mute", id, direction).await
     }
