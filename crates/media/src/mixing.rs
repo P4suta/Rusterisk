@@ -28,6 +28,7 @@ struct Input {
     bridge: Option<u64>,
     frames: VecDeque<Frame>,
     gate: Gate,
+    generated_audio_gate: Gate,
 }
 
 pub struct Mixer<K> {
@@ -67,6 +68,7 @@ impl<K: Ord + Clone> Mixer<K> {
                 bridge: None,
                 frames: VecDeque::with_capacity(3),
                 gate: Gate::Open,
+                generated_audio_gate: Gate::Open,
             },
         );
         Ok(())
@@ -109,11 +111,21 @@ impl<K: Ord + Clone> Mixer<K> {
     }
 
     pub fn gate(&mut self, key: &K, gate: Gate) -> Result<(), MediaError> {
+        self.gates(key, gate, gate)
+    }
+
+    pub fn gates(
+        &mut self,
+        key: &K,
+        gate: Gate,
+        generated_audio_gate: Gate,
+    ) -> Result<(), MediaError> {
         let input = self.inputs.get_mut(key).ok_or(MediaError::UnknownStream)?;
         if input.gate != gate {
             input.frames.clear();
             input.gate = gate;
         }
+        input.generated_audio_gate = generated_audio_gate;
         Ok(())
     }
 
@@ -195,23 +207,25 @@ impl<K: Ord + Clone> Mixer<K> {
                     key.clone(),
                     input.bridge,
                     input.gate,
+                    input.generated_audio_gate,
                     frame.filter(|_| input.gate.receives()),
                 )
             })
             .collect();
         let mut output = Vec::with_capacity(frames.len());
-        for (key, bridge, gate, _) in &frames {
+        for (key, bridge, gate, generated_audio_gate, _) in &frames {
             let mut sum = [0i32; MAX_SAMPLES];
-            if let Some((_, music_gate, frame)) = music.iter().find(|(target, _, _)| target == key)
+            if let Some((_, generated_gate, frame)) =
+                music.iter().find(|(target, _, _)| target == key)
             {
-                if music_gate.sends() {
+                if generated_gate.sends() {
                     for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
                         *sum = i32::from(*sample);
                     }
                 }
             } else {
                 if bridge.is_some() && gate.sends() {
-                    for (source, source_bridge, _, frame) in &frames {
+                    for (source, source_bridge, _, _, frame) in &frames {
                         if source != key && source_bridge == bridge {
                             if let Some(frame) = frame {
                                 for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
@@ -221,16 +235,18 @@ impl<K: Ord + Clone> Mixer<K> {
                         }
                     }
                 }
-                if gate.sends() {
-                    for (target, frame) in playback {
-                        let matches = match target {
-                            AudioTarget::Channel(destination) => destination == key,
-                            AudioTarget::Bridge(destination) => Some(*destination) == *bridge,
-                        };
-                        if matches {
-                            for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
-                                *sum += i32::from(*sample);
-                            }
+                for (target, frame) in playback {
+                    let permitted = match target {
+                        AudioTarget::Channel(destination) => {
+                            destination == key && generated_audio_gate.sends()
+                        }
+                        AudioTarget::Bridge(destination) => {
+                            Some(*destination) == *bridge && gate.sends()
+                        }
+                    };
+                    if permitted {
+                        for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
+                            *sum += i32::from(*sample);
                         }
                     }
                 }
@@ -240,7 +256,7 @@ impl<K: Ord + Clone> Mixer<K> {
         }
         let bridge_ids = frames
             .iter()
-            .filter_map(|(_, bridge, _, _)| *bridge)
+            .filter_map(|(_, bridge, _, _, _)| *bridge)
             .chain(playback.iter().filter_map(|(target, _)| match target {
                 AudioTarget::Bridge(bridge) => Some(*bridge),
                 AudioTarget::Channel(_) => None,
@@ -249,7 +265,7 @@ impl<K: Ord + Clone> Mixer<K> {
         let mut bridges = Vec::with_capacity(bridge_ids.len());
         for bridge in bridge_ids {
             let mut sum = [0i32; MAX_SAMPLES];
-            for (_, source_bridge, _, frame) in &frames {
+            for (_, source_bridge, _, _, frame) in &frames {
                 if *source_bridge == Some(bridge) {
                     if let Some(frame) = frame {
                         for (sum, sample) in sum.iter_mut().zip(frame.samples()) {

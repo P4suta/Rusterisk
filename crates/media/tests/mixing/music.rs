@@ -46,6 +46,32 @@ fn music_uses_its_purpose_gate_while_conversation_stays_closed() -> Result<(), M
 }
 
 #[test]
+fn generated_permission_opens_channel_playback_without_opening_conversation_or_bridge_playback(
+) -> Result<(), MediaError> {
+    let mut mixer = Mixer::new(2);
+    mixer.insert(1)?;
+    mixer.insert(2)?;
+    mixer.bridge(10, &[1, 2])?;
+    let playback = [
+        (AudioTarget::Channel(1), frame(3600)?),
+        (AudioTarget::Bridge(10), frame(1000)?),
+    ];
+    for (generated, expected) in [(Gate::Open, 3600), (Gate::OutgoingMuted, 0)] {
+        mixer.gates(&1, Gate::Closed, generated)?;
+        mixer.push(&1, frame(4000)?)?;
+        mixer.push(&2, frame(-7000)?)?;
+        let mixed = mixer.tick_with_playback(&playback)?;
+        assert_eq!(mixed.channels[0].1.samples(), &[expected; 960]);
+        assert_eq!(mixed.channels[1].1.samples(), &[1000; 960]);
+        assert_eq!(mixed.bridges[0].1.samples(), &[-6000; 960]);
+    }
+    mixer.gate(&1, Gate::Closed)?;
+    let mixed = mixer.tick_with_playback(&playback)?;
+    assert_eq!(mixed.channels[0].1.samples(), &[0; 960]);
+    Ok(())
+}
+
+#[test]
 fn an_active_muted_music_source_cannot_expose_bridge_audio() -> Result<(), MediaError> {
     let mut mixer = Mixer::new(2);
     mixer.insert(1)?;
