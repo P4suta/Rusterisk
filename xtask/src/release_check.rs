@@ -4,6 +4,9 @@ mod aggregate;
 #[cfg(all(test, unix))]
 mod candidate_fixtures;
 mod candidate_run;
+mod cli_inputs;
+#[cfg(test)]
+mod cli_inputs_tests;
 mod inputs;
 mod native;
 #[cfg(unix)]
@@ -19,6 +22,7 @@ pub use aggregate::{
     CandidateCheckError, CandidateChecks, CandidateImages, CandidateProfile,
     CompletedCandidateChecks, RunnerOutcome,
 };
+pub use cli_inputs::{ReleaseInputError, ReleaseInputs, ReleaseRequest};
 pub use inputs::{InputError, InputKey, SourceInputs};
 pub use native::{FastOutcome, NativeGateError, SecurityOutcome};
 pub use oci::{OciOutcome, OciRunError};
