@@ -2,6 +2,9 @@ use super::{CallKey, ChannelEntry, Control, ControlError};
 use crate::{call_profiles::NativeProfileCatalog, storage::PreparedMusic, NativeCallProfile};
 use rusterisk_core::{SettingsGeneration, SettingsReference};
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone)]
 pub(super) struct CallSettings {
     pub(super) native_profiles: Option<NativeProfileCatalog>,
