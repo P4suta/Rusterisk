@@ -108,9 +108,19 @@ fn assert_starting_authority(engine: &mut Engine, invite: &Request) -> Result<()
 }
 
 fn assert_captured_profile(replacement: Config) -> Result<(), SipError> {
-    let profile = OutboundProfile::capture(&starting_configuration()?, "phone")?;
+    let mut starting = starting_configuration()?;
+    starting.transports[0].bind.set_port(0);
+    let profile = OutboundProfile::capture(&starting, "phone")?;
+    let copied = profile
+        .clone()
+        .bind_address("127.0.0.1:0".parse()?, "127.0.0.1:5060".parse()?)?;
+    let diagnostic = format!("{copied:?}");
+    assert!(!diagnostic.contains("password"));
+    assert!(!diagnostic.contains("starting-auth"));
+    assert!(!diagnostic.contains("inbound-only"));
+    drop(profile);
     let mut engine = Engine::new(replacement, [31; 32]).with_transport(Protocol::Udp);
-    let prepared = engine.prepare_outbound(profile, 0)?;
+    let prepared = engine.prepare_outbound(copied, 0)?;
     assert_eq!(
         prepared.destination(),
         &Destination::Static(StaticTarget::from_uri(Protocol::Udp, TARGET)?)
@@ -148,6 +158,36 @@ fn assert_captured_profile(replacement: Config) -> Result<(), SipError> {
     assert_starting_invite(&retried)?;
     assert_starting_auth(&retried)?;
     assert_starting_authority(&mut engine, &retried)
+}
+
+#[test]
+fn bound_profile_addresses_refuse_mismatched_requests_and_unusable_ports() -> Result<(), SipError> {
+    let mut starting = starting_configuration()?;
+    starting.transports[0].bind.set_port(0);
+    for (requested, bound) in [
+        ("127.0.0.1:5060", "127.0.0.1:5060"),
+        ("127.0.0.1:0", "127.0.0.1:0"),
+        ("127.0.0.1:0", "127.0.0.2:5060"),
+        ("127.0.0.1:0", "[::1]:5060"),
+        ("127.0.0.1:0", "224.0.0.1:5060"),
+    ] {
+        let profile = OutboundProfile::capture(&starting, "phone")?;
+        assert!(profile
+            .bind_address(requested.parse()?, bound.parse()?)
+            .is_err());
+    }
+    let profile = OutboundProfile::capture(&starting_configuration()?, "phone")?;
+    assert!(profile
+        .bind_address("127.0.0.1:5060".parse()?, "127.0.0.1:5061".parse()?)
+        .is_err());
+    starting.transports[0].bind = "0.0.0.0:0".parse()?;
+    assert!(OutboundProfile::capture(&starting, "phone")?
+        .bind_address("0.0.0.0:0".parse()?, "127.0.0.1:5060".parse()?)
+        .is_ok());
+    assert!(OutboundProfile::capture(&starting, "phone")?
+        .bind_address("0.0.0.0:0".parse()?, "224.0.0.1:5060".parse()?)
+        .is_err());
+    Ok(())
 }
 
 #[test]
