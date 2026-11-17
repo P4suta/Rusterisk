@@ -666,6 +666,11 @@ async fn dispatch(
         },
         ("POST", ["ari", "channels", channel, "hold"]) => Action::Hold(id(channel)?),
         ("DELETE", ["ari", "channels", channel, "hold"]) => Action::Unhold(id(channel)?),
+        ("POST", ["ari", "channels", channel, "moh"]) => Action::StartMusic {
+            channel: id(channel)?,
+            class: parameters.get("mohClass").cloned(),
+        },
+        ("DELETE", ["ari", "channels", channel, "moh"]) => Action::StopMusic(id(channel)?),
         ("POST", ["ari", "channels", channel, "mute"]) => Action::Mute {
             channel: id(channel)?,
             direction: mute_direction(parameters)?,
