@@ -14,11 +14,11 @@ The [channel contract](https://github.com/asterisk/asterisk/blob/22.9.0/rest-api
 ## Decision
 
 Bind music sources and saved cursors to channel generations and starting class snapshots.
-Share existing bounded media admission and terminal release.
+Share bounded media admission and terminal release.
 Select music as the channel's output source while preserving `channels.mute` and negotiated media direction.
 Loop validated, nonempty class audio before publishing end-of-file.
 Save the position actually consumed, excluding prefetched frames.
-Stop music before `/play` and require an explicit restart.
+Admit `/play` before stopping music and require an explicit restart.
 Report unavailable adapters or sources as identifiable failures.
 
 ## Alternatives
