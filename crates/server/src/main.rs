@@ -23,7 +23,10 @@ enum AppError {
 impl AppError {
     const fn status(&self) -> u8 {
         match self {
-            Self::Arguments(_) | Self::Config(_) | Self::CredentialInput(_) => 2,
+            Self::Arguments(_)
+            | Self::Config(_)
+            | Self::CredentialInput(_)
+            | Self::Control(ControlError::Configuration(_)) => 2,
             Self::Control(_)
             | Self::Runtime(_)
             | Self::Logging(_)
@@ -106,8 +109,8 @@ async fn shutdown_signal() -> Result<(), io::Error> {
     tokio::signal::ctrl_c().await
 }
 
-async fn start(config: Config, data_directory: PathBuf) -> Result<(), AppError> {
-    let server = Server::bind(config, 64, data_directory)
+async fn start(directory: PathBuf, data_directory: PathBuf) -> Result<(), AppError> {
+    let server = Server::bind_from_directory(directory, 64, data_directory)
         .await
         .map_err(AppError::Control)?;
     let controller = server.controller();
@@ -176,13 +179,12 @@ fn execute(command: Command) -> Result<(), AppError> {
             directory,
             data_directory,
         } => {
-            let config = Config::load(&directory).map_err(AppError::Config)?;
             let subscriber = tracing_subscriber::fmt()
                 .json()
                 .with_max_level(tracing::Level::INFO)
                 .finish();
             tracing::subscriber::set_global_default(subscriber).map_err(AppError::Logging)?;
-            runtime()?.block_on(start(config, data_directory))
+            runtime()?.block_on(start(directory, data_directory))
         }
     }
 }
