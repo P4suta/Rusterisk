@@ -1052,14 +1052,20 @@ impl Config {
     }
 
     pub fn reload(&self, replacement: &Self) -> Reload {
-        if self.http != replacement.http
-            || self.transports != replacement.transports
-            || self.rtp != replacement.rtp
-            || (self.origins != replacement.origins
-                && self
-                    .transports
-                    .iter()
-                    .any(|transport| matches!(transport.protocol, Protocol::Ws | Protocol::Wss)))
+        if self.http.bind != replacement.http.bind
+            || self.http.tls.is_some() != replacement.http.tls.is_some()
+            || self.transports.len() != replacement.transports.len()
+            || self
+                .transports
+                .iter()
+                .zip(&replacement.transports)
+                .any(|(current, replacement)| {
+                    current.name != replacement.name
+                        || current.protocol != replacement.protocol
+                        || current.bind != replacement.bind
+                })
+            || self.rtp.start != replacement.rtp.start
+            || self.rtp.end != replacement.rtp.end
         {
             Reload::RestartRequired
         } else {

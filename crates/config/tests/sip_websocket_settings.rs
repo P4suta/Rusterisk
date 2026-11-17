@@ -69,7 +69,7 @@ fn ambiguous_websocket_transport_metadata_is_rejected_before_binding() {
 }
 
 #[test]
-fn websocket_origin_policy_replacement_requires_listener_restart() -> Result<(), ConfigError> {
+fn websocket_origin_policy_replacement_preserves_listener_identity() -> Result<(), ConfigError> {
     let source =
         "[general]\nallowed_origins=https://browser.example\n[app]\ntype=user\npassword=test\n";
     let sip = "[browser]\ntype=transport\nprotocol=ws\nbind=0.0.0.0\n";
@@ -81,7 +81,7 @@ fn websocket_origin_policy_replacement_requires_listener_restart() -> Result<(),
         "",
         "",
     )?;
-    assert_eq!(current.reload(&replacement), Reload::RestartRequired);
+    assert_eq!(current.reload(&replacement), Reload::Apply);
     let current = Config::parse(HTTP, source, "", "", "")?;
     let replacement = Config::parse(
         HTTP,
