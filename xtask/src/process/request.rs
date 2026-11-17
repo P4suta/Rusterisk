@@ -89,11 +89,17 @@ impl CommandStream {
     }
 }
 
+enum EnvironmentBase {
+    Inherit,
+    Clear,
+}
+
 /// A bounded command request with private values omitted from diagnostics.
 pub struct SupervisedCommand {
     program: OsString,
     arguments: Vec<OsString>,
-    environment: BTreeMap<OsString, OsString>,
+    environment_base: EnvironmentBase,
+    environment: BTreeMap<OsString, Option<OsString>>,
     directory: Option<PathBuf>,
     stdout: CommandStream,
     stderr: CommandStream,
@@ -146,6 +152,7 @@ impl SupervisedCommand {
         Ok(Self {
             program: program.to_os_string(),
             arguments: Vec::new(),
+            environment_base: EnvironmentBase::Inherit,
             environment: BTreeMap::new(),
             directory: None,
             stdout: CommandStream::Null,
@@ -179,10 +186,27 @@ impl SupervisedCommand {
         name: impl AsRef<OsStr>,
         value: impl AsRef<OsStr>,
     ) -> Result<&mut Self, CommandRequestError> {
-        let name = name.as_ref();
-        let value = value.as_ref();
+        self.change_environment(name.as_ref(), Some(value.as_ref()))
+    }
+
+    /// Records a removal without inheriting the named value.
+    pub fn env_remove(
+        &mut self,
+        name: impl AsRef<OsStr>,
+    ) -> Result<&mut Self, CommandRequestError> {
+        self.change_environment(name.as_ref(), None)
+    }
+
+    fn change_environment(
+        &mut self,
+        name: &OsStr,
+        value: Option<&OsStr>,
+    ) -> Result<&mut Self, CommandRequestError> {
         let name_bytes = encoded_len(name, CommandField::EnvironmentName)?;
-        let value_bytes = encoded_len(value, CommandField::EnvironmentValue)?;
+        let value_bytes = value
+            .map(|value| encoded_len(value, CommandField::EnvironmentValue))
+            .transpose()?
+            .unwrap_or(0);
         if name.as_encoded_bytes().contains(&b'=') {
             return Err(CommandRequestError::InvalidEnvironmentName);
         }
@@ -190,10 +214,26 @@ impl SupervisedCommand {
         if existing.is_none() && self.environment.len() >= Self::MAX_ENVIRONMENT {
             return Err(CommandRequestError::TooManyEnvironmentVariables);
         }
-        let removed = existing.map_or(0, |value| name_bytes + value.len());
+        let removed = existing.map_or(0, |value| {
+            name_bytes + value.as_ref().map_or(0, |value| value.len())
+        });
         let bytes = self.changed_bytes(removed, name_bytes + value_bytes)?;
         self.environment
-            .insert(name.to_os_string(), value.to_os_string());
+            .insert(name.to_os_string(), value.map(OsStr::to_os_string));
+        self.bytes = bytes;
+        Ok(self)
+    }
+
+    /// Discards explicit changes and disables inherited environment variables.
+    pub fn env_clear(&mut self) -> Result<&mut Self, CommandRequestError> {
+        let removed = self
+            .environment
+            .iter()
+            .map(|(name, value)| name.len() + value.as_ref().map_or(0, |value| value.len()))
+            .sum();
+        let bytes = self.changed_bytes(removed, 0)?;
+        self.environment.clear();
+        self.environment_base = EnvironmentBase::Clear;
         self.bytes = bytes;
         Ok(self)
     }
@@ -227,7 +267,19 @@ impl SupervisedCommand {
     /// Transfers owned output files into the standard process adapter.
     pub fn into_std(self) -> Command {
         let mut command = Command::new(self.program);
-        command.args(self.arguments).envs(self.environment);
+        command.args(self.arguments);
+        match self.environment_base {
+            EnvironmentBase::Inherit => {}
+            EnvironmentBase::Clear => {
+                command.env_clear();
+            }
+        }
+        for (name, value) in self.environment {
+            match value {
+                Some(value) => command.env(name, value),
+                None => command.env_remove(name),
+            };
+        }
         if let Some(directory) = self.directory {
             command.current_dir(directory);
         }
