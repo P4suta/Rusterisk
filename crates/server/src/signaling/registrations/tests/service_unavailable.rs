@@ -20,6 +20,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::net::UdpSocket;
+#[path = "service_unavailable/exhaustion.rs"]
+mod exhaustion;
 #[path = "service_unavailable/persistent_wait.rs"]
 mod persistent_wait;
 
