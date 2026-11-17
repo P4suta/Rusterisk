@@ -1,8 +1,42 @@
-use super::{run, TaskError};
+use super::TaskError;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+
+struct DenyTemporary {
+    directory: PathBuf,
+}
+
+impl DenyTemporary {
+    fn create(root: &Path) -> std::io::Result<Self> {
+        let directory = root.join("temporary");
+        std::fs::create_dir(&directory)?;
+        Ok(Self {
+            directory: directory.canonicalize()?,
+        })
+    }
+
+    fn command(&self, arguments: &[&str]) -> Command {
+        let mut command = Command::new("cargo");
+        command
+            .args(arguments)
+            .env("TMPDIR", &self.directory)
+            .env("TMP", &self.directory)
+            .env("TEMP", &self.directory);
+        command
+    }
+
+    fn run(&self, arguments: &[&str]) -> Result<(), TaskError> {
+        println!("check: cargo {}", arguments.join(" "));
+        let status = self.command(arguments).status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(TaskError::Contract(format!("cargo failed: {status}")))
+        }
+    }
+}
 
 fn bounded_text(path: &Path) -> Result<String, TaskError> {
     let mut text = String::new();
@@ -70,18 +104,16 @@ fn snapshot(root: &Path) -> Result<(), TaskError> {
     let config = config
         .to_str()
         .ok_or_else(|| TaskError::Contract("security configuration path must be UTF-8".into()))?;
-    run(
-        "cargo",
-        &[
-            "deny",
-            "--config",
-            config,
-            "fetch",
-            "db",
-            "index",
-            "std-replacement",
-        ],
-    )?;
+    let temporary = DenyTemporary::create(root)?;
+    temporary.run(&[
+        "deny",
+        "--config",
+        config,
+        "fetch",
+        "db",
+        "index",
+        "std-replacement",
+    ])?;
     let mut count = 0;
     for entry in std::fs::read_dir(&database)? {
         let entry = entry?;
@@ -119,21 +151,18 @@ fn snapshot(root: &Path) -> Result<(), TaskError> {
         return Err(TaskError::Contract("no advisory database inspected".into()));
     }
     for manifest in ["Cargo.toml", "xtask/fuzz/Cargo.toml"] {
-        run(
-            "cargo",
-            &[
-                "deny",
-                "--manifest-path",
-                manifest,
-                "--all-features",
-                "--config",
-                config,
-                "--offline",
-                "--locked",
-                "check",
-                "--hide-inclusion-graph",
-            ],
-        )?;
+        temporary.run(&[
+            "deny",
+            "--manifest-path",
+            manifest,
+            "--all-features",
+            "--config",
+            config,
+            "--offline",
+            "--locked",
+            "check",
+            "--hide-inclusion-graph",
+        ])?;
     }
     legacy(root)?;
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
@@ -171,3 +200,6 @@ pub(super) fn check() -> Result<(), TaskError> {
         ))),
     }
 }
+
+#[cfg(test)]
+mod tests;
