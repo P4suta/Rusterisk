@@ -32,6 +32,8 @@ pub use ready::check_server_ready_log;
 #[cfg(unix)]
 mod native;
 #[cfg(unix)]
+pub(crate) mod runtime_commands;
+#[cfg(unix)]
 pub use native::{
     check_server_startup_for_target_with, check_server_startup_with, verify_server_native_with,
 };

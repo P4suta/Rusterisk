@@ -8,6 +8,7 @@ use crate::{
     server_distribution::{
         check_server_ready_log,
         native::{combine, write},
+        runtime_commands::{RuntimeCommands, RuntimeService},
     },
 };
 use serde::Deserialize;
@@ -42,14 +43,15 @@ fn arguments<const N: usize>(parts: [&str; N]) -> Vec<String> {
     parts.into_iter().map(str::to_owned).collect()
 }
 
-fn present<F>(
+fn present<F, G>(
     docker: &mut Docker<'_, F>,
-    supervisor: &mut CommandSupervisor,
+    supervisor: &mut RuntimeCommands<'_, G>,
     name: &str,
     cleanup: bool,
 ) -> io::Result<bool>
 where
     F: FnMut(&[String], &Path, &Path) -> io::Result<Command>,
+    G: FnMut(&mut Command, Duration) -> io::Result<()>,
 {
     let filter = format!("name=^/{name}$");
     let observed = docker.run(
@@ -132,14 +134,15 @@ where
     Ok(ownership)
 }
 
-fn cleanup<F>(
+fn cleanup<F, G>(
     docker: &mut Docker<'_, F>,
-    supervisor: &mut CommandSupervisor,
+    supervisor: &mut RuntimeCommands<'_, G>,
     runtime: &ActiveRuntime<'_>,
     phase: ServerOciRunPhase,
 ) -> io::Result<()>
 where
     F: FnMut(&[String], &Path, &Path) -> io::Result<Command>,
+    G: FnMut(&mut Command, Duration) -> io::Result<()>,
 {
     let name = runtime.plan.container(phase);
     if !present(docker, supervisor, &name, true)? {
@@ -164,15 +167,16 @@ where
     Ok(())
 }
 
-fn serve<F>(
+fn serve<F, G>(
     docker: &mut Docker<'_, F>,
-    supervisor: &mut CommandSupervisor,
+    supervisor: &mut RuntimeCommands<'_, G>,
     runtime: &ActiveRuntime<'_>,
     address: SocketAddr,
-    client: impl FnOnce(&mut RunningCommand<'_>, SocketAddr) -> io::Result<()>,
+    client: impl FnOnce(&mut RuntimeService<'_, G>, SocketAddr) -> io::Result<()>,
 ) -> io::Result<()>
 where
     F: FnMut(&[String], &Path, &Path) -> io::Result<Command>,
+    G: FnMut(&mut Command, Duration) -> io::Result<()>,
 {
     let name = runtime.plan.container(ServerOciRunPhase::Serve);
     if present(docker, supervisor, &name, false)? {
@@ -256,6 +260,23 @@ pub(super) fn runtime_using<F>(
 where
     F: FnMut(&[String], &Path, &Path) -> io::Result<Command>,
 {
+    let mut configure = |_: &mut Command, _: Duration| Ok(());
+    let mut commands = RuntimeCommands::new(supervisor, &mut configure);
+    runtime_configured_using(runtime, &mut commands, factory, |service, address| {
+        client(service.running(), address)
+    })
+}
+
+pub(super) fn runtime_configured_using<F, G>(
+    runtime: Runtime<'_>,
+    supervisor: &mut RuntimeCommands<'_, G>,
+    factory: F,
+    client: impl FnOnce(&mut RuntimeService<'_, G>, SocketAddr) -> io::Result<()>,
+) -> io::Result<()>
+where
+    F: FnMut(&[String], &Path, &Path) -> io::Result<Command>,
+    G: FnMut(&mut Command, Duration) -> io::Result<()>,
+{
     let mut docker = Docker::new(factory, runtime.artifacts);
     let scope = ServerOciRuntimePlan::new(
         runtime.identity,
@@ -306,14 +327,15 @@ where
     run_loaded(active, supervisor, &mut docker, client)
 }
 
-fn run_loaded<F>(
+fn run_loaded<F, G>(
     mut runtime: ActiveRuntime<'_>,
-    supervisor: &mut CommandSupervisor,
+    supervisor: &mut RuntimeCommands<'_, G>,
     docker: &mut Docker<'_, F>,
-    client: impl FnOnce(&mut RunningCommand<'_>, SocketAddr) -> io::Result<()>,
+    client: impl FnOnce(&mut RuntimeService<'_, G>, SocketAddr) -> io::Result<()>,
 ) -> io::Result<()>
 where
     F: FnMut(&[String], &Path, &Path) -> io::Result<Command>,
+    G: FnMut(&mut Command, Duration) -> io::Result<()>,
 {
     let mut attempted = Vec::with_capacity(4);
     let operation = (|| {

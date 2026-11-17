@@ -1,4 +1,8 @@
-use super::{check_server_ready_log, ServerCandidate, ServerRuntimeConfig, ServerTarget};
+use super::{
+    check_server_ready_log,
+    runtime_commands::{RuntimeCommands, RuntimeService},
+    ServerCandidate, ServerRuntimeConfig, ServerTarget,
+};
 use crate::process::{CommandSupervisor, RunningCommand};
 use std::{
     io::{self, Read, Write},
@@ -66,13 +70,16 @@ pub(super) fn combine(
     }
 }
 
-pub(super) fn check_command(
-    supervisor: &mut CommandSupervisor,
+pub(super) fn check_command<F>(
+    supervisor: &mut RuntimeCommands<'_, F>,
     command: &mut Command,
     artifacts: &Path,
     label: &str,
     expected: &[u8],
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    F: FnMut(&mut Command, Duration) -> io::Result<()>,
+{
     let stdout = artifacts.join(format!("{label}.stdout.txt"));
     let stderr = artifacts.join(format!("{label}.stderr.txt"));
     command.stdout(output(&stdout)?).stderr(output(&stderr)?);
@@ -87,11 +94,14 @@ pub(super) fn check_command(
     Ok(())
 }
 
-fn dependencies(
-    supervisor: &mut CommandSupervisor,
+fn dependencies<F>(
+    supervisor: &mut RuntimeCommands<'_, F>,
     executable: &Path,
     artifacts: &Path,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    F: FnMut(&mut Command, Duration) -> io::Result<()>,
+{
     let mut command = match std::env::consts::OS {
         "macos" => {
             let mut command = Command::new("otool");
@@ -155,13 +165,16 @@ fn dependencies(
     Ok(())
 }
 
-fn startup(
+fn startup<F>(
     candidate: &ServerCandidate,
     execution: &Path,
     artifacts: &Path,
-    supervisor: &mut CommandSupervisor,
-    client: impl FnOnce(&mut RunningCommand<'_>, SocketAddr) -> io::Result<()>,
-) -> io::Result<()> {
+    supervisor: &mut RuntimeCommands<'_, F>,
+    client: impl FnOnce(&mut RuntimeService<'_, F>, SocketAddr) -> io::Result<()>,
+) -> io::Result<()>
+where
+    F: FnMut(&mut Command, Duration) -> io::Result<()>,
+{
     let executable = execution.join(candidate.name().target().binary_path());
     dependencies(supervisor, &executable, artifacts)?;
     check_command(
@@ -283,6 +296,27 @@ pub(super) fn verify_loaded_server_with(
     supervisor: &mut CommandSupervisor,
     client: impl FnOnce(&mut RunningCommand<'_>, SocketAddr) -> io::Result<()>,
 ) -> io::Result<()> {
+    let mut configure = |_: &mut Command, _: Duration| Ok(());
+    let mut commands = RuntimeCommands::new(supervisor, &mut configure);
+    verify_loaded_server_configured(
+        candidate,
+        execution,
+        artifacts,
+        &mut commands,
+        |service, address| client(service.running(), address),
+    )
+}
+
+pub(crate) fn verify_loaded_server_configured<F>(
+    candidate: &ServerCandidate,
+    execution: &Path,
+    artifacts: &Path,
+    supervisor: &mut RuntimeCommands<'_, F>,
+    client: impl FnOnce(&mut RuntimeService<'_, F>, SocketAddr) -> io::Result<()>,
+) -> io::Result<()>
+where
+    F: FnMut(&mut Command, Duration) -> io::Result<()>,
+{
     if !execution.is_absolute()
         || !artifacts.is_absolute()
         || execution.starts_with(artifacts)

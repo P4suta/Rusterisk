@@ -1,6 +1,9 @@
 use crate::{
-    process::{CommandSupervisor, ProcessError},
-    server_distribution::native::{combine, read},
+    process::ProcessError,
+    server_distribution::{
+        native::{combine, read},
+        runtime_commands::RuntimeCommands,
+    },
 };
 use std::{
     io,
@@ -73,14 +76,17 @@ where
         })
     }
 
-    pub fn run(
+    pub fn run<G>(
         &mut self,
-        supervisor: &mut CommandSupervisor,
+        supervisor: &mut RuntimeCommands<'_, G>,
         arguments: &[String],
         budget: Duration,
         label: &str,
         cleanup: bool,
-    ) -> io::Result<Observed> {
+    ) -> io::Result<Observed>
+    where
+        G: FnMut(&mut Command, Duration) -> io::Result<()>,
+    {
         self.run_with(arguments, budget, label, |command, budget| {
             if cleanup {
                 supervisor.run_cleanup(command, budget)
