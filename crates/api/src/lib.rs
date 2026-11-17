@@ -466,6 +466,30 @@ pub struct Operation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagementOperation {
+    ReloadConfiguration,
+}
+
+impl ManagementOperation {
+    pub const fn metadata(self) -> &'static Operation {
+        match self {
+            Self::ReloadConfiguration => &Operation {
+                id: "configuration.reload",
+                nickname: "reloadConfiguration",
+                method: Method::Post,
+                path: "/rusterisk/configuration/reload",
+                response: "void",
+                success_status: 204,
+                parameters: &[],
+            },
+        }
+    }
+}
+
+pub const MANAGEMENT_OPERATIONS: &[ManagementOperation] =
+    &[ManagementOperation::ReloadConfiguration];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParameterKind {
     String,
     Integer,
