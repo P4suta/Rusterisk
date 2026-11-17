@@ -59,6 +59,61 @@ async fn rejected(
 }
 
 #[tokio::test]
+async fn early_attachment_closes_conversation_and_generated_audio_before_publication(
+) -> Result<(), MediaError> {
+    let (_handle, mut hub, _notices) = MediaHub::new(4);
+    let early = key()?;
+    let other = CallKey {
+        id: ChannelId::try_from("peer".to_owned()).map_err(failure)?,
+        generation: 20,
+    };
+    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let result = (|| {
+        hub.attach(
+            early.clone(),
+            SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?,
+            RtpSession {
+                remote: peer.local_addr().map_err(failure)?,
+                format: AudioFormat::Pcmu,
+                payload_type: 0,
+                telephone: None,
+            },
+            PeerMediaDirection::SendReceive,
+            AttachmentMode::Early,
+        )?;
+        datagram(&mut hub, other.clone(), &peer)?;
+        hub.mixer.bridge(1, &[early.clone(), other.clone()])?;
+        hub.mixer.push(&early, Frame::new(&[4000; 160], 8000)?)?;
+        hub.mixer.push(&other, Frame::new(&[-7000; 160], 8000)?)?;
+        let audio = hub.mixer.tick_with_playback(&[(
+            AudioTarget::Channel(early.clone()),
+            Frame::new(&[1234; 960], 48000)?,
+        )])?;
+        if !hub
+            .ports
+            .get(&early)
+            .is_some_and(|port| port.generated_audio_gate == Gate::Closed)
+            || audio.channels.len() != 2
+            || audio
+                .channels
+                .iter()
+                .any(|(_, frame)| frame.samples().iter().any(|sample| *sample != 0))
+        {
+            return Err(MediaError::InvalidRoute);
+        }
+        Ok(())
+    })();
+    let closed = hub.close().await;
+    match (result, closed) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(primary), Err(cleanup)) => Err(MediaError::Transport(format!(
+            "{primary}; early admission cleanup failed: {cleanup}"
+        ))),
+    }
+}
+
+#[tokio::test]
 async fn cancelled_duplicate_datagram_admission_keeps_the_existing_link() -> Result<(), MediaError>
 {
     let (_handle, mut hub, _notices) = MediaHub::new(4);
