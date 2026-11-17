@@ -31,6 +31,15 @@ fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
 }
 
+async fn close_startup(storage: StorageWorker, primary: ControlError) -> ControlError {
+    match storage.close().await {
+        Ok(()) => primary,
+        Err(cleanup) => failure(format!(
+            "{primary}; storage startup cleanup failed: {cleanup}"
+        )),
+    }
+}
+
 impl Server {
     pub async fn validate(config: &Config) -> Result<(), ControlError> {
         Self::validate_with_data_directory(config, Path::new("data")).await
@@ -81,43 +90,55 @@ impl Server {
             .map_err(failure)?;
         let (controller, control, effects) = Controller::new(config.clone(), capacity);
         let (media_port, media, notices) = MediaHub::new(capacity);
-        let listeners: Result<(Runner, Signaling, HttpServer), ControlError> = async {
-            let music = storage_port
-                .prepare_music(config.music_on_hold.clone())
-                .await
-                .map_err(failure)?;
-            let control = control
-                .with_music(music)?
-                .with_storage(storage_port.clone())?;
-            let http = HttpServer::bind(&config.http, controller.clone())
-                .await?
-                .with_media(media_port.clone());
-            config.http.bind = http.local_addr()?;
-            let signaling = Signaling::bind(
-                config.clone(),
-                controller.clone(),
-                effects,
-                media_port.clone(),
-                notices,
-            )
-            .await?
-            .with_storage(storage_port);
-            let control = control.with_native_profiles(signaling.native_profiles())?;
-            let http = http.with_signaling(signaling.websocket_port());
-            Ok((control, signaling, http))
-        }
-        .await;
-        let (control, signaling, http) = match listeners {
-            Ok(listeners) => listeners,
+        let music = match storage_port
+            .prepare_music(config.music_on_hold.clone())
+            .await
+        {
+            Ok(music) => music,
+            Err(primary) => return Err(close_startup(storage, failure(primary)).await),
+        };
+        let control = match control
+            .with_music(music)
+            .and_then(|control| control.with_storage(storage_port.clone()))
+        {
+            Ok(control) => control,
+            Err(primary) => return Err(close_startup(storage, primary).await),
+        };
+        let http = match HttpServer::bind(&config.http, controller.clone()).await {
+            Ok(http) => http.with_media(media_port.clone()),
+            Err(primary) => return Err(close_startup(storage, primary).await),
+        };
+        config.http.bind = match http.local_addr() {
+            Ok(address) => address,
             Err(primary) => {
-                if let Err(error) = storage.close().await {
-                    return Err(failure(format!(
-                        "{primary}; storage startup cleanup failed: {error}"
-                    )));
-                }
-                return Err(primary);
+                drop(http);
+                return Err(close_startup(storage, primary).await);
             }
         };
+        let signaling = match Signaling::bind(
+            config.clone(),
+            controller.clone(),
+            effects,
+            media_port.clone(),
+            notices,
+        )
+        .await
+        {
+            Ok(signaling) => signaling.with_storage(storage_port),
+            Err(primary) => {
+                drop(http);
+                return Err(close_startup(storage, primary).await);
+            }
+        };
+        let control = match control.with_native_profiles(signaling.native_profiles()) {
+            Ok(control) => control,
+            Err(primary) => {
+                drop(signaling);
+                drop(http);
+                return Err(close_startup(storage, primary).await);
+            }
+        };
+        let http = http.with_signaling(signaling.websocket_port());
         Ok(Self {
             controller,
             control,
