@@ -56,3 +56,36 @@ fn a_foreign_generation_cannot_select_or_retain_local_settings() -> Result<(), S
     assert!(second.slot(second.current()).is_ok());
     Ok(())
 }
+
+#[test]
+fn publication_identity_matches_the_candidate_domain_and_sequence() -> Result<(), SettingsError> {
+    let mut first = SettingsLifetimes::new(1);
+    let mut second = SettingsLifetimes::new(2);
+    let base = first.current();
+    let foreign_base = second.current();
+    let cancelled = first.prepare()?;
+    assert!(cancelled.follows(base));
+    assert!(!cancelled.follows(foreign_base));
+    assert!(!base.matches_candidate(cancelled));
+    first.cancel(cancelled)?;
+    let selected = first.prepare()?;
+    let foreign = second.prepare()?;
+    assert!(selected.follows(base));
+    assert!(!foreign.follows(base));
+    let published = first.commit(selected)?.generation();
+    let foreign_published = second.commit(foreign)?.generation();
+    assert!(published.matches_candidate(selected));
+    assert!(!published.matches_candidate(cancelled));
+    assert!(!published.matches_candidate(foreign));
+    assert!(!foreign_published.matches_candidate(selected));
+    assert!(!selected.follows(published));
+    assert!(!cancelled.follows(published));
+    let later = first.prepare()?;
+    assert!(later.follows(base));
+    assert!(later.follows(published));
+    let later_published = first.commit(later)?.generation();
+    assert!(later_published.matches_candidate(later));
+    assert!(!later_published.matches_candidate(selected));
+    assert!(!published.matches_candidate(later));
+    Ok(())
+}

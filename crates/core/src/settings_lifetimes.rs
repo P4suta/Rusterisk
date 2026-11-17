@@ -10,6 +10,20 @@ pub struct SettingsCandidate {
     sequence: u64,
 }
 
+impl SettingsGeneration {
+    /// Compares the domain and sequence without establishing token liveness.
+    pub const fn matches_candidate(self, candidate: SettingsCandidate) -> bool {
+        self.owner == candidate.owner && self.sequence == candidate.sequence
+    }
+}
+
+impl SettingsCandidate {
+    /// Checks domain membership and sequence order without establishing token liveness.
+    pub const fn follows(self, generation: SettingsGeneration) -> bool {
+        self.owner == generation.owner && self.sequence > generation.sequence
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SettingsSlot {
     index: usize,
