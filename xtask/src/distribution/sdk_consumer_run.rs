@@ -3,7 +3,7 @@ use super::{
     SdkConsumerPhase, SdkConsumerScope, SdkConsumerWorkspace, SdkContents, SdkContentsError,
     SdkHttpTarget, SdkMetadataError, SdkPackage,
 };
-use crate::process::ProcessError;
+use crate::process::{CommandSupervisor, ProcessError};
 use std::{
     io::{Read, Write},
     path::Path,
@@ -22,6 +22,10 @@ pub enum SdkConsumerRunError {
     Lock(SdkConsumerLockError),
     Metadata(SdkMetadataError),
     Output,
+    Finalization {
+        context: &'static str,
+        source: std::io::Error,
+    },
     FollowUp {
         operation: String,
         context: &'static str,
@@ -41,6 +45,7 @@ impl std::fmt::Display for SdkConsumerRunError {
             Self::Output => {
                 formatter.write_str("SDK consumer requires its exact successful contract output")
             }
+            Self::Finalization { context, source } => write!(formatter, "{context}: {source}"),
             Self::FollowUp {
                 operation,
                 context,
@@ -53,6 +58,38 @@ impl std::error::Error for SdkConsumerRunError {}
 impl From<std::io::Error> for SdkConsumerRunError {
     fn from(error: std::io::Error) -> Self {
         Self::Io(error)
+    }
+}
+
+pub(crate) trait SdkPort {
+    fn run(&mut self, command: &mut Command, budget: Duration) -> Result<(), ProcessError>;
+    fn finish(self) -> Result<(), ProcessError>;
+}
+
+impl SdkPort for CommandSupervisor {
+    fn run(&mut self, command: &mut Command, budget: Duration) -> Result<(), ProcessError> {
+        CommandSupervisor::run(self, command, budget)
+    }
+
+    fn finish(self) -> Result<(), ProcessError> {
+        CommandSupervisor::finish(self)
+    }
+}
+
+struct Callback<F> {
+    perform: F,
+}
+
+impl<F> SdkPort for Callback<F>
+where
+    F: FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+{
+    fn run(&mut self, command: &mut Command, budget: Duration) -> Result<(), ProcessError> {
+        (self.perform)(command, budget)
+    }
+
+    fn finish(self) -> Result<(), ProcessError> {
+        Ok(())
     }
 }
 
@@ -142,7 +179,7 @@ pub(super) fn follow_up<T>(
 ) -> Result<T, SdkConsumerRunError> {
     match (operation, follow_up) {
         (operation, Ok(())) => operation,
-        (Ok(_), Err(error)) => Err(error.into()),
+        (Ok(_), Err(source)) => Err(SdkConsumerRunError::Finalization { context, source }),
         (Err(operation), Err(source)) => Err(SdkConsumerRunError::FollowUp {
             operation: operation.to_string(),
             context,
@@ -331,9 +368,40 @@ pub fn verify_sdk_consumers_with(
     artifacts: &Path,
     perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
 ) -> Result<(), SdkConsumerRunError> {
-    create_artifacts(contents, execution, artifacts)?;
-    let workspace = SdkConsumerWorkspace::create(contents, execution)?;
-    let operation = run(contents, &workspace, perform);
+    verify_sdk_consumers_supervised(contents, execution, artifacts, Callback { perform })
+}
+
+pub(crate) fn verify_sdk_consumers_supervised(
+    contents: &SdkContents,
+    execution: &Path,
+    artifacts: &Path,
+    mut port: impl SdkPort,
+) -> Result<(), SdkConsumerRunError> {
+    let workspace = match create_artifacts(contents, execution, artifacts).and_then(|()| {
+        SdkConsumerWorkspace::create(contents, execution).map_err(SdkConsumerRunError::Io)
+    }) {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            return follow_up(
+                Err(error),
+                port.finish().map_err(std::io::Error::other),
+                "consumer supervisor cleanup failed",
+            )
+        }
+    };
+    let operation = run(contents, &workspace, |command, budget| {
+        port.run(command, budget)
+    });
+    let operation = follow_up(
+        operation,
+        port.finish().map_err(std::io::Error::other),
+        "consumer supervisor cleanup failed",
+    );
+    let operation = follow_up(
+        operation,
+        workspace.check_sources(),
+        "consumer source verification failed",
+    );
     let operation = follow_up(
         operation,
         preserve(&workspace, artifacts),

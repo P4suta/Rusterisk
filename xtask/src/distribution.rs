@@ -34,6 +34,7 @@ pub use sdk_consumer_lock::{check_sdk_consumer_lock, SdkConsumerLockError};
 mod sdk_consumer_workspace;
 pub use sdk_consumer_workspace::SdkConsumerWorkspace;
 mod sdk_consumer_run;
+pub(crate) use sdk_consumer_run::{verify_sdk_consumers_supervised, SdkPort};
 pub use sdk_consumer_run::{verify_sdk_consumers_with, verify_sdk_with, SdkConsumerRunError};
 mod sdk_http;
 pub use sdk_http::{SdkHttpTarget, SdkHttpTargetError};
