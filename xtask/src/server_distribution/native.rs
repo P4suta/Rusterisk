@@ -56,14 +56,14 @@ pub(super) fn write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     file.flush()
 }
 
-pub(super) fn combine(
-    operation: io::Result<()>,
+pub(super) fn combine<T>(
+    operation: io::Result<T>,
     cleanup: io::Result<()>,
     context: &str,
-) -> io::Result<()> {
+) -> io::Result<T> {
     match (operation, cleanup) {
         (operation, Ok(())) => operation,
-        (Ok(()), Err(error)) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
         (Err(operation), Err(cleanup)) => Err(io::Error::other(format!(
             "{operation}; {context}: {cleanup}"
         ))),
