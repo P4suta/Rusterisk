@@ -38,7 +38,7 @@ pub(crate) struct Forks {
 impl Default for Forks {
     fn default() -> Self {
         Self {
-            entries: std::array::from_fn(|_| None),
+            entries: [const { None }; CAPACITY],
             retained_bytes: 0,
         }
     }
