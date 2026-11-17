@@ -1,6 +1,7 @@
 use super::{
     native::{combine, output, write},
-    ServerCandidate, ServerRuntimeConfig, ServerTarget,
+    runtime_commands::{RuntimeCommands, RuntimeService},
+    ServerCandidate, ServerOciContents, ServerRuntimeConfig, ServerTarget,
 };
 use crate::distribution::{PreparedSdkHttpConsumer, SdkContents, SdkHttpTarget};
 use std::{
@@ -9,7 +10,7 @@ use std::{
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 mod docker;
@@ -18,9 +19,9 @@ mod runtime;
 use super::{ServerOciRunPhase, ServerOciRuntimePlan};
 use crate::process::CommandSupervisor;
 use identity::ExpectedImage;
-use runtime::{runtime_using, Runtime};
+use runtime::{runtime_configured_using, runtime_using, Runtime};
 
-fn copy_archive(source: &Path, destination: &Path, maximum: u64) -> io::Result<()> {
+pub(crate) fn copy_archive(source: &Path, destination: &Path, maximum: u64) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(source)?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > maximum {
         return Err(io::Error::other(
@@ -187,6 +188,125 @@ pub fn verify_server_oci_sdk_with(
     )?;
     println!("OCI server and SDK candidate HTTP interoperability passed");
     Ok(artifacts)
+}
+
+pub(crate) struct OciSdkExecution<'a> {
+    pub(crate) identity: &'a str,
+    pub(crate) execution: &'a Path,
+    pub(crate) consumer_execution: &'a Path,
+    pub(crate) artifacts: &'a Path,
+    pub(crate) archive: &'a Path,
+    pub(crate) checked: &'a ServerOciContents,
+}
+
+pub(crate) fn verify_loaded_oci_sdk_configured<F>(
+    server: &ServerCandidate,
+    contents: &SdkContents,
+    scope: OciSdkExecution<'_>,
+    commands: &mut RuntimeCommands<'_, F>,
+) -> io::Result<()>
+where
+    F: FnMut(&mut Command, Duration) -> io::Result<()>,
+{
+    let mut prepared = None;
+    let operation = (|| {
+        write(
+            &scope.artifacts.join("CONFIG.sha256"),
+            format!("{}\n", scope.checked.config_digest()).as_bytes(),
+        )?;
+        write(
+            &scope.artifacts.join("MANIFEST.sha256"),
+            format!("{}\n", scope.checked.manifest_digest()).as_bytes(),
+        )?;
+        write(
+            &scope.artifacts.join("SOURCE.sha256"),
+            format!("{}\n", server.source_digest()).as_bytes(),
+        )?;
+        let http_reservation = TcpListener::bind("127.0.0.1:0")?;
+        let sip_reservation = UdpSocket::bind("127.0.0.1:0")?;
+        let configuration = ServerRuntimeConfig::capture(
+            http_reservation.local_addr()?,
+            sip_reservation.local_addr()?,
+            |path| {
+                server
+                    .files()
+                    .find(|(name, _)| *name == path)
+                    .map(|(_, bytes)| bytes.to_vec())
+                    .ok_or_else(|| io::Error::other("OCI runtime sample configuration missing"))
+            },
+        )?;
+        let config = scope.execution.join("config");
+        std::fs::DirBuilder::new().mode(0o755).create(&config)?;
+        for (path, bytes) in configuration.files() {
+            let path = path
+                .strip_prefix("config/")
+                .ok_or_else(|| io::Error::other("OCI runtime configuration path changed"))?;
+            let path = config.join(path);
+            write(&path, bytes)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
+        }
+        prepared = Some(
+            PreparedSdkHttpConsumer::prepare_with(
+                contents,
+                scope.consumer_execution,
+                &scope.artifacts.join("consumer"),
+                |command, budget| commands.run(command, budget),
+            )
+            .map_err(io::Error::other)?,
+        );
+        runtime_configured_using(
+            Runtime {
+                identity: scope.identity,
+                configuration: &config,
+                expected: ExpectedImage {
+                    configuration: scope.checked.config_digest(),
+                    manifest: scope.checked.manifest_digest(),
+                    manifest_size: scope.checked.manifest_size(),
+                    target: server.name().target(),
+                },
+                archive: scope.archive,
+                version: server.name().version(),
+                artifacts: scope.artifacts,
+                http_reservation: Some(http_reservation),
+                sip_reservation: Some(sip_reservation),
+            },
+            commands,
+            |arguments, stdout, stderr| {
+                let mut command = Command::new("docker");
+                command
+                    .args(arguments)
+                    .stdout(output(stdout)?)
+                    .stderr(output(stderr)?);
+                Ok(command)
+            },
+            |service: &mut RuntimeService<'_, F>, address| {
+                let identifier = format!("sdk-{}", scope.identity);
+                let target = SdkHttpTarget::new(
+                    address,
+                    "api",
+                    "change-at-install",
+                    contents.version(),
+                    &identifier,
+                )
+                .map_err(io::Error::other)?;
+                prepared
+                    .take()
+                    .ok_or_else(|| io::Error::other("prepared OCI SDK consumer ownership ended"))?
+                    .run_with(&target, |command, budget| service.run(command, budget))
+                    .map(|_| ())
+                    .map_err(io::Error::other)
+            },
+        )
+    })();
+    let consumer_cleanup = match prepared {
+        Some(prepared) => prepared.close().map_err(io::Error::other),
+        None => Ok(()),
+    };
+    combine(
+        operation,
+        consumer_cleanup,
+        "prepared OCI SDK consumer cleanup",
+    )
 }
 
 #[cfg(test)]

@@ -34,6 +34,8 @@ mod native;
 #[cfg(unix)]
 pub(crate) mod runtime_commands;
 #[cfg(unix)]
+pub(crate) use native::verify_loaded_server_configured;
+#[cfg(unix)]
 pub use native::{
     check_server_startup_for_target_with, check_server_startup_with, verify_server_native_with,
 };
@@ -59,6 +61,8 @@ pub use oci_archive::{
 };
 #[cfg(unix)]
 pub use oci_sdk::verify_server_oci_sdk_with;
+#[cfg(unix)]
+pub(crate) use oci_sdk::{copy_archive, verify_loaded_oci_sdk_configured, OciSdkExecution};
 mod container_build;
 pub use container_build::{ServerBuildCommandMode, ServerContainerBuildPlan};
 
