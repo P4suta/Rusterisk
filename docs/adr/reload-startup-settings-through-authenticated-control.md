@@ -7,39 +7,41 @@ status: proposed
 
 ## Context
 
-Operators need complete settings reload.
-[Asterisk](https://github.com/asterisk/asterisk/blob/22.9.0/rest-api/api-docs/asterisk.json) reloads individual modules.
+Operators need settings reload.
+[Asterisk REST Interface](https://github.com/asterisk/asterisk/blob/22.9.0/rest-api/api-docs/asterisk.json) reloads individual modules.
 
 ## Decision
 
-CLI delegates to SDK for `POST /rusterisk/configuration/reload` ([POST](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.3)).
-Define management operations outside the Asterisk REST Interface catalog.
-Read regular local files from the fixed startup directory.
-Reject request bodies and query parameters.
-Require current authentication and Origin policy.
-Reject `read_only` and busy requests.
-Own one loading/applying caller.
-Preserve calls through [prepared publication](prepare-settings-before-serialized-publication.md).
+CLI uses SDK for `POST /rusterisk/configuration/reload` ([POST](https://www.rfc-editor.org/rfc/rfc9110.html#section-9.3.3)).
+Keep management operations outside the Asterisk REST Interface catalog.
+Use live credentials through [password input](https://curl.se/docs/manpage.html#-u), independent of replacement settings.
+Read regular files from fixed startup directories.
+Reject bodies, query parameters, concurrent reloads, and `read_only` users.
+Require current authentication and Origin policy at serialized admission.
+Own one blocking loader outside audio storage.
+Share one deadline for loading and preparation.
 Cancel disconnected callers before the first swap.
 Require completion or service shutdown afterward.
-Return [204](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.3.5) only after all acknowledgements.
-Report file, line, and reason on failure.
-Embedded servers may omit the required reload source.
-Give reload its own timeout covering loading and publication.
+Preserve calls through [prepared publication](prepare-settings-before-serialized-publication.md).
+Return [204](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.3.5) after all acknowledgements.
+Return file, line, and reason for configuration failures.
+Keep operational errors distinct.
+Management requests expire after 30 seconds and ordinary requests after 10.
+Embedded servers may omit reload sources.
 
 ## Alternatives
 
-[202](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.3.3) supports long operations but needs job tracking.
+[202](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.3.3) supports long operations with job tracking.
 Library-only reload excludes binary operators.
 
 ## Consequences
 
-CLI credential input remains unresolved for changed replacement passwords.
-`Config::load` caps eight files at 1 MiB each without regular-file checks.
-Started `spawn_blocking` work outlives cancellation.
-Reconcile loading with [disk ownership](own-disk-io-on-one-dedicated-thread.md).
+Reap started loaders after cancellation and before Control exits.
+Shutdown may exceed 10 seconds for trusted local filesystems.
+Stalled filesystems have no hard timeout.
+Audio [disk ownership](own-disk-io-on-one-dedicated-thread.md) remains separate.
 
 ## Confirmation
 
-Test platform parity, authorization, unavailable sources, busy rejection, disconnects, failed loads, continued audio, and cleanup.
-Reconsider asynchronous jobs when request lifetimes prove insufficient.
+Test authorization, busy rejection, positions, cancellation, reaping, calls, and cleanup.
+Reconsider asynchronous jobs for insufficient request lifetimes.
