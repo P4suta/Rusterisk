@@ -17,6 +17,9 @@ use tokio::time::Instant;
 const PREPARATION_BUDGET: Duration = Duration::from_secs(10);
 const RELOAD_BUDGET: Duration = Duration::from_secs(25);
 
+#[cfg(test)]
+mod source_tests;
+
 pub(super) fn new_settings(action: &Action) -> bool {
     match action {
         Action::Originate { .. }
