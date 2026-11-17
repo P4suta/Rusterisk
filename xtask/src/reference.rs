@@ -1,12 +1,16 @@
 use std::time::Duration;
 mod configuration;
 mod interop;
+#[cfg(unix)]
+mod sipp_comparison;
 mod sipp_statistics;
 pub use configuration::copy_configuration;
 pub use interop::{
     callback_address, media_address, published_address, CallbackHost, Interop, SipTransferCase,
     SippAdapter,
 };
+#[cfg(unix)]
+pub use sipp_comparison::{compare_sipp_registrations_with, SippRegistrationComparison};
 pub use sipp_statistics::validate_sipp_statistics;
 
 pub struct Step {
