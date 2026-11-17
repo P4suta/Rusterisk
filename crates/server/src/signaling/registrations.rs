@@ -7,6 +7,8 @@ use super::{
     Received, Signaling,
 };
 use crate::ControlError;
+use candidates::{CandidateCursor, Selection};
+use peer_waits::{Admission, PeerWaits};
 pub(super) use resolution::ConfigurationLease;
 use resolution::{Completion, ConfigurationLifetime};
 use rusterisk_config::{Auth, Config, Protocol, Registration, MAX_REGISTRATIONS};
@@ -21,6 +23,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::task::JoinSet;
+mod candidates;
+mod peer_waits;
 mod resolution;
 mod retry;
 #[cfg(test)]
@@ -47,6 +51,9 @@ struct Client {
     requested_expiration: u32,
     retries: u32,
     auth: Auth,
+    candidates: Option<CandidateCursor>,
+    waits: PeerWaits,
+    continuation: Option<RegistrationResponse>,
     state: State,
 }
 
@@ -76,9 +83,17 @@ enum State {
     Waiting {
         at: u64,
     },
+    CandidateWait {
+        at: u64,
+    },
     Ready {
         at: u64,
         route: Route,
+    },
+    Alternate {
+        at: u64,
+        response: RegistrationResponse,
+        peer: SocketAddr,
     },
     Resolving {
         setup: SetupKey,
@@ -116,7 +131,9 @@ impl State {
             | Self::Trying { route, .. }
             | Self::Registered { route, .. }
             | Self::Backoff { route, .. } => Some(*route),
+            Self::Alternate { peer, .. } => Some(Route::Datagram(*peer)),
             Self::Waiting { .. }
+            | Self::CandidateWait { .. }
             | Self::Resolving { .. }
             | Self::Connecting { .. }
             | Self::Stopped => None,
@@ -133,6 +150,31 @@ impl Client {
     ) -> Result<State, ControlError> {
         let status = response.status();
         let instruction = response.retry_after().map_err(failure)?;
+        if matches!(route, Route::Datagram(_)) {
+            if let Some(interval) = instruction {
+                self.waits.postpone(route.peer(), interval, now)?;
+            } else {
+                self.waits.release_unused();
+            }
+        }
+        if status == 503 && matches!(route, Route::Datagram(_)) {
+            if let Some(candidates) = &mut self.candidates {
+                match candidates.select(&mut self.waits, route.peer().is_ipv4(), now)? {
+                    Selection::Peer(peer) => {
+                        return Ok(State::Alternate {
+                            at: now,
+                            response,
+                            peer,
+                        });
+                    }
+                    Selection::Wait { at } => {
+                        self.continuation = Some(response);
+                        return Ok(State::CandidateWait { at });
+                    }
+                    Selection::Exhausted => {}
+                }
+            }
+        }
         self.retry(status, instruction, Some(response), route, now)
     }
 
@@ -144,6 +186,7 @@ impl Client {
         route: Route,
         now: u64,
     ) -> Result<State, ControlError> {
+        self.waits.release_unused();
         match retry::decide(&self.settings, self.retries, status, instruction, now)? {
             retry::Decision::Stop => Ok(State::Stopped),
             retry::Decision::Wait { at, retries } => {
@@ -155,6 +198,21 @@ impl Client {
                 })
             }
         }
+    }
+
+    fn choose_candidate(&mut self, ipv4: bool, now: u64) -> Result<State, ControlError> {
+        let candidates = self
+            .candidates
+            .as_mut()
+            .ok_or(ControlError::Invalid("Missing registration candidates"))?;
+        Ok(match candidates.select(&mut self.waits, ipv4, now)? {
+            Selection::Peer(peer) => State::Ready {
+                at: now,
+                route: Route::Datagram(peer),
+            },
+            Selection::Wait { at } => State::CandidateWait { at },
+            Selection::Exhausted => State::Stopped,
+        })
     }
 
     fn same_registrar(&self, other: &Self) -> bool {
@@ -254,6 +312,9 @@ impl Registrations {
                 requested_expiration: settings.expiration,
                 retries: 0,
                 auth,
+                candidates: None,
+                waits: PeerWaits::default(),
+                continuation: None,
                 state,
             });
         }
@@ -280,20 +341,25 @@ impl Registrations {
             self.cursor = (self.cursor + 1) % self.clients.len();
             let client = &self.clients[index];
             let due = match &client.state {
-                State::Waiting { at } | State::Registered { refresh_at: at, .. } => {
+                State::Waiting { at }
+                | State::CandidateWait { at }
+                | State::Registered { refresh_at: at, .. } => {
                     now >= *at
                         && !self.clients.iter().any(|other| {
                             client.same_registrar(other)
                                 && matches!(
                                     other.state,
                                     State::Ready { .. }
+                                        | State::Alternate { .. }
                                         | State::Trying { .. }
                                         | State::Resolving { .. }
                                         | State::Connecting { .. }
                                 )
                         })
                 }
-                State::Ready { at, .. } | State::Backoff { at, .. } => {
+                State::Ready { at, .. }
+                | State::Alternate { at, .. }
+                | State::Backoff { at, .. } => {
                     now >= *at
                         && !self.clients.iter().any(|other| {
                             client.same_registrar(other)
@@ -330,11 +396,34 @@ impl Registrations {
         if matches!(
             &client.state,
             State::Ready { at, .. }
+                | State::CandidateWait { at }
+                | State::Alternate { at, .. }
                 | State::Backoff { at, .. }
                 | State::Registered { refresh_at: at, .. }
                 if now < *at
         ) {
             return Ok(None);
+        }
+        if !matches!(client.state, State::Trying { .. }) {
+            if let Some(Route::Datagram(peer)) = client.state.route() {
+                if let Admission::Wait { at } = client.waits.reserve(peer, now)? {
+                    match &mut client.state {
+                        State::Ready { at: due, .. }
+                        | State::Alternate { at: due, .. }
+                        | State::Backoff { at: due, .. }
+                        | State::Registered {
+                            refresh_at: due, ..
+                        } => *due = at,
+                        State::Waiting { .. }
+                        | State::CandidateWait { .. }
+                        | State::Resolving { .. }
+                        | State::Connecting { .. }
+                        | State::Trying { .. }
+                        | State::Stopped => {}
+                    }
+                    return Ok(None);
+                }
+            }
         }
         let transaction = match &client.state {
             State::Ready { route, .. }
@@ -346,11 +435,21 @@ impl Registrations {
                 let identity = self.identity.advance(random()?).map_err(failure)?;
                 let mut settings = client.settings.clone();
                 settings.expiration = client.requested_expiration;
-                Some((
-                    RegistrationTransaction::new(&settings, local, route.peer(), identity, now)
+                let transaction = match &client.continuation {
+                    Some(response) => response
+                        .retry_after_resolution(
+                            std::slice::from_ref(&client.auth),
+                            identity,
+                            route.peer(),
+                            now,
+                        )
                         .map_err(failure)?,
-                    *route,
-                ))
+                    None => {
+                        RegistrationTransaction::new(&settings, local, route.peer(), identity, now)
+                            .map_err(failure)?
+                    }
+                };
+                Some((transaction, *route))
             }
             State::Registered {
                 response, route, ..
@@ -370,6 +469,15 @@ impl Registrations {
                     *route,
                 ))
             }
+            State::Alternate { response, peer, .. } => {
+                let identity = self.identity.advance(random()?).map_err(failure)?;
+                Some((
+                    response
+                        .retry_alternate(std::slice::from_ref(&client.auth), identity, *peer, now)
+                        .map_err(failure)?,
+                    Route::Datagram(*peer),
+                ))
+            }
             State::Backoff {
                 response: Some(response),
                 route,
@@ -384,6 +492,7 @@ impl Registrations {
                 ))
             }
             State::Waiting { .. }
+            | State::CandidateWait { .. }
             | State::Resolving { .. }
             | State::Connecting { .. }
             | State::Trying { .. }
@@ -391,6 +500,7 @@ impl Registrations {
         };
         if let Some((transaction, route)) = transaction {
             self.identity = transaction.identity();
+            client.continuation = None;
             client.state = State::Trying { transaction, route };
         }
         let State::Trying { transaction, route } = &mut client.state else {
@@ -447,6 +557,9 @@ impl Registrations {
             200..=299 => {
                 let grant = response.grant().map_err(failure)?;
                 client.retries = 0;
+                client.candidates = None;
+                client.continuation = None;
+                client.waits.release_unused();
                 match grant {
                     RegistrationGrant::Active { refresh_at, .. } => State::Registered {
                         response,
@@ -481,6 +594,9 @@ impl Registrations {
                 transaction.cancel();
             }
             client.state = State::Stopped;
+            client.candidates = None;
+            client.continuation = None;
+            client.waits = PeerWaits::default();
         }
     }
 
@@ -513,7 +629,26 @@ impl Signaling {
             generation: self.registrations.lifetime.generation(),
             index,
         };
-        self.registrations.clients[index].state = State::Resolving { setup };
+        let client = &mut self.registrations.clients[index];
+        let previous = std::mem::replace(&mut client.state, State::Resolving { setup });
+        client.continuation = match previous {
+            State::Backoff { response, .. } => {
+                if target.protocol() == Protocol::Udp {
+                    response
+                } else {
+                    None
+                }
+            }
+            State::Alternate { response, .. } => Some(response),
+            State::Ready { .. } | State::Waiting { .. } | State::CandidateWait { .. } => {
+                client.continuation.take()
+            }
+            State::Resolving { .. }
+            | State::Connecting { .. }
+            | State::Trying { .. }
+            | State::Registered { .. }
+            | State::Stopped => None,
+        };
         self.registrations.jobs.spawn(resolution::resolve(
             key,
             setup,
@@ -561,17 +696,8 @@ impl Signaling {
             Protocol::Udp => {
                 self.network.finish_resolution(completed.setup);
                 let local = self.network.local_addr(client.listener)?;
-                let Some(peer) = resolved
-                    .peers()
-                    .find(|peer| peer.is_ipv4() == local.is_ipv4())
-                else {
-                    client.state = State::Stopped;
-                    return Ok(());
-                };
-                client.state = State::Ready {
-                    at: now,
-                    route: Route::Datagram(peer),
-                };
+                client.candidates = Some(CandidateCursor::new(resolved));
+                client.state = client.choose_candidate(local.is_ipv4(), now)?;
             }
             Protocol::Tcp | Protocol::Tls => {
                 client.state = State::Connecting {
@@ -695,7 +821,9 @@ impl Signaling {
             .filter_map(|client| match client.state {
                 State::Resolving { setup } | State::Connecting { setup, .. } => Some(setup),
                 State::Waiting { .. }
+                | State::CandidateWait { .. }
                 | State::Ready { .. }
+                | State::Alternate { .. }
                 | State::Trying { .. }
                 | State::Registered { .. }
                 | State::Backoff { .. }
@@ -789,6 +917,18 @@ impl Signaling {
                 }
             };
         }
+        if matches!(
+            self.registrations.clients[index].state,
+            State::CandidateWait { .. }
+        ) {
+            let listener = self.registrations.clients[index].listener;
+            let ipv4 = self.network.local_addr(listener)?.is_ipv4();
+            let client = &mut self.registrations.clients[index];
+            client.state = client.choose_candidate(ipv4, now)?;
+            if matches!(client.state, State::CandidateWait { .. } | State::Stopped) {
+                return Ok(());
+            }
+        }
         let client = &self.registrations.clients[index];
         let listener = client.listener;
         let route = client
@@ -799,7 +939,9 @@ impl Signaling {
             self.registrations.clients[index].state = match &client.state {
                 State::Backoff { at, .. } => State::Waiting { at: *at },
                 State::Waiting { .. }
+                | State::CandidateWait { .. }
                 | State::Ready { .. }
+                | State::Alternate { .. }
                 | State::Resolving { .. }
                 | State::Connecting { .. }
                 | State::Trying { .. }
