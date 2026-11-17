@@ -275,7 +275,7 @@ fn review<'a>(
     Ok(())
 }
 
-pub fn assess(manifest: &str, lock: &str, report: &str) -> Result<Assessment, AuditError> {
+fn inputs(manifest: &str, lock: &str, report: &str) -> Result<Lock, AuditError> {
     if [manifest, lock, report]
         .iter()
         .any(|source| source.len() > 1024 * 1024)
@@ -297,6 +297,10 @@ pub fn assess(manifest: &str, lock: &str, report: &str) -> Result<Assessment, Au
     if lock.version != 3 || lock.packages.len() > 512 {
         return Err(AuditError::Boundary);
     }
+    Ok(lock)
+}
+
+fn assess_lock(lock: &Lock, report: &str) -> Result<Assessment, AuditError> {
     for (name, version) in PACKAGES {
         let package = lock
             .packages
@@ -316,7 +320,7 @@ pub fn assess(manifest: &str, lock: &str, report: &str) -> Result<Assessment, Au
             return Err(AuditError::Boundary);
         }
     }
-    licenses(&lock)?;
+    licenses(lock)?;
     let audit: Audit = serde_json::from_str(report)?;
     if audit.version != 2 || audit.vulnerabilities.len() > 9 {
         return Err(AuditError::InvalidReport);
@@ -337,4 +341,9 @@ pub fn assess(manifest: &str, lock: &str, report: &str) -> Result<Assessment, Au
         packages: counts.total,
         advisories: advisories.len(),
     })
+}
+
+pub fn assess(manifest: &str, lock: &str, report: &str) -> Result<Assessment, AuditError> {
+    let lock = inputs(manifest, lock, report)?;
+    assess_lock(&lock, report)
 }
