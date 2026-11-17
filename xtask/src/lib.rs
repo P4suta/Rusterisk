@@ -18,6 +18,10 @@ pub const WORKSPACE_FORMAT_CHECK: &[&str] = &["fmt", "--", "--check"];
 mod sip_domain_policy;
 mod tls_client_policy;
 mod unsafe_policy;
+mod windows_job_accounting_policy;
+pub use windows_job_accounting_policy::{
+    inspect_windows_job_accounting_manifest, inspect_windows_job_accounting_source,
+};
 
 #[derive(Debug)]
 pub enum SecurityConfigError {

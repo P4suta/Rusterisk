@@ -1,7 +1,16 @@
 const QUERY_EXPECTATION: &str = r#"#[expect(unsafe_code, reason = "docs/adr/assign-windows-command-trees-to-jobs-during-creation.md: Read one basic Job accounting record through a borrowed handle.")]"#;
 
 const ACCOUNTING_SOURCE: &str = r#"
-pub(super) fn active_processes(
+#![cfg(windows)]
+
+/// Returns the current number of processes assigned to a borrowed Windows Job handle.
+///
+/// The count can change immediately after the query.
+///
+/// # Errors
+///
+/// Returns the operating-system error when the accounting query fails.
+pub fn active_processes(
     handle: ::std::os::windows::io::BorrowedHandle<'_>,
 ) -> ::std::io::Result<::core::primitive::u32> {
     let mut information =
@@ -28,7 +37,7 @@ pub(super) fn active_processes(
 
 fn query_exception() -> xtask::Exception {
     xtask::Exception {
-        path: "xtask/src/process/supervisor/windows/accounting.rs".into(),
+        path: "crates/windows-job-accounting/src/lib.rs".into(),
         item: "active_processes".into(),
         lint: "unsafe_code".into(),
         adr: "docs/adr/assign-windows-command-trees-to-jobs-during-creation.md".into(),
@@ -250,7 +259,7 @@ fn dynamic_cfg_predicates_preserve_unsafe_attribute_and_name_rejection() -> Resu
 fn rejects_query_changes_extra_operations_and_copied_exceptions() -> Result<(), syn::Error> {
     for source in [
         ACCOUNTING_SOURCE.replace("fn active_processes", "fn other_processes"),
-        ACCOUNTING_SOURCE.replace("pub(super)", "pub"),
+        ACCOUNTING_SOURCE.replace("pub fn active_processes", "pub(super) fn active_processes"),
         ACCOUNTING_SOURCE.replace("::windows_sys::", "windows_sys::"),
         ACCOUNTING_SOURCE.replace("BorrowedHandle<'_>", "OwnedHandle"),
         ACCOUNTING_SOURCE.replace(
@@ -280,12 +289,18 @@ fn rejects_query_changes_extra_operations_and_copied_exceptions() -> Result<(), 
         ),
         ACCOUNTING_SOURCE.replace(QUERY_EXPECTATION, ""),
         ACCOUNTING_SOURCE.replace("a borrowed handle.", "an unregistered handle."),
-        format!("#[cfg(any())] {ACCOUNTING_SOURCE}"),
+        ACCOUNTING_SOURCE.replace(
+            "pub fn active_processes",
+            "#[cfg(any())]\npub fn active_processes",
+        ),
         format!("mod nested {{ {ACCOUNTING_SOURCE} }}"),
-        format!("{ACCOUNTING_SOURCE}\n{ACCOUNTING_SOURCE}"),
+        format!(
+            "{ACCOUNTING_SOURCE}\n{}",
+            ACCOUNTING_SOURCE.replacen("#![cfg(windows)]", "", 1)
+        ),
         format!("{ACCOUNTING_SOURCE}\nfn additional() {{ unsafe {{}} }}"),
         format!("{ACCOUNTING_SOURCE}\nfn additional() -> u8 {{ 1 }}"),
-        format!("extern crate foreign as windows_sys; {ACCOUNTING_SOURCE}"),
+        format!("{ACCOUNTING_SOURCE}\nextern crate foreign as windows_sys;"),
     ] {
         let findings = xtask::inspect_with_exceptions(&source, &[query_exception()])?;
         assert!(!findings.is_empty(), "{source}");

@@ -2,7 +2,16 @@ use syn::ext::IdentExt;
 use syn::{buffer::Cursor, parse::ParseStream, parse::Parser, punctuated::Punctuated, Meta, Token};
 
 const ACCOUNTING_SOURCE: &str = r#"
-pub(super) fn active_processes(
+#![cfg(windows)]
+
+/// Returns the current number of processes assigned to a borrowed Windows Job handle.
+///
+/// The count can change immediately after the query.
+///
+/// # Errors
+///
+/// Returns the operating-system error when the accounting query fails.
+pub fn active_processes(
     handle: ::std::os::windows::io::BorrowedHandle<'_>,
 ) -> ::std::io::Result<::core::primitive::u32> {
     let mut information =
@@ -28,7 +37,7 @@ pub(super) fn active_processes(
 "#;
 
 pub(super) fn registration(exception: &crate::Exception) -> bool {
-    exception.path == "xtask/src/process/supervisor/windows/accounting.rs"
+    exception.path == "crates/windows-job-accounting/src/lib.rs"
         && exception.item == "active_processes"
         && exception.lint == "unsafe_code"
         && exception.adr == "docs/adr/assign-windows-command-trees-to-jobs-during-creation.md"
@@ -39,16 +48,16 @@ pub(super) fn accounting_query<'a>(
     file: &'a syn::File,
     exceptions: &[crate::Exception],
 ) -> Result<Option<&'a syn::Local>, syn::Error> {
-    if !file.attrs.is_empty() || exceptions.iter().filter(|item| registration(item)).count() != 1 {
+    if exceptions.iter().filter(|item| registration(item)).count() != 1 {
         return Ok(None);
     }
-    let expected: syn::ItemFn = syn::parse_str(ACCOUNTING_SOURCE)?;
+    let expected: syn::File = syn::parse_str(ACCOUNTING_SOURCE)?;
+    if *file != expected {
+        return Ok(None);
+    }
     let [syn::Item::Fn(function)] = file.items.as_slice() else {
         return Ok(None);
     };
-    if *function != expected {
-        return Ok(None);
-    }
     Ok(match function.block.stmts.get(2) {
         Some(syn::Stmt::Local(local)) => Some(local),
         _ => None,
