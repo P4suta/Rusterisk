@@ -16,9 +16,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 mod attended;
 mod cleanup;
+mod early_media;
 mod external_media;
 mod media;
-use media::{PendingMedia, PendingWebRtc};
+use media::{AnsweredAttachment, MediaAdmission, PendingWebRtc, PreparedAnswer};
 #[cfg(test)]
 mod negotiation_tests;
 mod outbound;
@@ -43,7 +44,7 @@ struct Listener {
 }
 struct Active {
     listener: usize,
-    pending: Option<PendingMedia>,
+    media: MediaAdmission,
     digits: DigitDelivery,
     direction_reply: Option<DirectionReply>,
 }
@@ -356,13 +357,15 @@ impl Signaling {
                     session,
                 } => {
                     let key = key(id, generation)?;
-                    let pending = self
-                        .calls
-                        .get_mut(&key)
-                        .and_then(|call| call.pending.take());
-                    if let Some(pending) = pending {
+                    let attached = match self.queue_answered_attachment(&key, &session) {
+                        Ok(AnsweredAttachment::Existing) => Some(Ok(())),
+                        Ok(AnsweredAttachment::Pending(receipt)) => Some(receipt.wait().await),
+                        Ok(AnsweredAttachment::Missing) => None,
+                        Err(error) => Some(Err(error)),
+                    };
+                    if let Some(attached) = attached {
                         let direction = peer_direction(session.direction);
-                        match pending.attach(&self.media, key.clone(), &session).await {
+                        match attached {
                             Ok(()) => {
                                 self.notify(Signal::PeerDirection {
                                     key: key.clone(),
@@ -433,28 +436,34 @@ impl Signaling {
                         extension,
                         target: crate::IncomingTarget::Dialplan,
                     };
-                    if let Err(error) = self.admit(listener, incoming).await {
-                        let reason = match error {
-                            ControlError::Capacity => RejectReason::Busy,
-                            ControlError::NotFound(_) | ControlError::EndpointTechnology(_) => {
-                                RejectReason::NoRoute
-                            }
-                            ControlError::Unsupported => RejectReason::Unsupported,
-                            ControlError::Invalid(_)
-                            | ControlError::Unprocessable(_)
-                            | ControlError::InvalidState(_)
-                            | ControlError::Conflict(_)
-                            | ControlError::BridgeExists(_)
-                            | ControlError::Unauthorized
-                            | ControlError::Forbidden
-                            | ControlError::Encoding(_)
-                            | ControlError::Adapter(_) => RejectReason::Rejected,
-                        };
-                        let rejected = self.listeners[listener]
-                            .engine
-                            .reject(&id, reason, now)
-                            .map_err(failure)?;
-                        self.transmit(listener, rejected.datagrams).await?;
+                    match self.admit(listener, incoming).await {
+                        Ok((key, direction)) => {
+                            self.notify(Signal::PeerDirection { key, direction })
+                                .await?
+                        }
+                        Err(error) => {
+                            let reason = match error {
+                                ControlError::Capacity => RejectReason::Busy,
+                                ControlError::NotFound(_) | ControlError::EndpointTechnology(_) => {
+                                    RejectReason::NoRoute
+                                }
+                                ControlError::Unsupported => RejectReason::Unsupported,
+                                ControlError::Invalid(_)
+                                | ControlError::Unprocessable(_)
+                                | ControlError::InvalidState(_)
+                                | ControlError::Conflict(_)
+                                | ControlError::BridgeExists(_)
+                                | ControlError::Unauthorized
+                                | ControlError::Forbidden
+                                | ControlError::Encoding(_)
+                                | ControlError::Adapter(_) => RejectReason::Rejected,
+                            };
+                            let rejected = self.listeners[listener]
+                                .engine
+                                .reject(&id, reason, now)
+                                .map_err(failure)?;
+                            self.transmit(listener, rejected.datagrams).await?;
+                        }
                     }
                 }
                 SipEvent::IncomingEnded { id, cause } => {
@@ -468,7 +477,11 @@ impl Signaling {
         Ok(())
     }
 
-    async fn admit(&mut self, listener: usize, incoming: IncomingCall) -> Result<(), ControlError> {
+    async fn admit(
+        &mut self,
+        listener: usize,
+        incoming: IncomingCall,
+    ) -> Result<(CallKey, PeerMediaDirection), ControlError> {
         if self.calls.len()
             + self.external_media.len()
             + self.stream_admissions.len()
@@ -484,17 +497,25 @@ impl Signaling {
             .find(|endpoint| endpoint.name == incoming.endpoint)
             .ok_or(ControlError::NotFound("Endpoint not found"))?
             .dtmf;
+        let direction = peer_direction(
+            self.listeners[listener]
+                .engine
+                .pending(incoming.id.as_str())
+                .ok_or(ControlError::NotFound("Incoming offer not found"))?
+                .session
+                .direction,
+        );
         let key = self.controller.incoming(incoming).await?;
         self.calls.insert(
-            key,
+            key.clone(),
             Active {
                 listener,
-                pending: None,
+                media: MediaAdmission::Incoming,
                 digits: DigitDelivery::new(dtmf),
                 direction_reply: None,
             },
         );
-        Ok(())
+        Ok((key, direction))
     }
 
     async fn start(
@@ -588,20 +609,20 @@ impl Signaling {
                 None => engine.originate_with_sdp(outbound, &description, now),
             }
             .map_err(failure)?;
-            (PendingMedia::WebRtc(PendingWebRtc::Offer(offer)), output)
+            (MediaAdmission::WebRtc(PendingWebRtc::Offer(offer)), output)
         } else {
             let output = match resolved_peer {
                 Some(peer) => engine.originate_to(outbound, peer, now),
                 None => engine.originate(outbound, now),
             }
             .map_err(failure)?;
-            (PendingMedia::Rtp(sockets), output)
+            (MediaAdmission::Rtp(sockets), output)
         };
         self.calls.insert(
             key,
             Active {
                 listener,
-                pending: Some(pending),
+                media: pending,
                 digits: DigitDelivery::new(dtmf),
                 direction_reply: None,
             },
@@ -849,6 +870,14 @@ impl Signaling {
                 selection,
             } => {
                 self.start_music(key, token, selection).await?;
+            }
+            Effect::PrepareEarlyMusic { key, token } => {
+                let result = self.prepare_early_media(&key, now).await;
+                if let Err(error) = &result {
+                    tracing::warn!(channel = %key.id, generation = key.generation, ?token, %error, "early media preparation failed");
+                }
+                self.notify(Signal::EarlyMediaPrepared { key, token, result })
+                    .await?;
             }
             Effect::MusicClassUnavailable { key } => {
                 tracing::warn!(channel = %key.id, generation = key.generation, "music class lookup failed; current source retained");
@@ -1100,73 +1129,9 @@ impl Signaling {
         if self.external_media.contains(key) {
             return Ok(());
         }
-        let call = self
-            .calls
-            .get(key)
-            .ok_or(ControlError::NotFound("Channel not found"))?;
-        let listener = call.listener;
-        if self.listeners[listener]
-            .engine
-            .active_session(key.id.as_str(), key.generation)
-            .is_some()
-        {
+        let Some((listener, output)) = self.incoming_answer(key, now)? else {
             return Ok(());
-        }
-        let transport = self
-            .config
-            .transports
-            .iter()
-            .find(|transport| transport.name == self.listeners[listener].name)
-            .ok_or(ControlError::NotFound("Transport not found"))?;
-        let incoming = self.listeners[listener]
-            .engine
-            .pending(key.id.as_str())
-            .ok_or(ControlError::NotFound("Incoming offer not found"))?;
-        let offered = incoming.session.clone();
-        let bind = if transport.bind.ip().is_unspecified() {
-            media::local_ip(incoming.peer)?
-        } else {
-            transport.bind.ip()
         };
-        let sockets =
-            SocketPair::bind(bind, self.config.rtp.start, self.config.rtp.end).map_err(failure)?;
-        let local = sockets.local_addr().map_err(failure)?;
-        let advertised = SocketAddr::new(
-            transport.external_media_address.unwrap_or(local.ip()),
-            local.port(),
-        );
-        let (pending, output) = match &offered.security {
-            rusterisk_sip::SessionSecurity::Rtp => {
-                let output = self.listeners[listener]
-                    .engine
-                    .answer(key.id.as_str(), key.generation, advertised, now)
-                    .map_err(failure)?;
-                (PendingMedia::Rtp(sockets), output)
-            }
-            rusterisk_sip::SessionSecurity::WebRtc(description) => {
-                let (session, answer) = crate::webrtc::WebRtcSession::answer(
-                    sockets,
-                    advertised,
-                    description.as_str(),
-                    &[offered.codec],
-                    Instant::now(),
-                )
-                .map_err(failure)?;
-                let answer = rusterisk_sip::WebRtcDescription::parse(&answer).map_err(failure)?;
-                let output = self.listeners[listener]
-                    .engine
-                    .answer_with_sdp(key.id.as_str(), key.generation, advertised, &answer, now)
-                    .map_err(failure)?;
-                (
-                    PendingMedia::WebRtc(PendingWebRtc::Session(session)),
-                    output,
-                )
-            }
-        };
-        self.calls
-            .get_mut(key)
-            .ok_or(ControlError::NotFound("Channel not found"))?
-            .pending = Some(pending);
         self.output(listener, output, now).await
     }
 

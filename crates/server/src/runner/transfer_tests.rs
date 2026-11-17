@@ -310,6 +310,7 @@ async fn shutdown_keeps_every_transfer_final_and_release_with_a_full_effect_chan
             | Effect::EndRecording { .. }
             | Effect::PlayMedia { .. }
             | Effect::StartMusic { .. }
+            | Effect::PrepareEarlyMusic { .. }
             | Effect::MusicClassUnavailable { .. }
             | Effect::ControlPlayback { .. }
             | Effect::Playback { .. }

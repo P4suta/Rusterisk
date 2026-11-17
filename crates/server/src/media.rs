@@ -40,6 +40,39 @@ pub enum MediaNotice {
     },
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum AttachmentMode {
+    Answered,
+    Early,
+}
+
+impl AttachmentMode {
+    fn gate(self, direction: PeerMediaDirection) -> Gate {
+        match self {
+            Self::Early => Gate::Closed,
+            Self::Answered => match direction {
+                PeerMediaDirection::SendReceive => Gate::Open,
+                PeerMediaDirection::SendOnly => Gate::OutgoingMuted,
+                PeerMediaDirection::ReceiveOnly => Gate::IncomingMuted,
+                PeerMediaDirection::Inactive => Gate::Closed,
+            },
+        }
+    }
+}
+
+pub(crate) struct AttachmentReceipt {
+    response: oneshot::Receiver<Result<(), MediaError>>,
+}
+
+impl AttachmentReceipt {
+    pub(crate) async fn wait(self) -> Result<(), MediaError> {
+        tokio::time::timeout(Duration::from_secs(5), self.response)
+            .await
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+            .map_err(|error| MediaError::Transport(error.to_string()))?
+    }
+}
+
 enum Command {
     ReceivedDigit {
         key: CallKey,
@@ -100,6 +133,7 @@ enum Command {
         sockets: SocketPair,
         session: RtpSession,
         direction: PeerMediaDirection,
+        mode: AttachmentMode,
         reply: oneshot::Sender<Result<(), MediaError>>,
     },
     AttachAudioSocket {
@@ -392,6 +426,19 @@ impl MediaPort {
         session: RtpSession,
         direction: PeerMediaDirection,
     ) -> Result<(), MediaError> {
+        self.queue_attachment(key, sockets, session, direction, AttachmentMode::Answered)?
+            .wait()
+            .await
+    }
+
+    pub(crate) fn queue_attachment(
+        &self,
+        key: CallKey,
+        sockets: SocketPair,
+        session: RtpSession,
+        direction: PeerMediaDirection,
+        mode: AttachmentMode,
+    ) -> Result<AttachmentReceipt, MediaError> {
         let (reply, response) = oneshot::channel();
         self.commands
             .try_send(Command::Attach {
@@ -399,13 +446,11 @@ impl MediaPort {
                 sockets,
                 session,
                 direction,
+                mode,
                 reply,
             })
             .map_err(|_| MediaError::Capacity)?;
-        tokio::time::timeout(Duration::from_secs(5), response)
-            .await
-            .map_err(|error| MediaError::Transport(error.to_string()))?
-            .map_err(|error| MediaError::Transport(error.to_string()))?
+        Ok(AttachmentReceipt { response })
     }
     pub fn release(&self, key: CallKey) -> Result<(), MediaError> {
         self.commands
@@ -611,6 +656,7 @@ impl MediaHub {
         sockets: SocketPair,
         session: RtpSession,
         initial_direction: PeerMediaDirection,
+        mode: AttachmentMode,
     ) -> Result<(), MediaError> {
         self.check_link(&key)?;
         let support = session
@@ -619,7 +665,7 @@ impl MediaHub {
             .unwrap_or(DigitSupport::Unsupported);
         let (port, channels) = Port::new(initial_direction, support);
         let link = RtpLink::new(sockets, session, channels)?;
-        self.install_link(key.clone(), port, initial_direction)?;
+        self.install_link(key.clone(), port, mode.gate(initial_direction))?;
         self.workers.spawn(async move { (key, link.run().await) });
         Ok(())
     }
@@ -803,10 +849,11 @@ impl MediaHub {
                 sockets,
                 session,
                 direction,
+                mode,
                 reply,
             } => {
                 if !reply.is_closed() {
-                    let result = self.attach(key.clone(), sockets, session, direction);
+                    let result = self.attach(key.clone(), sockets, session, direction, mode);
                     self.complete_attachment(&key, result, reply)?;
                 }
             }

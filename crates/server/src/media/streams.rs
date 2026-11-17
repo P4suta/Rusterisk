@@ -98,19 +98,12 @@ impl MediaHub {
     pub(super) fn install_link(
         &mut self,
         key: CallKey,
-        port: Port,
-        initial_direction: PeerMediaDirection,
+        mut port: Port,
+        initial_gate: Gate,
     ) -> Result<(), MediaError> {
         self.mixer.insert(key.clone())?;
-        self.mixer.gate(
-            &key,
-            match initial_direction {
-                PeerMediaDirection::SendReceive => Gate::Open,
-                PeerMediaDirection::SendOnly => Gate::OutgoingMuted,
-                PeerMediaDirection::ReceiveOnly => Gate::IncomingMuted,
-                PeerMediaDirection::Inactive => Gate::Closed,
-            },
-        )?;
+        self.mixer.gates(&key, initial_gate, initial_gate)?;
+        port.generated_audio_gate = initial_gate;
         self.ports.insert(key, port);
         Ok(())
     }
@@ -124,7 +117,7 @@ impl MediaHub {
         self.check_link(&key)?;
         let (port, channels) = Port::new(PeerMediaDirection::SendReceive, DigitSupport::Stream);
         let link = AudioSocketLink::new(socket, channels, rate)?;
-        self.install_link(key.clone(), port, PeerMediaDirection::SendReceive)?;
+        self.install_link(key.clone(), port, Gate::Open)?;
         self.workers.spawn(async move { (key, link.run().await) });
         Ok(())
     }
@@ -151,7 +144,7 @@ impl MediaHub {
         port.answers = Some(answers);
         port.connection_lease = lease;
         let link = WebSocketMediaLink::new(socket, channels, options, answer)?;
-        self.install_link(key.clone(), port, PeerMediaDirection::SendReceive)?;
+        self.install_link(key.clone(), port, Gate::Open)?;
         self.workers.spawn(async move { (key, link.run().await) });
         Ok(())
     }

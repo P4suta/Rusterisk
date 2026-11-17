@@ -50,7 +50,7 @@ async fn media_acknowledgements_never_send_old_answers_on_replacement_connection
         key.clone(),
         Active {
             listener: 0,
-            pending: None,
+            media: crate::signaling::media::MediaAdmission::Attached,
             digits: DigitDelivery::Media,
             direction_reply: None,
         },
@@ -148,7 +148,7 @@ async fn closed_deferred_answers_suppress_cached_retries_on_replacement_connecti
             key.clone(),
             Active {
                 listener: 0,
-                pending: None,
+                media: crate::signaling::media::MediaAdmission::Attached,
                 digits: DigitDelivery::Media,
                 direction_reply: None,
             },

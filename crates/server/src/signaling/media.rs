@@ -1,5 +1,5 @@
 use crate::{
-    media::MediaPort,
+    media::{AttachmentMode, AttachmentReceipt, MediaPort},
     rtp::{RtpSession, SocketPair},
     webrtc::{WebRtcOffer, WebRtcSession},
     CallKey, ControlError,
@@ -60,9 +60,50 @@ pub(super) fn destination_peer(
     clippy::large_enum_variant,
     reason = "docs/adr/own-webrtc-media-by-call-generation.md: Keep pending media inline and owned by the call generation."
 )]
-pub(super) enum PendingMedia {
+pub(super) enum MediaAdmission {
+    Incoming,
     Rtp(SocketPair),
     WebRtc(PendingWebRtc),
+    Early(PreparedAnswer),
+    Attached,
+}
+
+pub(super) enum PreparedAnswer {
+    Rtp(SocketAddr),
+    WebRtc {
+        local: SocketAddr,
+        description: rusterisk_sip::WebRtcDescription,
+    },
+}
+
+impl PreparedAnswer {
+    pub(super) fn progress(
+        &self,
+        engine: &mut Engine,
+        key: &CallKey,
+        now: u64,
+    ) -> Result<rusterisk_sip::Output, rusterisk_sip::SipError> {
+        match self {
+            Self::Rtp(local) => engine.progress(key.id.as_str(), key.generation, *local, now),
+            Self::WebRtc { local, description } => {
+                engine.progress_with_sdp(key.id.as_str(), key.generation, *local, description, now)
+            }
+        }
+    }
+
+    pub(super) fn answer(
+        &self,
+        engine: &mut Engine,
+        key: &CallKey,
+        now: u64,
+    ) -> Result<rusterisk_sip::Output, rusterisk_sip::SipError> {
+        match self {
+            Self::Rtp(local) => engine.answer(key.id.as_str(), key.generation, *local, now),
+            Self::WebRtc { local, description } => {
+                engine.answer_with_sdp(key.id.as_str(), key.generation, *local, description, now)
+            }
+        }
+    }
 }
 
 pub(super) enum PendingWebRtc {
@@ -70,13 +111,39 @@ pub(super) enum PendingWebRtc {
     Session(WebRtcSession),
 }
 
-impl PendingMedia {
-    pub(super) async fn attach(
+pub(super) enum AnsweredAttachment {
+    Existing,
+    Pending(AttachmentReceipt),
+    Missing,
+}
+
+impl super::Signaling {
+    pub(super) fn queue_answered_attachment(
+        &mut self,
+        key: &CallKey,
+        session: &Session,
+    ) -> Result<AnsweredAttachment, MediaError> {
+        let Some(call) = self.calls.get_mut(key) else {
+            return Ok(AnsweredAttachment::Missing);
+        };
+        match std::mem::replace(&mut call.media, MediaAdmission::Attached) {
+            MediaAdmission::Early(_) => Ok(AnsweredAttachment::Existing),
+            admission @ (MediaAdmission::Rtp(_) | MediaAdmission::WebRtc(_)) => admission
+                .attach(&self.media, key.clone(), session, AttachmentMode::Answered)
+                .map(AnsweredAttachment::Pending),
+            MediaAdmission::Incoming | MediaAdmission::Attached => Ok(AnsweredAttachment::Missing),
+        }
+    }
+}
+
+impl MediaAdmission {
+    pub(super) fn attach(
         self,
         media: &MediaPort,
         key: CallKey,
         session: &Session,
-    ) -> Result<(), MediaError> {
+        mode: AttachmentMode,
+    ) -> Result<AttachmentReceipt, MediaError> {
         let direction = super::peer_direction(session.direction);
         match (self, &session.security) {
             (Self::Rtp(sockets), SessionSecurity::Rtp) => {
@@ -92,29 +159,32 @@ impl PendingMedia {
                             .with_events(format.events())
                     })
                     .transpose()?;
-                media
-                    .attach(
-                        key,
-                        sockets,
-                        RtpSession {
-                            remote: session.remote,
-                            format,
-                            payload_type: session.payload_type,
-                            telephone,
-                        },
-                        direction,
-                    )
-                    .await
+                media.queue_attachment(
+                    key,
+                    sockets,
+                    RtpSession {
+                        remote: session.remote,
+                        format,
+                        payload_type: session.payload_type,
+                        telephone,
+                    },
+                    direction,
+                    mode,
+                )
             }
             (Self::WebRtc(pending), SessionSecurity::WebRtc(description)) => {
                 let rtc = match pending {
                     PendingWebRtc::Offer(offer) => offer.accept_answer(description.as_str())?,
                     PendingWebRtc::Session(session) => session,
                 };
-                media.attach_webrtc(key, rtc, direction).await
+                media.queue_webrtc_attachment(key, rtc, direction, mode)
             }
             (Self::Rtp(_), SessionSecurity::WebRtc(_))
-            | (Self::WebRtc(_), SessionSecurity::Rtp) => Err(MediaError::Unsupported),
+            | (Self::WebRtc(_), SessionSecurity::Rtp)
+            | (
+                Self::Incoming | Self::Early(_) | Self::Attached,
+                SessionSecurity::Rtp | SessionSecurity::WebRtc(_),
+            ) => Err(MediaError::Unsupported),
         }
     }
 }

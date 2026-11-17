@@ -43,7 +43,7 @@ async fn direction_answers_wait_for_the_current_transport_and_ignore_cached_retr
         key.clone(),
         Active {
             listener: 0,
-            pending: None,
+            media: super::MediaAdmission::Attached,
             digits: DigitDelivery::Media,
             direction_reply: None,
         },

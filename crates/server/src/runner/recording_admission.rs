@@ -68,6 +68,7 @@ impl Runner {
             )),
             Signal::AttendedTransferRequested { .. }
             | Signal::BlindTransferRequested { .. }
+            | Signal::EarlyMediaPrepared { .. }
             | Signal::MediaPlaybackStarted { .. }
             | Signal::MediaPlaybackFinished { .. }
             | Signal::PlaybackStarted { .. }
@@ -336,6 +337,7 @@ mod tests {
                     }
                     | Effect::PlayMedia { .. }
                     | Effect::StartMusic { .. }
+                    | Effect::PrepareEarlyMusic { .. }
                     | Effect::MusicClassUnavailable { .. }
                     | Effect::ControlPlayback { .. }
                     | Effect::Playback { .. }

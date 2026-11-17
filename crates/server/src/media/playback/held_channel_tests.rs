@@ -124,11 +124,11 @@ async fn exercise(storage: StoragePort, muted: bool) -> Result<(), ControlError>
         };
         let (port, mut channels) =
             Port::new(PeerMediaDirection::SendReceive, DigitSupport::Unsupported);
-        hub.install_link(channel.clone(), port, PeerMediaDirection::SendReceive)
+        hub.install_link(channel.clone(), port, Gate::Open)
             .map_err(failure)?;
         let (port, mut peers) =
             Port::new(PeerMediaDirection::SendReceive, DigitSupport::Unsupported);
-        hub.install_link(peer.clone(), port, PeerMediaDirection::SendReceive)
+        hub.install_link(peer.clone(), port, Gate::Open)
             .map_err(failure)?;
         hub.mixer
             .bridge(10, &[channel.clone(), peer])

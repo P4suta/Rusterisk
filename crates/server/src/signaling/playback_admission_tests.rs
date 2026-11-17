@@ -294,7 +294,7 @@ async fn exercise(
             key.clone(),
             Active {
                 listener: 0,
-                pending: None,
+                media: super::MediaAdmission::Attached,
                 digits: DigitDelivery::Media,
                 direction_reply: None,
             },

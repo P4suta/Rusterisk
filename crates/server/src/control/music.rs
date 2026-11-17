@@ -2,12 +2,41 @@ use super::{CallKey, Control, ControlError, Effect, MediaOwner, Outcome, StasisM
 use crate::media::PlaybackControl;
 use crate::storage::{MusicSelection, PreparedMusic};
 use rusterisk_api::{ChannelId, ChannelState};
-use rusterisk_core::{CallState, MediaTaskKind, MediaTaskToken};
+use rusterisk_core::{CallState, MediaState, MediaTaskKind, MediaTaskToken};
 
-pub(super) struct MusicTask {
-    pub(super) token: MediaTaskToken,
-    class: Option<String>,
-    selection: Option<Result<MusicSelection, ControlError>>,
+pub(super) enum MusicTask {
+    Selected {
+        token: MediaTaskToken,
+        class: Option<String>,
+        selection: Result<MusicSelection, ControlError>,
+    },
+    Preparing {
+        token: MediaTaskToken,
+        class: Option<String>,
+        selection: Result<MusicSelection, ControlError>,
+    },
+    Running {
+        token: MediaTaskToken,
+        class: Option<String>,
+    },
+}
+
+impl MusicTask {
+    pub(super) fn token(&self) -> MediaTaskToken {
+        match self {
+            Self::Selected { token, .. }
+            | Self::Preparing { token, .. }
+            | Self::Running { token, .. } => *token,
+        }
+    }
+
+    fn class(&self) -> Option<&str> {
+        match self {
+            Self::Selected { class, .. }
+            | Self::Preparing { class, .. }
+            | Self::Running { class, .. } => class.as_deref(),
+        }
+    }
 }
 
 impl Control {
@@ -79,7 +108,7 @@ impl Control {
         ) {
             return Err(ControlError::InvalidState("Channel in invalid state"));
         }
-        if entry.call.state() != CallState::Up {
+        if !matches!(entry.call.state(), CallState::Up | CallState::Ringing) {
             return Err(ControlError::Unsupported);
         }
         if selection.is_err() && entry.music.is_some() {
@@ -95,7 +124,7 @@ impl Control {
         if entry
             .music
             .as_ref()
-            .is_some_and(|music| music.class == class)
+            .is_some_and(|music| music.class() == class.as_deref())
         {
             return Ok(Outcome::empty());
         }
@@ -113,7 +142,7 @@ impl Control {
         let token = entry.media_tasks.reserve(MediaTaskKind::Playback)?;
         let mut outcome = Outcome::empty();
         if let Some(previous) = entry.music.take() {
-            if !entry.media_tasks.finish(previous.token) {
+            if !entry.media_tasks.finish(previous.token()) {
                 entry.music = Some(previous);
                 if !entry.media_tasks.finish(token) {
                     return Err(ControlError::Conflict("Music replacement rollback failed"));
@@ -121,14 +150,14 @@ impl Control {
                 return Err(ControlError::Conflict("Music ownership changed"));
             }
             outcome.effects.push(Effect::ControlPlayback {
-                token: previous.token,
+                token: previous.token(),
                 operation: PlaybackControl::Stop,
             });
         }
-        entry.music = Some(MusicTask {
+        entry.music = Some(MusicTask::Selected {
             token,
             class,
-            selection: Some(selection),
+            selection,
         });
         self.next_playback(&MediaOwner::Channel(key), &mut outcome)?;
         Ok(outcome)
@@ -172,12 +201,12 @@ impl Control {
         let Some(music) = entry.music.take() else {
             return Ok(());
         };
-        if !entry.media_tasks.finish(music.token) {
+        if !entry.media_tasks.finish(music.token()) {
             entry.music = Some(music);
             return Err(ControlError::Conflict("Music ownership changed"));
         }
         outcome.effects.push(Effect::ControlPlayback {
-            token: music.token,
+            token: music.token(),
             operation: PlaybackControl::Stop,
         });
         self.next_playback(&MediaOwner::Channel(key.clone()), outcome)
@@ -199,20 +228,93 @@ impl Control {
         else {
             return Ok(false);
         };
-        let Some(music) = entry.music.as_mut().filter(|music| music.token == token) else {
+        if !entry
+            .music
+            .as_ref()
+            .is_some_and(|music| music.token() == token)
+        {
             return Ok(false);
-        };
+        }
         entry.media_tasks.start(token)?;
-        let selection = music
-            .selection
-            .take()
-            .ok_or(ControlError::Conflict("Music selection already consumed"))?;
+        let music = entry.music.take().ok_or(ControlError::Capacity)?;
+        let MusicTask::Selected {
+            token,
+            class,
+            selection,
+        } = music
+        else {
+            entry.music = Some(music);
+            return Err(ControlError::Conflict("Music selection already consumed"));
+        };
+        if entry.call.state() == CallState::Ringing && entry.call.media() == MediaState::Waiting {
+            entry.music = Some(MusicTask::Preparing {
+                token,
+                class,
+                selection,
+            });
+            outcome.effects.push(Effect::PrepareEarlyMusic {
+                key: key.clone(),
+                token,
+            });
+            return Ok(true);
+        }
+        entry.music = Some(MusicTask::Running { token, class });
         outcome.effects.push(Effect::StartMusic {
             key: key.clone(),
             token,
             selection,
         });
         Ok(true)
+    }
+
+    pub(super) fn early_media_prepared(
+        &mut self,
+        key: CallKey,
+        token: MediaTaskToken,
+        result: Result<(), ControlError>,
+    ) -> Result<Outcome, ControlError> {
+        let Some(entry) = self.channels.get_mut(&key.id).filter(|entry| {
+            entry.call.generation() == key.generation
+                && matches!(entry.music.as_ref(), Some(MusicTask::Preparing { token: current, .. }) if *current == token)
+        }) else {
+            return Ok(Outcome::empty());
+        };
+        if result.is_err() {
+            return Ok(self
+                .finish_music(&MediaOwner::Channel(key), token)?
+                .unwrap_or_else(Outcome::empty));
+        }
+        let call = if entry.call.state() == CallState::Ringing {
+            entry.call.admit_early_media()?
+        } else {
+            entry.call
+        };
+        let music = entry.music.take().ok_or(ControlError::Capacity)?;
+        let MusicTask::Preparing {
+            token,
+            class,
+            selection,
+        } = music
+        else {
+            entry.music = Some(music);
+            return Err(ControlError::Conflict(
+                "Early music preparation ownership changed",
+            ));
+        };
+        entry.call = call;
+        entry.music = Some(MusicTask::Running { token, class });
+        let mut outcome = Outcome::empty();
+        outcome.effects.push(Effect::Gate {
+            key: key.clone(),
+            gate: call.audio_gate(),
+            generated_audio_gate: call.generated_audio_gate(),
+        });
+        outcome.effects.push(Effect::StartMusic {
+            key,
+            token,
+            selection,
+        });
+        Ok(outcome)
     }
 
     pub(super) fn owns_music(&self, owner: &MediaOwner, token: MediaTaskToken) -> bool {
@@ -224,7 +326,7 @@ impl Control {
                 && entry
                     .music
                     .as_ref()
-                    .is_some_and(|music| music.token == token)
+                    .is_some_and(|music| music.token() == token)
         })
     }
 

@@ -612,6 +612,7 @@ impl Runner {
                             | Effect::EndRecording { .. }
                             | Effect::PlayMedia { .. }
                             | Effect::StartMusic { .. }
+                            | Effect::PrepareEarlyMusic { .. }
                             | Effect::MusicClassUnavailable { .. }
                             | Effect::ControlPlayback { .. }
                             | Effect::Playback { .. }

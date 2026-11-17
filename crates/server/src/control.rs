@@ -474,6 +474,10 @@ pub enum Effect {
         token: MediaTaskToken,
         selection: Result<crate::storage::MusicSelection, ControlError>,
     },
+    PrepareEarlyMusic {
+        key: CallKey,
+        token: MediaTaskToken,
+    },
     MusicClassUnavailable {
         key: CallKey,
     },
@@ -569,6 +573,11 @@ pub enum Signal {
     PeerDirection {
         key: CallKey,
         direction: PeerMediaDirection,
+    },
+    EarlyMediaPrepared {
+        key: CallKey,
+        token: MediaTaskToken,
+        result: Result<(), ControlError>,
     },
     RecordingAdmitted {
         owner: MediaOwner,
@@ -1923,7 +1932,7 @@ impl Control {
         };
         let mut outcome = Outcome::empty();
         if entry.call != call {
-            if call.state() == CallState::Up {
+            if call.state() == CallState::Up || call.media() == MediaState::Early {
                 outcome.effects.push(Effect::Gate {
                     key: key.clone(),
                     gate: call.audio_gate(),
@@ -1989,6 +1998,9 @@ impl Control {
             Signal::AudioSocketAdmitted { key, result } => {
                 self.audio_socket_admitted(key, result, timestamp)
             }
+            Signal::EarlyMediaPrepared { key, token, result } => {
+                self.early_media_prepared(key, token, result)
+            }
             Signal::EndpointContact { key, presence } => {
                 let mut outcome = Outcome::empty();
                 if self.endpoints.observe(&key, presence) {
@@ -2010,13 +2022,17 @@ impl Control {
                     if entry.call.peer_direction() != direction {
                         let was_held = !entry.call.peer_direction().can_receive();
                         entry.call = entry.call.with_peer_direction(direction)?;
-                        if entry.call.state() == CallState::Up {
+                        if entry.call.state() == CallState::Up
+                            || entry.call.media() == MediaState::Early
+                        {
                             outcome.effects.push(Effect::PeerDirection {
                                 key,
                                 direction,
                                 gate: entry.call.audio_gate(),
                                 generated_audio_gate: entry.call.generated_audio_gate(),
                             });
+                        }
+                        if entry.call.state() == CallState::Up {
                             let held = !direction.can_receive();
                             if held != was_held {
                                 outcome.optional_event(
@@ -2158,6 +2174,7 @@ impl Control {
                 match milestone {
                     Milestone::Ringing | Milestone::Answered => {
                         let before = entry.call.state();
+                        let was_early = entry.call.media() == MediaState::Early;
                         entry.call = entry
                             .call
                             .apply(if milestone == Milestone::Ringing {
@@ -2174,7 +2191,7 @@ impl Control {
                         };
                         if entry.call.state() != before {
                             if entry.call.state() == CallState::Up
-                                && entry.call.audio_gate() != AudioGate::Open
+                                && (was_early || entry.call.audio_gate() != AudioGate::Open)
                             {
                                 outcome.effects.push(Effect::Gate {
                                     key: key.clone(),

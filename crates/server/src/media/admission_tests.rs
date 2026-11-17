@@ -26,6 +26,7 @@ fn datagram(hub: &mut MediaHub, key: CallKey, peer: &SocketPair) -> Result<(), M
             telephone: None,
         },
         PeerMediaDirection::SendReceive,
+        AttachmentMode::Answered,
     )
 }
 

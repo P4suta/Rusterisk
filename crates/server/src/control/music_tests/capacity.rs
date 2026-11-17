@@ -288,7 +288,10 @@ fn assert_active(
             entry.media_tasks.state(*token),
             Some(MediaTaskState::Active)
         );
-        assert_eq!(entry.music.as_ref().map(|music| music.token), Some(*token));
+        assert_eq!(
+            entry.music.as_ref().map(|music| music.token()),
+            Some(*token)
+        );
     }
     Ok(())
 }
