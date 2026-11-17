@@ -5,10 +5,14 @@ use rusterisk_server::{runtime::Server, ControlError, Controller};
 use std::{net::SocketAddr, path::Path, time::Duration};
 use tokio::task::JoinHandle;
 
+#[path = "runtime/contracts.rs"]
+mod contracts;
+
 pub(super) struct Fixture {
     client: Client,
     controller: Controller,
     address: SocketAddr,
+    listeners: Vec<(String, SocketAddr)>,
     task: JoinHandle<Result<(), ControlError>>,
 }
 
@@ -60,15 +64,17 @@ impl Fixture {
         let controller = server.controller();
         let observed = (|| {
             let address = server.local_addr().map_err(failure)?;
+            let listeners = server.sip_listeners().map_err(failure)?;
             let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
-            Ok::<_, Error>((client, address))
+            Ok::<_, Error>((client, address, listeners))
         })();
         let task = tokio::spawn(server.run());
         match observed {
-            Ok((client, address)) => Ok(Self {
+            Ok((client, address, listeners)) => Ok(Self {
                 client,
                 controller,
                 address,
+                listeners,
                 task,
             }),
             Err(primary) => match shutdown(controller, task).await {
@@ -86,6 +92,10 @@ impl Fixture {
 
     pub(super) const fn address(&self) -> SocketAddr {
         self.address
+    }
+
+    pub(super) const fn sip_listeners(&self) -> &[(String, SocketAddr)] {
+        self.listeners.as_slice()
     }
 
     pub(super) async fn finish(self, primary: Result<(), Error>) -> Result<(), Error> {

@@ -18,6 +18,8 @@ mod external_websocket_clients;
 mod external_websockets;
 #[path = "home_telephone_media/scenario.rs"]
 mod home_telephone_media;
+#[path = "reference/music_on_hold.rs"]
+mod music_on_hold;
 #[path = "reference/playback_position.rs"]
 mod playback_position;
 #[path = "reference/recording_audio.rs"]
