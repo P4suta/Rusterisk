@@ -22,6 +22,8 @@ use media::{PendingMedia, PendingWebRtc};
 #[cfg(test)]
 mod negotiation_tests;
 mod outbound;
+#[cfg(test)]
+mod playback_admission_tests;
 mod recording;
 mod refer_routes;
 mod registrations;
