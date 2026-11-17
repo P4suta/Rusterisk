@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 #[path = "cli_process/music.rs"]
 mod music;
+#[path = "cli_process/startup.rs"]
+mod startup;
 #[path = "cli_process/tls_files.rs"]
 mod tls_files;
 
