@@ -215,7 +215,10 @@ impl Signaling {
             .engine
             .refer_identity(reference)
             .ok_or(ControlError::Invalid("REFER owner unavailable"))?;
-        let route = self.network.capture(listener, identity.peer())?;
+        let route = match identity.flow() {
+            Some(flow) => self.network.capture_flow(listener, identity.peer(), flow)?,
+            None => self.network.capture(listener, identity.peer())?,
+        };
         self.refer_routes.insert(
             (listener, reference),
             ReferRoute {

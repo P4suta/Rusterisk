@@ -8,7 +8,9 @@ use rusterisk_api::{ChannelId, MediaUri};
 use rusterisk_config::{Config, Dtmf};
 use rusterisk_core::{AudioGate, DtmfCommand, MediaTaskToken, PeerMediaDirection};
 use rusterisk_media::{AudioTarget, Gate};
-use rusterisk_sip::{Datagram, DatagramOrigin, Engine, Outbound, Output, RejectReason, SipEvent};
+use rusterisk_sip::{
+    Datagram, DatagramOrigin, Engine, Outbound, Output, RejectReason, SipEvent, StreamFlowId,
+};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -230,7 +232,11 @@ impl Signaling {
     ) -> Result<(), ControlError> {
         for packet in datagrams {
             match packet.origin() {
-                DatagramOrigin::Direct => self.network.send(listener, packet).await?,
+                DatagramOrigin::Direct => {
+                    if !self.network.send_packet(listener, packet).await? {
+                        tracing::debug!("signaling delivery flow is closed");
+                    }
+                }
                 DatagramOrigin::Refer(reference) => {
                     if let Some(route) = self.refer_delivery(listener, reference) {
                         if self.network.send_on(route, packet).await? {
@@ -550,6 +556,7 @@ impl Signaling {
         native: outbound::NativeStart,
         call: outbound::CallStart,
         resolved_peer: Option<SocketAddr>,
+        flow: Option<StreamFlowId>,
         now: u64,
     ) -> Result<(), ControlError> {
         if self.calls.len()
@@ -565,7 +572,6 @@ impl Signaling {
             prepared,
             media: profile,
             binding,
-            registered_profile: _,
         } = native;
         let listener = binding.listener();
         let bind = if profile.bind_ip().is_unspecified() {
@@ -606,14 +612,38 @@ impl Signaling {
             .map_err(failure)?;
             let description =
                 rusterisk_sip::WebRtcDescription::parse(offer.description()).map_err(failure)?;
-            let output = engine
-                .originate_prepared(outbound, prepared, resolved_peer, Some(&description), now)
-                .map_err(failure)?;
+            let output = match flow {
+                Some(flow) => engine.originate_prepared_on_flow(
+                    outbound,
+                    prepared,
+                    resolved_peer,
+                    Some(&description),
+                    flow,
+                    now,
+                ),
+                None => engine.originate_prepared(
+                    outbound,
+                    prepared,
+                    resolved_peer,
+                    Some(&description),
+                    now,
+                ),
+            }
+            .map_err(failure)?;
             (MediaAdmission::WebRtc(PendingWebRtc::Offer(offer)), output)
         } else {
-            let output = engine
-                .originate_prepared(outbound, prepared, resolved_peer, None, now)
-                .map_err(failure)?;
+            let output = match flow {
+                Some(flow) => engine.originate_prepared_on_flow(
+                    outbound,
+                    prepared,
+                    resolved_peer,
+                    None,
+                    flow,
+                    now,
+                ),
+                None => engine.originate_prepared(outbound, prepared, resolved_peer, None, now),
+            }
+            .map_err(failure)?;
             (MediaAdmission::Rtp(sockets), output)
         };
         self.calls.insert(
@@ -1241,7 +1271,12 @@ impl Signaling {
                     match packet? {
                         transport::Input::Packet(packet) => {
                             if self.registration_received(&packet, now) { continue; }
-                            match self.listeners[packet.listener].engine.receive(&packet.bytes, packet.peer, now) {
+                            let engine = &mut self.listeners[packet.listener].engine;
+                            let output = match packet.route().flow()? {
+                                Some(flow) => engine.receive_on_flow(&packet.bytes, packet.peer, flow, now),
+                                None => engine.receive(&packet.bytes, packet.peer, now),
+                            };
+                            match output {
                             Ok(output) => self.output(packet.listener, output, now).await?,
                             Err(error) => {
                                 self.network.refuse(packet.route());
@@ -1252,7 +1287,7 @@ impl Signaling {
                         transport::Input::Closed { key, result } => {
                             self.registration_closed(key);
                             if let Err(error) = result { tracing::debug!(transport = %self.listeners[key.listener].name, %error, "signaling stream closed"); }
-                            let output = self.listeners[key.listener].engine.disconnected(key.peer);
+                            let output = self.listeners[key.listener].engine.disconnected_flow(key.flow()?);
                             self.output(key.listener, output, now).await?;
                         },
                         transport::Input::Prepared(prepared) => {

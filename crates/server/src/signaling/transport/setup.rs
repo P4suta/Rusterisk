@@ -5,6 +5,7 @@ use super::{
 use crate::signaling::{registrations::ConfigurationLease, resolver::ResolvedTarget};
 use crate::{encryption::TlsClientContext, runner::CallLease};
 use candidate::{CandidateDecision, PreparedReply};
+use rusterisk_sip::StreamFlowId;
 use std::{future::Future, net::SocketAddr, num::NonZeroU64, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -191,6 +192,23 @@ impl Network {
                     .filter(|port| matches!(port.state, ConnectionState::Open))
                     .ok_or(ControlError::Conflict("Registered signaling flow closed"))?;
                 Ok(RegisteredRoute::Stream(port.key))
+            }
+        }
+    }
+
+    pub(in crate::signaling) fn registered_flow_route(
+        &self,
+        listener: usize,
+        peer: SocketAddr,
+        flow: StreamFlowId,
+    ) -> Result<RegisteredRoute, ControlError> {
+        let route = self.capture_flow(listener, peer, flow)?;
+        match route.0 {
+            super::Route::Stream(key) if self.current(route) => Ok(RegisteredRoute::Stream(key)),
+            super::Route::Stream(_)
+            | super::Route::Datagram { .. }
+            | super::Route::Closed { .. } => {
+                Err(ControlError::Conflict("Registered signaling flow closed"))
             }
         }
     }

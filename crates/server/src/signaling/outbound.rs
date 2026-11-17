@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{runner::CallLease, CallKey, ControlError, Controller, Signal};
 use rusterisk_config::Protocol;
-use rusterisk_sip::{Destination, OutboundProfile, PreparedOutbound};
+use rusterisk_sip::{Destination, PreparedOutbound};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -47,7 +47,6 @@ pub(super) struct NativeStart {
     pub(super) prepared: PreparedOutbound,
     pub(super) media: crate::call_profiles::NativeMediaProfile,
     pub(super) binding: crate::call_profiles::NativeTransportBinding,
-    pub(super) registered_profile: Option<OutboundProfile>,
 }
 
 struct Resolution {
@@ -104,19 +103,14 @@ impl Signaling {
         let listener = profile.binding.listener();
         let prepared = self.listeners[listener]
             .engine
-            .prepare_outbound(profile.sip.clone(), now)
+            .prepare_outbound(profile.sip, now)
             .map_err(failure)?;
         let destination = prepared.destination().clone();
-        let registered_profile = match &destination {
-            Destination::Registered(_) => Some(profile.sip),
-            Destination::Static(_) => None,
-        };
         let native = NativeStart {
             endpoint: profile.endpoint,
             prepared,
             media: profile.media,
             binding: profile.binding,
-            registered_profile,
         };
         let cached = match &destination {
             Destination::Registered(_) => None,
@@ -124,7 +118,10 @@ impl Signaling {
         };
         let (route, setup) = match destination {
             Destination::Registered(peer) => {
-                let route = self.network.registered_route(listener, peer)?;
+                let route = match native.prepared.flow() {
+                    Some(flow) => self.network.registered_flow_route(listener, peer, flow)?,
+                    None => self.network.registered_route(listener, peer)?,
+                };
                 let setup = self.network.reserve_registered_setup(listener)?;
                 (Route::Registered(route), setup)
             }
@@ -198,23 +195,8 @@ impl Signaling {
         match (pending.route, resolved.target) {
             (Route::Registered(route), None) => {
                 self.network.finish_resolution(pending.setup);
-                let profile = pending
-                    .native
-                    .registered_profile
-                    .as_ref()
-                    .ok_or(ControlError::Invalid("Registered profile missing"))?;
-                let current = match self.listeners[pending.listener]
-                    .engine
-                    .prepare_outbound(profile.clone(), now)
-                {
-                    Ok(current) => current,
-                    Err(error) => {
-                        self.cancel_native(&completed.key);
-                        return self.native_failed(completed.key, failure(error)).await;
-                    }
-                };
                 if !self.network.route_is_current(route)
-                    || !matches!(current.destination(), Destination::Registered(peer) if *peer == route.peer())
+                    || !matches!(pending.native.prepared.destination(), Destination::Registered(peer) if *peer == route.peer())
                 {
                     self.cancel_native(&completed.key);
                     return self
@@ -228,12 +210,14 @@ impl Signaling {
                     .native_pending
                     .remove(&completed.key)
                     .ok_or(ControlError::Capacity)?;
+                let flow = pending.native.prepared.flow();
                 let result = self
                     .start_resolved(
                         completed.key.clone(),
                         pending.native,
                         pending.call,
                         None,
+                        flow,
                         now,
                     )
                     .await;
@@ -263,6 +247,7 @@ impl Signaling {
                                     pending.native,
                                     pending.call,
                                     Some(peer),
+                                    None,
                                     now,
                                 )
                                 .await
@@ -353,6 +338,7 @@ impl Signaling {
                 pending.native,
                 pending.call,
                 Some(connection.peer),
+                Some(connection.flow()?),
                 now,
             )
             .await;

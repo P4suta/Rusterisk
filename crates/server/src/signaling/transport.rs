@@ -5,7 +5,7 @@ use crate::{
     ControlError,
 };
 use rusterisk_config::{Config, Protocol};
-use rusterisk_sip::{Datagram, SipStreamDecoder, StreamItem, MAX_MESSAGE};
+use rusterisk_sip::{Datagram, SipStreamDecoder, StreamFlowId, StreamItem, MAX_MESSAGE};
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::SocketAddr,
@@ -49,6 +49,12 @@ pub(super) struct ConnectionKey {
     generation: u64,
 }
 
+impl ConnectionKey {
+    pub(super) fn flow(self) -> Result<StreamFlowId, ControlError> {
+        StreamFlowId::new(self.generation).map_err(failure)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Route {
     Datagram { listener: usize, peer: SocketAddr },
@@ -77,6 +83,13 @@ impl DeliveryRoute {
             Route::Stream(key) => key.peer,
         }
     }
+
+    pub(super) fn flow(self) -> Result<Option<StreamFlowId>, ControlError> {
+        match self.0 {
+            Route::Stream(key) => key.flow().map(Some),
+            Route::Datagram { .. } | Route::Closed { .. } => Ok(None),
+        }
+    }
 }
 
 pub(super) struct DeferredTransmission {
@@ -88,6 +101,7 @@ impl DeferredTransmission {
     pub(super) fn matches(&self, listener: usize, packet: &Datagram) -> bool {
         self.route.listener() == listener
             && self.packet.peer == packet.peer
+            && self.packet.flow() == packet.flow()
             && self.packet.bytes == packet.bytes
     }
 }
@@ -331,6 +345,52 @@ impl Network {
             .ok_or(ControlError::Conflict("Signaling flow is not open"))
     }
 
+    pub(super) fn capture_flow(
+        &self,
+        listener: usize,
+        peer: SocketAddr,
+        flow: StreamFlowId,
+    ) -> Result<DeliveryRoute, ControlError> {
+        match self.listeners.get(listener) {
+            Some(
+                ListenerSocket::Stream(_)
+                | ListenerSocket::Encrypted { .. }
+                | ListenerSocket::WebSocket { .. },
+            ) => {}
+            Some(ListenerSocket::Datagram(_)) | None => {
+                return Err(ControlError::Invalid(
+                    "Stream flow has no reliable listener",
+                ));
+            }
+        }
+        for port in self.peer_ports(listener, peer) {
+            if port.key.flow()? == flow {
+                return Ok(DeliveryRoute(Route::Stream(port.key)));
+            }
+        }
+        Ok(DeliveryRoute(Route::Closed { listener, peer }))
+    }
+
+    fn capture_packet(
+        &self,
+        listener: usize,
+        packet: &Datagram,
+    ) -> Result<DeliveryRoute, ControlError> {
+        match packet.flow() {
+            Some(flow) => self.capture_flow(listener, packet.peer, flow),
+            None => self.capture(listener, packet.peer),
+        }
+    }
+
+    pub(super) async fn send_packet(
+        &mut self,
+        listener: usize,
+        packet: Datagram,
+    ) -> Result<bool, ControlError> {
+        let route = self.capture_packet(listener, &packet)?;
+        self.send_on(route, packet).await
+    }
+
     pub(super) fn defer(
         &self,
         listener: usize,
@@ -340,7 +400,7 @@ impl Network {
             return Err(ControlError::Capacity);
         }
         Ok(DeferredTransmission {
-            route: self.capture(listener, packet.peer)?,
+            route: self.capture_packet(listener, &packet)?,
             packet,
         })
     }
@@ -365,6 +425,9 @@ impl Network {
         }
         if !self.current(route) {
             return Ok(false);
+        }
+        if packet.flow().is_some() && packet.flow() != route.flow()? {
+            return Err(ControlError::Invalid("Delivery flow changed"));
         }
         match route.0 {
             Route::Datagram { listener, .. } => self.send(listener, packet).await?,
