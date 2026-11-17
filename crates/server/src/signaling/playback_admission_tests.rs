@@ -237,7 +237,7 @@ async fn exercise(
         .await
         .map_err(failure)?;
     let (controller, runner, effects) = Controller::new(config.clone(), 2);
-    let runner = runner.with_music(catalog);
+    let runner = runner.with_music(catalog)?;
     let (media, hub, notices) = MediaHub::new(2);
     let mut signaling =
         Signaling::bind(config, controller.clone(), effects, media.clone(), notices)

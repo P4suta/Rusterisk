@@ -6,7 +6,7 @@ use crate::{
 };
 use rusterisk_config::Codec;
 use rusterisk_media::{AudioFormat, MediaError, TelephoneFormat};
-use rusterisk_sip::{Destination, Engine, Session, SessionSecurity, TargetHost};
+use rusterisk_sip::{Engine, Session, SessionSecurity};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 pub(super) fn local_ip(peer: SocketAddr) -> Result<IpAddr, ControlError> {
@@ -29,39 +29,12 @@ pub(super) fn local_ip(peer: SocketAddr) -> Result<IpAddr, ControlError> {
     Ok(address)
 }
 
-pub(super) fn destination_peer(
-    engine: &Engine,
-    endpoint: &str,
-    resolved: Option<SocketAddr>,
-    now: u64,
-) -> Result<SocketAddr, ControlError> {
-    if let Some(peer) = resolved {
-        return Ok(peer);
-    }
-    match engine.destination(endpoint, now).map_err(super::failure)? {
-        Destination::Registered(peer) => Ok(peer),
-        Destination::Static(target) => {
-            let TargetHost::Address(address) = target.host() else {
-                return Err(ControlError::Unsupported);
-            };
-            let default = match target.protocol() {
-                rusterisk_config::Protocol::Udp | rusterisk_config::Protocol::Tcp => 5060,
-                rusterisk_config::Protocol::Tls => 5061,
-                rusterisk_config::Protocol::Ws | rusterisk_config::Protocol::Wss => {
-                    return Err(ControlError::Unsupported)
-                }
-            };
-            Ok(SocketAddr::new(*address, target.port().unwrap_or(default)))
-        }
-    }
-}
-
 #[expect(
     clippy::large_enum_variant,
     reason = "docs/adr/own-webrtc-media-by-call-generation.md: Keep pending media inline and owned by the call generation."
 )]
 pub(super) enum MediaAdmission {
-    Incoming,
+    Incoming(crate::call_profiles::NativeMediaProfile),
     Rtp(SocketPair),
     WebRtc(PendingWebRtc),
     Early(PreparedAnswer),
@@ -131,7 +104,9 @@ impl super::Signaling {
             admission @ (MediaAdmission::Rtp(_) | MediaAdmission::WebRtc(_)) => admission
                 .attach(&self.media, key.clone(), session, AttachmentMode::Answered)
                 .map(AnsweredAttachment::Pending),
-            MediaAdmission::Incoming | MediaAdmission::Attached => Ok(AnsweredAttachment::Missing),
+            MediaAdmission::Incoming(_) | MediaAdmission::Attached => {
+                Ok(AnsweredAttachment::Missing)
+            }
         }
     }
 }
@@ -182,7 +157,7 @@ impl MediaAdmission {
             (Self::Rtp(_), SessionSecurity::WebRtc(_))
             | (Self::WebRtc(_), SessionSecurity::Rtp)
             | (
-                Self::Incoming | Self::Early(_) | Self::Attached,
+                Self::Incoming(_) | Self::Early(_) | Self::Attached,
                 SessionSecurity::Rtp | SessionSecurity::WebRtc(_),
             ) => Err(MediaError::Unsupported),
         }

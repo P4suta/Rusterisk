@@ -5,7 +5,7 @@ use crate::{
     CallKey, ControlError, Signal,
 };
 use rusterisk_sip::{Session, SessionSecurity, WebRtcDescription};
-use std::{net::SocketAddr, time::Instant};
+use std::time::Instant;
 
 impl Signaling {
     pub(super) fn incoming_answer(
@@ -57,34 +57,30 @@ impl Signaling {
         &self,
         key: &CallKey,
     ) -> Result<(MediaAdmission, PreparedAnswer, Session), ControlError> {
-        let listener = self
+        let call = self
             .calls
             .get(key)
-            .ok_or(ControlError::NotFound("Channel not found"))?
-            .listener;
-        let transport = self
-            .config
-            .transports
-            .iter()
-            .find(|transport| transport.name == self.listeners[listener].name)
-            .ok_or(ControlError::NotFound("Transport not found"))?;
+            .ok_or(ControlError::NotFound("Channel not found"))?;
+        let listener = call.listener;
+        let MediaAdmission::Incoming(profile) = &call.media else {
+            return Err(ControlError::InvalidState(
+                "Incoming transport already prepared",
+            ));
+        };
         let incoming = self.listeners[listener]
             .engine
             .pending(key.id.as_str())
             .ok_or(ControlError::NotFound("Incoming offer not found"))?;
         let offered = incoming.session.clone();
-        let bind = if transport.bind.ip().is_unspecified() {
+        let bind = if profile.bind_ip().is_unspecified() {
             media::local_ip(incoming.peer)?
         } else {
-            transport.bind.ip()
+            profile.bind_ip()
         };
         let sockets =
-            SocketPair::bind(bind, self.config.rtp.start, self.config.rtp.end).map_err(failure)?;
+            SocketPair::bind(bind, profile.rtp.start, profile.rtp.end).map_err(failure)?;
         let local = sockets.local_addr().map_err(failure)?;
-        let advertised = SocketAddr::new(
-            transport.external_media_address.unwrap_or(local.ip()),
-            local.port(),
-        );
+        let advertised = profile.advertised(local);
         let (admission, answer) = match &offered.security {
             SessionSecurity::Rtp => (
                 MediaAdmission::Rtp(sockets),
@@ -127,7 +123,7 @@ impl Signaling {
             MediaAdmission::Rtp(_) | MediaAdmission::WebRtc(_) => {
                 return Err(ControlError::Unsupported)
             }
-            MediaAdmission::Incoming => {}
+            MediaAdmission::Incoming(_) => {}
         }
         let (receipt, answer) = self.queue_early_attachment(key)?;
         receipt.wait().await.map_err(failure)?;

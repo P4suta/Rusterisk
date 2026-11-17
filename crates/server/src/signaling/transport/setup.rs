@@ -213,13 +213,35 @@ impl Network {
         listener: usize,
         configuration: NonZeroU64,
     ) -> Result<SetupKey, ControlError> {
-        let tls_profile = match self.listeners.get(listener) {
+        let context = match self.listeners.get(listener) {
             Some(ListenerSocket::Datagram(_) | ListenerSocket::Stream(_)) => None,
-            Some(ListenerSocket::Encrypted { client, .. }) => Some(StartingTlsProfile {
-                configuration,
-                context: client.clone(),
-            }),
+            Some(ListenerSocket::Encrypted { client, .. }) => Some(client.clone()),
             Some(ListenerSocket::WebSocket { .. }) | None => return Err(ControlError::Unsupported),
+        };
+        self.reserve_native_setup(listener, configuration, context)
+    }
+
+    pub(in crate::signaling) fn reserve_native_setup(
+        &mut self,
+        listener: usize,
+        configuration: NonZeroU64,
+        context: Option<TlsClientContext>,
+    ) -> Result<SetupKey, ControlError> {
+        let tls_profile = match (self.listeners.get(listener), context) {
+            (Some(ListenerSocket::Datagram(_) | ListenerSocket::Stream(_)), None) => None,
+            (Some(ListenerSocket::Encrypted { .. }), Some(context)) => Some(StartingTlsProfile {
+                configuration,
+                context,
+            }),
+            (Some(ListenerSocket::Datagram(_) | ListenerSocket::Stream(_)), Some(_))
+            | (Some(ListenerSocket::Encrypted { .. }), None) => {
+                return Err(ControlError::Conflict(
+                    "Starting signaling protocol changed",
+                ));
+            }
+            (Some(ListenerSocket::WebSocket { .. }) | None, _) => {
+                return Err(ControlError::Unsupported);
+            }
         };
         let key = self.reserve_slot(listener)?;
         let (stop, _stopped) = watch::channel(false);

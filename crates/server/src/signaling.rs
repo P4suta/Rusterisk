@@ -84,6 +84,7 @@ type PlaybackResult = (MediaOwner, MediaTaskToken, Result<(), ControlError>);
 
 pub struct Signaling {
     config: Config,
+    native_profiles: crate::call_profiles::BoundNativeProfiles,
     controller: Controller,
     effects: mpsc::Receiver<Effect>,
     media: MediaPort,
@@ -146,6 +147,10 @@ impl Signaling {
         self
     }
 
+    pub(crate) fn native_profiles(&self) -> crate::call_profiles::BoundNativeProfiles {
+        self.native_profiles.clone()
+    }
+
     pub async fn bind(
         mut config: Config,
         controller: Controller,
@@ -158,7 +163,9 @@ impl Signaling {
         }
         let registrations = registrations::Registrations::new(&config)?;
         let websocket_clients = websocket::PreparedClients::new(&config.websocket.clients)?;
+        let requested = config.transports.clone();
         let network = transport::Network::bind(&mut config).await?;
+        let native_profiles = network.native_profiles(&requested, registrations.generation())?;
         let mut listeners = Vec::with_capacity(config.transports.len());
         for transport in &config.transports {
             let mut scoped = config.clone();
@@ -172,8 +179,10 @@ impl Signaling {
                 engine: Engine::new(scoped, seed).with_transport(transport.protocol),
             });
         }
+        controller.bind_native_profiles(native_profiles.clone())?;
         Ok(Self {
             config,
+            native_profiles,
             controller,
             effects,
             media,
@@ -490,13 +499,12 @@ impl Signaling {
         {
             return Err(ControlError::Capacity);
         }
-        let dtmf = self
-            .config
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.name == incoming.endpoint)
-            .ok_or(ControlError::NotFound("Endpoint not found"))?
-            .dtmf;
+        let profile = crate::call_profiles::NativeMediaProfile::capture(
+            &self.config,
+            &incoming.endpoint,
+            &self.native_profiles,
+        )?;
+        let dtmf = profile.dtmf;
         let direction = peer_direction(
             self.listeners[listener]
                 .engine
@@ -510,7 +518,7 @@ impl Signaling {
             key.clone(),
             Active {
                 listener,
-                media: MediaAdmission::Incoming,
+                media: MediaAdmission::Incoming(profile),
                 digits: DigitDelivery::new(dtmf),
                 direction_reply: None,
             },
@@ -524,15 +532,16 @@ impl Signaling {
         endpoint: String,
         caller: String,
         timeout: Option<u32>,
+        profile: crate::NativeCallProfile,
         now: u64,
     ) -> Result<(), ControlError> {
-        self.queue_native(key, endpoint, caller, timeout, now)
+        self.queue_native_profile(key, endpoint, caller, timeout, profile, now)
     }
 
     async fn start_resolved(
         &mut self,
         key: CallKey,
-        endpoint: String,
+        native: outbound::NativeStart,
         caller: String,
         timeout: Option<u32>,
         resolved_peer: Option<SocketAddr>,
@@ -546,76 +555,59 @@ impl Signaling {
         {
             return Err(ControlError::Capacity);
         }
-        let name = endpoint
-            .strip_prefix("PJSIP/")
-            .ok_or(ControlError::Unsupported)?;
-        let endpoint = self
-            .config
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.name == name)
-            .ok_or(ControlError::NotFound("Endpoint not found"))?;
-        let listener = self
-            .listeners
-            .iter()
-            .position(|listener| listener.name == endpoint.transport)
-            .ok_or(ControlError::NotFound("Transport not found"))?;
-        let transport = self
-            .config
-            .transports
-            .iter()
-            .find(|transport| transport.name == endpoint.transport)
-            .ok_or(ControlError::NotFound("Transport not found"))?;
-        let bind = if transport.bind.ip().is_unspecified() {
-            let peer = media::destination_peer(
-                &self.listeners[listener].engine,
-                &endpoint.name,
-                resolved_peer,
-                now,
-            )?;
+        let outbound::NativeStart {
+            endpoint,
+            prepared,
+            media: profile,
+            binding,
+            registered_profile: _,
+        } = native;
+        let listener = binding.listener();
+        let bind = if profile.bind_ip().is_unspecified() {
+            let peer = match (prepared.destination(), resolved_peer) {
+                (rusterisk_sip::Destination::Registered(peer), None) => *peer,
+                (rusterisk_sip::Destination::Static(_), Some(peer)) => peer,
+                (rusterisk_sip::Destination::Registered(_), Some(_))
+                | (rusterisk_sip::Destination::Static(_), None) => {
+                    return Err(ControlError::Invalid("Signaling destination changed"))
+                }
+            };
             media::local_ip(peer)?
         } else {
-            transport.bind.ip()
+            profile.bind_ip()
         };
         let sockets =
-            SocketPair::bind(bind, self.config.rtp.start, self.config.rtp.end).map_err(failure)?;
+            SocketPair::bind(bind, profile.rtp.start, profile.rtp.end).map_err(failure)?;
         let local = sockets.local_addr().map_err(failure)?;
-        let local_rtp = SocketAddr::new(
-            transport.external_media_address.unwrap_or(local.ip()),
-            local.port(),
-        );
-        let dtmf = endpoint.dtmf;
+        let local_rtp = profile.advertised(local);
+        let dtmf = profile.dtmf;
         let outbound = Outbound {
             id: key.id.as_str().into(),
             generation: key.generation,
-            endpoint: endpoint.name.clone(),
+            endpoint,
             caller,
             local_rtp,
             timeout_ms: timeout.map(|timeout| u64::from(timeout) * 1000),
         };
         let engine = &mut self.listeners[listener].engine;
-        let (pending, output) = if endpoint.webrtc {
+        let (pending, output) = if profile.webrtc {
             let offer = crate::webrtc::WebRtcOffer::new(
                 sockets,
                 local_rtp,
-                &endpoint.codecs,
+                &profile.codecs,
                 Instant::now(),
             )
             .map_err(failure)?;
             let description =
                 rusterisk_sip::WebRtcDescription::parse(offer.description()).map_err(failure)?;
-            let output = match resolved_peer {
-                Some(peer) => engine.originate_to_with_sdp(outbound, peer, &description, now),
-                None => engine.originate_with_sdp(outbound, &description, now),
-            }
-            .map_err(failure)?;
+            let output = engine
+                .originate_prepared(outbound, prepared, resolved_peer, Some(&description), now)
+                .map_err(failure)?;
             (MediaAdmission::WebRtc(PendingWebRtc::Offer(offer)), output)
         } else {
-            let output = match resolved_peer {
-                Some(peer) => engine.originate_to(outbound, peer, now),
-                None => engine.originate(outbound, now),
-            }
-            .map_err(failure)?;
+            let output = engine
+                .originate_prepared(outbound, prepared, resolved_peer, None, now)
+                .map_err(failure)?;
             (MediaAdmission::Rtp(sockets), output)
         };
         self.calls.insert(
@@ -831,11 +823,31 @@ impl Signaling {
                 endpoint,
                 caller,
                 timeout,
+                settings,
             } => {
-                if let Err(error) = self
-                    .start(key.clone(), endpoint, caller, timeout, now)
-                    .await
-                {
+                if self.calls.contains_key(&key) || self.native_pending.contains_key(&key) {
+                    return Ok(());
+                }
+                let capsule = self
+                    .controller
+                    .take_native_profile(key.clone(), settings)
+                    .await;
+                let profile = match capsule {
+                    Ok(capsule) => capsule.into_profile(),
+                    Err(ControlError::Conflict(_) | ControlError::NotFound(_)) => {
+                        tracing::debug!(channel = %key.id, generation = key.generation, "native start key rejected");
+                        return Ok(());
+                    }
+                    Err(error) => Err(error),
+                };
+                let started = match profile {
+                    Ok(profile) => {
+                        self.start(key.clone(), endpoint, caller, timeout, profile, now)
+                            .await
+                    }
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = started {
                     tracing::warn!(channel = %key.id.as_str(), generation = key.generation, %error, "outgoing call failed");
                     self.notify(Signal::Terminated { key, cause: 21 }).await?;
                 }

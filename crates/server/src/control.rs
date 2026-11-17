@@ -21,9 +21,9 @@ mod initial_variables;
 mod music;
 #[cfg(test)]
 mod music_tests;
+mod native_start;
 mod playback;
 mod recording;
-#[cfg(test)]
 mod settings;
 #[cfg(test)]
 mod settings_tests;
@@ -35,6 +35,9 @@ mod transfer_tests;
 use dialplan::DialplanFrame;
 pub use endpoints::EndpointKey;
 use endpoints::Endpoints;
+use native_start::CallSettings;
+pub(crate) use native_start::NativeStartCapsule;
+use settings::SettingsGenerations;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControlError {
@@ -520,6 +523,7 @@ pub enum Effect {
         endpoint: String,
         caller: String,
         timeout: Option<u32>,
+        settings: rusterisk_core::SettingsGeneration,
     },
     Release {
         key: CallKey,
@@ -733,6 +737,8 @@ struct ChannelEntry {
     dialplan: Option<DialplanFrame>,
     media_tasks: MediaTasks,
     music: Option<music::MusicTask>,
+    settings: rusterisk_core::SettingsReference,
+    pending_native: Option<NativeStartCapsule>,
 }
 
 impl ChannelEntry {
@@ -842,7 +848,8 @@ pub struct Control {
     event_filters: BTreeMap<StasisApplication, stasis::EventFilters>,
     resource_subscriptions: BTreeMap<StasisApplication, rusterisk_core::ResourceSubscriptions<128>>,
     playbacks: BTreeMap<ChannelId, playback::PlaybackEntry>,
-    music_catalog: Option<crate::storage::PreparedMusic>,
+    settings: SettingsGenerations<CallSettings>,
+    info: crate::server_info::ServerInfo,
     recordings: BTreeMap<ChannelId, recording::RecordingEntry>,
     dialplan_program: rusterisk_config::Dialplan,
     endpoints: Endpoints,
@@ -959,6 +966,7 @@ impl Control {
                 },
             );
         }
+        let settings = self.settings.retain(self.settings.current())?;
         self.channels.insert(
             incoming.id,
             ChannelEntry {
@@ -973,6 +981,8 @@ impl Control {
                 dialplan: Some(DialplanFrame::dormant(self.dialplan_program.clone())),
                 media_tasks: MediaTasks::new(call.generation()),
                 music: None,
+                settings,
+                pending_native: None,
             },
         );
         Ok(outcome)
@@ -993,13 +1003,26 @@ impl Control {
     }
 
     pub fn with_configuration(capacity: usize, config: &rusterisk_config::Config) -> Self {
-        let mut control = Self::with_dialplan(capacity, config.dialplan.clone());
+        let mut control = Self::with_initial_settings(
+            capacity,
+            config.dialplan.clone(),
+            CallSettings::configured(config),
+        );
         control.endpoints = Endpoints::configured(config);
         control.websocket = config.websocket.clone();
         control
     }
 
     pub fn with_dialplan(capacity: usize, program: rusterisk_config::Dialplan) -> Self {
+        Self::with_initial_settings(capacity, program, CallSettings::empty())
+    }
+
+    fn with_initial_settings(
+        capacity: usize,
+        program: rusterisk_config::Dialplan,
+        settings: CallSettings,
+    ) -> Self {
+        let info = crate::server_info::ServerInfo::new(capacity);
         Self {
             capacity: capacity.min(64),
             generation: 0,
@@ -1009,7 +1032,8 @@ impl Control {
             event_filters: BTreeMap::new(),
             resource_subscriptions: BTreeMap::new(),
             playbacks: BTreeMap::new(),
-            music_catalog: None,
+            settings: SettingsGenerations::new(settings, info.settings_owner()),
+            info,
             recordings: BTreeMap::new(),
             dialplan_program: program,
             endpoints: Endpoints::default(),
@@ -1412,11 +1436,23 @@ impl Control {
                         channel: snapshot.clone(),
                     },
                 );
+                let call = Call::outgoing(generation).reserve_stasis(application)?;
+                let settings_generation = self.settings.current();
+                let capsule = self.native_capsule(
+                    &CallKey {
+                        id: id.clone(),
+                        generation,
+                    },
+                    settings_generation,
+                    &endpoint,
+                )?;
+                let settings = self.settings.retain(settings_generation)?;
                 outcome.effects.push(Effect::Start {
                     key: CallKey {
                         id: id.clone(),
                         generation,
                     },
+                    settings: settings_generation,
                     endpoint,
                     caller: snapshot.caller.number.clone(),
                     timeout: Some(timeout),
@@ -1425,7 +1461,7 @@ impl Control {
                     id,
                     ChannelEntry {
                         kind: ChannelKind::Sip,
-                        call: Call::outgoing(generation).reserve_stasis(application)?,
+                        call,
                         endpoint: endpoint_resource,
                         snapshot,
                         arguments: args,
@@ -1435,6 +1471,8 @@ impl Control {
                         dialplan: Some(DialplanFrame::dormant(self.dialplan_program.clone())),
                         media_tasks: MediaTasks::new(generation),
                         music: None,
+                        settings,
+                        pending_native: Some(capsule),
                     },
                 );
                 Ok(outcome)
@@ -1779,6 +1817,8 @@ impl Control {
             .channels
             .remove(id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
+        drop(entry.pending_native.take());
+        self.settings.release(entry.settings)?;
         self.media_connections
             .retain(|_, (key, _)| key.id != *id || key.generation != entry.call.generation());
         let application =

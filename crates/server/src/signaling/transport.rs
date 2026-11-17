@@ -212,6 +212,41 @@ async fn listen(listeners: &[ListenerSocket]) -> Result<ListenerInput, ControlEr
 }
 
 impl Network {
+    pub(super) fn native_profiles(
+        &self,
+        requested: &[rusterisk_config::Transport],
+        configuration: std::num::NonZeroU64,
+    ) -> Result<crate::call_profiles::BoundNativeProfiles, ControlError> {
+        if requested.len() != self.listeners.len() {
+            return Err(ControlError::Conflict(
+                "Starting signaling listeners changed",
+            ));
+        }
+        let bindings = requested
+            .iter()
+            .enumerate()
+            .map(|(listener, transport)| {
+                let context = match self.listeners.get(listener) {
+                    Some(ListenerSocket::Encrypted { client, .. }) => Some(client.clone()),
+                    Some(
+                        ListenerSocket::Datagram(_)
+                        | ListenerSocket::Stream(_)
+                        | ListenerSocket::WebSocket { .. },
+                    ) => None,
+                    None => return Err(ControlError::Invalid("Unknown signaling listener")),
+                };
+                Ok(crate::call_profiles::NativeTransportBinding::new(
+                    transport.clone(),
+                    self.local_addr(listener)?,
+                    listener,
+                    configuration,
+                    context,
+                ))
+            })
+            .collect::<Result<Vec<_>, ControlError>>()?;
+        Ok(crate::call_profiles::BoundNativeProfiles::new(bindings))
+    }
+
     pub(super) fn current(&self, route: DeliveryRoute) -> bool {
         match route.0 {
             Route::Datagram { listener, .. } => matches!(

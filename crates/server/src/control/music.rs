@@ -40,9 +40,11 @@ impl MusicTask {
 }
 
 impl Control {
-    pub(crate) fn with_music(mut self, catalog: PreparedMusic) -> Self {
-        self.music_catalog = Some(catalog);
-        self
+    pub(crate) fn with_music(mut self, catalog: PreparedMusic) -> Result<Self, ControlError> {
+        let mut settings = self.settings.get(self.settings.current())?.clone();
+        settings.music_catalog = Some(catalog);
+        self.publish_call_settings(settings)?;
+        Ok(self)
     }
 
     pub(super) fn music_source_count(&self) -> usize {
@@ -60,6 +62,7 @@ impl Control {
         requested: Option<String>,
     ) -> Result<Outcome, ControlError> {
         let catalog = self
+            .channel_settings(&channel)?
             .music_catalog
             .as_ref()
             .ok_or(ControlError::Unsupported)?;
@@ -77,6 +80,7 @@ impl Control {
         channel: ChannelId,
     ) -> Result<Outcome, ControlError> {
         match self
+            .channel_settings(&channel)?
             .music_catalog
             .as_ref()
             .and_then(|catalog| catalog.select("default"))

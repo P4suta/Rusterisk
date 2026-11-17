@@ -8,6 +8,10 @@ pub(crate) struct ServerInfo {
 }
 
 impl ServerInfo {
+    pub(crate) fn settings_owner(&self) -> u128 {
+        self.entity_id.as_u128()
+    }
+
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
             entity_id: uuid::Uuid::new_v4(),

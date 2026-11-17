@@ -9,7 +9,7 @@ use super::{
 };
 use crate::{runner::CallLease, CallKey, ControlError, Controller, Signal};
 use rusterisk_config::Protocol;
-use rusterisk_sip::Destination;
+use rusterisk_sip::{Destination, OutboundProfile, PreparedOutbound};
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
 
@@ -28,7 +28,7 @@ enum Phase {
 }
 
 pub(super) struct Pending {
-    endpoint: String,
+    native: NativeStart,
     caller: String,
     timeout: Option<u32>,
     listener: usize,
@@ -36,6 +36,14 @@ pub(super) struct Pending {
     route: Route,
     phase: Phase,
     cancel: watch::Sender<bool>,
+}
+
+pub(super) struct NativeStart {
+    pub(super) endpoint: String,
+    pub(super) prepared: PreparedOutbound,
+    pub(super) media: crate::call_profiles::NativeMediaProfile,
+    pub(super) binding: crate::call_profiles::NativeTransportBinding,
+    pub(super) registered_profile: Option<OutboundProfile>,
 }
 
 struct Resolution {
@@ -50,12 +58,27 @@ pub(super) struct Completion {
 }
 
 impl Signaling {
+    #[cfg(test)]
     pub(super) fn queue_native(
         &mut self,
         key: CallKey,
         endpoint: String,
         caller: String,
         timeout: Option<u32>,
+        now: u64,
+    ) -> Result<(), ControlError> {
+        let catalog = crate::call_profiles::NativeProfileCatalog::new(&self.config);
+        let profile = catalog.capture(&endpoint)?;
+        self.queue_native_profile(key, endpoint, caller, timeout, profile, now)
+    }
+
+    pub(super) fn queue_native_profile(
+        &mut self,
+        key: CallKey,
+        endpoint: String,
+        caller: String,
+        timeout: Option<u32>,
+        profile: crate::NativeCallProfile,
         now: u64,
     ) -> Result<(), ControlError> {
         if self.native_pending.len() >= 16
@@ -71,24 +94,27 @@ impl Signaling {
         {
             return Err(ControlError::Capacity);
         }
-        let name = endpoint
-            .strip_prefix("PJSIP/")
-            .ok_or(ControlError::Unsupported)?;
-        let settings = self
-            .config
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.name == name)
-            .ok_or(ControlError::NotFound("Endpoint not found"))?;
-        let listener = self
-            .listeners
-            .iter()
-            .position(|listener| listener.name == settings.transport)
-            .ok_or(ControlError::NotFound("Transport not found"))?;
-        let destination = self.listeners[listener]
+        let profile = profile.bind(&self.native_profiles)?;
+        if endpoint.strip_prefix("PJSIP/") != Some(profile.endpoint.as_str()) {
+            return Err(ControlError::Invalid("Captured endpoint changed"));
+        }
+        let listener = profile.binding.listener();
+        let prepared = self.listeners[listener]
             .engine
-            .destination(name, now)
+            .prepare_outbound(profile.sip.clone(), now)
             .map_err(failure)?;
+        let destination = prepared.destination().clone();
+        let registered_profile = match &destination {
+            Destination::Registered(_) => Some(profile.sip),
+            Destination::Static(_) => None,
+        };
+        let native = NativeStart {
+            endpoint: profile.endpoint,
+            prepared,
+            media: profile.media,
+            binding: profile.binding,
+            registered_profile,
+        };
         let cached = match &destination {
             Destination::Registered(_) => None,
             Destination::Static(target) => self.resolution_cache.get(target, Instant::now()),
@@ -100,9 +126,11 @@ impl Signaling {
                 (Route::Registered(route), setup)
             }
             Destination::Static(_) => {
-                let setup = self
-                    .network
-                    .reserve_setup(listener, self.registrations.generation())?;
+                let setup = self.network.reserve_native_setup(
+                    listener,
+                    native.binding.configuration(),
+                    native.binding.context(),
+                )?;
                 (Route::Static, setup)
             }
         };
@@ -110,7 +138,7 @@ impl Signaling {
         self.native_pending.insert(
             key.clone(),
             Pending {
-                endpoint,
+                native,
                 caller,
                 timeout,
                 listener,
@@ -168,15 +196,23 @@ impl Signaling {
         match (pending.route, resolved.target) {
             (Route::Registered(route), None) => {
                 self.network.finish_resolution(pending.setup);
-                let name = pending
-                    .endpoint
-                    .strip_prefix("PJSIP/")
-                    .ok_or(ControlError::Unsupported)?;
+                let profile = pending
+                    .native
+                    .registered_profile
+                    .as_ref()
+                    .ok_or(ControlError::Invalid("Registered profile missing"))?;
+                let current = match self.listeners[pending.listener]
+                    .engine
+                    .prepare_outbound(profile.clone(), now)
+                {
+                    Ok(current) => current,
+                    Err(error) => {
+                        self.cancel_native(&completed.key);
+                        return self.native_failed(completed.key, failure(error)).await;
+                    }
+                };
                 if !self.network.route_is_current(route)
-                    || self.listeners[pending.listener]
-                        .engine
-                        .registered_peer(name, now)
-                        != Some(route.peer())
+                    || !matches!(current.destination(), Destination::Registered(peer) if *peer == route.peer())
                 {
                     self.cancel_native(&completed.key);
                     return self
@@ -193,7 +229,7 @@ impl Signaling {
                 let result = self
                     .start_resolved(
                         completed.key.clone(),
-                        pending.endpoint,
+                        pending.native,
                         pending.caller,
                         pending.timeout,
                         None,
@@ -223,7 +259,7 @@ impl Signaling {
                             Some(peer) => {
                                 self.start_resolved(
                                     completed.key.clone(),
-                                    pending.endpoint,
+                                    pending.native,
                                     pending.caller,
                                     pending.timeout,
                                     Some(peer),
@@ -314,7 +350,7 @@ impl Signaling {
         let result = self
             .start_resolved(
                 key.clone(),
-                pending.endpoint,
+                pending.native,
                 pending.caller,
                 pending.timeout,
                 Some(connection.peer),

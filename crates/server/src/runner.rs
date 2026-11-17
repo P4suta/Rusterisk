@@ -11,6 +11,7 @@ mod call_lifetime;
 mod external_admission;
 mod history;
 mod media_connections;
+mod native_start;
 mod recording_admission;
 mod stored_recordings;
 #[cfg(test)]
@@ -58,6 +59,12 @@ impl Credentials {
 }
 
 enum Request {
+    BindNativeProfiles(crate::call_profiles::BoundNativeProfiles),
+    TakeNativeProfile {
+        key: CallKey,
+        settings: rusterisk_core::SettingsGeneration,
+        reply: oneshot::Sender<Result<crate::control::NativeStartCapsule, ControlError>>,
+    },
     Sounds {
         credentials: Credentials,
         origin: Option<String>,
@@ -192,6 +199,15 @@ async fn receive<T>(
 }
 
 impl Controller {
+    pub(crate) fn bind_native_profiles(
+        &self,
+        profiles: crate::call_profiles::BoundNativeProfiles,
+    ) -> Result<(), ControlError> {
+        self.requests
+            .try_send(Request::BindNativeProfiles(profiles))
+            .map_err(|_| ControlError::Capacity)
+    }
+
     pub async fn incoming(&self, call: IncomingCall) -> Result<CallKey, ControlError> {
         let (reply, receiver) = oneshot::channel();
         self.requests
@@ -205,15 +221,17 @@ impl Controller {
         let (signals, signal_receiver) = mpsc::channel(128);
         let (effects, effect_receiver) = mpsc::channel(128);
         let (shutdown, shutdown_receiver) = watch::channel(false);
+        let control = Control::with_configuration(capacity, &config);
+        let info = control.server_info().clone();
         (
             Self {
                 requests,
                 signals,
                 shutdown,
-                info: crate::server_info::ServerInfo::new(capacity),
+                info,
             },
             Runner {
-                control: Control::with_configuration(capacity, &config),
+                control,
                 config,
                 requests: request_receiver,
                 signals: signal_receiver,
@@ -362,9 +380,20 @@ fn timestamp() -> String {
 }
 
 impl Runner {
-    pub(crate) fn with_music(mut self, music: crate::storage::PreparedMusic) -> Self {
-        self.control = self.control.with_music(music);
-        self
+    pub(crate) fn with_native_profiles(
+        mut self,
+        profiles: crate::call_profiles::BoundNativeProfiles,
+    ) -> Result<Self, ControlError> {
+        self.control.bind_native_profiles(profiles)?;
+        Ok(self)
+    }
+
+    pub(crate) fn with_music(
+        mut self,
+        music: crate::storage::PreparedMusic,
+    ) -> Result<Self, ControlError> {
+        self.control = self.control.with_music(music)?;
+        Ok(self)
     }
 
     pub fn with_storage(mut self, storage: StoragePort) -> Result<Self, ControlError> {
@@ -482,6 +511,16 @@ impl Runner {
 
     fn request(&mut self, request: Request, now_ms: u64) -> Result<(), ControlError> {
         match request {
+            Request::BindNativeProfiles(profiles) => {
+                self.control.bind_native_profiles(profiles)?;
+            }
+            Request::TakeNativeProfile {
+                key,
+                settings,
+                reply,
+            } => {
+                self.native_profile_request(key, settings, reply)?;
+            }
             Request::Sounds {
                 credentials,
                 origin,

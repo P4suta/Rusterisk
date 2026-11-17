@@ -512,6 +512,7 @@ impl Control {
             .get(&parent.id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
         let snapshot = parent_entry.snapshot.clone();
+        let settings_generation = self.settings.current();
         let mut children = Vec::with_capacity(destinations.len());
         let mut planned = Vec::with_capacity(destinations.len());
         for endpoint in destinations {
@@ -524,10 +525,28 @@ impl Control {
                     break;
                 }
             }
-            planned.push((selected.ok_or(ControlError::Capacity)?, endpoint));
+            let resource = endpoint
+                .strip_prefix("PJSIP/")
+                .ok_or(ControlError::Invalid("Invalid endpoint technology"))?
+                .to_owned();
+            let key = selected.ok_or(ControlError::Capacity)?;
+            let capsule = self.native_capsule(&key, settings_generation, endpoint)?;
+            planned.push((key, endpoint, resource, capsule));
+        }
+        let mut retained = Vec::with_capacity(planned.len());
+        for plan in planned {
+            match self.settings.retain(settings_generation) {
+                Ok(reference) => retained.push((plan, reference)),
+                Err(error) => {
+                    return Err(self.release_settings(
+                        retained.into_iter().map(|(_, reference)| reference),
+                        error,
+                    ))
+                }
+            }
         }
         let mut outcome = Outcome::empty();
-        for (key, endpoint) in planned {
+        for ((key, endpoint, resource, capsule), settings) in retained {
             let id = key.id.clone();
             let generation = key.generation;
             let child = Channel {
@@ -553,10 +572,7 @@ impl Control {
                 ChannelEntry {
                     kind: super::ChannelKind::Sip,
                     call: Call::outgoing(generation),
-                    endpoint: endpoint
-                        .strip_prefix("PJSIP/")
-                        .ok_or(ControlError::Invalid("Invalid endpoint technology"))?
-                        .into(),
+                    endpoint: resource,
                     snapshot: child,
                     arguments: Vec::new(),
                     deadline: None,
@@ -567,10 +583,13 @@ impl Control {
                     )),
                     media_tasks: rusterisk_core::MediaTasks::new(generation),
                     music: None,
+                    settings,
+                    pending_native: Some(capsule),
                 },
             );
             outcome.effects.push(Effect::Start {
                 key: key.clone(),
+                settings: settings_generation,
                 endpoint: endpoint.into(),
                 caller: snapshot.caller.number.clone(),
                 timeout: timeout.map(u32::from),

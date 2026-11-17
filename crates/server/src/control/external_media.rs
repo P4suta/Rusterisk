@@ -174,6 +174,8 @@ impl Control {
             },
         );
         outcome.effects.push(effect);
+        let call = Call::outgoing(generation).reserve_stasis(application)?;
+        let settings = self.settings.retain(self.settings.current())?;
         if let Some(options) = websocket {
             self.media_connections
                 .insert(options.connection_id.clone(), (key.clone(), options));
@@ -182,7 +184,7 @@ impl Control {
             id,
             ChannelEntry {
                 kind,
-                call: Call::outgoing(generation).reserve_stasis(application)?,
+                call,
                 endpoint: String::new(),
                 snapshot,
                 arguments: if data.is_empty() {
@@ -196,6 +198,8 @@ impl Control {
                 dialplan: None,
                 media_tasks: MediaTasks::new(generation),
                 music: None,
+                settings,
+                pending_native: None,
             },
         );
         Ok(outcome)

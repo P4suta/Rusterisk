@@ -325,7 +325,7 @@ async fn fixture(
         let closed = worker.close().await.map_err(failure);
         let result = match prepared {
             Ok(catalog) => (|| {
-                let mut control = Control::with_configuration(4, &config).with_music(catalog);
+                let mut control = Control::with_configuration(4, &config).with_music(catalog)?;
                 control.subscribe("app")?;
                 let key = admit(&mut control)?;
                 check(&mut control, key)

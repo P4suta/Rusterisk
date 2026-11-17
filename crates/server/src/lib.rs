@@ -1,4 +1,5 @@
 pub mod audiosocket;
+mod call_profiles;
 pub mod cli;
 mod control;
 mod encryption;
@@ -15,6 +16,7 @@ pub mod signaling;
 pub mod storage;
 pub mod webrtc;
 mod websocket;
+pub use call_profiles::NativeCallProfile;
 pub use control::{
     Action, CallHistoryEvent, CallKey, Control, ControlError, Effect, EndpointKey, IncomingCall,
     IncomingTarget, MediaOwner, Milestone, Outcome, PlaybackCompletion, Signal,

@@ -87,7 +87,7 @@ impl Server {
                 .await
                 .map_err(failure)?;
             let control = control
-                .with_music(music)
+                .with_music(music)?
                 .with_storage(storage_port.clone())?;
             let http = HttpServer::bind(&config.http, controller.clone())
                 .await?
@@ -102,6 +102,7 @@ impl Server {
             )
             .await?
             .with_storage(storage_port);
+            let control = control.with_native_profiles(signaling.native_profiles())?;
             let http = http.with_signaling(signaling.websocket_port());
             Ok((control, signaling, http))
         }

@@ -40,6 +40,7 @@ fn parallel_attempts_belong_to_the_parent_and_cancel_with_it() -> Result<(), Con
                 endpoint,
                 caller,
                 timeout,
+                ..
             } = effect
             else {
                 return Err(ControlError::Unsupported);
