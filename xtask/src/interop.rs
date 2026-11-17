@@ -4,7 +4,7 @@ use xtask::{
     process::{CommandSupervisor, ProcessError},
     reference::{
         callback_address, copy_configuration, media_address, published_address, Interop,
-        SipTransferCase, Step,
+        ReferenceCase, ReferenceImage, SipTransferCase, Step,
     },
 };
 
@@ -89,22 +89,6 @@ fn captured_command(
     }
 }
 
-fn transfer_arguments(case: SipTransferCase) -> [&'static str; 11] {
-    [
-        "test",
-        "--locked",
-        "--package",
-        "rusterisk-server",
-        "--test",
-        "sip_call",
-        case.name(),
-        "--",
-        "--ignored",
-        "--exact",
-        "--show-output",
-    ]
-}
-
 pub fn execute(execute: bool) -> Result<(), TaskError> {
     let identity = super::execution_identity(execute)?;
     let configuration = std::env::current_dir()?
@@ -132,19 +116,12 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
             step.arguments.join(" ")
         );
     }
-    let arguments = [
-        "test",
-        "--locked",
-        "--package",
-        "rusterisk-client",
-        "--test",
-        "reference",
-        "--",
-        "--ignored",
-    ];
-    println!("budget=300s cargo {}", arguments.join(" "));
-    for case in SipTransferCase::ALL {
-        println!("budget=180s cargo {}", transfer_arguments(case).join(" "));
+    for case in ReferenceCase::ALL {
+        println!(
+            "budget={}s cargo {}",
+            case.budget().as_secs(),
+            case.cargo_arguments().join(" ")
+        );
     }
     println!(
         "budget={}s docker {}",
@@ -171,10 +148,19 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
                 Duration::from_secs(300),
             )
             .map_err(TaskError::Process)?;
+        let inspected = captured(
+            &mut supervisor,
+            &ReferenceImage::inspection(),
+            &identity,
+            "reference-image",
+        )
+        .map_err(TaskError::Process)?;
+        let image = ReferenceImage::parse_inspection(&inspected)
+            .map_err(|error| TaskError::Contract(error.to_string()))?;
         #[cfg(unix)]
         {
             let root = std::env::current_dir()?;
-            let comparison = xtask::reference::compare_sipp_registrations_with(
+            let comparison = image.compare_sipp_registrations_with(
                 &root,
                 &root.join("target/debug/rusterisk"),
                 &mut supervisor,
@@ -185,13 +171,7 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
                 comparison.completed_calls(xtask::reference::SippAdapter::Rusterisk),
             );
         }
-        execute_owned(
-            &mut supervisor,
-            &plan,
-            &configuration,
-            &identity,
-            &arguments,
-        )
+        execute_owned(&mut supervisor, &plan, &image, &configuration, &identity)
     })();
     match (result, supervisor.finish()) {
         (result, Ok(())) => result,
@@ -205,15 +185,19 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
 fn execute_owned(
     supervisor: &mut CommandSupervisor,
     plan: &Interop,
+    image: &ReferenceImage,
     configuration: &Path,
     identity: &str,
-    arguments: &[&str],
 ) -> Result<(), TaskError> {
     std::fs::create_dir_all("target/interop")?;
     copy_configuration(Path::new("tests/interop/asterisk"), configuration)?;
     let result: Result<(), ProcessError> = (|| {
         std::fs::create_dir(configuration.join("sounds"))?;
-        perform(supervisor, &plan.start())?;
+        let start = image.start(plan).map_err(|_| ProcessError::InvalidOutput)?;
+        image
+            .check_start(&start)
+            .map_err(|_| ProcessError::InvalidOutput)?;
+        perform(supervisor, &start)?;
         let address = published_address(&captured(supervisor, &plan.port(), identity, "port")?)
             .map_err(|_| ProcessError::InvalidOutput)?;
         let media = media_address(&captured(
@@ -229,29 +213,21 @@ fn execute_owned(
             ProcessError::InvalidOutput
         })?;
         println!("reference callback address: {callback}");
-        supervisor.run(
-            Command::new("cargo")
-                .args(arguments)
-                .env("RUSTERISK_REFERENCE_URL", format!("http://{address}"))
-                .env("RUSTERISK_REFERENCE_MEDIA_IP", media.to_string())
-                .env("RUSTERISK_REFERENCE_CALLBACK_IP", callback.to_string())
-                .env("RUSTERISK_REFERENCE_CONFIGURATION", configuration),
-            Duration::from_secs(300),
-        )?;
-        for case in SipTransferCase::ALL {
+        for case in ReferenceCase::ALL {
             let field = match case {
-                SipTransferCase::Blind => "sip-transfer-blind",
-                SipTransferCase::Attended => "sip-transfer-attended",
+                ReferenceCase::Ari => "ari",
+                ReferenceCase::Transfer(SipTransferCase::Blind) => "sip-transfer-blind",
+                ReferenceCase::Transfer(SipTransferCase::Attended) => "sip-transfer-attended",
             };
             let output = captured_command(
                 supervisor,
                 Command::new("cargo")
-                    .args(transfer_arguments(case))
+                    .args(case.cargo_arguments())
                     .env("RUSTERISK_REFERENCE_URL", format!("http://{address}"))
                     .env("RUSTERISK_REFERENCE_MEDIA_IP", media.to_string())
                     .env("RUSTERISK_REFERENCE_CALLBACK_IP", callback.to_string())
                     .env("RUSTERISK_REFERENCE_CONFIGURATION", configuration),
-                Duration::from_secs(180),
+                case.budget(),
                 identity,
                 field,
                 65_537,

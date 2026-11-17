@@ -36,8 +36,9 @@ fn interop_dry_run_reports_local_ports_deadlines_and_cleanup() -> Result<(), std
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("127.0.0.1::8088"));
     assert!(stdout.contains(
-        "budget=300s cargo test --locked --package rusterisk-client --test reference -- --ignored"
+        "budget=300s cargo test --locked --package rusterisk-client --test reference resource_queries_and_app_subscriptions_match_the_reference -- --ignored --exact --show-output"
     ));
+    assert_eq!(stdout.matches("budget=300s cargo test ").count(), 1);
     assert!(stdout.contains("budget=180s cargo test --locked --package rusterisk-server --test sip_call blind_transfer::reference_blind_transfer_matches_native_received_audio -- --ignored --exact --show-output"));
     assert!(stdout.contains("budget=180s cargo test --locked --package rusterisk-server --test sip_call attended_transfer::reference_attended_transfer_matches_native_received_audio -- --ignored --exact --show-output"), "{stdout}");
     assert_eq!(stdout.matches("budget=180s cargo test ").count(), 2);

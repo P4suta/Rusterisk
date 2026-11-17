@@ -1,6 +1,6 @@
 use super::{
     callback_address, copy_configuration, media_address, validate_sipp_statistics, ImageIdentity,
-    Interop, SippAdapter, Step,
+    Interop, ReferenceImage, SippAdapter, Step,
 };
 use crate::{
     process::{CommandSupervisor, ProcessError, RunningCommand},
@@ -389,6 +389,7 @@ impl Reference {
 fn start_reference(
     reference: &mut Reference,
     plan: &Interop,
+    selected: Option<&ReferenceImage>,
     commands: &mut Commands<'_>,
     supervisor: &mut CommandSupervisor,
 ) -> io::Result<String> {
@@ -398,7 +399,7 @@ fn start_reference(
             "inspect",
             "--format",
             "{{.Id}}",
-            REFERENCE_IMAGE,
+            selected.map_or(REFERENCE_IMAGE, ReferenceImage::as_str),
         ])),
         Duration::from_secs(10),
         |command, budget| supervisor.run(command, budget),
@@ -408,20 +409,14 @@ fn start_reference(
     let image = ImageIdentity::parse(source)
         .filter(|image| image.as_str().starts_with("sha256:"))
         .ok_or_else(|| io::Error::other("comparison reference image ID is invalid"))?;
-    reference.image = Some(image.as_str().into());
-    let mut start = plan.start();
-    let mut replacements = 0;
-    for argument in &mut start.arguments {
-        if argument == REFERENCE_IMAGE {
-            *argument = image.as_str().into();
-            replacements += 1;
-        }
-    }
-    if replacements != 1 {
+    if selected.is_some_and(|selected| selected.as_str() != image.as_str()) {
         return Err(io::Error::other(
-            "comparison reference image selection changed",
+            "comparison reference image differs from the selected image",
         ));
     }
+    let image = ReferenceImage::new(image);
+    reference.image = Some(image.as_str().into());
+    let mut start = image.start(plan).map_err(io::Error::other)?;
     let cidfile = reference
         .cidfile
         .to_str()
@@ -705,12 +700,13 @@ fn native_scenario(
 fn run(
     root: &Path,
     executable: &Path,
-    directory: &Path,
     plan: &Interop,
+    selected: Option<&ReferenceImage>,
     reference: &mut Reference,
     commands: &mut Commands<'_>,
     supervisor: &mut CommandSupervisor,
 ) -> io::Result<SippRegistrationComparison> {
+    let directory = commands.directory;
     let configuration = directory.join("asterisk");
     copy_configuration(&root.join("tests/interop/asterisk"), &configuration)?;
     fs::create_dir(configuration.join("sounds"))?;
@@ -718,7 +714,7 @@ fn run(
         &configuration.join("sipp-registration.xml"),
         &read(&root.join("tests/interop/sipp/registration.xml"), 65_536)?,
     )?;
-    let id = start_reference(reference, plan, commands, supervisor)?;
+    let id = start_reference(reference, plan, selected, commands, supervisor)?;
     reference_versions(&id, commands, supervisor)?;
     reference_ready(&id, commands, supervisor)?;
     let step = owned_step(plan.media_address(), &reference.name, &id);
@@ -773,6 +769,26 @@ pub fn compare_sipp_registrations_with(
     executable: &Path,
     supervisor: &mut CommandSupervisor,
 ) -> io::Result<SippRegistrationComparison> {
+    compare(root, executable, None, supervisor)
+}
+
+impl ReferenceImage {
+    pub fn compare_sipp_registrations_with(
+        &self,
+        root: &Path,
+        executable: &Path,
+        supervisor: &mut CommandSupervisor,
+    ) -> io::Result<SippRegistrationComparison> {
+        compare(root, executable, Some(self), supervisor)
+    }
+}
+
+fn compare(
+    root: &Path,
+    executable: &Path,
+    selected: Option<&ReferenceImage>,
+    supervisor: &mut CommandSupervisor,
+) -> io::Result<SippRegistrationComparison> {
     let root = fs::canonicalize(root)?;
     let executable = fs::canonicalize(executable)?;
     if !executable.is_file() {
@@ -818,8 +834,8 @@ pub fn compare_sipp_registrations_with(
     let operation = run(
         &root,
         &executable,
-        &directory,
         &plan,
+        selected,
         reference,
         &mut commands,
         supervisor,

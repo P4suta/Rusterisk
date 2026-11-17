@@ -22,40 +22,8 @@ impl SipTransferCase {
     }
 
     pub fn validate_execution(self, output: &str) -> Result<(), ReferenceError> {
-        if output.len() > 65_536 {
-            return Err(ReferenceError::IncompleteTransfer);
-        }
-        let expected = format!("test {} ... ok", self.name());
-        let mut passed = false;
-        let mut summarized = false;
-        for line in output.lines() {
-            if line.starts_with("test result:") {
-                let filtered = line
-                    .strip_prefix("test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; ")
-                    .and_then(|line| line.split_once("; finished in "))
-                    .and_then(|(filtered, _time)| filtered.strip_suffix(" filtered out"));
-                if summarized
-                    || !filtered.is_some_and(|count| {
-                        !count.is_empty()
-                            && count.bytes().all(|byte| byte.is_ascii_digit())
-                            && count.parse::<usize>().is_ok()
-                    })
-                {
-                    return Err(ReferenceError::IncompleteTransfer);
-                }
-                summarized = true;
-            } else if line.starts_with("test ") {
-                if passed || line != expected {
-                    return Err(ReferenceError::IncompleteTransfer);
-                }
-                passed = true;
-            }
-        }
-        if passed && summarized {
-            Ok(())
-        } else {
-            Err(ReferenceError::IncompleteTransfer)
-        }
+        super::comparison::validate_case(self.name(), output)
+            .map_err(|_| ReferenceError::IncompleteTransfer)
     }
 }
 

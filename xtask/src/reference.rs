@@ -1,9 +1,13 @@
 use std::time::Duration;
+mod comparison;
+#[cfg(test)]
+mod comparison_tests;
 mod configuration;
 mod interop;
 #[cfg(unix)]
 mod sipp_comparison;
 mod sipp_statistics;
+pub use comparison::{ReferenceCase, ReferenceImage};
 pub use configuration::copy_configuration;
 pub use interop::{
     callback_address, media_address, published_address, CallbackHost, Interop, SipTransferCase,
@@ -67,6 +71,7 @@ pub enum ReferenceError {
     InvalidIdentity,
     InvalidAddress,
     InvalidConfigPath,
+    IncompleteCase,
     IncompleteTransfer,
     IncompleteSippStatistics,
 }
@@ -77,6 +82,7 @@ impl std::fmt::Display for ReferenceError {
             Self::InvalidIdentity => formatter.write_str("invalid reference build identity"),
             Self::InvalidAddress => formatter.write_str("invalid local reference address"),
             Self::InvalidConfigPath => formatter.write_str("invalid reference configuration path"),
+            Self::IncompleteCase => formatter.write_str("the required reference case did not pass"),
             Self::IncompleteTransfer => {
                 formatter.write_str("the required SIP transfer comparison did not pass")
             }
