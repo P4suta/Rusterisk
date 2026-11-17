@@ -1,4 +1,5 @@
 use crate::{Config, ConfigError, Ini, Secret, Section};
+mod validation;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WebSocketControlFormat {
@@ -33,14 +34,10 @@ impl WebSocketClient {
 
 fn client(section: Section) -> Result<WebSocketClient, ConfigError> {
     let file = "websocket_client.conf";
-    if section.name.contains('/') || matches!(section.name.as_str(), "." | "..") {
-        return Err(ConfigError::at(
-            file,
-            section.line,
-            "invalid media connection id",
-        ));
-    }
+    validation::name(&section.name)
+        .map_err(|error| ConfigError::at(file, section.line, error.reason))?;
     let error = |key: &str, reason: &str| ConfigError::at(file, section.position(key), reason);
+    let invalid = |issue: validation::InvalidClient| error(issue.field, issue.reason);
     section.check(
         file,
         &[
@@ -75,14 +72,8 @@ fn client(section: Section) -> Result<WebSocketClient, ConfigError> {
         ));
     }
     let uri = section.required(file, "uri")?;
-    let url = url::Url::parse(uri).map_err(|_| error("uri", "invalid media URI"))?;
-    if uri.len() > 2048
-        || !matches!(url.scheme(), "ws" | "wss")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.fragment().is_some()
-    {
+    let url = validation::uri(uri).map_err(invalid)?;
+    if uri.len() > 2048 {
         return Err(error("uri", "invalid media URI"));
     }
     if section.flag(file, "tls_enabled", false)? != (url.scheme() == "wss") {
@@ -94,68 +85,19 @@ fn client(section: Section) -> Result<WebSocketClient, ConfigError> {
         }
     }
     let ca_list_file = section.value("ca_list_file");
-    if ca_list_file.is_some_and(|path| {
-        url.scheme() != "wss"
-            || path.is_empty()
-            || path.len() > 4096
-            || path.chars().any(char::is_control)
-    }) {
-        return Err(error("ca_list_file", "invalid TLS trust file"));
-    }
+    validation::ca(ca_list_file, url.scheme() == "wss").map_err(invalid)?;
     let username = section.value("username");
     let password = section.value("password");
-    if username.is_some() != password.is_some() {
-        return Err(error(
-            if password.is_some() {
-                "password"
-            } else {
-                "username"
-            },
-            "username and password must be paired",
-        ));
-    }
-    if username.is_some_and(|name| {
-        name.is_empty()
-            || name.len() > 128
-            || name.contains(':')
-            || name.chars().any(char::is_control)
-    }) {
-        return Err(error("username", "invalid media username"));
-    }
-    if password.is_some_and(|password| {
-        password.is_empty() || password.len() > 256 || password.chars().any(char::is_control)
-    }) {
-        return Err(error("password", "invalid media password"));
-    }
+    validation::credentials(username, password).map_err(invalid)?;
     let connection_timeout_ms = section.number(file, "connection_timeout", 500)?;
     let reconnect_interval_ms = section.number(file, "reconnect_interval", 500)?;
     let reconnect_attempts = section.number(file, "reconnect_attempts", 4)?;
-    if connection_timeout_ms == 0 || connection_timeout_ms > 4000 {
-        return Err(error(
-            "connection_timeout",
-            "connection_timeout must be between 1 and 4000 milliseconds",
-        ));
-    }
-    if reconnect_interval_ms == 0 || reconnect_interval_ms > 4000 {
-        return Err(error(
-            "reconnect_interval",
-            "reconnect_interval must be between 1 and 4000 milliseconds",
-        ));
-    }
-    if !(1..=4).contains(&reconnect_attempts) {
-        return Err(error(
-            "reconnect_attempts",
-            "reconnect_attempts must be between 1 and 4",
-        ));
-    }
-    let total = u32::from(connection_timeout_ms) * u32::from(reconnect_attempts)
-        + u32::from(reconnect_interval_ms) * u32::from(reconnect_attempts - 1);
-    if total > 4000 {
-        return Err(error(
-            "connection_timeout",
-            "media connection attempts exceed the four-second admission budget",
-        ));
-    }
+    validation::timing(
+        connection_timeout_ms,
+        reconnect_interval_ms,
+        reconnect_attempts,
+    )
+    .map_err(invalid)?;
     Ok(WebSocketClient {
         name: section.name.clone(),
         uri: Secret(url.to_string()),
