@@ -1,6 +1,6 @@
 use crate::{
-    Auth, ConfigError, Protocol, RegistrarUri, Registration, RegistrationAddress,
-    RegistrationUriError, Section, Transport,
+    Auth, ConfigError, Protocol, RegistrarUri, Registration, RegistrationAddress, Section,
+    Transport,
 };
 
 pub(crate) fn parse(
@@ -40,30 +40,8 @@ pub(crate) fn parse(
     let client_uri = RegistrationAddress::parse(required("client_uri")?).map_err(|error| {
         ConfigError::at(file, section.position("client_uri"), error.to_string())
     })?;
-    if client_uri.is_secure() && transport.protocol != Protocol::Tls {
-        return Err(ConfigError::at(
-            file,
-            section.position("client_uri"),
-            RegistrationUriError::TransportConflict.to_string(),
-        ));
-    }
-    match (server_uri.is_secure(), client_uri.is_secure()) {
-        (true, false) => {
-            return Err(ConfigError::at(
-                file,
-                section.position("client_uri"),
-                "SIPS registrar scheme requires SIPS Contact and client_uri schemes",
-            ));
-        }
-        (false, true) => {
-            return Err(ConfigError::at(
-                file,
-                section.position("server_uri"),
-                "SIPS Contact scheme requires the registrar Request-URI scheme to be SIPS",
-            ));
-        }
-        (false, false) | (true, true) => {}
-    }
+    validate_roles(transport.protocol, &server_uri, &client_uri)
+        .map_err(|issue| ConfigError::at(file, section.position(issue.option()), issue.reason()))?;
     Ok(Registration {
         name: section.name.clone(),
         transport: transport_name.into(),
@@ -83,7 +61,7 @@ pub(crate) fn parse(
 
 fn contact_user(file: &str, section: &Section) -> Result<String, ConfigError> {
     let value = section.value("contact_user").unwrap_or("s");
-    if value.is_empty() || value.len() > 256 || !valid_user(value) {
+    if !valid_contact_user(value) {
         return Err(ConfigError::at(
             file,
             section.position("contact_user"),
@@ -91,6 +69,58 @@ fn contact_user(file: &str, section: &Section) -> Result<String, ConfigError> {
         ));
     }
     Ok(value.into())
+}
+
+pub(super) enum RoleIssue {
+    ServerTransport,
+    ClientTransport,
+    RegistrarRequiresSecureClient,
+    ContactRequiresSecureRegistrar,
+}
+
+impl RoleIssue {
+    pub(super) const fn option(&self) -> &'static str {
+        match self {
+            Self::ServerTransport | Self::ContactRequiresSecureRegistrar => "server_uri",
+            Self::ClientTransport | Self::RegistrarRequiresSecureClient => "client_uri",
+        }
+    }
+
+    pub(super) const fn reason(&self) -> &'static str {
+        match self {
+            Self::ServerTransport | Self::ClientTransport => {
+                "registration URI conflicts with its transport"
+            }
+            Self::RegistrarRequiresSecureClient => {
+                "SIPS registrar scheme requires SIPS Contact and client_uri schemes"
+            }
+            Self::ContactRequiresSecureRegistrar => {
+                "SIPS Contact scheme requires the registrar Request-URI scheme to be SIPS"
+            }
+        }
+    }
+}
+
+pub(super) fn validate_roles(
+    protocol: Protocol,
+    server_uri: &RegistrarUri,
+    client_uri: &RegistrationAddress,
+) -> Result<(), RoleIssue> {
+    if server_uri.protocol() != protocol {
+        return Err(RoleIssue::ServerTransport);
+    }
+    if client_uri.is_secure() && protocol != Protocol::Tls {
+        return Err(RoleIssue::ClientTransport);
+    }
+    match (server_uri.is_secure(), client_uri.is_secure()) {
+        (true, false) => Err(RoleIssue::RegistrarRequiresSecureClient),
+        (false, true) => Err(RoleIssue::ContactRequiresSecureRegistrar),
+        (false, false) | (true, true) => Ok(()),
+    }
+}
+
+pub(super) fn valid_contact_user(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && valid_user(value)
 }
 
 pub(super) fn valid_user(value: &str) -> bool {
