@@ -13,6 +13,7 @@ The approved reload contract preserves starting settings for active and queued c
 ## Decision
 
 Control owns a bounded settings-generation arena.
+The pure core decides reference lifetimes.
 Keep at most sixty-five committed generations and one prepared candidate.
 Channels reference their starting generation until terminal release.
 Capture selected native profiles before emitting effects.
