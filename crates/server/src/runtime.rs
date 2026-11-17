@@ -31,6 +31,11 @@ pub struct Server {
     storage: StorageWorker,
 }
 
+struct StartupConfiguration {
+    config: Config,
+    directory: Option<PathBuf>,
+}
+
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
 }
@@ -84,11 +89,50 @@ impl Server {
         Ok(())
     }
 
-    pub async fn bind(
-        mut config: Config,
+    pub fn bind(
+        config: Config,
+        capacity: usize,
+        data_directory: PathBuf,
+    ) -> impl std::future::Future<Output = Result<Self, ControlError>> {
+        Self::bind_with_source(
+            Ok(StartupConfiguration {
+                config,
+                directory: None,
+            }),
+            capacity,
+            data_directory,
+        )
+    }
+
+    pub fn bind_from_directory(
+        directory: PathBuf,
+        capacity: usize,
+        data_directory: PathBuf,
+    ) -> impl std::future::Future<Output = Result<Self, ControlError>> {
+        let startup = (|| {
+            let config = crate::runner::load_startup_configuration(&directory)
+                .map_err(ControlError::Configuration)?;
+            let directory = std::fs::canonicalize(directory).map_err(failure)?;
+            config
+                .validate_runtime()
+                .map_err(ControlError::Configuration)?;
+            Ok(StartupConfiguration {
+                config,
+                directory: Some(directory),
+            })
+        })();
+        Self::bind_with_source(startup, capacity, data_directory)
+    }
+
+    async fn bind_with_source(
+        startup: Result<StartupConfiguration, ControlError>,
         capacity: usize,
         data_directory: PathBuf,
     ) -> Result<Self, ControlError> {
+        let StartupConfiguration {
+            mut config,
+            directory,
+        } = startup?;
         let (storage_port, storage) = StorageWorker::start(data_directory)
             .await
             .map_err(failure)?;
@@ -153,11 +197,19 @@ impl Server {
         let generation = control.configuration_generation();
         let (http_publication, http_receiver) = crate::reload::PublicationPort::channel();
         let (native_publication, native_receiver) = crate::reload::PublicationPort::channel();
-        let control = control.with_reload(
-            signaling.native_preparation(),
-            http_publication,
-            native_publication,
-        );
+        let control = match directory {
+            Some(directory) => control.with_reload_source(
+                signaling.native_preparation(),
+                http_publication,
+                native_publication,
+                Some(directory),
+            ),
+            None => control.with_reload(
+                signaling.native_preparation(),
+                http_publication,
+                native_publication,
+            ),
+        };
         let signaling = signaling.with_publication(native_receiver, generation);
         let http = http.with_signaling(signaling.websocket_port());
         let http = http.with_publication(http_receiver, generation);
@@ -193,10 +245,13 @@ impl Server {
         let mut tasks = JoinSet::new();
         tasks.spawn(async move { (Component::Control, control.run().await) });
         let stopped = controller.shutdown_signal();
-        tasks.spawn(async move { (Component::Signaling, signaling.run(stopped).await) });
+        let signaling_task =
+            tasks.spawn(async move { (Component::Signaling, signaling.run(stopped).await) });
         let stopped = controller.shutdown_signal();
-        tasks.spawn(async move { (Component::Media, media.run(stopped).await.map_err(failure)) });
-        tasks.spawn(async move { (Component::Http, http.run().await) });
+        let media_task = tasks
+            .spawn(async move { (Component::Media, media.run(stopped).await.map_err(failure)) });
+        let http_task = tasks.spawn(async move { (Component::Http, http.run().await) });
+        let cancellable = [signaling_task, media_task, http_task];
         let mut primary = match tasks.join_next().await {
             Some(Ok((component, Ok(())))) => {
                 if controller.is_stopping() {
@@ -232,7 +287,9 @@ impl Server {
                     }
                 }
                 Err(error) => {
-                    tasks.abort_all();
+                    for component in &cancellable {
+                        component.abort();
+                    }
                     while let Some(joined) = tasks.join_next().await {
                         match joined {
                             Ok((_, Ok(()))) => {}

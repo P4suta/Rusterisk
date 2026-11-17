@@ -13,16 +13,27 @@ use rusterisk_api::{ChannelId, InvalidMediaUri, MediaUri};
 use rusterisk_core::{DtmfTiming, MuteDirection, RecordingControl};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+mod configuration;
 mod external_media;
 mod recording;
 mod request_body;
 
 pub fn router(controller: Controller) -> Router {
-    router_for_scheme(controller, HttpScheme::Http)
+    with_management(
+        router_for_scheme(controller.clone(), HttpScheme::Http),
+        controller,
+    )
 }
 
 pub fn router_with_media(controller: Controller, media: crate::media::MediaPort) -> Router {
-    router_with_media_for_scheme(controller, media, HttpScheme::Http)
+    with_management(
+        router_with_media_for_scheme(controller.clone(), media, HttpScheme::Http),
+        controller,
+    )
+}
+
+pub(crate) fn with_management(application: Router, controller: Controller) -> Router {
+    application.merge(configuration::router(controller))
 }
 
 pub(crate) fn router_with_media_for_scheme(

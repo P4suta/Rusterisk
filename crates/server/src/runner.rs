@@ -17,6 +17,7 @@ mod media_connections;
 mod native_start;
 mod recording_admission;
 mod reload;
+pub(crate) use reload::load_startup_configuration;
 mod stored_recordings;
 #[cfg(test)]
 mod transfer_tests;
@@ -164,6 +165,7 @@ pub struct Controller {
     signals: mpsc::Sender<Signal>,
     shutdown: watch::Sender<bool>,
     reload_requests: mpsc::Sender<reload::ReloadRequest>,
+    directory_reload_requests: mpsc::Sender<reload::DirectoryReloadRequest>,
 }
 
 pub struct Runner {
@@ -245,6 +247,7 @@ impl Controller {
         let (effects, effect_receiver) = mpsc::channel(128);
         let (shutdown, shutdown_receiver) = watch::channel(false);
         let (reload_requests, reload_receiver) = mpsc::channel(1);
+        let (directory_reload_requests, directory_reload_receiver) = mpsc::channel(1);
         let control = Control::with_configuration(capacity, &config);
         (
             Self {
@@ -252,6 +255,7 @@ impl Controller {
                 signals,
                 shutdown: shutdown.clone(),
                 reload_requests,
+                directory_reload_requests,
             },
             Runner {
                 control,
@@ -262,7 +266,7 @@ impl Controller {
                 pending_effects: VecDeque::with_capacity(MAX_PENDING_EFFECTS),
                 shutdown: shutdown_receiver,
                 stop: shutdown,
-                reload: reload::ReloadCoordinator::new(reload_receiver),
+                reload: reload::ReloadCoordinator::new(reload_receiver, directory_reload_receiver),
                 subscribers: BTreeMap::new(),
                 sessions: BTreeMap::new(),
                 subscription_generation: 0,
@@ -908,6 +912,9 @@ impl Runner {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                loaded = self.reload.loaders.join_next(), if !self.reload.loaders.is_empty() => {
+                    self.loading_completed(loaded.ok_or(ControlError::Conflict("Settings loading task missing"))?)?;
+                }
                 prepared = self.reload.preparations.join_next(), if !self.reload.preparations.is_empty() => {
                     self.preparation_completed(prepared.ok_or(ControlError::Conflict("Settings preparation task missing"))?)?;
                 }
@@ -916,6 +923,9 @@ impl Runner {
                 }
                 replacement = self.reload.requests.recv(), if !self.reload.requests.is_closed() || !self.reload.requests.is_empty() => {
                     if let Some(replacement) = replacement { self.begin_reload(replacement); }
+                }
+                request = self.reload.directory_requests.recv(), if !self.reload.directory_requests.is_closed() || !self.reload.directory_requests.is_empty() => {
+                    if let Some(request) = request { self.begin_directory_reload(request); }
                 }
                 result = self.stored_jobs.join_next(), if !self.stored_jobs.is_empty() => {
                     result.ok_or(ControlError::Capacity)?.map_err(|error| ControlError::Adapter(error.to_string()))?;

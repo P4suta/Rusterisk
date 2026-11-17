@@ -6,8 +6,9 @@ use crate::reload::{
 };
 use crate::signaling::{NativePreparation, NativePreparedSignaling};
 use crate::storage::StoragePort;
-use crate::{Action, ControlError};
-use rusterisk_config::{Config, Reload};
+use crate::{Action, ControlError, Credentials};
+use rusterisk_config::{Config, ConfigError, Reload};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinError, JoinSet};
@@ -69,10 +70,17 @@ pub(super) struct ReloadRequest {
     reply: oneshot::Sender<Result<(), ControlError>>,
 }
 
+pub(super) struct DirectoryReloadRequest {
+    credentials: Credentials,
+    origin: Option<String>,
+    reply: oneshot::Sender<Result<(), ControlError>>,
+}
+
 struct Services {
     native: NativePreparation,
     http: PublicationPort<PreparedHttpSettings>,
     signaling: PublicationPort<NativePreparedSignaling>,
+    directory: Option<PathBuf>,
 }
 
 pub(super) struct PreparedReplacement {
@@ -84,6 +92,7 @@ pub(super) struct PreparedReplacement {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Phase {
+    Loading,
     Preparing,
     Staging,
     Quiescing,
@@ -111,6 +120,8 @@ pub(super) struct Step {
 
 pub(super) struct ReloadCoordinator {
     pub(super) requests: mpsc::Receiver<ReloadRequest>,
+    pub(super) directory_requests: mpsc::Receiver<DirectoryReloadRequest>,
+    pub(super) loaders: JoinSet<Result<Config, ConfigError>>,
     pub(super) preparations: JoinSet<Result<PreparedReplacement, ControlError>>,
     pub(super) steps: JoinSet<Step>,
     services: Option<Services>,
@@ -119,6 +130,32 @@ pub(super) struct ReloadCoordinator {
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
+}
+
+pub(crate) fn load_startup_configuration(directory: &Path) -> Result<Config, ConfigError> {
+    for (file, optional) in [
+        ("http.conf", false),
+        ("ari.conf", false),
+        ("pjsip.conf", false),
+        ("rtp.conf", false),
+        ("extensions.conf", false),
+        ("chan_websocket.conf", true),
+        ("websocket_client.conf", true),
+        ("musiconhold.conf", true),
+    ] {
+        let error = |reason: String| ConfigError {
+            file: file.into(),
+            line: 0,
+            reason,
+        };
+        match std::fs::metadata(directory.join(file)) {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => return Err(error("configuration input must be a regular file".into())),
+            Err(issue) if optional && issue.kind() == std::io::ErrorKind::NotFound => {}
+            Err(issue) => return Err(error(issue.to_string())),
+        }
+    }
+    Config::load(directory)
 }
 
 fn combine(
@@ -195,9 +232,14 @@ async fn prepare(
 }
 
 impl ReloadCoordinator {
-    pub(super) fn new(requests: mpsc::Receiver<ReloadRequest>) -> Self {
+    pub(super) fn new(
+        requests: mpsc::Receiver<ReloadRequest>,
+        directory_requests: mpsc::Receiver<DirectoryReloadRequest>,
+    ) -> Self {
         Self {
             requests,
+            directory_requests,
+            loaders: JoinSet::new(),
             preparations: JoinSet::new(),
             steps: JoinSet::new(),
             services: None,
@@ -216,7 +258,37 @@ impl ReloadCoordinator {
     }
 
     fn busy(&self) -> bool {
-        self.pending.is_some() || !self.preparations.is_empty() || !self.steps.is_empty()
+        self.pending.is_some()
+            || !self.loaders.is_empty()
+            || !self.preparations.is_empty()
+            || !self.steps.is_empty()
+    }
+
+    fn begin_loading<F>(
+        &mut self,
+        directory: PathBuf,
+        reply: oneshot::Sender<Result<(), ControlError>>,
+        load: F,
+    ) where
+        F: FnOnce(&Path) -> Result<Config, ConfigError> + Send + 'static,
+    {
+        if reply.is_closed() {
+            return;
+        }
+        if self.busy() {
+            respond(reply, Err(ControlError::Capacity));
+            return;
+        }
+        self.pending = Some(Pending {
+            reply,
+            key: None,
+            phase: Phase::Loading,
+            deadline: Instant::now() + PREPARATION_BUDGET,
+            barrier: false,
+            reserved: false,
+            failure: None,
+        });
+        self.loaders.spawn_blocking(move || load(&directory));
     }
 
     fn step(&mut self, phase: Phase, command: PublicationPhase) -> Result<(), ControlError> {
@@ -250,19 +322,49 @@ impl Controller {
             .map_err(|_| ControlError::Capacity)?;
         reload_response(receiver).await
     }
+
+    pub(crate) async fn reload_startup(
+        &self,
+        credentials: Credentials,
+        origin: Option<String>,
+    ) -> Result<(), ControlError> {
+        if self.is_stopping() {
+            return Err(ControlError::Conflict("Control is stopping"));
+        }
+        let (reply, receiver) = oneshot::channel();
+        self.directory_reload_requests
+            .try_send(DirectoryReloadRequest {
+                credentials,
+                origin,
+                reply,
+            })
+            .map_err(|_| ControlError::Capacity)?;
+        reload_response(receiver).await
+    }
 }
 
 impl Runner {
     pub(crate) fn with_reload(
+        self,
+        native: NativePreparation,
+        http: PublicationPort<PreparedHttpSettings>,
+        signaling: PublicationPort<NativePreparedSignaling>,
+    ) -> Self {
+        self.with_reload_source(native, http, signaling, None)
+    }
+
+    pub(crate) fn with_reload_source(
         mut self,
         native: NativePreparation,
         http: PublicationPort<PreparedHttpSettings>,
         signaling: PublicationPort<NativePreparedSignaling>,
+        directory: Option<PathBuf>,
     ) -> Self {
         self.reload.services = Some(Services {
             native,
             http,
             signaling,
+            directory,
         });
         self
     }
@@ -329,6 +431,26 @@ impl Runner {
             .spawn(prepare(replacement, native, storage));
     }
 
+    pub(super) fn begin_directory_reload(&mut self, request: DirectoryReloadRequest) {
+        if request.reply.is_closed() {
+            return;
+        }
+        if let Err(error) = self.authorize(&request.credentials, request.origin.as_deref(), false) {
+            return respond(request.reply, Err(error));
+        }
+        let directory = match self
+            .reload
+            .services
+            .as_ref()
+            .and_then(|services| services.directory.clone())
+        {
+            Some(directory) => directory,
+            None => return respond(request.reply, Err(ControlError::Unsupported)),
+        };
+        self.reload
+            .begin_loading(directory, request.reply, load_startup_configuration);
+    }
+
     fn check_replacement(
         &self,
         replacement: &Config,
@@ -359,6 +481,49 @@ impl Runner {
             .port
             .clone();
         Ok((native, storage))
+    }
+
+    pub(super) fn loading_completed(
+        &mut self,
+        result: Result<Result<Config, ConfigError>, JoinError>,
+    ) -> Result<(), ControlError> {
+        let pending = self.reload.pending()?;
+        if pending.phase == Phase::Cancelling {
+            let cleanup = match result {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(error)) => Err(ControlError::Configuration(error)),
+                Err(error) if error.is_cancelled() => Ok(()),
+                Err(error) => Err(failure(error)),
+            };
+            pending.failure = combine(pending.failure.take().map_or(Ok(()), Err), cleanup).err();
+            return self.finish_aborted_reload();
+        }
+        if pending.phase != Phase::Loading {
+            return Err(ControlError::Conflict("Unexpected settings load"));
+        }
+        let result = result
+            .map_err(failure)
+            .and_then(|result| result.map_err(ControlError::Configuration));
+        if pending.reply.is_closed() || Instant::now() >= pending.deadline {
+            let cancelled = match result {
+                Ok(_) => ControlError::Conflict("Settings loading cancelled"),
+                Err(error) => failure(format!("Settings loading cancelled; {error}")),
+            };
+            return self.abort_reload(cancelled);
+        }
+        let config = match result {
+            Ok(config) => config,
+            Err(error) => return self.abort_reload(error),
+        };
+        let (native, storage) = match self.preparation_services(&config) {
+            Ok(services) => services,
+            Err(error) => return self.abort_reload(error),
+        };
+        self.reload.pending()?.phase = Phase::Preparing;
+        self.reload
+            .preparations
+            .spawn(prepare(config, native, storage));
+        Ok(())
     }
 
     pub(super) fn preparation_completed(
@@ -463,9 +628,9 @@ impl Runner {
                 self.reload.pending()?.phase = Phase::Draining;
                 self.finish_aborted_reload()
             }
-            Phase::Preparing | Phase::Cancelling | Phase::Draining => Err(ControlError::Conflict(
-                "Unexpected settings acknowledgement",
-            )),
+            Phase::Loading | Phase::Preparing | Phase::Cancelling | Phase::Draining => Err(
+                ControlError::Conflict("Unexpected settings acknowledgement"),
+            ),
         }
     }
 
@@ -527,13 +692,17 @@ impl Runner {
             self.reload.pending()?.reserved = false;
         }
         self.reload.pending()?.phase = Phase::Cancelling;
+        self.reload.loaders.abort_all();
         self.reload.preparations.abort_all();
         self.reload.steps.abort_all();
         self.finish_aborted_reload()
     }
 
     fn finish_aborted_reload(&mut self) -> Result<(), ControlError> {
-        if !self.reload.preparations.is_empty() || !self.reload.steps.is_empty() {
+        if !self.reload.loaders.is_empty()
+            || !self.reload.preparations.is_empty()
+            || !self.reload.steps.is_empty()
+        {
             return Ok(());
         }
         let pending = self.reload.pending()?;
@@ -571,7 +740,7 @@ impl Runner {
             pending.phase,
             Phase::Cancelling | Phase::Aborting | Phase::Draining
         ) {
-            if Instant::now() >= pending.deadline {
+            if Instant::now() >= pending.deadline && self.reload.loaders.is_empty() {
                 return Err(ControlError::Conflict("Settings cleanup timed out"));
             }
             return self.finish_aborted_reload();
@@ -594,9 +763,19 @@ impl Runner {
 
     pub(super) async fn close_reload(&mut self, deadline: Instant) -> Result<(), ControlError> {
         self.reload.requests.close();
+        self.reload.directory_requests.close();
+        self.reload.loaders.abort_all();
         self.reload.preparations.abort_all();
         self.reload.steps.abort_all();
         let mut result = Ok(());
+        while let Some(joined) = self.reload.loaders.join_next().await {
+            match joined {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => result = combine(result, Err(ControlError::Configuration(error))),
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => result = combine(result, Err(failure(error))),
+            }
+        }
         while let Some(joined) = self.reload.preparations.join_next().await {
             match joined {
                 Ok(Ok(_)) => {}
