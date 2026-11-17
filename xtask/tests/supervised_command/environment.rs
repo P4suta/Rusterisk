@@ -1,5 +1,5 @@
 use super::checked;
-use std::{ffi::OsStr, path::Path};
+use std::{ffi::OsStr, path::Path, process::Command};
 use xtask::process::{CommandField, CommandRequestError, CommandStream, SupervisedCommand};
 
 fn fill_arguments(request: &mut SupervisedCommand, mut bytes: usize) -> Result<(), String> {
@@ -8,6 +8,112 @@ fn fill_arguments(request: &mut SupervisedCommand, mut bytes: usize) -> Result<(
         checked(request.arg("x".repeat(length)))?;
         bytes -= length;
     }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum EnvironmentChange {
+    Set(&'static str, &'static str),
+    Remove(&'static str),
+    Clear,
+}
+
+fn compare_environment(changes: &[EnvironmentChange]) -> Result<(), String> {
+    let mut request = checked(SupervisedCommand::new("p"))?;
+    let mut reference = Command::new("p");
+    for &change in changes {
+        match change {
+            EnvironmentChange::Set(name, value) => {
+                checked(request.env(name, value))?;
+                reference.env(name, value);
+            }
+            EnvironmentChange::Remove(name) => {
+                checked(request.env_remove(name))?;
+                reference.env_remove(name);
+            }
+            EnvironmentChange::Clear => {
+                checked(request.env_clear())?;
+                reference.env_clear();
+            }
+        }
+    }
+    let actual = request.into_std();
+    assert_eq!(actual.get_envs().count(), reference.get_envs().count());
+    assert_eq!(
+        actual.get_envs().collect::<Vec<_>>(),
+        reference.get_envs().collect::<Vec<_>>(),
+        "{changes:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn environment_call_order_matches_standard_clear_remove_set_and_repeated_clear(
+) -> Result<(), String> {
+    use EnvironmentChange::{Clear, Remove, Set};
+    const CASES: [&[EnvironmentChange]; 8] = [
+        &[Clear, Remove("K")],
+        &[Set("K", "discarded"), Clear, Remove("K")],
+        &[Clear, Remove("K"), Set("K", "retained")],
+        &[Clear, Set("K", "discarded"), Remove("K")],
+        &[Set("K", "discarded"), Remove("K"), Set("K", "retained")],
+        &[Remove("K"), Clear, Set("K", "discarded"), Clear, Clear],
+        &[
+            Clear,
+            Set("K", "discarded"),
+            Clear,
+            Set("K", "retained"),
+            Remove("OTHER"),
+        ],
+        &[
+            Clear,
+            Remove("K"),
+            Clear,
+            Set("OTHER", ""),
+            Remove("K"),
+            Set("K", "retained"),
+        ],
+    ];
+    for changes in CASES {
+        compare_environment(changes)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn removals_after_clear_preserve_environment_slots_for_explicit_sets() -> Result<(), String> {
+    let mut request = checked(SupervisedCommand::new("p"))?;
+    let mut reference = Command::new("p");
+    checked(request.env("K", "discarded"))?;
+    reference.env("K", "discarded");
+    checked(request.env_clear())?;
+    reference.env_clear();
+    for index in 0..=SupervisedCommand::MAX_ENVIRONMENT {
+        let name = format!("REMOVAL_{index}");
+        reference.env_remove(&name);
+        assert_eq!(reference.get_envs().count(), 0);
+        checked(request.env_remove(&name)).map_err(|error| {
+            format!("No-op removal {index} exhausted admission while std::Command retained zero entries: {error}")
+        })?;
+    }
+    for index in 0..SupervisedCommand::MAX_ENVIRONMENT {
+        let name = format!("SET_{index}");
+        checked(request.env(&name, "retained"))?;
+        reference.env(&name, "retained");
+    }
+    assert_eq!(
+        reference.get_envs().count(),
+        SupervisedCommand::MAX_ENVIRONMENT
+    );
+    assert_eq!(
+        request.env("EXTRA", "").map(|_| ()),
+        Err(CommandRequestError::TooManyEnvironmentVariables)
+    );
+    let actual = request.into_std();
+    assert_eq!(
+        actual.get_envs().collect::<Vec<_>>(),
+        reference.get_envs().collect::<Vec<_>>()
+    );
     Ok(())
 }
 
@@ -151,8 +257,9 @@ fn clearing_environment_releases_both_set_and_remove_count_slots() -> Result<(),
     for index in 0..SupervisedCommand::MAX_ENVIRONMENT {
         checked(request.env(format!("N{index}"), ""))?;
     }
+    checked(request.env_remove("EXTRA"))?;
     assert_eq!(
-        request.env_remove("EXTRA").map(|_| ()),
+        request.env("EXTRA", "").map(|_| ()),
         Err(CommandRequestError::TooManyEnvironmentVariables)
     );
     let command = request.into_std();

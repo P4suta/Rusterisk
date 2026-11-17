@@ -4,6 +4,10 @@ use xtask::process::{CommandField, CommandRequestError, CommandStream, Supervise
 #[path = "supervised_command/environment.rs"]
 mod environment;
 
+#[cfg(windows)]
+#[path = "supervised_command/windows_environment.rs"]
+mod windows_environment;
+
 #[cfg(unix)]
 #[path = "supervised_command/unix.rs"]
 mod unix;

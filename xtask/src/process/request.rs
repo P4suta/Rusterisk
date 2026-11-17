@@ -202,39 +202,77 @@ impl SupervisedCommand {
         name: &OsStr,
         value: Option<&OsStr>,
     ) -> Result<&mut Self, CommandRequestError> {
-        let name_bytes = encoded_len(name, CommandField::EnvironmentName)?;
-        let value_bytes = value
-            .map(|value| encoded_len(value, CommandField::EnvironmentValue))
-            .transpose()?
-            .unwrap_or(0);
+        encoded_len(name, CommandField::EnvironmentName)?;
+        if let Some(value) = value {
+            encoded_len(value, CommandField::EnvironmentValue)?;
+        }
         if name.as_encoded_bytes().contains(&b'=') {
             return Err(CommandRequestError::InvalidEnvironmentName);
         }
-        let existing = self.environment.get(name);
-        if existing.is_none() && self.environment.len() >= Self::MAX_ENVIRONMENT {
-            return Err(CommandRequestError::TooManyEnvironmentVariables);
-        }
-        let removed = existing.map_or(0, |value| {
-            name_bytes + value.as_ref().map_or(0, |value| value.len())
-        });
-        let bytes = self.changed_bytes(removed, name_bytes + value_bytes)?;
-        self.environment
-            .insert(name.to_os_string(), value.map(OsStr::to_os_string));
-        self.bytes = bytes;
+        let mut command = self.environment_command();
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+        self.commit_environment(&command)?;
         Ok(self)
     }
 
-    /// Discards explicit changes and disables inherited environment variables.
-    pub fn env_clear(&mut self) -> Result<&mut Self, CommandRequestError> {
+    fn environment_command(&self) -> Command {
+        let mut command = Command::new(&self.program);
+        match &self.environment_base {
+            EnvironmentBase::Inherit => {}
+            EnvironmentBase::Clear => {
+                command.env_clear();
+            }
+        }
+        for (name, value) in &self.environment {
+            match value {
+                Some(value) => command.env(name, value),
+                None => command.env_remove(name),
+            };
+        }
+        command
+    }
+
+    fn commit_environment(&mut self, command: &Command) -> Result<(), CommandRequestError> {
+        if command.get_envs().count() > Self::MAX_ENVIRONMENT {
+            return Err(CommandRequestError::TooManyEnvironmentVariables);
+        }
         let removed = self
             .environment
             .iter()
             .map(|(name, value)| name.len() + value.as_ref().map_or(0, |value| value.len()))
             .sum();
-        let bytes = self.changed_bytes(removed, 0)?;
-        self.environment.clear();
-        self.environment_base = EnvironmentBase::Clear;
+        let added = command
+            .get_envs()
+            .try_fold(0usize, |total, (name, value)| {
+                let name_bytes = encoded_len(name, CommandField::EnvironmentName)?;
+                let value_bytes = value
+                    .map(|value| encoded_len(value, CommandField::EnvironmentValue))
+                    .transpose()?
+                    .unwrap_or(0);
+                total
+                    .checked_add(name_bytes)
+                    .and_then(|bytes| bytes.checked_add(value_bytes))
+                    .ok_or(CommandRequestError::TotalTooLong)
+            })?;
+        let bytes = self.changed_bytes(removed, added)?;
+        let environment = command
+            .get_envs()
+            .map(|(name, value)| (name.to_os_string(), value.map(OsStr::to_os_string)))
+            .collect();
+        self.environment = environment;
         self.bytes = bytes;
+        Ok(())
+    }
+
+    /// Discards explicit changes and disables inherited environment variables.
+    pub fn env_clear(&mut self) -> Result<&mut Self, CommandRequestError> {
+        let mut command = self.environment_command();
+        command.env_clear();
+        self.commit_environment(&command)?;
+        self.environment_base = EnvironmentBase::Clear;
         Ok(self)
     }
 
