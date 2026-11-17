@@ -56,7 +56,7 @@ impl std::fmt::Display for AuditError {
             Self::Json(error) => write!(formatter, "invalid dependency audit data: {error}"),
             Self::Io(error) => write!(formatter, "dependency fixture input failed: {error}"),
             Self::Capacity => formatter.write_str("dependency audit capacity exceeded"),
-            Self::Boundary => formatter.write_str("legacy dependency fixture boundary changed"),
+            Self::Boundary => formatter.write_str("dependency fixture boundary changed"),
             Self::UnexpectedPackage(name) => {
                 write!(formatter, "unreviewed vulnerable dependency: {name}")
             }
@@ -160,7 +160,11 @@ fn licenses(lock: &Lock, local: Option<&project_service::Verified>) -> Result<()
             ),
             Some(_) => false,
         };
-        if !known || (!path.is_empty() && !package.dev) {
+        if !known
+            || (!path.is_empty()
+                && !package.dev
+                && !local.is_some_and(|profile| profile.allows_runtime(path, package)))
+        {
             return Err(AuditError::UnreviewedLicense(path.clone()));
         }
     }
@@ -375,6 +379,46 @@ pub fn assess_fixture(fixture: &Path, report: &str) -> Result<Assessment, AuditE
     let manifest = project_service::read_regular(&fixture.join("package.json"))?;
     let lock_text = project_service::read_regular(&fixture.join("package-lock.json"))?;
     let lock = inputs(&manifest, &lock_text, report)?;
-    let local = project_service::verify(fixture, &manifest, &lock)?;
+    let local = project_service::verify(
+        fixture,
+        &manifest,
+        &lock,
+        project_service::FixtureRole::Comparison,
+    )?;
     assess_lock(&lock, report, Some(&local))
+}
+
+pub fn check_browser_fixture(fixture: &Path) -> Result<(), AuditError> {
+    let manifest = project_service::read_regular(&fixture.join("package.json"))?;
+    let lock = project_service::read_regular(&fixture.join("package-lock.json"))?;
+    let lock: Lock = serde_json::from_str(&lock)?;
+    if lock.version != 3 || lock.packages.len() > 512 {
+        return Err(AuditError::Boundary);
+    }
+    let local = project_service::verify(
+        fixture,
+        &manifest,
+        &lock,
+        project_service::FixtureRole::Browser,
+    )?;
+    let manifest: Manifest = serde_json::from_str(&manifest)?;
+    if !manifest.private
+        || manifest.dependencies.len() != 1
+        || manifest.dependencies.get("sip.js").map(String::as_str) != Some("0.21.2")
+        || lock
+            .packages
+            .get("node_modules/sip.js")
+            .is_none_or(|package| package.version.as_deref() != Some("0.21.2"))
+        || manifest.dev_dependencies.is_empty()
+        || manifest.dev_dependencies.iter().any(|(name, version)| {
+            semver::Version::parse(version).is_err()
+                || lock
+                    .packages
+                    .get(&format!("node_modules/{name}"))
+                    .is_none_or(|package| package.version.as_deref() != Some(version.as_str()))
+        })
+    {
+        return Err(AuditError::Boundary);
+    }
+    licenses(&lock, Some(&local))
 }

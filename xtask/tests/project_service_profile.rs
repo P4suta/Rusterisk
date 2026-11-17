@@ -5,6 +5,9 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use xtask::legacy_audit::{assess, assess_fixture, AuditError};
 
+#[path = "project_service_profile/browser.rs"]
+mod browser;
+
 const MANIFEST: &str = include_str!("../../tests/interop/node-ari-client/package.json");
 const LOCK: &str = include_str!("../../tests/interop/node-ari-client/package-lock.json");
 const ESLINT: &str = include_str!("../../tests/interop/node-ari-client/eslint.config.mjs");

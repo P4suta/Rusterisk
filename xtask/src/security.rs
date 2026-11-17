@@ -165,6 +165,8 @@ fn snapshot(root: &Path) -> Result<(), TaskError> {
         ])?;
     }
     legacy(root)?;
+    xtask::legacy_audit::check_browser_fixture(Path::new("examples/browser"))
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
     println!("check: npm --prefix examples/browser audit --audit-level=low");
     xtask::process::run(
