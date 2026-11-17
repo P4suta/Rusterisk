@@ -782,7 +782,7 @@ impl Signaling {
                     {
                         let output = self.listeners[listener]
                             .engine
-                            .ring(key.id.as_str())
+                            .ring_at(key.id.as_str(), now)
                             .map_err(failure)?;
                         self.transmit(listener, output.datagrams).await?;
                     }
