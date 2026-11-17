@@ -1,0 +1,4 @@
+#[path = "windows_job_accounting/applicability.rs"]
+mod applicability;
+#[path = "windows_job_accounting/cli.rs"]
+mod fixtures;

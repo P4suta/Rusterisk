@@ -69,6 +69,69 @@ fn sources(directory: &Path, files: &mut Vec<PathBuf>) -> Result<(), TaskError> 
     Ok(())
 }
 
+fn relative_path_matches(value: &str, expected: &Path) -> bool {
+    let mut path = PathBuf::new();
+    for component in Path::new(value).components() {
+        match component {
+            std::path::Component::Normal(part) => path.push(part),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !path.pop() {
+                    return false;
+                }
+            }
+            std::path::Component::Prefix(_) | std::path::Component::RootDir => return false,
+        }
+    }
+    path == expected
+}
+
+fn windows_job_accounting_policy(
+    workspace_source: &str,
+    members: &[toml::Value],
+    exceptions: &[xtask::Exception],
+) -> Result<(), TaskError> {
+    const MEMBER: &str = "crates/windows-job-accounting";
+    const MANIFEST: &str = "crates/windows-job-accounting/Cargo.toml";
+    const SOURCE: &str = "crates/windows-job-accounting/src/lib.rs";
+    let artifact_exists = match std::fs::symlink_metadata(MEMBER) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    let registered_member = members.iter().any(|member| {
+        member
+            .as_str()
+            .is_some_and(|member| relative_path_matches(member, Path::new(MEMBER)))
+    });
+    let scoped: Vec<_> = exceptions
+        .iter()
+        .filter(|exception| relative_path_matches(&exception.path, Path::new(SOURCE)))
+        .cloned()
+        .collect();
+    if !artifact_exists && !registered_member && scoped.is_empty() {
+        return Ok(());
+    }
+    let manifest = std::fs::read_to_string(MANIFEST)?;
+    let findings = xtask::inspect_windows_job_accounting_manifest(workspace_source, &manifest)?;
+    if let Some(finding) = findings.first() {
+        return Err(TaskError::Contract(format!(
+            "{MANIFEST}: {}: {}",
+            finding.rule, finding.detail
+        )));
+    }
+    let source = std::fs::read_to_string(SOURCE)?;
+    let findings = xtask::inspect_windows_job_accounting_source(&source, &scoped)
+        .map_err(|error| TaskError::Contract(format!("{SOURCE}: {error}")))?;
+    if let Some(finding) = findings.first() {
+        return Err(TaskError::Contract(format!(
+            "{SOURCE}: {}: {}",
+            finding.rule, finding.detail
+        )));
+    }
+    Ok(())
+}
+
 fn policy() -> Result<(), TaskError> {
     let exceptions: xtask::Exceptions =
         toml::from_str(&std::fs::read_to_string("api/policy-exceptions.toml")?)?;
@@ -85,10 +148,12 @@ fn policy() -> Result<(), TaskError> {
             return Err(TaskError::Contract("invalid exception scope or ADR".into()));
         }
     }
-    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string("Cargo.toml")?)?;
+    let workspace_source = std::fs::read_to_string("Cargo.toml")?;
+    let manifest: toml::Value = toml::from_str(&workspace_source)?;
     let members = manifest["workspace"]["members"]
         .as_array()
         .ok_or_else(|| TaskError::Contract("workspace members missing".into()))?;
+    windows_job_accounting_policy(&workspace_source, members, &exceptions.exceptions)?;
     let mut files = Vec::new();
     for member in members {
         let member = member
