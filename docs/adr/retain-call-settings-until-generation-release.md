@@ -8,32 +8,32 @@ status: proposed
 ## Context
 
 The approved reload contract preserves starting settings for active and queued calls.
-[Prepared publication](prepare-settings-before-serialized-publication.md) must also preserve later music selection without cloning the complete catalog per call.
+[Prepared publication](prepare-settings-before-serialized-publication.md) also preserves later music selection.
 
 ## Decision
 
-Control owns a bounded settings-generation arena.
-The pure core decides reference lifetimes.
-Keep at most sixty-five committed generations and one prepared candidate.
-Channels reference their starting generation until terminal release.
-Capture selected native profiles before emitting effects.
-Keep requested listener declarations separate from immutable bound addresses and TLS contexts.
-Move profiles through queued effects and pending resolution without rereading current settings.
-Keep starting music definitions while selections own only their selected class.
+Control owns sixty-five committed settings slots and one candidate.
+The pure core decides reference lifetimes through terminal release.
+Capture native profiles before emitting effects.
+Control keeps queued profiles until signaling takes each profile once.
+Effects carry the call key and settings generation.
+Keep requested listeners separate from immutable bound addresses and TLS contexts.
+Pending resolution uses captured profiles.
+Channels keep starting music definitions without copying catalogs.
 Registration retirement owns correlation metadata independently.
-Reject generation saturation before cancellation or publication.
+Reject saturation before cancellation or publication.
 
 ## Alternatives
 
-Per-call catalog copies simplify ownership but multiply metadata.
-Shared domain ownership conflicts with the approved implementation rules.
-Reading current settings changes queued calls.
+Per-call catalog copies multiply metadata.
+Shared ownership conflicts with project rules.
+Inline profiles fail strict Clippy and enlarge every effect.
+Current settings change queued calls.
 
 ## Consequences
 
-Terminal release must balance generation references.
-Music files keep their existing validation contract.
-Reconsider the bound when ordinary reloads encounter retained-generation saturation.
+Terminal release balances references and discards untaken profiles.
+Reconsider the bound when ordinary reloads encounter saturation.
 
 ## Confirmation
 
