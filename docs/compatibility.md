@@ -28,6 +28,11 @@ Rusterisk supports [wildcard removal](adr/release-wildcard-interests-through-the
 Endpoint queries report configured resources, routing availability, and exact channel membership.
 Registration expiry changes routing availability without ending active calls.
 
+`Origin` validation for authenticated HTTP requests and event WebSocket upgrades follows a [stricter project policy](adr/check-origin-before-websocket-admission.md) than Asterisk's cross-origin response headers.
+Configure each browser client's exact origin in `ari.conf`.
+Mismatched supplied origins return `403`.
+Native clients can omit the header and still require authentication.
+
 Known operations without working adapters return `501`.
 Channel redirection still uses that response.
 Sound queries list configured wave files by sound identifier, language, and format.
