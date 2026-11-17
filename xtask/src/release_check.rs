@@ -1,8 +1,10 @@
 use crate::server_distribution::ServerTarget;
 
 mod inputs;
+mod native;
 mod source;
 pub use inputs::{InputError, InputKey, SourceInputs};
+pub use native::{FastOutcome, NativeGateError, SecurityOutcome};
 pub use source::{CapturedReleaseSource, ReleaseSourceError};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
