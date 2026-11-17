@@ -154,6 +154,10 @@ fn package(
 
 impl SdkContents {
     pub fn read(candidate: &Path) -> Result<Self, SdkContentsError> {
+        Self::read_paired(candidate).map(|(_, contents)| contents)
+    }
+
+    pub(crate) fn read_paired(candidate: &Path) -> Result<(CapturedSdk, Self), SdkContentsError> {
         let candidate = directory(candidate)?;
         let source =
             CapturedSdk::read(&candidate.join("source")).map_err(SdkContentsError::Source)?;
@@ -199,7 +203,7 @@ impl SdkContents {
             client: package(&candidate, &source, SdkPackage::Client, client)?,
         };
         contents.check_locks()?;
-        Ok(contents)
+        Ok((source, contents))
     }
 
     fn package(&self, package: SdkPackage) -> &PackageContents {
