@@ -700,6 +700,22 @@ pub const OPERATIONS: &[Operation] = &[
         []
     ),
     operation!(
+        "channels.startMoh",
+        "startMoh",
+        Post,
+        "/channels/{channelId}/moh",
+        "void",
+        ["mohClass"]
+    ),
+    operation!(
+        "channels.stopMoh",
+        "stopMoh",
+        Delete,
+        "/channels/{channelId}/moh",
+        "void",
+        []
+    ),
+    operation!(
         "channels.mute",
         "mute",
         Post,
