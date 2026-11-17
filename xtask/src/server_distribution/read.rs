@@ -32,10 +32,18 @@ fn read(root: &Path, name: &str, limit: u64) -> io::Result<Vec<u8>> {
 pub struct ServerCandidate {
     payload: ServerPayload,
     source_digest: String,
+    checksum: String,
 }
 
 impl ServerCandidate {
     pub fn read(root: &Path, target: ServerTarget) -> io::Result<Self> {
+        Self::read_paired(root, target).map(|(_, candidate)| candidate)
+    }
+
+    pub(crate) fn read_paired(
+        root: &Path,
+        target: ServerTarget,
+    ) -> io::Result<(CapturedServer, Self)> {
         if !std::fs::symlink_metadata(root)?.is_dir() {
             return Err(invalid());
         }
@@ -109,10 +117,15 @@ impl ServerCandidate {
             ArchiveFormat::TarGzip => check_server_tar_gzip(&payload, &bytes)?,
             ArchiveFormat::Zip => check_server_zip(&payload, &bytes)?,
         }
-        Ok(Self {
-            payload,
-            source_digest,
-        })
+        capture.check(&root.join("source"))?;
+        Ok((
+            capture,
+            Self {
+                payload,
+                source_digest,
+                checksum: digest,
+            },
+        ))
     }
 
     pub fn name(&self) -> &ServerCandidateName {
@@ -120,6 +133,9 @@ impl ServerCandidate {
     }
     pub fn source_digest(&self) -> &str {
         &self.source_digest
+    }
+    pub fn checksum(&self) -> &str {
+        &self.checksum
     }
     pub fn files(&self) -> impl Iterator<Item = (&str, &[u8])> {
         self.payload.files()
