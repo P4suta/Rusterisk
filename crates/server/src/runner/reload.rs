@@ -1,0 +1,634 @@
+use super::{Controller, Runner};
+use crate::control::CallSettings;
+use crate::listener::reload::PreparedHttpSettings;
+use crate::reload::{
+    Acknowledgement, PublicationKey, PublicationPhase, PublicationPort, PUBLICATION_BUDGET,
+};
+use crate::signaling::{NativePreparation, NativePreparedSignaling};
+use crate::storage::StoragePort;
+use crate::{Action, ControlError};
+use rusterisk_config::{Config, Reload};
+use std::time::Duration;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::{JoinError, JoinSet};
+use tokio::time::Instant;
+
+const PREPARATION_BUDGET: Duration = Duration::from_secs(10);
+const RELOAD_BUDGET: Duration = Duration::from_secs(25);
+
+pub(super) fn new_settings(action: &Action) -> bool {
+    match action {
+        Action::Originate { .. }
+        | Action::ExternalRtp { .. }
+        | Action::ExternalAudioSocket { .. }
+        | Action::ExternalWebSocket { .. }
+        | Action::ExternalWebSocketClient { .. }
+        | Action::CreateBridge { .. }
+        | Action::Continue { .. } => true,
+        Action::RecordChannel { .. }
+        | Action::RecordBridge { .. }
+        | Action::GetRecording(_)
+        | Action::ControlRecording { .. }
+        | Action::EndRecording { .. }
+        | Action::PlayBridge { .. }
+        | Action::PlayChannel { .. }
+        | Action::GetPlayback(_)
+        | Action::ControlPlayback { .. }
+        | Action::StartMusic { .. }
+        | Action::StopMusic(_)
+        | Action::SendDtmf { .. }
+        | Action::ListChannels
+        | Action::GetChannel(_)
+        | Action::ListApplications
+        | Action::GetApplication(_)
+        | Action::FilterApplication { .. }
+        | Action::SubscribeResources { .. }
+        | Action::UnsubscribeResources { .. }
+        | Action::ListEndpoints { .. }
+        | Action::GetEndpoint { .. }
+        | Action::GetVariable { .. }
+        | Action::SetVariable { .. }
+        | Action::Hangup(_)
+        | Action::Move { .. }
+        | Action::Answer(_)
+        | Action::Ring(_)
+        | Action::Hold(_)
+        | Action::Unhold(_)
+        | Action::Mute { .. }
+        | Action::Unmute { .. }
+        | Action::ListBridges
+        | Action::GetBridge(_)
+        | Action::DestroyBridge(_)
+        | Action::AddChannels { .. }
+        | Action::RemoveChannels { .. } => false,
+    }
+}
+
+pub(super) struct ReloadRequest {
+    replacement: Config,
+    reply: oneshot::Sender<Result<(), ControlError>>,
+}
+
+struct Services {
+    native: NativePreparation,
+    http: PublicationPort<PreparedHttpSettings>,
+    signaling: PublicationPort<NativePreparedSignaling>,
+}
+
+pub(super) struct PreparedReplacement {
+    config: Config,
+    settings: CallSettings,
+    http: PreparedHttpSettings,
+    signaling: NativePreparedSignaling,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Phase {
+    Preparing,
+    Staging,
+    Quiescing,
+    Publishing,
+    Resuming,
+    Cancelling,
+    Aborting,
+    Draining,
+}
+
+struct Pending {
+    reply: oneshot::Sender<Result<(), ControlError>>,
+    key: Option<PublicationKey>,
+    phase: Phase,
+    deadline: Instant,
+    barrier: bool,
+    reserved: bool,
+    failure: Option<ControlError>,
+}
+
+pub(super) struct Step {
+    phase: Phase,
+    result: Result<(), ControlError>,
+}
+
+pub(super) struct ReloadCoordinator {
+    pub(super) requests: mpsc::Receiver<ReloadRequest>,
+    pub(super) preparations: JoinSet<Result<PreparedReplacement, ControlError>>,
+    pub(super) steps: JoinSet<Step>,
+    services: Option<Services>,
+    pending: Option<Pending>,
+}
+
+fn failure(error: impl std::fmt::Display) -> ControlError {
+    ControlError::Adapter(error.to_string())
+}
+
+fn combine(
+    primary: Result<(), ControlError>,
+    cleanup: Result<(), ControlError>,
+) -> Result<(), ControlError> {
+    match (primary, cleanup) {
+        (primary, Ok(())) => primary,
+        (Ok(()), Err(cleanup)) => Err(cleanup),
+        (Err(primary), Err(cleanup)) => Err(failure(format!(
+            "{primary}; settings publication cleanup failed: {cleanup}"
+        ))),
+    }
+}
+
+fn respond(reply: oneshot::Sender<Result<(), ControlError>>, result: Result<(), ControlError>) {
+    if reply.send(result).is_err() {
+        tracing::debug!("Settings requester disconnected");
+    }
+}
+
+async fn reload_response(
+    receiver: oneshot::Receiver<Result<(), ControlError>>,
+) -> Result<(), ControlError> {
+    tokio::time::timeout(RELOAD_BUDGET, receiver)
+        .await
+        .map_err(failure)?
+        .map_err(|_| ControlError::Adapter("Settings coordinator stopped".into()))?
+}
+
+async fn acknowledgement(
+    acknowledgement: Result<Acknowledgement, ControlError>,
+    deadline: Instant,
+) -> Result<(), ControlError> {
+    tokio::time::timeout_at(deadline, acknowledgement?.receive())
+        .await
+        .map_err(failure)?
+}
+
+async fn acknowledged(
+    first: Result<Acknowledgement, ControlError>,
+    second: Result<Acknowledgement, ControlError>,
+    deadline: Instant,
+) -> Result<(), ControlError> {
+    let (first, second) = tokio::join!(
+        acknowledgement(first, deadline),
+        acknowledgement(second, deadline)
+    );
+    combine(first, second)
+}
+
+async fn prepare(
+    config: Config,
+    native: NativePreparation,
+    storage: StoragePort,
+) -> Result<PreparedReplacement, ControlError> {
+    let http = PreparedHttpSettings::prepare(&config.http).await?;
+    let signaling = native.prepare(&config).await?;
+    let music = storage
+        .prepare_music(config.music_on_hold.clone())
+        .await
+        .map_err(failure)?;
+    let settings = CallSettings::prepared(
+        signaling.call_catalog(),
+        signaling.websocket_catalog(),
+        music,
+    );
+    Ok(PreparedReplacement {
+        config,
+        settings,
+        http,
+        signaling,
+    })
+}
+
+impl ReloadCoordinator {
+    pub(super) fn new(requests: mpsc::Receiver<ReloadRequest>) -> Self {
+        Self {
+            requests,
+            preparations: JoinSet::new(),
+            steps: JoinSet::new(),
+            services: None,
+            pending: None,
+        }
+    }
+
+    fn pending(&mut self) -> Result<&mut Pending, ControlError> {
+        self.pending
+            .as_mut()
+            .ok_or(ControlError::Conflict("Settings publication is missing"))
+    }
+
+    fn services(&self) -> Result<&Services, ControlError> {
+        self.services.as_ref().ok_or(ControlError::Unsupported)
+    }
+
+    fn busy(&self) -> bool {
+        self.pending.is_some() || !self.preparations.is_empty() || !self.steps.is_empty()
+    }
+
+    fn step(&mut self, phase: Phase, command: PublicationPhase) -> Result<(), ControlError> {
+        let pending = self.pending()?;
+        let key = pending
+            .key
+            .ok_or(ControlError::Conflict("Settings key is missing"))?;
+        let deadline = pending.deadline;
+        pending.phase = phase;
+        let services = self.services()?;
+        let first = services.http.command(key, command);
+        let second = services.signaling.command(key, command);
+        self.steps.spawn(async move {
+            Step {
+                phase,
+                result: acknowledged(first, second, deadline).await,
+            }
+        });
+        Ok(())
+    }
+}
+
+impl Controller {
+    pub async fn reload(&self, replacement: Config) -> Result<(), ControlError> {
+        if self.is_stopping() {
+            return Err(ControlError::Conflict("Control is stopping"));
+        }
+        let (reply, receiver) = oneshot::channel();
+        self.reload_requests
+            .try_send(ReloadRequest { replacement, reply })
+            .map_err(|_| ControlError::Capacity)?;
+        reload_response(receiver).await
+    }
+}
+
+impl Runner {
+    pub(crate) fn with_reload(
+        mut self,
+        native: NativePreparation,
+        http: PublicationPort<PreparedHttpSettings>,
+        signaling: PublicationPort<NativePreparedSignaling>,
+    ) -> Self {
+        self.reload.services = Some(Services {
+            native,
+            http,
+            signaling,
+        });
+        self
+    }
+
+    pub(crate) fn configuration_generation(&self) -> rusterisk_core::SettingsGeneration {
+        self.control.configuration_generation()
+    }
+
+    pub(super) fn admissions_paused(&self) -> bool {
+        self.reload
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.barrier)
+    }
+
+    pub(super) fn reject_new_transfer(
+        &mut self,
+        signal: &crate::Signal,
+    ) -> Result<bool, ControlError> {
+        if !self.admissions_paused() {
+            return Ok(false);
+        }
+        let rejected = if let crate::Signal::BlindTransferRequested { key, refer } = signal {
+            Some((key.clone(), refer.key()))
+        } else if let crate::Signal::AttendedTransferRequested { key, refer, .. } = signal {
+            Some((key.clone(), refer.key()))
+        } else {
+            None
+        };
+        let Some((source, refer)) = rejected else {
+            return Ok(false);
+        };
+        let mut outcome = crate::Outcome::empty();
+        outcome.effects.push(crate::Effect::RejectRefer {
+            source,
+            refer,
+            failure: rusterisk_sip::ReferFailure::Unavailable,
+        });
+        self.publish(&mut outcome)?;
+        Ok(true)
+    }
+
+    pub(super) fn begin_reload(&mut self, request: ReloadRequest) {
+        if request.reply.is_closed() {
+            return;
+        }
+        let replacement = request.replacement;
+        let result = self.check_replacement(&replacement);
+        let (native, storage) = match result {
+            Ok(services) => services,
+            Err(error) => return respond(request.reply, Err(error)),
+        };
+        self.reload.pending = Some(Pending {
+            reply: request.reply,
+            key: None,
+            phase: Phase::Preparing,
+            deadline: Instant::now() + PREPARATION_BUDGET,
+            barrier: false,
+            reserved: false,
+            failure: None,
+        });
+        self.reload
+            .preparations
+            .spawn(prepare(replacement, native, storage));
+    }
+
+    fn check_replacement(
+        &self,
+        replacement: &Config,
+    ) -> Result<(NativePreparation, StoragePort), ControlError> {
+        if self.reload.busy() {
+            return Err(ControlError::Capacity);
+        }
+        self.preparation_services(replacement)
+    }
+
+    fn preparation_services(
+        &self,
+        replacement: &Config,
+    ) -> Result<(NativePreparation, StoragePort), ControlError> {
+        replacement
+            .validate_runtime()
+            .map_err(ControlError::Configuration)?;
+        if matches!(self.config.reload(replacement), Reload::RestartRequired) {
+            return Err(ControlError::Conflict(
+                "Listener replacement requires restart",
+            ));
+        }
+        let native = self.reload.services()?.native.clone();
+        let storage = self
+            .storage
+            .as_ref()
+            .ok_or(ControlError::Unsupported)?
+            .port
+            .clone();
+        Ok((native, storage))
+    }
+
+    pub(super) fn preparation_completed(
+        &mut self,
+        result: Result<Result<PreparedReplacement, ControlError>, JoinError>,
+    ) -> Result<(), ControlError> {
+        let pending = self.reload.pending()?;
+        if pending.phase == Phase::Cancelling {
+            let cleanup = match result {
+                Ok(Ok(_)) => Ok(()),
+                Ok(Err(error)) => Err(error),
+                Err(error) if error.is_cancelled() => Ok(()),
+                Err(error) => Err(failure(error)),
+            };
+            pending.failure = combine(pending.failure.take().map_or(Ok(()), Err), cleanup).err();
+            return self.finish_aborted_reload();
+        }
+        if pending.phase != Phase::Preparing {
+            return Err(ControlError::Conflict("Unexpected settings preparation"));
+        }
+        if pending.reply.is_closed() || Instant::now() >= pending.deadline {
+            return self.abort_reload(ControlError::Conflict("Settings preparation cancelled"));
+        }
+        let prepared = match result.map_err(failure).and_then(|result| result) {
+            Ok(prepared) => prepared,
+            Err(error) => return self.abort_reload(error),
+        };
+        self.stage_replacement(prepared)
+    }
+
+    fn stage_replacement(&mut self, prepared: PreparedReplacement) -> Result<(), ControlError> {
+        let base = self.control.configuration_generation();
+        let candidate = match self
+            .control
+            .prepare_configuration(prepared.config, prepared.settings)
+        {
+            Ok(candidate) => candidate,
+            Err(error) => return self.abort_reload(error),
+        };
+        let key = PublicationKey::new(candidate, base);
+        let pending = self.reload.pending()?;
+        pending.key = Some(key);
+        pending.reserved = true;
+        pending.phase = Phase::Staging;
+        let deadline = pending.deadline;
+        let services = self.reload.services()?;
+        let first = services.http.stage(key, prepared.http);
+        let second = services.signaling.stage(key, prepared.signaling);
+        self.reload.steps.spawn(async move {
+            Step {
+                phase: Phase::Staging,
+                result: acknowledged(first, second, deadline).await,
+            }
+        });
+        Ok(())
+    }
+
+    pub(super) fn publication_completed(
+        &mut self,
+        result: Result<Step, JoinError>,
+    ) -> Result<(), ControlError> {
+        let pending = self.reload.pending()?;
+        if pending.phase == Phase::Cancelling {
+            let cleanup = match result {
+                Ok(step) => step.result,
+                Err(error) if error.is_cancelled() => Ok(()),
+                Err(error) => Err(failure(error)),
+            };
+            pending.failure = combine(pending.failure.take().map_or(Ok(()), Err), cleanup).err();
+            return self.finish_aborted_reload();
+        }
+        let step = result.map_err(failure)?;
+        if pending.phase != step.phase {
+            return Err(ControlError::Conflict(
+                "Settings acknowledgement is out of order",
+            ));
+        }
+        if matches!(step.phase, Phase::Publishing | Phase::Resuming)
+            && Instant::now() >= pending.deadline
+        {
+            return Err(ControlError::Conflict("Settings publication timed out"));
+        }
+        if let Err(error) = step.result {
+            if matches!(
+                step.phase,
+                Phase::Publishing | Phase::Resuming | Phase::Aborting
+            ) {
+                return Err(error);
+            }
+            return self.abort_reload(error);
+        }
+        match step.phase {
+            Phase::Staging => self.quiesce_replacement(),
+            Phase::Quiescing => self.commit_replacement(),
+            Phase::Publishing => {
+                let generation = self.control.configuration_generation();
+                self.reload
+                    .step(Phase::Resuming, PublicationPhase::Resume(generation))
+            }
+            Phase::Resuming => self.finish_replacement(),
+            Phase::Aborting => {
+                self.reload.pending()?.phase = Phase::Draining;
+                self.finish_aborted_reload()
+            }
+            Phase::Preparing | Phase::Cancelling | Phase::Draining => Err(ControlError::Conflict(
+                "Unexpected settings acknowledgement",
+            )),
+        }
+    }
+
+    fn quiesce_replacement(&mut self) -> Result<(), ControlError> {
+        let pending = self.reload.pending()?;
+        if pending.reply.is_closed() || Instant::now() >= pending.deadline {
+            return self.abort_reload(ControlError::Conflict("Settings requester disconnected"));
+        }
+        pending.barrier = true;
+        pending.deadline = Instant::now() + PUBLICATION_BUDGET;
+        self.reload
+            .step(Phase::Quiescing, PublicationPhase::Quiesce)
+    }
+
+    fn commit_replacement(&mut self) -> Result<(), ControlError> {
+        let pending = self.reload.pending()?;
+        if pending.reply.is_closed() || Instant::now() >= pending.deadline {
+            return self.abort_reload(ControlError::Conflict("Settings publication cancelled"));
+        }
+        let candidate = pending
+            .key
+            .ok_or(ControlError::Conflict("Settings key is missing"))?
+            .candidate();
+        let config = match self.control.commit_configuration(candidate) {
+            Ok(config) => config,
+            Err(error) => return self.abort_reload(error),
+        };
+        self.config = config;
+        self.reload.pending()?.reserved = false;
+        let generation = self.control.configuration_generation();
+        self.reload
+            .step(Phase::Publishing, PublicationPhase::Publish(generation))
+    }
+
+    fn finish_replacement(&mut self) -> Result<(), ControlError> {
+        let pending = self
+            .reload
+            .pending
+            .take()
+            .ok_or(ControlError::Conflict("Settings publication is missing"))?;
+        self.control.configuration_published(super::timestamp());
+        respond(pending.reply, Ok(()));
+        Ok(())
+    }
+
+    fn abort_reload(&mut self, primary: ControlError) -> Result<(), ControlError> {
+        let pending = self.reload.pending()?;
+        if matches!(pending.phase, Phase::Publishing | Phase::Resuming) {
+            return Err(primary);
+        }
+        pending.failure = combine(pending.failure.take().map_or(Ok(()), Err), Err(primary)).err();
+        pending.deadline = Instant::now() + PUBLICATION_BUDGET;
+        let key = pending.key;
+        if pending.reserved {
+            self.control.cancel_configuration(
+                key.ok_or(ControlError::Conflict("Settings key is missing"))?
+                    .candidate(),
+            )?;
+            self.reload.pending()?.reserved = false;
+        }
+        self.reload.pending()?.phase = Phase::Cancelling;
+        self.reload.preparations.abort_all();
+        self.reload.steps.abort_all();
+        self.finish_aborted_reload()
+    }
+
+    fn finish_aborted_reload(&mut self) -> Result<(), ControlError> {
+        if !self.reload.preparations.is_empty() || !self.reload.steps.is_empty() {
+            return Ok(());
+        }
+        let pending = self.reload.pending()?;
+        if pending.phase == Phase::Cancelling && pending.key.is_some() {
+            return self.reload.step(Phase::Aborting, PublicationPhase::Abort);
+        }
+        if !matches!(pending.phase, Phase::Cancelling | Phase::Draining) {
+            return Ok(());
+        }
+        let pending = self
+            .reload
+            .pending
+            .take()
+            .ok_or(ControlError::Conflict("Settings publication is missing"))?;
+        respond(
+            pending.reply,
+            Err(pending
+                .failure
+                .ok_or(ControlError::Conflict("Settings failure is missing"))?),
+        );
+        Ok(())
+    }
+
+    pub(super) fn tick_reload(&mut self) -> Result<(), ControlError> {
+        let Some(pending) = &self.reload.pending else {
+            return Ok(());
+        };
+        if matches!(pending.phase, Phase::Publishing | Phase::Resuming) {
+            if Instant::now() >= pending.deadline {
+                return Err(ControlError::Conflict("Settings publication timed out"));
+            }
+            return Ok(());
+        }
+        if matches!(
+            pending.phase,
+            Phase::Cancelling | Phase::Aborting | Phase::Draining
+        ) {
+            if Instant::now() >= pending.deadline {
+                return Err(ControlError::Conflict("Settings cleanup timed out"));
+            }
+            return self.finish_aborted_reload();
+        }
+        if pending.reply.is_closed() || Instant::now() >= pending.deadline {
+            self.abort_reload(ControlError::Conflict("Settings preparation cancelled"))?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn retain_reload_failure(&mut self, error: &ControlError) {
+        if let Some(pending) = &mut self.reload.pending {
+            pending.failure = combine(
+                pending.failure.take().map_or(Ok(()), Err),
+                Err(error.clone()),
+            )
+            .err();
+        }
+    }
+
+    pub(super) async fn close_reload(&mut self, deadline: Instant) -> Result<(), ControlError> {
+        self.reload.requests.close();
+        self.reload.preparations.abort_all();
+        self.reload.steps.abort_all();
+        let mut result = Ok(());
+        while let Some(joined) = self.reload.preparations.join_next().await {
+            match joined {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => result = combine(result, Err(error)),
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => result = combine(result, Err(failure(error))),
+            }
+        }
+        while let Some(joined) = self.reload.steps.join_next().await {
+            match joined {
+                Ok(step) => result = combine(result, step.result),
+                Err(error) if error.is_cancelled() => {}
+                Err(error) => result = combine(result, Err(failure(error))),
+            }
+        }
+        if let Some(pending) = self.reload.pending.take() {
+            if pending.reserved {
+                if let Some(key) = pending.key {
+                    result = combine(result, self.control.cancel_configuration(key.candidate()));
+                }
+            }
+            let primary = pending
+                .failure
+                .unwrap_or(ControlError::Conflict("Control is stopping"));
+            respond(pending.reply, combine(Err(primary), result.clone()));
+        }
+        if Instant::now() >= deadline {
+            result = combine(
+                result,
+                Err(ControlError::Conflict("Settings cleanup timed out")),
+            );
+        }
+        result
+    }
+}

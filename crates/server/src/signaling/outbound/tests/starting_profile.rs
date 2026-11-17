@@ -296,10 +296,12 @@ impl Fixture {
                 .await
                 .map(|()| false),
             Input::Packet(packet) => {
-                let output = self.signaling.listeners[packet.listener]
-                    .engine
-                    .receive(&packet.bytes, packet.peer, now)
-                    .map_err(failure)?;
+                let engine = &mut self.signaling.listeners[packet.listener].engine;
+                let output = match packet.route().flow()? {
+                    Some(flow) => engine.receive_on_flow(&packet.bytes, packet.peer, flow, now),
+                    None => engine.receive(&packet.bytes, packet.peer, now),
+                }
+                .map_err(failure)?;
                 self.signaling
                     .output(packet.listener, output, now)
                     .await
@@ -308,6 +310,7 @@ impl Fixture {
             Input::Closed { result, .. } => result.and(Err(ControlError::Invalid(
                 "Native profile flow closed before challenge completion",
             ))),
+            Input::Upgrade(_) => Err(ControlError::Invalid("Unexpected native profile upgrade")),
         }
     }
 

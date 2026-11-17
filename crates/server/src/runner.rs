@@ -8,14 +8,17 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 mod call_lifetime;
+mod endpoint_queries;
 mod external_admission;
 mod history;
 mod media_connections;
 mod native_start;
 mod recording_admission;
+mod reload;
 mod stored_recordings;
 #[cfg(test)]
 mod transfer_tests;
+mod websocket_profiles;
 pub(crate) use call_lifetime::CallLease;
 use history::HistoryRecorder;
 pub use media_connections::{ClaimedMediaConnection, MediaConnectionLease};
@@ -59,6 +62,18 @@ impl Credentials {
 }
 
 enum Request {
+    BindWebSocketProfiles(crate::signaling::PreparedWebSocketProfiles),
+    TakeWebSocketProfile {
+        key: CallKey,
+        settings: rusterisk_core::SettingsGeneration,
+        reply: oneshot::Sender<Result<crate::control::WebSocketStartCapsule, ControlError>>,
+    },
+    ObserveEndpoint {
+        settings: rusterisk_core::SettingsGeneration,
+        endpoint: String,
+        presence: rusterisk_core::ContactPresence,
+        reply: oneshot::Sender<Result<(), ControlError>>,
+    },
     Info {
         only: Option<String>,
         reply: oneshot::Sender<Result<rusterisk_api::AsteriskInfo, ControlError>>,
@@ -146,6 +161,7 @@ pub struct Controller {
     requests: mpsc::Sender<Request>,
     signals: mpsc::Sender<Signal>,
     shutdown: watch::Sender<bool>,
+    reload_requests: mpsc::Sender<reload::ReloadRequest>,
 }
 
 pub struct Runner {
@@ -156,6 +172,8 @@ pub struct Runner {
     effects: mpsc::Sender<Effect>,
     pending_effects: VecDeque<Effect>,
     shutdown: watch::Receiver<bool>,
+    stop: watch::Sender<bool>,
+    reload: reload::ReloadCoordinator,
     subscribers: BTreeMap<String, Subscriber>,
     sessions: BTreeMap<u64, Session>,
     subscription_generation: u64,
@@ -224,12 +242,14 @@ impl Controller {
         let (signals, signal_receiver) = mpsc::channel(128);
         let (effects, effect_receiver) = mpsc::channel(128);
         let (shutdown, shutdown_receiver) = watch::channel(false);
+        let (reload_requests, reload_receiver) = mpsc::channel(1);
         let control = Control::with_configuration(capacity, &config);
         (
             Self {
                 requests,
                 signals,
-                shutdown,
+                shutdown: shutdown.clone(),
+                reload_requests,
             },
             Runner {
                 control,
@@ -239,6 +259,8 @@ impl Controller {
                 effects,
                 pending_effects: VecDeque::with_capacity(MAX_PENDING_EFFECTS),
                 shutdown: shutdown_receiver,
+                stop: shutdown,
+                reload: reload::ReloadCoordinator::new(reload_receiver),
                 subscribers: BTreeMap::new(),
                 sessions: BTreeMap::new(),
                 subscription_generation: 0,
@@ -522,6 +544,24 @@ impl Runner {
 
     fn request(&mut self, request: Request, now_ms: u64) -> Result<(), ControlError> {
         match request {
+            Request::BindWebSocketProfiles(profiles) => {
+                self.control.bind_websocket_profiles(profiles)?
+            }
+            Request::TakeWebSocketProfile {
+                key,
+                settings,
+                reply,
+            } => {
+                self.websocket_profile_request(key, settings, reply)?;
+            }
+            Request::ObserveEndpoint {
+                settings,
+                endpoint,
+                presence,
+                reply,
+            } => {
+                self.endpoint_observation_request(settings, endpoint, presence, reply, now_ms)?;
+            }
             Request::Info { only, reply } => {
                 let selected = self.control.server_info().selected(only.as_deref());
                 if reply.send(Ok(selected)).is_err() {
@@ -569,7 +609,7 @@ impl Runner {
                 if reply.is_closed() {
                     return Ok(());
                 }
-                if !self.pending_effects.is_empty() {
+                if self.admissions_paused() || !self.pending_effects.is_empty() {
                     if reply.send(Err(ControlError::Capacity)).is_err() {
                         tracing::debug!("incoming requester disconnected during pending cleanup");
                     }
@@ -639,6 +679,7 @@ impl Runner {
                     .authorize(&credentials, origin.as_deref(), action.read_only())
                     .and_then(|()| {
                         if (!self.pending_effects.is_empty() && !action.read_only())
+                            || (self.admissions_paused() && reload::new_settings(&action))
                             || self.effects.capacity() < self.control.effect_budget(&action)
                             || (recording
                                 && (self.recording_admissions.len() >= 64
@@ -735,6 +776,12 @@ impl Runner {
                 if reply.is_closed() {
                     return Ok(());
                 }
+                if self.admissions_paused() {
+                    if reply.send(Err(ControlError::Capacity)).is_err() {
+                        tracing::debug!("Event subscriber disconnected during publication");
+                    }
+                    return Ok(());
+                }
                 let result = self
                     .authorize(&credentials, origin.as_deref(), true)
                     .and_then(|()| {
@@ -826,11 +873,12 @@ impl Runner {
     }
 
     fn tick(&mut self, now: u64) -> Result<(), ControlError> {
+        self.tick_reload()?;
         self.sessions
             .retain(|_, session| !session.lifetime.is_closed());
         let mut outcome = self.control.expire(now, &timestamp())?;
         self.publish(&mut outcome)?;
-        if self.pending_effects.is_empty() {
+        if self.pending_effects.is_empty() && !self.admissions_paused() {
             let mut outcome = self.control.tick_dialplans(now, &timestamp())?;
             self.publish(&mut outcome)?;
         }
@@ -858,6 +906,15 @@ impl Runner {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
+                prepared = self.reload.preparations.join_next(), if !self.reload.preparations.is_empty() => {
+                    self.preparation_completed(prepared.ok_or(ControlError::Conflict("Settings preparation task missing"))?)?;
+                }
+                step = self.reload.steps.join_next(), if !self.reload.steps.is_empty() => {
+                    self.publication_completed(step.ok_or(ControlError::Conflict("Settings acknowledgement task missing"))?)?;
+                }
+                replacement = self.reload.requests.recv(), if !self.reload.requests.is_closed() || !self.reload.requests.is_empty() => {
+                    if let Some(replacement) = replacement { self.begin_reload(replacement); }
+                }
                 result = self.stored_jobs.join_next(), if !self.stored_jobs.is_empty() => {
                     result.ok_or(ControlError::Capacity)?.map_err(|error| ControlError::Adapter(error.to_string()))?;
                 }
@@ -919,7 +976,15 @@ impl Runner {
             .and_then(|mut outcome| self.publish(&mut outcome));
         self.subscribers.clear();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        let mut cleanup = self.drain_effects(deadline).await;
+        let mut cleanup = self.close_reload(deadline).await;
+        if let Err(error) = self.drain_effects(deadline).await {
+            cleanup = match cleanup {
+                Ok(()) => Err(error),
+                Err(primary) => Err(ControlError::Adapter(format!(
+                    "{primary}; effect cleanup failed: {error}"
+                ))),
+            };
+        }
         for (_, mut session) in std::mem::take(&mut self.sessions) {
             if session.kind == SubscriptionKind::Socket {
                 let result = match tokio::time::timeout_at(deadline, session.lifetime.recv()).await
@@ -984,6 +1049,10 @@ impl Runner {
 
     pub async fn run(mut self) -> Result<(), ControlError> {
         let result = self.serve().await;
+        if let Err(error) = &result {
+            self.retain_reload_failure(error);
+            self.stop.send_replace(true);
+        }
         let cleanup = self.close().await;
         match (result, cleanup) {
             (Ok(()), Ok(())) => Ok(()),

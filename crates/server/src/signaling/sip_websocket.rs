@@ -25,30 +25,32 @@ pub(super) enum Scheme {
 pub(super) struct UpgradeRequest {
     pub scheme: Scheme,
     pub peer: SocketAddr,
+    pub origin: Option<String>,
     pub reply: oneshot::Sender<Result<oneshot::Sender<WebSocket>, ControlError>>,
 }
 
 #[derive(Clone)]
 pub struct SipWebSocketPort {
     requests: mpsc::Sender<UpgradeRequest>,
-    origins: Vec<String>,
 }
 
 impl SipWebSocketPort {
-    pub(super) fn new(requests: mpsc::Sender<UpgradeRequest>, origins: Vec<String>) -> Self {
-        Self { requests, origins }
+    pub(super) fn new(requests: mpsc::Sender<UpgradeRequest>) -> Self {
+        Self { requests }
     }
 
     async fn reserve(
         &self,
         scheme: Scheme,
         peer: SocketAddr,
+        origin: Option<String>,
     ) -> Result<oneshot::Sender<WebSocket>, ControlError> {
         let (reply, result) = oneshot::channel();
         self.requests
             .try_send(UpgradeRequest {
                 scheme,
                 peer,
+                origin,
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
@@ -58,18 +60,19 @@ impl SipWebSocketPort {
             .map_err(|_| ControlError::Capacity)?
     }
 
-    fn origin(&self, headers: &HeaderMap) -> Result<(), ControlError> {
+    fn origin(headers: &HeaderMap) -> Result<Option<String>, ControlError> {
         let mut origins = headers.get_all(header::ORIGIN).iter();
         if let Some(origin) = origins.next() {
             if origins.next().is_some() {
                 return Err(ControlError::Forbidden);
             }
             let origin = origin.to_str().map_err(|_| ControlError::Forbidden)?;
-            if !self.origins.iter().any(|allowed| allowed == origin) {
+            if origin.len() > 256 {
                 return Err(ControlError::Forbidden);
             }
+            return Ok(Some(origin.to_owned()));
         }
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -94,7 +97,7 @@ async fn upgrade_socket(
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
     let result = async {
-        port.origin(&headers)?;
+        let origin = SipWebSocketPort::origin(&headers)?;
         let mut sip = false;
         for header in headers.get_all(header::SEC_WEBSOCKET_PROTOCOL) {
             let text = header
@@ -112,7 +115,7 @@ async fn upgrade_socket(
             HttpScheme::Http => Scheme::Ws,
             HttpScheme::Https => Scheme::Wss,
         };
-        let reserved = port.reserve(scheme, peer).await?;
+        let reserved = port.reserve(scheme, peer, origin).await?;
         Ok(upgrade
             .protocols(["sip"])
             .max_frame_size(MAX_MESSAGE)

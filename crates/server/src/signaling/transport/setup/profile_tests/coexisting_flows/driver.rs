@@ -202,7 +202,7 @@ impl Fixture {
                             "TLS fixture flow closed before admission",
                         ));
                     }
-                    Input::Packet(_) => {
+                    Input::Packet(_) | Input::Upgrade(_) => {
                         return Err(ControlError::Invalid(
                             "SIP arrived before the TLS fixture driver started",
                         ))

@@ -4,6 +4,8 @@ use rusterisk_config::Config;
 use rusterisk_core::{ContactPresence, ResourceKind, ResourceSource};
 use std::collections::BTreeMap;
 
+const INITIAL_SOURCE: u64 = 1_u64 << 32;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EndpointKey {
     pub resource: String,
@@ -16,8 +18,20 @@ struct Route {
     contact: ContactPresence,
 }
 
+#[derive(Clone, Copy)]
+struct SourceSerial(u64);
+
+impl SourceSerial {
+    fn next(&mut self) -> Result<u64, ControlError> {
+        let next = self.0.checked_add(1).ok_or(ControlError::Capacity)?;
+        self.0 = next;
+        Ok(next)
+    }
+}
+
 pub(super) struct Endpoints {
     generation: u64,
+    source_serial: SourceSerial,
     routes: BTreeMap<String, Route>,
 }
 
@@ -25,6 +39,7 @@ impl Default for Endpoints {
     fn default() -> Self {
         Self {
             generation: 1,
+            source_serial: SourceSerial(INITIAL_SOURCE),
             routes: BTreeMap::new(),
         }
     }
@@ -32,7 +47,7 @@ impl Default for Endpoints {
 
 impl Endpoints {
     pub(super) fn configured(config: &Config) -> Self {
-        let routes = config
+        let routes: BTreeMap<_, _> = config
             .endpoints
             .iter()
             .enumerate()
@@ -46,16 +61,55 @@ impl Endpoints {
                 (
                     endpoint.name.clone(),
                     Route {
-                        source: (1_u64 << 32) + index as u64 + 1,
+                        source: INITIAL_SOURCE + index as u64 + 1,
                         static_contact,
                         contact: ContactPresence::Absent,
                     },
                 )
             })
             .collect();
+        let source_serial = SourceSerial(
+            routes
+                .values()
+                .map(|route| route.source)
+                .max()
+                .unwrap_or(INITIAL_SOURCE),
+        );
         Self {
             generation: 1,
+            source_serial,
             routes,
+        }
+    }
+
+    pub(super) fn prepare_configuration(&self, config: &Config) -> Result<Self, ControlError> {
+        let generation = self
+            .generation
+            .checked_add(1)
+            .ok_or(ControlError::Capacity)?;
+        let mut replacement = Self::configured(config);
+        replacement.generation = generation;
+        replacement.source_serial = self.source_serial;
+        for (name, route) in &mut replacement.routes {
+            if let Some(current) = self.routes.get(name) {
+                route.source = current.source;
+                route.contact = current.contact;
+            } else {
+                route.source = replacement.source_serial.next()?;
+            }
+        }
+        Ok(replacement)
+    }
+
+    pub(super) fn preserve_contacts(&mut self, current: &Self) {
+        for (name, route) in &mut self.routes {
+            if let Some(current) = current
+                .routes
+                .get(name)
+                .filter(|current| current.source == route.source)
+            {
+                route.contact = current.contact;
+            }
         }
     }
 

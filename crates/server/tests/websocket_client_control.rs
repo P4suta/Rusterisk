@@ -54,7 +54,7 @@ fn admission(format: MediaFormat) -> Result<(), ControlError> {
     );
     let key = control.key(&channel.id)?;
     assert!(
-        matches!(&accepted.effects[..], [Effect::ConnectWebSocket { key: current, client, options, channel_variables }] if current == &key && client.uri.expose() == "ws://127.0.0.1:18080/media" && options.format == format && options.control_format == MediaControlFormat::Json && channel_variables.get("INITIAL_TAG").map(String::as_str) == Some("outgoing value"))
+        matches!(&accepted.effects[..], [Effect::ConnectWebSocket { key: current, client, options, channel_variables, .. }] if current == &key && client.uri.expose() == "ws://127.0.0.1:18080/media" && options.format == format && options.control_format == MediaControlFormat::Json && channel_variables.get("INITIAL_TAG").map(String::as_str) == Some("outgoing value"))
     );
     control.signal(
         Signal::Milestone {

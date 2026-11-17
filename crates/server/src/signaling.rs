@@ -27,6 +27,8 @@ mod negotiation_tests;
 mod outbound;
 #[cfg(test)]
 mod playback_admission_tests;
+mod publication;
+pub(crate) use publication::{NativePreparation, NativePreparedSignaling};
 mod recording;
 mod refer_routes;
 mod registrations;
@@ -39,6 +41,7 @@ pub use sip_websocket::SipWebSocketPort;
 #[cfg(test)]
 mod sip_websocket_tests;
 mod websocket;
+pub(crate) use websocket::{PreparedClients as PreparedWebSocketProfiles, PreparedWebSocketClient};
 
 struct Listener {
     name: String,
@@ -94,6 +97,8 @@ type PlaybackResult = (MediaOwner, MediaTaskToken, Result<(), ControlError>);
 pub struct Signaling {
     config: Config,
     native_profiles: crate::call_profiles::BoundNativeProfiles,
+    startup_native_profiles: crate::call_profiles::BoundNativeProfiles,
+    publication: Option<publication::NativePublication>,
     controller: Controller,
     effects: mpsc::Receiver<Effect>,
     media: MediaPort,
@@ -148,7 +153,7 @@ fn audio_gate(gate: AudioGate) -> Gate {
 
 impl Signaling {
     pub fn websocket_port(&self) -> SipWebSocketPort {
-        self.network.websocket_port(self.config.origins.clone())
+        self.network.websocket_port()
     }
 
     pub fn with_storage(mut self, storage: StoragePort) -> Self {
@@ -174,7 +179,7 @@ impl Signaling {
         let websocket_clients = websocket::PreparedClients::new(&config.websocket.clients)?;
         let requested = config.transports.clone();
         let network = transport::Network::bind(&mut config).await?;
-        let native_profiles = network.native_profiles(&requested, registrations.generation())?;
+        let native_profiles = network.native_profiles(&requested)?;
         let mut listeners = Vec::with_capacity(config.transports.len());
         for transport in &config.transports {
             let mut scoped = config.clone();
@@ -189,9 +194,12 @@ impl Signaling {
             });
         }
         controller.bind_native_profiles(native_profiles.clone())?;
+        controller.bind_websocket_profiles(websocket_clients.clone())?;
         Ok(Self {
             config,
+            startup_native_profiles: native_profiles.clone(),
             native_profiles,
+            publication: None,
             controller,
             effects,
             media,
@@ -264,6 +272,7 @@ impl Signaling {
         now: u64,
     ) -> Result<(), ControlError> {
         self.prune_refer_routes(listener, now)?;
+        let settings = self.registrations.settings_epoch;
         let mut datagrams = output.datagrams;
         for event in &output.events {
             if let SipEvent::PeerDirection {
@@ -326,16 +335,32 @@ impl Signaling {
                     endpoint,
                     generation,
                     presence,
-                } => {
-                    self.notify(Signal::EndpointContact {
-                        key: crate::EndpointKey {
-                            resource: endpoint,
-                            generation,
-                        },
-                        presence,
-                    })
-                    .await?;
-                }
+                } => match settings {
+                    Some(settings) => {
+                        match self
+                            .controller
+                            .observe_endpoint(settings, endpoint, presence)
+                            .await
+                        {
+                            Ok(()) => {}
+                            Err(ControlError::Conflict(_) | ControlError::NotFound(_)) => {
+                                tracing::debug!("stale endpoint contact observation rejected");
+                                continue;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    None => {
+                        self.notify(Signal::EndpointContact {
+                            key: crate::EndpointKey {
+                                resource: endpoint,
+                                generation,
+                            },
+                            presence,
+                        })
+                        .await?;
+                    }
+                },
                 SipEvent::PeerDirection {
                     id,
                     generation,
@@ -477,6 +502,7 @@ impl Signaling {
                                 | ControlError::BridgeExists(_)
                                 | ControlError::Unauthorized
                                 | ControlError::Forbidden
+                                | ControlError::Configuration(_)
                                 | ControlError::Encoding(_)
                                 | ControlError::Adapter(_) => RejectReason::Rejected,
                             };
@@ -512,6 +538,9 @@ impl Signaling {
         {
             return Err(ControlError::Capacity);
         }
+        if !self.admitting() {
+            return Err(ControlError::Capacity);
+        }
         let profile = crate::call_profiles::NativeMediaProfile::capture(
             &self.config,
             &incoming.endpoint,
@@ -545,9 +574,17 @@ impl Signaling {
         endpoint: String,
         call: outbound::CallStart,
         profile: crate::NativeCallProfile,
+        settings: rusterisk_core::SettingsGeneration,
         now: u64,
     ) -> Result<(), ControlError> {
-        self.queue_native_profile(key, endpoint, call, profile, now)
+        let epoch = self
+            .registrations
+            .settings_epoch
+            .map(|_| transport::ProfileEpoch::Settings(settings))
+            .unwrap_or(transport::ProfileEpoch::Configuration(
+                self.registrations.generation(),
+            ));
+        self.queue_native_profile(key, endpoint, call, profile, epoch, now)
     }
 
     async fn start_resolved(
@@ -676,13 +713,26 @@ impl Signaling {
             }
             Effect::ConnectWebSocket {
                 key,
-                client,
+                settings,
+                client: _,
                 options,
                 channel_variables,
             } => {
-                if let Err(error) =
-                    self.start_websocket(key.clone(), client, options, channel_variables)
-                {
+                let prepared = self
+                    .controller
+                    .take_websocket_profile(key.clone(), settings)
+                    .await;
+                let started = match prepared {
+                    Ok(prepared) => {
+                        self.start_websocket(key.clone(), prepared, options, channel_variables)
+                    }
+                    Err(ControlError::Conflict(_) | ControlError::NotFound(_)) => {
+                        tracing::debug!(channel = %key.id, generation = key.generation, "WebSocket start key rejected");
+                        return Ok(());
+                    }
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = started {
                     self.notify(Signal::WebSocketAdmitted {
                         key,
                         result: Err(error),
@@ -883,6 +933,7 @@ impl Signaling {
                             endpoint,
                             outbound::CallStart { caller, timeout },
                             profile,
+                            settings,
                             now,
                         )
                         .await
@@ -1253,11 +1304,30 @@ impl Signaling {
     ) -> Result<(), ControlError> {
         let mut tick = tokio::time::interval(Duration::from_millis(20));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let publication_stopped = stop.clone();
         loop {
             if *stop.borrow() {
                 break;
             }
+            let (prepared, commands) = match &mut self.publication {
+                Some(publication) => (
+                    Some(&mut publication.receiver.prepared),
+                    Some(&mut publication.receiver.commands),
+                ),
+                None => (None, None),
+            };
             tokio::select! {
+                prepared = publication::receive(prepared, &publication_stopped) => match prepared? {
+                    Some(prepared) => self.stage_native_settings(prepared)?,
+                    None => break,
+                },
+                command = publication::receive(commands, &publication_stopped) => match command? {
+                    Some(command) => {
+                        let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
+                        self.native_publication(command, now)?;
+                    }
+                    None => break,
+                },
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { break; },
                 effect = self.effects.recv() => match effect {
                     Some(effect) => {
@@ -1269,6 +1339,10 @@ impl Signaling {
                 packet = self.network.next() => {
                     let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
                     match packet? {
+                        transport::Input::Upgrade(request) => {
+                            let admitting = self.admitting();
+                            self.network.admit_upgrade(request, &self.config.origins, admitting);
+                        },
                         transport::Input::Packet(packet) => {
                             if self.registration_received(&packet, now) { continue; }
                             let engine = &mut self.listeners[packet.listener].engine;
@@ -1377,9 +1451,11 @@ impl Signaling {
         cleanup = cleanup::combine(cleanup, self.finish_streams().await);
         cleanup = cleanup::combine(cleanup, self.finish_websockets().await);
         for (key, call) in std::mem::take(&mut self.calls) {
-            match self.terminate(call.listener, &key, now) {
+            let listener = call.listener;
+            drop(call);
+            match self.terminate(listener, &key, now) {
                 Ok(output) => {
-                    if let Err(error) = self.transmit(call.listener, output.datagrams).await {
+                    if let Err(error) = self.transmit(listener, output.datagrams).await {
                         tracing::error!(%error, "signaling cleanup failed");
                         cleanup = cleanup::combine(cleanup, Err(error));
                     }

@@ -20,12 +20,15 @@ use tokio::{
 };
 #[cfg(test)]
 mod refer_tests;
+mod settings;
 mod setup;
+pub(super) use settings::PreparedNetworkSettings;
 #[cfg(test)]
 mod tests;
 mod websocket;
 pub(super) use setup::{
-    ConnectionAdmission, ConnectionSetup, Prepared, RegisteredRoute, SetupKey, SetupLifetime,
+    ConnectionAdmission, ConnectionSetup, Prepared, ProfileEpoch, RegisteredRoute, SetupKey,
+    SetupLifetime,
 };
 
 enum ListenerSocket {
@@ -158,6 +161,7 @@ enum ListenerInput {
 
 pub(super) enum Input {
     Packet(Received),
+    Upgrade(UpgradeRequest),
     Prepared(Prepared),
     SetupFinished {
         key: SetupKey,
@@ -262,7 +266,6 @@ impl Network {
     pub(super) fn native_profiles(
         &self,
         requested: &[rusterisk_config::Transport],
-        configuration: std::num::NonZeroU64,
     ) -> Result<crate::call_profiles::BoundNativeProfiles, ControlError> {
         if requested.len() != self.listeners.len() {
             return Err(ControlError::Conflict(
@@ -286,7 +289,6 @@ impl Network {
                     transport.clone(),
                     self.local_addr(listener)?,
                     listener,
-                    configuration,
                     context,
                 ))
             })
@@ -497,8 +499,8 @@ impl Network {
         })
     }
 
-    pub(super) fn websocket_port(&self, origins: Vec<String>) -> SipWebSocketPort {
-        SipWebSocketPort::new(self.upgrade_requests.clone(), origins)
+    pub(super) fn websocket_port(&self) -> SipWebSocketPort {
+        SipWebSocketPort::new(self.upgrade_requests.clone())
     }
 
     pub(super) fn local_addr(&self, listener: usize) -> Result<SocketAddr, ControlError> {
@@ -563,6 +565,28 @@ impl Network {
             websocket::connection(received, key, packets, sender, stop).await
         });
         Ok(socket)
+    }
+
+    pub(super) fn admit_upgrade(
+        &mut self,
+        request: UpgradeRequest,
+        origins: &[String],
+        admitting: bool,
+    ) {
+        let result = if request
+            .origin
+            .as_ref()
+            .is_some_and(|origin| !origins.iter().any(|allowed| allowed == origin))
+        {
+            Err(ControlError::Forbidden)
+        } else if !admitting {
+            Err(ControlError::Capacity)
+        } else {
+            self.upgrade(request.scheme, request.peer)
+        };
+        if request.reply.send(result).is_err() {
+            tracing::debug!("Signaling upgrade requester closed");
+        }
     }
 
     fn accepted(
@@ -656,8 +680,7 @@ impl Network {
                 },
                 upgrade = self.upgrades.recv() => {
                     let request = upgrade.ok_or(ControlError::Capacity)?;
-                    let result = self.upgrade(request.scheme, request.peer);
-                    if request.reply.send(result).is_err() { tracing::debug!("Signaling upgrade requester closed"); }
+                    return Ok(Input::Upgrade(request));
                 },
                 received = listen(&self.listeners) => match received? {
                     ListenerInput::Datagram(packet) => return Ok(Input::Packet(packet)),

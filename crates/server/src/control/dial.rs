@@ -585,6 +585,7 @@ impl Control {
                     music: None,
                     settings,
                     pending_native: Some(capsule),
+                    pending_websocket: None,
                 },
             );
             outcome.effects.push(Effect::Start {

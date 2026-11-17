@@ -15,7 +15,7 @@ impl Fixture {
                         ));
                     }
                     Input::SetupFinished { result, .. } => result?,
-                    Input::Prepared(_) => {
+                    Input::Prepared(_) | Input::Upgrade(_) => {
                         return Err(ControlError::Invalid("Unexpected extra TLS preparation"))
                     }
                 }

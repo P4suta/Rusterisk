@@ -14,14 +14,17 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 use tower_http::timeout::TimeoutLayer;
+pub(crate) mod reload;
 
 pub struct HttpServer {
     listener: TcpListener,
+    requested_bind: SocketAddr,
     application: Router,
     encryption: Option<TlsContext>,
     controller: Controller,
     media: Option<crate::media::MediaPort>,
     signaling: Option<crate::signaling::SipWebSocketPort>,
+    publication: Option<reload::HttpPublication>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -117,11 +120,13 @@ impl HttpServer {
         );
         Ok(Self {
             listener,
+            requested_bind: config.bind,
             application,
             encryption,
             controller,
             media: None,
             signaling: None,
+            publication: None,
         })
     }
 
@@ -164,8 +169,9 @@ impl HttpServer {
         ));
     }
 
-    pub async fn run(self) -> Result<(), ControlError> {
+    pub async fn run(mut self) -> Result<(), ControlError> {
         let mut stopped = self.controller.shutdown_signal();
+        let publication_stopped = stopped.clone();
         let mut connections = JoinSet::new();
         let result = loop {
             if *stopped.borrow() {
@@ -173,7 +179,19 @@ impl HttpServer {
             }
             tokio::select! {
                 changed = stopped.changed() => if changed.is_err() || *stopped.borrow() { break Ok(()); },
-                accepted = self.listener.accept(), if connections.len() < 64 => {
+                event = reload::publication_event(&mut self.publication, &publication_stopped) => {
+                    let event = match event {
+                        Ok(Some(event)) => event,
+                        Ok(None) => break Ok(()),
+                        Err(error) => break Err(error),
+                    };
+                    match self.publication(event) {
+                        Ok(()) => {}
+                        Err(error) => break Err(error),
+                    }
+                }
+                accepted = self.listener.accept(), if connections.len() < 64
+                    && self.publication.as_ref().is_none_or(reload::HttpPublication::admitting) => {
                     let (stream, peer) = match accepted { Ok(accepted) => accepted, Err(error) => break Err(failure(error)) };
                     let encryption = self.encryption.clone();
                     let application = self.application.clone();

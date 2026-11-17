@@ -1,8 +1,8 @@
 use super::{
     cleanup, failure, media,
     transport::{
-        ConnectionAdmission, ConnectionKey, ConnectionSetup, DeliveryRoute, Prepared, SetupKey,
-        SetupLifetime,
+        ConnectionAdmission, ConnectionKey, ConnectionSetup, DeliveryRoute, Prepared, ProfileEpoch,
+        SetupKey, SetupLifetime,
     },
     Received, Signaling,
 };
@@ -14,8 +14,8 @@ use resolution::{Completion, ConfigurationLifetime};
 use rusterisk_config::{Auth, Config, Protocol, Registration, MAX_REGISTRATIONS};
 use rusterisk_sip::{
     Datagram, RegistrationAuthentication, RegistrationGrant, RegistrationIdentity,
-    RegistrationResponse, RegistrationTransaction, RegistrationTransactionEvent, StaticTarget,
-    TargetHost,
+    RegistrationResponse, RegistrationRetirementReceipt, RegistrationTransaction,
+    RegistrationTransactionEvent, StaticTarget, TargetHost,
 };
 use std::{
     net::SocketAddr,
@@ -25,7 +25,10 @@ use std::{
 use tokio::task::JoinSet;
 mod candidates;
 mod peer_waits;
+mod publication;
+pub(super) use publication::PreparedRegistrations;
 mod resolution;
+mod retiring;
 mod retry;
 #[cfg(test)]
 mod tests;
@@ -36,6 +39,9 @@ pub(super) struct Registrations {
     identity: RegistrationIdentity,
     lifetime: ConfigurationLifetime,
     jobs: JoinSet<Completion>,
+    retiring: retiring::Retiring,
+    pub(super) settings_epoch: Option<rusterisk_core::SettingsGeneration>,
+    reservation: Option<publication::RegistrationReservation>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -224,20 +230,7 @@ impl Client {
         {
             return true;
         }
-        let Ok(default_port) = default_port(self.target.protocol()) else {
-            return false;
-        };
-        self.target.protocol() == other.target.protocol()
-            && self.target.port().unwrap_or(default_port)
-                == other.target.port().unwrap_or(default_port)
-            && match (self.target.host(), other.target.host()) {
-                (TargetHost::Address(first), TargetHost::Address(second)) => first == second,
-                (TargetHost::Name(first), TargetHost::Name(second)) => first
-                    .trim_end_matches('.')
-                    .eq_ignore_ascii_case(second.trim_end_matches('.')),
-                (TargetHost::Address(_), TargetHost::Name(_))
-                | (TargetHost::Name(_), TargetHost::Address(_)) => false,
-            }
+        retiring::same_registrar(&self.target, &other.target)
     }
 }
 
@@ -257,6 +250,24 @@ fn random() -> Result<u128, ControlError> {
 
 impl Registrations {
     pub(super) fn new(config: &Config) -> Result<Self, ControlError> {
+        Self::new_at(config, 0)
+    }
+
+    pub(super) fn new_at(config: &Config, now: u64) -> Result<Self, ControlError> {
+        let clients = Self::clients_at(config, now)?;
+        Ok(Self {
+            clients,
+            cursor: 0,
+            identity: RegistrationIdentity::new(random()?, 0, 0).map_err(failure)?,
+            lifetime: ConfigurationLifetime::new(NonZeroU64::MIN),
+            jobs: JoinSet::new(),
+            retiring: retiring::Retiring::new(now),
+            settings_epoch: None,
+            reservation: None,
+        })
+    }
+
+    fn clients_at(config: &Config, now: u64) -> Result<Vec<Client>, ControlError> {
         if config.registrations.len() > MAX_REGISTRATIONS {
             return Err(ControlError::Capacity);
         }
@@ -279,7 +290,12 @@ impl Registrations {
             } else {
                 random()? % u128::from(settings.max_random_initial_delay)
             };
-            let at = (u64::try_from(delay).map_err(failure)? + 1) * 1000;
+            let delay = u64::try_from(delay)
+                .map_err(failure)?
+                .checked_add(1)
+                .and_then(|delay| delay.checked_mul(1000))
+                .ok_or(ControlError::Capacity)?;
+            let at = now.checked_add(delay).ok_or(ControlError::Capacity)?;
             let state = match target.host() {
                 TargetHost::Address(address) => {
                     let peer = SocketAddr::new(*address, target.port().unwrap_or(default_port));
@@ -318,14 +334,7 @@ impl Registrations {
                 state,
             });
         }
-        let boot = if clients.is_empty() { 0 } else { random()? };
-        Ok(Self {
-            clients,
-            cursor: 0,
-            identity: RegistrationIdentity::new(boot, 0, 0).map_err(failure)?,
-            lifetime: ConfigurationLifetime::new(NonZeroU64::MIN),
-            jobs: JoinSet::new(),
-        })
+        Ok(clients)
     }
 
     pub(super) const fn generation(&self) -> NonZeroU64 {
@@ -340,6 +349,15 @@ impl Registrations {
             let index = self.cursor;
             self.cursor = (self.cursor + 1) % self.clients.len();
             let client = &self.clients[index];
+            if !self.allows_transaction(index, client, now) {
+                continue;
+            }
+            if self
+                .retiring
+                .blocked(&client.target, client.state.peer(), now)
+            {
+                continue;
+            }
             let due = match &client.state {
                 State::Waiting { at }
                 | State::CandidateWait { at }
@@ -392,7 +410,18 @@ impl Registrations {
         if self.lifetime.lease().is_released() {
             return Ok(None);
         }
+        self.retiring.poll(now)?;
+        let current = self.clients.get(index).ok_or(ControlError::Capacity)?;
+        if !self.allows_transaction(index, current, now) {
+            return Ok(None);
+        }
         let client = self.clients.get_mut(index).ok_or(ControlError::Capacity)?;
+        if self
+            .retiring
+            .blocked(&client.target, client.state.peer(), now)
+        {
+            return Ok(None);
+        }
         if matches!(
             &client.state,
             State::Ready { at, .. }
@@ -589,6 +618,8 @@ impl Registrations {
 
     pub(super) fn cancel(&mut self) {
         self.lifetime.cancel();
+        self.reservation = None;
+        self.retiring.clear();
         for client in &mut self.clients {
             if let State::Trying { transaction, .. } = &mut client.state {
                 transaction.cancel();
@@ -622,9 +653,13 @@ impl Signaling {
             .ok_or(ControlError::Capacity)?;
         let target = client.target.clone();
         let cached = self.resolution_cache.get(&target, Instant::now());
-        let setup = self
-            .network
-            .reserve_setup(client.listener, self.registrations.generation())?;
+        let setup = self.network.reserve_setup(
+            client.listener,
+            self.registrations
+                .settings_epoch
+                .map(ProfileEpoch::Settings)
+                .unwrap_or(ProfileEpoch::Configuration(self.registrations.generation())),
+        )?;
         let key = ConfigurationKey {
             generation: self.registrations.lifetime.generation(),
             index,
@@ -862,6 +897,17 @@ impl Signaling {
     }
 
     pub(super) fn registration_received(&mut self, packet: &Received, now: u64) -> bool {
+        match self.registrations.retiring.receive_datagram(packet, now) {
+            Ok(RegistrationRetirementReceipt::Unmatched) => {}
+            Ok(
+                RegistrationRetirementReceipt::Provisional(_)
+                | RegistrationRetirementReceipt::Final(_),
+            ) => return true,
+            Err(error) => {
+                tracing::debug!(%error, "retired registration response refused");
+                return true;
+            }
+        }
         let Some(index) = self.registrations.clients.iter().position(|client| {
             client.listener == packet.listener
                 && client.state.peer() == Some(packet.peer)
@@ -906,6 +952,10 @@ impl Signaling {
     }
 
     pub(super) async fn registration_tick(&mut self, now: u64) -> Result<(), ControlError> {
+        self.registrations.retiring.poll(now)?;
+        if !self.admitting() && self.registrations.reservation.is_none() {
+            return Ok(());
+        }
         let Some(index) = self.registrations.select(now) else {
             return Ok(());
         };

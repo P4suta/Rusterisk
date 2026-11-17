@@ -137,7 +137,7 @@ impl Fixture {
                     result?;
                     return Err(ControlError::Invalid("Incoming profile flow ended"));
                 }
-                Input::Prepared(_) => {
+                Input::Prepared(_) | Input::Upgrade(_) => {
                     return Err(ControlError::Invalid("Unexpected incoming setup"))
                 }
             };

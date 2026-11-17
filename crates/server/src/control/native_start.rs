@@ -6,9 +6,10 @@ use rusterisk_core::{SettingsGeneration, SettingsReference};
 mod tests;
 
 #[derive(Clone)]
-pub(super) struct CallSettings {
+pub(crate) struct CallSettings {
     pub(super) native_profiles: Option<NativeProfileCatalog>,
     pub(super) music_catalog: Option<PreparedMusic>,
+    pub(super) websocket_profiles: Option<crate::signaling::PreparedWebSocketProfiles>,
 }
 
 impl CallSettings {
@@ -16,6 +17,7 @@ impl CallSettings {
         Self {
             native_profiles: None,
             music_catalog: None,
+            websocket_profiles: None,
         }
     }
 
@@ -23,6 +25,19 @@ impl CallSettings {
         Self {
             native_profiles: Some(NativeProfileCatalog::new(config)),
             music_catalog: None,
+            websocket_profiles: None,
+        }
+    }
+
+    pub(crate) fn prepared(
+        native: NativeProfileCatalog,
+        websocket: crate::signaling::PreparedWebSocketProfiles,
+        music: PreparedMusic,
+    ) -> Self {
+        Self {
+            native_profiles: Some(native),
+            music_catalog: Some(music),
+            websocket_profiles: Some(websocket),
         }
     }
 }

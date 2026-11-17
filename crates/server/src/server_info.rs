@@ -4,6 +4,7 @@ use rusterisk_api::{AsteriskInfo, BuildInfo, ConfigInfo, SetId, StatusInfo, Syst
 pub(crate) struct ServerInfo {
     entity_id: uuid::Uuid,
     startup: String,
+    last_reload: String,
     capacity: i32,
 }
 
@@ -13,11 +14,17 @@ impl ServerInfo {
     }
 
     pub(crate) fn new(capacity: usize) -> Self {
+        let startup = chrono::Utc::now().to_rfc3339();
         Self {
             entity_id: uuid::Uuid::new_v4(),
-            startup: chrono::Utc::now().to_rfc3339(),
+            last_reload: startup.clone(),
+            startup,
             capacity: capacity.min(64) as i32,
         }
+    }
+
+    pub(crate) fn configuration_published(&mut self, timestamp: String) {
+        self.last_reload = timestamp;
     }
 
     pub(crate) fn selected(&self, only: Option<&str>) -> AsteriskInfo {
@@ -53,7 +60,7 @@ impl ServerInfo {
             }),
             status: selected("status").then(|| StatusInfo {
                 startup_time: self.startup.clone(),
-                last_reload_time: self.startup.clone(),
+                last_reload_time: self.last_reload.clone(),
             }),
         }
     }

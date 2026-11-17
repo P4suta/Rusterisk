@@ -109,7 +109,7 @@ impl Fixture {
                     result?;
                     Err(ControlError::Invalid("TLS flow ended before admission"))
                 }
-                Input::Packet(_) => Err(ControlError::Invalid(
+                Input::Packet(_) | Input::Upgrade(_) => Err(ControlError::Invalid(
                     "Unexpected packet during TLS admission",
                 )),
             }
@@ -188,7 +188,7 @@ impl Fixture {
                         return Err(ControlError::Invalid("TLS flow closed before its response"));
                     }
                     Input::SetupFinished { result, .. } => result?,
-                    Input::Prepared(_) => {
+                    Input::Prepared(_) | Input::Upgrade(_) => {
                         return Err(ControlError::Invalid(
                             "Unexpected additional TLS preparation",
                         ));

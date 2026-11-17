@@ -88,8 +88,12 @@ impl Control {
         };
         let mut variables = initial.values;
         let mut websocket = None;
+        let settings_generation = self.settings.current();
+        let mut pending_websocket = None;
         let (kind, name, effect) = match target {
             Target::WebSocketClient { client, options } => {
+                pending_websocket =
+                    Some(self.websocket_capsule(&key, settings_generation, &client)?);
                 let name = format!("WebSocket/{}/{generation:08x}", client.name);
                 variables.insert("MEDIA_WEBSOCKET_CONNECTION_ID".into(), client.name.clone());
                 variables.insert(
@@ -101,6 +105,7 @@ impl Control {
                     name,
                     Effect::ConnectWebSocket {
                         key: key.clone(),
+                        settings: settings_generation,
                         client,
                         options,
                         channel_variables: variables.clone(),
@@ -200,6 +205,7 @@ impl Control {
                 music: None,
                 settings,
                 pending_native: None,
+                pending_websocket,
             },
         );
         Ok(outcome)

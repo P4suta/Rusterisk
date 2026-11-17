@@ -53,7 +53,7 @@ async fn initiated_registration_waits_for_a_response_beyond_the_accepted_first_m
             event = signaling.network.next() => {
                 return match event? {
                     Input::Closed { result: Err(_), .. } => Err(ControlError::Invalid("Initiated registration expired before its response deadline")),
-                    Input::Closed { result: Ok(()), .. } | Input::Packet(_) | Input::Prepared(_) | Input::SetupFinished { .. } => Err(ControlError::Invalid("Unexpected event while awaiting registration response")),
+                    Input::Closed { result: Ok(()), .. } | Input::Packet(_) | Input::Prepared(_) | Input::Upgrade(_) | Input::SetupFinished { .. } => Err(ControlError::Invalid("Unexpected event while awaiting registration response")),
                 };
             }
             () = tokio::time::sleep(Duration::from_secs(6)) => {}

@@ -27,6 +27,9 @@ impl Pending {
 
 impl Runner {
     pub(super) fn apply_signal(&mut self, signal: Signal, now: u64) -> Result<(), ControlError> {
+        if self.reject_new_transfer(&signal)? {
+            return Ok(());
+        }
         if let Signal::ExternalRtpAdmitted { key, result } = signal {
             return self.complete_external_admission(key, result, now);
         }

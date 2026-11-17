@@ -2,8 +2,8 @@ use super::{
     failure,
     resolver::{DestinationResolver, ResolvedTarget},
     transport::{
-        ConnectionAdmission, ConnectionKey, ConnectionSetup, Prepared, RegisteredRoute, SetupKey,
-        SetupLifetime,
+        ConnectionAdmission, ConnectionKey, ConnectionSetup, Prepared, ProfileEpoch,
+        RegisteredRoute, SetupKey, SetupLifetime,
     },
     Signaling,
 };
@@ -72,7 +72,14 @@ impl Signaling {
     ) -> Result<(), ControlError> {
         let catalog = crate::call_profiles::NativeProfileCatalog::new(&self.config);
         let profile = catalog.capture(&endpoint)?;
-        self.queue_native_profile(key, endpoint, CallStart { caller, timeout }, profile, now)
+        self.queue_native_profile(
+            key,
+            endpoint,
+            CallStart { caller, timeout },
+            profile,
+            ProfileEpoch::Configuration(self.registrations.generation()),
+            now,
+        )
     }
 
     pub(super) fn queue_native_profile(
@@ -81,6 +88,7 @@ impl Signaling {
         endpoint: String,
         call: CallStart,
         profile: crate::NativeCallProfile,
+        epoch: ProfileEpoch,
         now: u64,
     ) -> Result<(), ControlError> {
         if self.native_pending.len() >= 16
@@ -96,7 +104,7 @@ impl Signaling {
         {
             return Err(ControlError::Capacity);
         }
-        let profile = profile.bind(&self.native_profiles)?;
+        let profile = profile.bind(&self.startup_native_profiles)?;
         if endpoint.strip_prefix("PJSIP/") != Some(profile.endpoint.as_str()) {
             return Err(ControlError::Invalid("Captured endpoint changed"));
         }
@@ -126,11 +134,9 @@ impl Signaling {
                 (Route::Registered(route), setup)
             }
             Destination::Static(_) => {
-                let setup = self.network.reserve_native_setup(
-                    listener,
-                    native.binding.configuration(),
-                    native.binding.context(),
-                )?;
+                let setup =
+                    self.network
+                        .reserve_native_setup(listener, epoch, native.binding.context())?;
                 (Route::Static, setup)
             }
         };

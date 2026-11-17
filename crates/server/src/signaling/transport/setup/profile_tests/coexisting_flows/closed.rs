@@ -29,7 +29,7 @@ async fn closing_an_old_tls_flow_preserves_the_replacement_flow() -> Result<(), 
                         return Ok(key);
                     }
                     Input::SetupFinished { result, .. } => result?,
-                    Input::Packet(_) | Input::Prepared(_) => {
+                    Input::Packet(_) | Input::Prepared(_) | Input::Upgrade(_) => {
                         return Err(ControlError::Invalid(
                             "Unexpected event while closing the old TLS flow",
                         ))

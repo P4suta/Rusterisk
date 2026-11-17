@@ -24,6 +24,7 @@ mod music_tests;
 mod native_start;
 mod playback;
 mod recording;
+mod reload;
 mod settings;
 #[cfg(test)]
 mod settings_tests;
@@ -32,12 +33,14 @@ mod subscriptions;
 mod transfer;
 #[cfg(test)]
 mod transfer_tests;
+mod websocket_profiles;
 use dialplan::DialplanFrame;
 pub use endpoints::EndpointKey;
 use endpoints::Endpoints;
-use native_start::CallSettings;
+pub(crate) use native_start::CallSettings;
 pub(crate) use native_start::NativeStartCapsule;
 use settings::SettingsGenerations;
+pub(crate) use websocket_profiles::WebSocketStartCapsule;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ControlError {
@@ -52,6 +55,7 @@ pub enum ControlError {
     Unauthorized,
     Forbidden,
     Unsupported,
+    Configuration(rusterisk_config::ConfigError),
     Encoding(String),
     Adapter(String),
 }
@@ -63,7 +67,7 @@ impl ControlError {
             Self::NotFound(_) | Self::EndpointTechnology(_) => 404,
             Self::Conflict(_) | Self::BridgeExists(_) => 409,
             Self::InvalidState(_) => 412,
-            Self::Unprocessable(_) => 422,
+            Self::Unprocessable(_) | Self::Configuration(_) => 422,
             Self::Capacity => 503,
             Self::Unauthorized => 401,
             Self::Forbidden => 403,
@@ -89,6 +93,7 @@ impl std::fmt::Display for ControlError {
             Self::Unauthorized => f.write_str("Authentication required"),
             Self::Forbidden => f.write_str("Operation forbidden"),
             Self::Unsupported => f.write_str("Operation not supported"),
+            Self::Configuration(error) => std::fmt::Display::fmt(error, f),
             Self::Encoding(message) | Self::Adapter(message) => f.write_str(message),
         }
     }
@@ -440,6 +445,7 @@ pub enum Effect {
     },
     ConnectWebSocket {
         key: CallKey,
+        settings: rusterisk_core::SettingsGeneration,
         client: rusterisk_config::WebSocketClient,
         options: rusterisk_api::WebSocketMediaOptions,
         channel_variables: BTreeMap<String, String>,
@@ -739,6 +745,7 @@ struct ChannelEntry {
     music: Option<music::MusicTask>,
     settings: rusterisk_core::SettingsReference,
     pending_native: Option<NativeStartCapsule>,
+    pending_websocket: Option<WebSocketStartCapsule>,
 }
 
 impl ChannelEntry {
@@ -849,6 +856,7 @@ pub struct Control {
     resource_subscriptions: BTreeMap<StasisApplication, rusterisk_core::ResourceSubscriptions<128>>,
     playbacks: BTreeMap<ChannelId, playback::PlaybackEntry>,
     settings: SettingsGenerations<CallSettings>,
+    pending_configuration: Option<reload::PreparedConfiguration>,
     info: crate::server_info::ServerInfo,
     recordings: BTreeMap<ChannelId, recording::RecordingEntry>,
     dialplan_program: rusterisk_config::Dialplan,
@@ -983,6 +991,7 @@ impl Control {
                 music: None,
                 settings,
                 pending_native: None,
+                pending_websocket: None,
             },
         );
         Ok(outcome)
@@ -1033,6 +1042,7 @@ impl Control {
             resource_subscriptions: BTreeMap::new(),
             playbacks: BTreeMap::new(),
             settings: SettingsGenerations::new(settings, info.settings_owner()),
+            pending_configuration: None,
             info,
             recordings: BTreeMap::new(),
             dialplan_program: program,
@@ -1473,6 +1483,7 @@ impl Control {
                         music: None,
                         settings,
                         pending_native: Some(capsule),
+                        pending_websocket: None,
                     },
                 );
                 Ok(outcome)
@@ -1818,6 +1829,7 @@ impl Control {
             .remove(id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
         drop(entry.pending_native.take());
+        drop(entry.pending_websocket.take());
         self.settings.release(entry.settings)?;
         self.media_connections
             .retain(|_, (key, _)| key.id != *id || key.generation != entry.call.generation());

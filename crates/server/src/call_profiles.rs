@@ -1,7 +1,7 @@
 use crate::{encryption::TlsClientContext, ControlError};
-use rusterisk_config::{Codec, Config, Dtmf, Rtp, Transport};
+use rusterisk_config::{Codec, Config, Dtmf, Protocol, Rtp, Transport};
 use rusterisk_sip::OutboundProfile;
-use std::{fmt, net::SocketAddr, num::NonZeroU64};
+use std::{fmt, net::SocketAddr};
 
 #[derive(Clone)]
 pub struct NativeCallProfile {
@@ -28,11 +28,17 @@ enum NativeListenerProfile {
 
 #[derive(Clone)]
 pub(crate) struct NativeTransportBinding {
-    requested: Transport,
+    identity: ListenerIdentity,
+    context: Option<TlsClientContext>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ListenerIdentity {
+    name: String,
+    protocol: Protocol,
+    requested: SocketAddr,
     address: SocketAddr,
     listener: usize,
-    configuration: NonZeroU64,
-    context: Option<TlsClientContext>,
 }
 
 impl NativeTransportBinding {
@@ -40,24 +46,22 @@ impl NativeTransportBinding {
         requested: Transport,
         address: SocketAddr,
         listener: usize,
-        configuration: NonZeroU64,
         context: Option<TlsClientContext>,
     ) -> Self {
         Self {
-            requested,
-            address,
-            listener,
-            configuration,
+            identity: ListenerIdentity {
+                name: requested.name,
+                protocol: requested.protocol,
+                requested: requested.bind,
+                address,
+                listener,
+            },
             context,
         }
     }
 
     pub(crate) fn listener(&self) -> usize {
-        self.listener
-    }
-
-    pub(crate) fn configuration(&self) -> NonZeroU64 {
-        self.configuration
+        self.identity.listener
     }
 
     pub(crate) fn context(&self) -> Option<TlsClientContext> {
@@ -65,16 +69,14 @@ impl NativeTransportBinding {
     }
 
     fn accepts(&self, transport: &Transport) -> bool {
-        let mut bound = self.requested.clone();
-        bound.bind = self.address;
-        transport == &self.requested || transport == &bound
+        transport.name == self.identity.name
+            && transport.protocol == self.identity.protocol
+            && (transport.bind == self.identity.requested
+                || transport.bind == self.identity.address)
     }
 
     fn same(&self, other: &Self) -> bool {
-        self.requested == other.requested
-            && self.address == other.address
-            && self.listener == other.listener
-            && self.configuration == other.configuration
+        self.identity == other.identity
             && match (&self.context, &other.context) {
                 (Some(first), Some(second)) => first.same_profile(second),
                 (None, None) => true,
@@ -100,6 +102,51 @@ impl BoundNativeProfiles {
             .ok_or(ControlError::Conflict(
                 "Starting signaling listener changed",
             ))
+    }
+
+    pub(crate) fn project(&self, config: &Config) -> Result<Config, ControlError> {
+        if config.transports.len() != self.bindings.len() {
+            return Err(ControlError::Conflict(
+                "Starting signaling listeners changed",
+            ));
+        }
+        let mut projected = config.clone();
+        for transport in &mut projected.transports {
+            transport.bind = self.find(transport)?.identity.address;
+        }
+        Ok(projected)
+    }
+
+    pub(crate) fn replacing_contexts(
+        &self,
+        transports: &[Transport],
+        contexts: Vec<Option<TlsClientContext>>,
+    ) -> Result<Self, ControlError> {
+        if transports.len() != self.bindings.len() || contexts.len() != transports.len() {
+            return Err(ControlError::Conflict(
+                "Starting signaling listeners changed",
+            ));
+        }
+        let bindings = transports
+            .iter()
+            .zip(contexts)
+            .map(|(transport, context)| {
+                Ok(NativeTransportBinding {
+                    identity: self.find(transport)?.identity.clone(),
+                    context,
+                })
+            })
+            .collect::<Result<Vec<_>, ControlError>>()?;
+        Ok(Self { bindings })
+    }
+
+    pub(crate) fn same_listeners(&self, other: &Self) -> bool {
+        self.bindings.len() == other.bindings.len()
+            && self
+                .bindings
+                .iter()
+                .zip(&other.bindings)
+                .all(|(first, second)| first.identity == second.identity)
     }
 }
 
@@ -139,7 +186,7 @@ impl NativeProfileCatalog {
             return Ok(());
         }
         for transport in &mut self.config.transports {
-            transport.bind = bindings.find(transport)?.address;
+            transport.bind = bindings.find(transport)?.identity.address;
         }
         self.bindings = Some(bindings);
         Ok(())
@@ -169,7 +216,7 @@ impl NativeMediaProfile {
         bindings: &BoundNativeProfiles,
     ) -> Result<Self, ControlError> {
         let mut media = Self::requested(config, endpoint)?;
-        media.transport.bind = bindings.find(&media.transport)?.address;
+        media.transport.bind = bindings.find(&media.transport)?.identity.address;
         Ok(media)
     }
 
@@ -248,18 +295,18 @@ impl NativeCallProfile {
             NativeListenerProfile::Requested(requested) => {
                 let binding = bindings.find(&requested)?.clone();
                 let sip = sip
-                    .bind_address(requested.bind, binding.address)
+                    .bind_address(requested.bind, binding.identity.address)
                     .map_err(|error| ControlError::Adapter(error.to_string()))?;
                 (sip, binding)
             }
             NativeListenerProfile::Bound(binding) => {
-                if !bindings.find(&media.transport)?.same(&binding) {
+                if bindings.find(&media.transport)?.identity != binding.identity {
                     return Err(ControlError::Conflict("Starting signaling profile changed"));
                 }
                 (sip, binding)
             }
         };
-        media.transport.bind = binding.address;
+        media.transport.bind = binding.identity.address;
         Ok(BoundNativeCall {
             endpoint,
             sip,

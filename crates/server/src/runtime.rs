@@ -138,7 +138,25 @@ impl Server {
                 return Err(close_startup(storage, primary).await);
             }
         };
+        let control = match control.with_websocket_profiles(signaling.websocket_profiles()) {
+            Ok(control) => control,
+            Err(primary) => {
+                drop(signaling);
+                drop(http);
+                return Err(close_startup(storage, primary).await);
+            }
+        };
+        let generation = control.configuration_generation();
+        let (http_publication, http_receiver) = crate::reload::PublicationPort::channel();
+        let (native_publication, native_receiver) = crate::reload::PublicationPort::channel();
+        let control = control.with_reload(
+            signaling.native_preparation(),
+            http_publication,
+            native_publication,
+        );
+        let signaling = signaling.with_publication(native_receiver, generation);
         let http = http.with_signaling(signaling.websocket_port());
+        let http = http.with_publication(http_receiver, generation);
         Ok(Self {
             controller,
             control,

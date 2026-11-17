@@ -215,7 +215,7 @@ impl Fixture {
                             "An owned TLS flow closed during admission",
                         ));
                     }
-                    Input::Packet(_) => {
+                    Input::Packet(_) | Input::Upgrade(_) => {
                         return Err(ControlError::Invalid(
                             "Unexpected SIP packet during TLS admission",
                         ))

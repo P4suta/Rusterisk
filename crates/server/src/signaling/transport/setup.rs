@@ -5,6 +5,7 @@ use super::{
 use crate::signaling::{registrations::ConfigurationLease, resolver::ResolvedTarget};
 use crate::{encryption::TlsClientContext, runner::CallLease};
 use candidate::{CandidateDecision, PreparedReply};
+use rusterisk_core::SettingsGeneration;
 use rusterisk_sip::StreamFlowId;
 use std::{future::Future, net::SocketAddr, num::NonZeroU64, time::Duration};
 use tokio::{
@@ -59,8 +60,26 @@ pub(super) enum Phase {
 
 #[derive(Clone)]
 pub(super) struct StartingTlsProfile {
-    configuration: NonZeroU64,
+    configuration: ProfileEpoch,
     context: TlsClientContext,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::signaling) enum ProfileEpoch {
+    Configuration(NonZeroU64),
+    Settings(SettingsGeneration),
+}
+
+impl From<NonZeroU64> for ProfileEpoch {
+    fn from(generation: NonZeroU64) -> Self {
+        Self::Configuration(generation)
+    }
+}
+
+impl From<SettingsGeneration> for ProfileEpoch {
+    fn from(generation: SettingsGeneration) -> Self {
+        Self::Settings(generation)
+    }
 }
 
 pub(super) struct Preparation {
@@ -229,7 +248,7 @@ impl Network {
     pub(in crate::signaling) fn reserve_setup(
         &mut self,
         listener: usize,
-        configuration: NonZeroU64,
+        configuration: impl Into<ProfileEpoch>,
     ) -> Result<SetupKey, ControlError> {
         let context = match self.listeners.get(listener) {
             Some(ListenerSocket::Datagram(_) | ListenerSocket::Stream(_)) => None,
@@ -242,13 +261,13 @@ impl Network {
     pub(in crate::signaling) fn reserve_native_setup(
         &mut self,
         listener: usize,
-        configuration: NonZeroU64,
+        configuration: impl Into<ProfileEpoch>,
         context: Option<TlsClientContext>,
     ) -> Result<SetupKey, ControlError> {
         let tls_profile = match (self.listeners.get(listener), context) {
             (Some(ListenerSocket::Datagram(_) | ListenerSocket::Stream(_)), None) => None,
             (Some(ListenerSocket::Encrypted { .. }), Some(context)) => Some(StartingTlsProfile {
-                configuration,
+                configuration: configuration.into(),
                 context,
             }),
             (Some(ListenerSocket::Datagram(_) | ListenerSocket::Stream(_)), Some(_))

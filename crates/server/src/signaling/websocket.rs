@@ -28,10 +28,16 @@ pub(super) struct Completion {
     result: Result<(), ControlError>,
 }
 
-pub(super) struct PreparedClients(Vec<(WebSocketClient, Option<TlsClientContext>)>);
+#[derive(Clone)]
+pub(crate) struct PreparedClients(Vec<(WebSocketClient, Option<TlsClientContext>)>);
+
+pub(crate) struct PreparedWebSocketClient {
+    client: WebSocketClient,
+    context: Option<TlsClientContext>,
+}
 
 impl PreparedClients {
-    pub(super) fn new(clients: &[WebSocketClient]) -> Result<Self, ControlError> {
+    pub(crate) fn new(clients: &[WebSocketClient]) -> Result<Self, ControlError> {
         let mut prepared = Vec::with_capacity(clients.len());
         for client in clients {
             let tls = if client.requires_tls() {
@@ -50,12 +56,34 @@ impl PreparedClients {
         Ok(Self(prepared))
     }
 
-    fn context(&self, client: &WebSocketClient) -> Result<Option<TlsClientContext>, ControlError> {
+    pub(crate) fn capture(
+        &self,
+        client: &WebSocketClient,
+    ) -> Result<PreparedWebSocketClient, ControlError> {
         self.0
             .iter()
             .find(|(settings, _tls)| settings == client)
-            .map(|(_settings, tls)| tls.clone())
+            .map(|(settings, tls)| PreparedWebSocketClient {
+                client: settings.clone(),
+                context: tls.clone(),
+            })
             .ok_or(ControlError::Invalid("WebSocket client was not prepared"))
+    }
+
+    pub(crate) fn same(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self
+                .0
+                .iter()
+                .zip(&other.0)
+                .all(|((first, first_tls), (second, second_tls))| {
+                    first == second
+                        && match (first_tls, second_tls) {
+                            (Some(first), Some(second)) => first.same_profile(second),
+                            (None, None) => true,
+                            (Some(_), None) | (None, Some(_)) => false,
+                        }
+                })
     }
 }
 
@@ -123,7 +151,7 @@ impl Signaling {
     pub(super) fn start_websocket(
         &mut self,
         key: CallKey,
-        client: WebSocketClient,
+        prepared: PreparedWebSocketClient,
         options: WebSocketMediaOptions,
         channel_variables: BTreeMap<String, String>,
     ) -> Result<(), ControlError> {
@@ -136,7 +164,10 @@ impl Signaling {
         {
             return Err(ControlError::Capacity);
         }
-        let tls = self.websocket_clients.context(&client)?;
+        let PreparedWebSocketClient {
+            client,
+            context: tls,
+        } = prepared;
         let options = MediaLinkOptions {
             connection_id: ChannelId::try_from(client.name.clone())?,
             channel_id: key.id.clone(),
