@@ -44,7 +44,7 @@ struct Fixture {
     replacement: SocketPair,
     local: SocketAddr,
     media: SocketAddr,
-    addresses: Vec<SocketAddr>,
+    addresses: [SocketAddr; 8],
 }
 
 impl Fixture {
@@ -72,7 +72,7 @@ impl Fixture {
         let (port, hub, notices) = MediaHub::new(4);
         let signaling = Signaling::bind(config, controller.clone(), effects, port, notices).await?;
         let local = signaling.network.local_addr(0)?;
-        let addresses = vec![
+        let addresses = [
             local,
             peer.local_addr().map_err(failure)?,
             audio.local_addr().map_err(failure)?,
