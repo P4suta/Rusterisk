@@ -16,6 +16,8 @@ Delayed contact observations must not update replacement configuration.
 Project endpoint resources from configured names, contact presence, and explicit channel membership.
 Tag contact observations with an endpoint name and configuration generation.
 Apply observations only to the matching configuration.
+Serialize generation validation, observation, event publication, and acknowledgement in one control request.
+Finish acknowledged observations before quiescing signaling.
 Combine static routes and registered contacts when computing availability.
 Keep existing calls when a contact expires.
 
@@ -33,5 +35,5 @@ Reconsider the projection when supporting another endpoint technology.
 
 ## Confirmation
 
-Test static routes, contact changes, stale observations, exact membership, missing resources, and calls that survive contact expiry.
+Test static routes, contact changes across prepared publication, stale observations, exact membership, missing resources, and calls that survive contact expiry.
 Keep the record proposed until reference and reload checks pass.
