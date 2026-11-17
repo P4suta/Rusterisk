@@ -19,6 +19,7 @@ The call stays Ringing until Answer.
 Bind provisional SDP, one negotiated transport, and music to the channel generation.
 Prepare transport before publishing 183 and start music after admission.
 Reuse the transport, address, and exact SDP in 200.
+For extended answer waits, repeat non-100 provisional responses every minute under [RFC 3261 §13.3.1.1](https://www.rfc-editor.org/rfc/rfc3261.html#section-13.3.1.1).
 Preserve `channels.mute` and negotiated direction.
 Release sources, reservations, and sockets on CANCEL, failure, shutdown, or stale attachment.
 
