@@ -284,6 +284,23 @@ pub(super) fn lock_unchanged(
     Ok(())
 }
 
+pub(super) fn check_run_output(
+    directory: &Path,
+    scope: SdkConsumerScope,
+) -> Result<(), SdkConsumerRunError> {
+    let phase = SdkConsumerPhase::new(scope, SdkConsumerAction::Run);
+    let output = read(&directory.join(stdout(phase)), 4096)?;
+    let diagnostic = read(&directory.join(stderr(phase)), 4096)?;
+    let expected = match scope {
+        SdkConsumerScope::CoreMsrv => "core candidate consumer passed\n",
+        SdkConsumerScope::Sdk => "SDK candidate consumer passed\n",
+    };
+    if output != expected.as_bytes() || !diagnostic.is_empty() {
+        return Err(SdkConsumerRunError::Output);
+    }
+    Ok(())
+}
+
 fn run(
     contents: &SdkContents,
     workspace: &SdkConsumerWorkspace<'_>,
@@ -319,15 +336,7 @@ fn run(
         let execute = SdkConsumerPhase::new(scope, SdkConsumerAction::Run);
         phase(workspace, execute, &mut perform)?;
         lock_unchanged(workspace, scope, &lock)?;
-        let output = read(&workspace.plan().state().join(stdout(execute)), 4096)?;
-        let diagnostic = read(&workspace.plan().state().join(stderr(execute)), 4096)?;
-        let expected = match scope {
-            SdkConsumerScope::CoreMsrv => "core candidate consumer passed\n",
-            SdkConsumerScope::Sdk => "SDK candidate consumer passed\n",
-        };
-        if output != expected.as_bytes() || !diagnostic.is_empty() {
-            return Err(SdkConsumerRunError::Output);
-        }
+        check_run_output(workspace.plan().state(), scope)?;
     }
     Ok(())
 }

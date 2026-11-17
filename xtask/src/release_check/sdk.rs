@@ -1,8 +1,8 @@
 use super::{CapturedReleaseSource, InputError, InputKey, SourceInputs};
 use crate::{
     distribution::{
-        verify_sdk_consumers_supervised, SdkConsumerRunError, SdkContents, SdkContentsError,
-        SdkPackage, SdkPort,
+        verify_sdk_consumers_supervised, CapturedSdk, SdkConsumerRunError, SdkContents,
+        SdkContentsError, SdkPackage, SdkPort,
     },
     process::{CommandSupervisor, ProcessError},
 };
@@ -127,6 +127,13 @@ fn load(
     captured: &CapturedReleaseSource,
     candidate: &Path,
 ) -> Result<(SdkContents, InputKey), SdkRunError> {
+    load_paired(captured, candidate).map(|(_, contents, projection)| (contents, projection))
+}
+
+fn load_paired(
+    captured: &CapturedReleaseSource,
+    candidate: &Path,
+) -> Result<(CapturedSdk, SdkContents, InputKey), SdkRunError> {
     let (source, contents) = SdkContents::read_paired(candidate)
         .map_err(|error| SdkRunError::new("SDK candidate contents", Failure::Contents(error)))?;
     let projection = SourceInputs::new(source.files())
@@ -137,7 +144,7 @@ fn load(
     let projection = release
         .bind(&projection)
         .map_err(|error| SdkRunError::new("SDK source binding", Failure::Inputs(error)))?;
-    Ok((contents, projection))
+    Ok((source, contents, projection))
 }
 
 fn verify_sdk_with<'a>(
