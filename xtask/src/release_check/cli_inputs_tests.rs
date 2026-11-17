@@ -5,7 +5,10 @@ use crate::{
     release_check::{CandidateProfile, LinuxOciTarget, RequiredGate},
     server_distribution::{ServerExecutionMode, ServerTarget},
 };
-use std::{io, path::PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 const IMAGES: [(RequiredGate, char); 7] = [
     (RequiredGate::Reference, 'a'),
@@ -242,7 +245,7 @@ fn release_requests_select_one_gate_or_complete_retained_validation() -> io::Res
         ]))?;
         assert!(
             matches!(request, ReleaseRequest::Run { gate: selected, inputs }
-            if selected == gate && inputs == PathBuf::from("input path.toml"))
+            if selected == gate && inputs == Path::new("input path.toml"))
         );
     }
     let request = checked(ReleaseRequest::parse(&[
@@ -251,7 +254,7 @@ fn release_requests_select_one_gate_or_complete_retained_validation() -> io::Res
         "inputs.toml",
     ]))?;
     assert!(matches!(request, ReleaseRequest::Verify { inputs }
-        if inputs == PathBuf::from("inputs.toml")));
+        if inputs == Path::new("inputs.toml")));
     for invalid in [
         &[][..],
         &["--run"][..],
