@@ -20,8 +20,24 @@ fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
 }
 
+fn check_material(metadata: &std::fs::Metadata, limit: usize) -> Result<(), ControlError> {
+    if !metadata.is_file() {
+        return Err(ControlError::Invalid(
+            "Encryption material must be a regular file",
+        ));
+    }
+    if metadata.len() == 0 || metadata.len() > limit as u64 {
+        return Err(ControlError::Invalid(
+            "Encryption material exceeds capacity",
+        ));
+    }
+    Ok(())
+}
+
 fn read(path: &Path, limit: usize) -> Result<Vec<u8>, ControlError> {
+    check_material(&std::fs::metadata(path).map_err(failure)?, limit)?;
     let file = std::fs::File::open(path).map_err(failure)?;
+    check_material(&file.metadata().map_err(failure)?, limit)?;
     let mut bytes = Vec::new();
     file.take(limit as u64 + 1)
         .read_to_end(&mut bytes)

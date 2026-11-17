@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 #[path = "cli_process/music.rs"]
 mod music;
+#[path = "cli_process/tls_files.rs"]
+mod tls_files;
 
 fn run(directory: &Path, arguments: &[&OsStr]) -> Result<Output, io::Error> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rusterisk"))
