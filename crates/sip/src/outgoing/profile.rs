@@ -10,12 +10,23 @@ const MAX_VALUE_BYTES: usize = 4096;
 const MAX_REFERENCES: usize = 4096;
 const MAX_CREDENTIALS: usize = 8;
 
+#[derive(Clone)]
 pub struct OutboundProfile {
     pub(super) endpoint: Endpoint,
     pub(super) transport: Transport,
     pub(super) credentials: Vec<Auth>,
     pub(super) authority: ReferAuthority,
     contact: Option<Uri>,
+}
+
+impl core::fmt::Debug for OutboundProfile {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("OutboundProfile")
+            .field("endpoint", &self.endpoint.name)
+            .field("transport", &self.transport.name)
+            .finish_non_exhaustive()
+    }
 }
 
 pub struct PreparedOutbound {
@@ -42,6 +53,24 @@ pub(super) struct SelectedOutbound {
 }
 
 impl OutboundProfile {
+    pub fn bind_address(
+        mut self,
+        requested: SocketAddr,
+        bound: SocketAddr,
+    ) -> Result<Self, SipError> {
+        if self.transport.bind != requested
+            || bound.port() == 0
+            || bound.ip().is_multicast()
+            || requested.is_ipv4() != bound.is_ipv4()
+            || (!requested.ip().is_unspecified() && requested.ip() != bound.ip())
+            || (requested.port() != 0 && requested.port() != bound.port())
+        {
+            return Err(SipError::InvalidPacket);
+        }
+        self.transport.bind = bound;
+        Ok(self)
+    }
+
     pub fn capture(config: &Config, endpoint: &str) -> Result<Self, SipError> {
         let endpoint = config
             .endpoints
