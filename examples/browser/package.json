@@ -18,7 +18,8 @@
 	},
 	"overrides": {
 		"@typescript-eslint/typescript-estree": {
-			"minimatch": "11.0.1"
+			"minimatch": "11.0.1",
+			"tinyglobby": "file:../../../../../tests/interop/node-ari-client/project-service-only"
 		}
 	},
 	"devDependencies": {
