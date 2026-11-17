@@ -13,6 +13,8 @@ use rusterisk_sip::{Engine, Session, SipError, SipEvent};
 
 #[path = "identity/early_media.rs"]
 mod early_media;
+#[path = "identity/flow_provenance.rs"]
+mod flow_provenance;
 #[path = "identity/required_options.rs"]
 mod required_options;
 #[path = "identity/required_options_capacity.rs"]
