@@ -6,7 +6,12 @@ export default defineConfig(
 	js.configs.recommended,
 	tseslint.configs.strictTypeChecked,
 	{
-		files: ["*.ts", "*.mjs"],
+		files: [
+			"*.ts",
+			"*.mjs",
+			"project-service-only/*.ts",
+			"project-service-only/*.mjs",
+		],
 		linterOptions: {
 			noInlineConfig: true,
 			reportUnusedDisableDirectives: "error",

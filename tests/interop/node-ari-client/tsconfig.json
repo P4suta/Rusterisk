@@ -15,5 +15,10 @@
     "allowJs": true,
     "checkJs": true
   },
-  "include": ["*.ts", "*.mjs"]
+  "include": [
+    "*.ts",
+    "*.mjs",
+    "project-service-only/*.ts",
+    "project-service-only/*.mjs"
+  ]
 }

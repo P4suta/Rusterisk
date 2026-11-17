@@ -1,0 +1,7 @@
+{
+  "name": "@rusterisk/project-service-only",
+  "private": true,
+  "type": "module",
+  "license": "(MIT OR Apache-2.0)",
+  "exports": "./index.mjs"
+}

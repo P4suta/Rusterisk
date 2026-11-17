@@ -41,12 +41,8 @@ fn legacy(root: &Path) -> Result<(), TaskError> {
         Err(xtask::process::ProcessError::Status(status)) if status.code() == Some(1) => true,
         Err(error) => return Err(TaskError::Process(error)),
     };
-    let assessment = xtask::legacy_audit::assess(
-        &bounded_text(&fixture.join("package.json"))?,
-        &bounded_text(&fixture.join("package-lock.json"))?,
-        &bounded_text(&path)?,
-    )
-    .map_err(|error| TaskError::Contract(error.to_string()))?;
+    let assessment = xtask::legacy_audit::assess_fixture(fixture, &bounded_text(&path)?)
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
     if findings != (assessment.packages > 0) {
         return Err(TaskError::Contract(
             "dependency audit status doesn't match its findings".into(),

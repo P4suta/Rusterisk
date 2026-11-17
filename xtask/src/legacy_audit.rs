@@ -1,5 +1,8 @@
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
+mod project_service;
 
 const PACKAGES: [(&str, &str); 9] = [
     ("ari-client", "2.2.0"),
@@ -26,6 +29,7 @@ const ADVISORIES: [(&str, &str); 8] = [
 #[derive(Debug)]
 pub enum AuditError {
     Json(serde_json::Error),
+    Io(std::io::Error),
     Capacity,
     Boundary,
     UnexpectedPackage(String),
@@ -41,10 +45,16 @@ impl From<serde_json::Error> for AuditError {
         Self::Json(error)
     }
 }
+impl From<std::io::Error> for AuditError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
 impl std::fmt::Display for AuditError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Json(error) => write!(formatter, "invalid dependency audit data: {error}"),
+            Self::Io(error) => write!(formatter, "dependency fixture input failed: {error}"),
             Self::Capacity => formatter.write_str("dependency audit capacity exceeded"),
             Self::Boundary => formatter.write_str("legacy dependency fixture boundary changed"),
             Self::UnexpectedPackage(name) => {
@@ -90,16 +100,38 @@ struct Lock {
 }
 #[derive(Deserialize)]
 struct LockedPackage {
+    name: Option<String>,
     version: Option<String>,
     resolved: Option<String>,
     integrity: Option<String>,
     license: Option<String>,
     #[serde(default)]
     dev: bool,
+    #[serde(default)]
+    link: bool,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
 }
 
-fn licenses(lock: &Lock) -> Result<(), AuditError> {
+fn licenses(lock: &Lock, local: Option<&project_service::Verified>) -> Result<(), AuditError> {
     for (path, package) in &lock.packages {
+        if local.is_some_and(|profile| profile.contains(path)) {
+            continue;
+        }
+        if !path.is_empty()
+            && (package.link
+                || package
+                    .resolved
+                    .as_ref()
+                    .is_none_or(|url| !url.starts_with("https://registry.npmjs.org/"))
+                || package.integrity.as_ref().is_none_or(|integrity| {
+                    !integrity.starts_with("sha512-")
+                        || integrity.len() <= 7
+                        || integrity.len() > 128
+                }))
+        {
+            return Err(AuditError::Boundary);
+        }
         let known = match package.license.as_deref() {
             Some(
                 "MIT"
@@ -130,19 +162,6 @@ fn licenses(lock: &Lock) -> Result<(), AuditError> {
         };
         if !known || (!path.is_empty() && !package.dev) {
             return Err(AuditError::UnreviewedLicense(path.clone()));
-        }
-        if !path.is_empty()
-            && (package
-                .resolved
-                .as_ref()
-                .is_none_or(|url| !url.starts_with("https://registry.npmjs.org/"))
-                || package.integrity.as_ref().is_none_or(|integrity| {
-                    !integrity.starts_with("sha512-")
-                        || integrity.len() <= 7
-                        || integrity.len() > 128
-                }))
-        {
-            return Err(AuditError::Boundary);
         }
     }
     Ok(())
@@ -300,7 +319,11 @@ fn inputs(manifest: &str, lock: &str, report: &str) -> Result<Lock, AuditError> 
     Ok(lock)
 }
 
-fn assess_lock(lock: &Lock, report: &str) -> Result<Assessment, AuditError> {
+fn assess_lock(
+    lock: &Lock,
+    report: &str,
+    local: Option<&project_service::Verified>,
+) -> Result<Assessment, AuditError> {
     for (name, version) in PACKAGES {
         let package = lock
             .packages
@@ -320,7 +343,7 @@ fn assess_lock(lock: &Lock, report: &str) -> Result<Assessment, AuditError> {
             return Err(AuditError::Boundary);
         }
     }
-    licenses(lock)?;
+    licenses(lock, local)?;
     let audit: Audit = serde_json::from_str(report)?;
     if audit.version != 2 || audit.vulnerabilities.len() > 9 {
         return Err(AuditError::InvalidReport);
@@ -345,5 +368,13 @@ fn assess_lock(lock: &Lock, report: &str) -> Result<Assessment, AuditError> {
 
 pub fn assess(manifest: &str, lock: &str, report: &str) -> Result<Assessment, AuditError> {
     let lock = inputs(manifest, lock, report)?;
-    assess_lock(&lock, report)
+    assess_lock(&lock, report, None)
+}
+
+pub fn assess_fixture(fixture: &Path, report: &str) -> Result<Assessment, AuditError> {
+    let manifest = project_service::read_regular(&fixture.join("package.json"))?;
+    let lock_text = project_service::read_regular(&fixture.join("package-lock.json"))?;
+    let lock = inputs(&manifest, &lock_text, report)?;
+    let local = project_service::verify(fixture, &manifest, &lock)?;
+    assess_lock(&lock, report, Some(&local))
 }
