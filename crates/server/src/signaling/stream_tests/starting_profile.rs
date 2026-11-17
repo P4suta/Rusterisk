@@ -82,8 +82,7 @@ impl Fixture {
             replacement.local_addr().map_err(failure)?,
             replacement.control_addr().map_err(failure)?,
         ];
-        let credentials = credentials()?;
-        let mut fixture = Self {
+        Ok(Self {
             signaling,
             runner: tokio::spawn(runner.run()),
             hub: tokio::spawn(hub.run(controller.shutdown_signal())),
@@ -95,24 +94,21 @@ impl Fixture {
             local,
             media,
             addresses,
-        };
-        let subscribed = tokio::time::timeout(
-            Duration::from_secs(2),
-            controller.subscribe(credentials, None, "calls".into()),
-        )
-        .await
-        .map_err(failure)
-        .and_then(|result| result);
-        match subscribed {
-            Ok(subscription) => {
-                fixture.subscription = Some(subscription);
-                Ok(fixture)
-            }
-            Err(primary) => match fixture.finish(Err(primary.clone())).await {
-                Err(error) => Err(error),
-                Ok(()) => Err(primary),
-            },
-        }
+        })
+    }
+
+    async fn subscribe(&mut self) -> Result<(), ControlError> {
+        self.subscription = Some(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                self.signaling
+                    .controller
+                    .subscribe(credentials()?, None, "calls".into()),
+            )
+            .await
+            .map_err(failure)??,
+        );
+        Ok(())
     }
 
     fn invite(&self, sequence: u32, authorization: &str) -> Result<String, ControlError> {
@@ -361,41 +357,46 @@ async fn joined<E: std::fmt::Display>(
 
 async fn exercise(admission: Admission) -> Result<(), ControlError> {
     let mut fixture = Fixture::new().await?;
-    let mut phase = "authenticated admission";
-    let primary = tokio::time::timeout(Duration::from_secs(8), async {
-        let key = fixture.admit().await?;
-        phase = "adapter current settings replacement";
-        fixture.replace_current_settings()?;
-        let progress = match admission {
-            Admission::Early => {
-                phase = "early transport from the admitted profile";
-                fixture.signaling.prepare_early_media(&key, 10).await?;
-                let progress = fixture.response(183).await?;
-                fixture.starting_media(&progress)?;
-                Some(progress)
+    let mut phase = "event subscription";
+    let primary = async {
+        fixture.subscribe().await?;
+        phase = "authenticated admission";
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let key = fixture.admit().await?;
+            phase = "adapter current settings replacement";
+            fixture.replace_current_settings()?;
+            let progress = match admission {
+                Admission::Early => {
+                    phase = "early transport from the admitted profile";
+                    fixture.signaling.prepare_early_media(&key, 10).await?;
+                    let progress = fixture.response(183).await?;
+                    fixture.starting_media(&progress)?;
+                    Some(progress)
+                }
+                Admission::Answer => None,
+            };
+            phase = "answer from the admitted profile";
+            fixture.signaling.answer(&key, 11).await?;
+            let answer = fixture.response(200).await?;
+            fixture.starting_media(&answer)?;
+            if let Some(progress) = progress {
+                require(
+                    answer.body == progress.body
+                        && answer.to_header().map_err(failure)?
+                            == progress.to_header().map_err(failure)?
+                        && answer.contact_header().map_err(failure)?
+                            == progress.contact_header().map_err(failure)?,
+                    "Answer replaced the early starting transport",
+                )?;
             }
-            Admission::Answer => None,
-        };
-        phase = "answer from the admitted profile";
-        fixture.signaling.answer(&key, 11).await?;
-        let answer = fixture.response(200).await?;
-        fixture.starting_media(&answer)?;
-        if let Some(progress) = progress {
-            require(
-                answer.body == progress.body
-                    && answer.to_header().map_err(failure)?
-                        == progress.to_header().map_err(failure)?
-                    && answer.contact_header().map_err(failure)?
-                        == progress.contact_header().map_err(failure)?,
-                "Answer replaced the early starting transport",
-            )?;
-        }
-        phase = "admitted INFO delivery";
-        fixture.starting_digits(&key, &answer).await
-    })
+            phase = "admitted INFO delivery";
+            fixture.starting_digits(&key, &answer).await
+        })
+        .await
+        .map_err(failure)
+        .and_then(|result| result)
+    }
     .await
-    .map_err(failure)
-    .and_then(|result| result)
     .map_err(|error| failure(format!("incoming starting profile phase={phase}: {error}")));
     fixture.finish(primary).await
 }
