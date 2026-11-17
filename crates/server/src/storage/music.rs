@@ -635,3 +635,5 @@ fn reparse_attributes(attributes: u32) -> bool {
     attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
 }
 
+#[cfg(test)]
+mod tests;
