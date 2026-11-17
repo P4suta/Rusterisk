@@ -40,5 +40,16 @@ Leaving Stasis releases client control and preserves the channel in its destinat
 Dropping a handle starts cleanup while the runtime remains available.
 Explicit cleanup reports failures to the caller.
 
+`Client::reload_configuration` reloads the server's fixed startup configuration directory through a separate authenticated management operation.
+Supply the running server's current credentials even when the replacement configuration changes the password.
+The client sends an empty `POST /rusterisk/configuration/reload` request and accepts only `204 No Content` as completed publication.
+The request has a 35-second timeout while ordinary client requests keep their 10-second timeout.
+Configuration failures preserve their file, line, and reason in `ApiError.message`.
+An embedded server without a startup configuration directory returns `501 Not Implemented`.
+Existing calls keep their starting settings, and listener changes require a restart.
+The server cancels disconnected requests before the first settings swap.
+After the first swap, the server completes publication or stops the service.
+A transport failure alone doesn't establish whether publication completed.
+
 The packages use `MIT OR Apache-2.0`.
 Each package includes both license texts.
