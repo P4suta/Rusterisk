@@ -41,4 +41,6 @@ pub use sdk_http::{SdkHttpTarget, SdkHttpTargetError};
 mod sdk_runtime;
 pub use sdk_runtime::SdkRuntimeIdentity;
 mod sdk_http_run;
+#[cfg(unix)]
+pub(crate) use sdk_http_run::check_sdk_http_results;
 pub use sdk_http_run::PreparedSdkHttpConsumer;

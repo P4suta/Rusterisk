@@ -3,6 +3,8 @@ use super::{
     SdkConsumerPhase, SdkConsumerRunError, SdkConsumerScope, SdkConsumerWorkspace, SdkContents,
     SdkHttpTarget,
 };
+#[cfg(unix)]
+use super::{SdkConsumerPlan, SdkPackage, SdkRuntimeIdentity};
 use crate::process::ProcessError;
 use std::{
     path::{Path, PathBuf},
@@ -28,6 +30,63 @@ fn check_run_output(directory: &Path) -> Result<(), SdkConsumerRunError> {
         return Err(SdkConsumerRunError::Output);
     }
     Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn check_sdk_http_results(
+    contents: &SdkContents,
+    artifacts: &Path,
+    plan: &SdkConsumerPlan,
+) -> Result<(), SdkConsumerRunError> {
+    if io::read(&artifacts.join("SOURCE.sha256"), 65)?
+        != format!("{}\n", contents.source_digest()).as_bytes()
+    {
+        return Err(invalid("HTTP consumer output source differs").into());
+    }
+    let sums: String = SdkPackage::ALL
+        .iter()
+        .map(|package| {
+            format!(
+                "{}  {}-{}.crate\n",
+                contents.checksum(*package),
+                package.name(),
+                contents.version()
+            )
+        })
+        .collect();
+    if io::read(&artifacts.join("SHA256SUMS"), 1024)? != sums.as_bytes() {
+        return Err(invalid("HTTP consumer candidate archives differ").into());
+    }
+    let scope = SdkConsumerScope::Sdk;
+    let lock = io::read(&artifacts.join("consumers/sdk/Cargo.lock"), 2 * 1024 * 1024)?;
+    check_sdk_consumer_lock(scope, contents.version(), io::seed(contents, scope)?, &lock)
+        .map_err(SdkConsumerRunError::Lock)?;
+    if io::read(
+        &artifacts.join("consumers/core-msrv/Cargo.lock"),
+        2 * 1024 * 1024,
+    )? != io::seed(contents, SdkConsumerScope::CoreMsrv)?
+    {
+        return Err(invalid("HTTP consumer changed its unused core lock").into());
+    }
+    let runtime = SdkRuntimeIdentity::from_contents(contents).map_err(std::io::Error::other)?;
+    for action in [
+        SdkConsumerAction::Resolve,
+        SdkConsumerAction::Metadata,
+        SdkConsumerAction::Build,
+        SdkConsumerAction::Run,
+    ] {
+        let phase = SdkConsumerPhase::new(scope, action);
+        let output = io::read(&artifacts.join(io::stdout(phase)), 8 * 1024 * 1024)?;
+        io::read(&artifacts.join(io::stderr(phase)), 8 * 1024 * 1024)?;
+        if matches!(
+            action,
+            SdkConsumerAction::Resolve | SdkConsumerAction::Metadata
+        ) {
+            check_sdk_http_metadata(plan, contents.version(), &runtime, &output)
+                .map_err(SdkConsumerRunError::Metadata)?;
+        }
+    }
+    check_run_output(artifacts)
 }
 
 fn prepare(

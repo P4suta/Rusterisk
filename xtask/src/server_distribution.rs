@@ -34,6 +34,8 @@ mod native;
 #[cfg(unix)]
 pub(crate) mod runtime_commands;
 #[cfg(unix)]
+pub(crate) use native::check_native_server_outputs;
+#[cfg(unix)]
 pub(crate) use native::verify_loaded_server_configured;
 #[cfg(unix)]
 pub use native::{

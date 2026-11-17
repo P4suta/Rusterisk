@@ -131,11 +131,15 @@ where
         .run(&mut command, Duration::from_secs(15))
         .map_err(io::Error::other)?;
     let bytes = read(&stdout, 65_536)?;
-    let text = std::str::from_utf8(&bytes).map_err(io::Error::other)?;
-    if !read(&stderr, 4096)?.is_empty() || text.contains("not found") {
+    check_dependencies_output(&bytes, &read(&stderr, 4096)?, std::env::consts::OS)
+}
+
+fn check_dependencies_output(bytes: &[u8], diagnostic: &[u8], os: &str) -> io::Result<()> {
+    let text = std::str::from_utf8(bytes).map_err(io::Error::other)?;
+    if !diagnostic.is_empty() || text.contains("not found") {
         return Err(io::Error::other("server dependency resolution failed"));
     }
-    let entries = match std::env::consts::OS {
+    let entries = match os {
         "macos" => text.lines().skip(1).collect::<Vec<_>>(),
         "linux" => text.lines().collect::<Vec<_>>(),
         _ => {
@@ -149,7 +153,7 @@ where
     }
     for entry in entries {
         let entry = entry.trim();
-        let permitted = match std::env::consts::OS {
+        let permitted = match os {
             "macos" => entry.starts_with("/usr/lib/") || entry.starts_with("/System/Library/"),
             "linux" => {
                 let path = entry
@@ -167,6 +171,41 @@ where
                 "server resolves a dependency outside system directories",
             ));
         }
+    }
+    Ok(())
+}
+
+pub(crate) fn check_native_server_outputs(
+    candidate: &ServerCandidate,
+    artifacts: &Path,
+    os: &str,
+    http: SocketAddr,
+) -> io::Result<()> {
+    if read(&artifacts.join("SOURCE.sha256"), 65)?
+        != format!("{}\n", candidate.source_digest()).as_bytes()
+    {
+        return Err(io::Error::other("native server output source differs"));
+    }
+    check_dependencies_output(
+        &read(&artifacts.join("dependencies.stdout.txt"), 65_536)?,
+        &read(&artifacts.join("dependencies.stderr.txt"), 4096)?,
+        os,
+    )?;
+    check_command_output(
+        artifacts,
+        "version",
+        format!("rusterisk {}\n", candidate.name().version()).as_bytes(),
+    )?;
+    for label in ["packaged-config", "runtime-config"] {
+        check_command_output(artifacts, label, b"Configuration valid.\n")?;
+    }
+    if !read(&artifacts.join("server.stderr.txt"), 1024 * 1024)?.is_empty()
+        || !check_server_ready_log(
+            &read(&artifacts.join("server.stdout.txt"), 1024 * 1024)?,
+            http,
+        )?
+    {
+        return Err(io::Error::other("native server runtime output differs"));
     }
     Ok(())
 }

@@ -5,7 +5,12 @@ use crate::{
     distribution::SdkPackage,
     server_distribution::{ServerExecutionMode, ServerTarget},
 };
+#[cfg(unix)]
+use std::net::SocketAddr;
 use std::path::Path;
+
+#[cfg(unix)]
+mod artifacts;
 
 #[cfg(unix)]
 use super::candidate_run::{combine, conclude, Loaded, Paths, Workspace};
@@ -32,6 +37,8 @@ pub struct ServerOutcome<'a> {
     checksum: String,
     source_digest: String,
     sdk_checksums: [String; 3],
+    #[cfg(unix)]
+    runtime_address: SocketAddr,
 }
 
 impl ServerOutcome<'_> {
@@ -116,8 +123,31 @@ fn execution(request: &ServerRequest<'_>) -> Result<(), RunError> {
 fn verify_server_with<'a>(
     captured: &'a CapturedReleaseSource,
     request: ServerRequest<'_>,
+    supervisor: CommandSupervisor,
+    configure: impl FnMut(&mut Command, Duration) -> io::Result<()>,
+) -> Result<ServerOutcome<'a>, ServerRunError> {
+    verify_server_recorded(
+        captured,
+        request,
+        supervisor,
+        configure,
+        Retention::Diagnostic,
+    )
+}
+
+#[cfg(unix)]
+enum Retention<'a> {
+    Diagnostic,
+    Reusable(&'a Path),
+}
+
+#[cfg(unix)]
+fn verify_server_recorded<'a>(
+    captured: &'a CapturedReleaseSource,
+    request: ServerRequest<'_>,
     mut supervisor: CommandSupervisor,
     mut configure: impl FnMut(&mut Command, Duration) -> io::Result<()>,
+    retention: Retention<'_>,
 ) -> Result<ServerOutcome<'a>, ServerRunError> {
     let operation = (|| {
         execution(&request)?;
@@ -156,6 +186,7 @@ fn verify_server_with<'a>(
             .map_err(ServerRunError)
         }
     };
+    let mut runtime_address = None;
     let operation = (|| {
         captured
             .write(&workspace.source(), &workspace.state())
@@ -177,7 +208,17 @@ fn verify_server_with<'a>(
             request.mode.label(),
         )
         .map_err(|error| RunError::io("server execution output", error))?;
-        let mut commands = RuntimeCommands::new(&mut supervisor, &mut configure);
+        if let Retention::Reusable(root) = retention {
+            artifacts::capture_tools(captured, root, &mut supervisor)
+                .map_err(|error| RunError::io("native tool capture", error))?;
+        }
+        let mut configure_bound = |command: &mut Command, budget: Duration| {
+            if let Retention::Reusable(_) = retention {
+                artifacts::configure_tools(captured, command)?;
+            }
+            configure(command, budget)
+        };
+        let mut commands = RuntimeCommands::new(&mut supervisor, &mut configure_bound);
         let mut prepared = Some(
             PreparedSdkHttpConsumer::prepare_with(
                 &loaded.sdk,
@@ -193,6 +234,7 @@ fn verify_server_with<'a>(
             &request.artifacts.join("server"),
             &mut commands,
             |service, address| {
+                runtime_address = Some(address);
                 let target = SdkHttpTarget::new(
                     address,
                     "api",
@@ -224,7 +266,7 @@ fn verify_server_with<'a>(
         supervisor.finish()
     })
     .map_err(ServerRunError)?;
-    Ok(ServerOutcome {
+    let outcome = ServerOutcome {
         captured,
         projection: loaded.server_projection,
         sdk_projection: loaded.sdk_projection,
@@ -234,10 +276,68 @@ fn verify_server_with<'a>(
         checksum: loaded.server.checksum().to_owned(),
         source_digest: loaded.server.source_digest().to_owned(),
         sdk_checksums: SdkPackage::ALL.map(|package| loaded.sdk.checksum(package).to_owned()),
-    })
+        runtime_address: runtime_address.ok_or_else(|| {
+            ServerRunError(RunError::contract(
+                "server runtime observation",
+                "successful server verification has no bound listener",
+            ))
+        })?,
+    };
+    if let Retention::Reusable(root) = retention {
+        loaded
+            .preserve_paired(request.artifacts)
+            .and_then(|()| artifacts::record(captured, root, &request, &loaded, &outcome))
+            .map_err(|error| ServerRunError(RunError::io("native artifact preservation", error)))?;
+    }
+    Ok(outcome)
 }
 
 impl CapturedReleaseSource {
+    pub fn verify_server_artifact(
+        &self,
+        candidate: &Path,
+        target: ServerTarget,
+        sdk_candidate: &Path,
+        mode: ServerExecutionMode,
+        published: &Path,
+    ) -> Result<ServerOutcome<'_>, ServerRunError> {
+        #[cfg(unix)]
+        {
+            artifacts::produce(self, candidate, target, sdk_candidate, mode, published)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (candidate, target, sdk_candidate, mode, published);
+            Err(ServerRunError(RunError::process(
+                "native artifact producer",
+                ProcessError::UnsupportedSupervision,
+            )))
+        }
+    }
+
+    pub fn read_server_artifact(
+        &self,
+        artifact: &Path,
+        candidate: &Path,
+        target: ServerTarget,
+        sdk_candidate: &Path,
+        mode: ServerExecutionMode,
+    ) -> Result<ServerOutcome<'_>, ServerRunError> {
+        #[cfg(unix)]
+        {
+            artifacts::read(self, artifact, candidate, target, sdk_candidate, mode)
+                .map_err(|error| ServerRunError(RunError::io("native artifact validation", error)))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (artifact, candidate, target, sdk_candidate, mode);
+            Err(ServerRunError(RunError::process(
+                "native artifact reader",
+                ProcessError::UnsupportedSupervision,
+            )))
+        }
+    }
+
     /// Checks distributed server bytes and their SDK consumer on the native host.
     /// Returns after supervised execution, source checks, and owned cleanup.
     pub fn verify_server(

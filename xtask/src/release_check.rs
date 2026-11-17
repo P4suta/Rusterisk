@@ -6,6 +6,10 @@ mod candidate_fixtures;
 mod candidate_run;
 mod inputs;
 mod native;
+#[cfg(unix)]
+mod native_artifacts;
+#[cfg(all(test, unix))]
+mod native_artifacts_tests;
 mod oci;
 mod reference;
 mod sdk;

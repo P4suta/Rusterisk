@@ -10,6 +10,10 @@ use std::{io, process::Command, time::Duration};
 
 #[path = "server_execution_tests.rs"]
 mod execution;
+#[path = "server_tests/reusable_artifacts.rs"]
+mod reusable_artifacts;
+#[path = "server_tests/reusable_toolchain.rs"]
+mod reusable_toolchain;
 
 #[test]
 fn server_source_changes_cannot_start_native_or_sdk_commands() -> io::Result<()> {

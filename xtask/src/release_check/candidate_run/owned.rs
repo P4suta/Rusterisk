@@ -117,6 +117,41 @@ impl Loaded {
             )
             .map_err(|error| RunError::source("release source preservation", error))
     }
+
+    pub(in crate::release_check) fn preserve_paired(&self, artifacts: &Path) -> io::Result<()> {
+        let server = artifacts.join("server-candidate");
+        self.server_source
+            .write(&server.join("source"), &server.join("captured-browser"))?;
+        for name in ["fetch.txt", "build.txt"] {
+            let bytes = crate::release_check::native_artifacts::read_regular(
+                &self.server_root.join(name),
+                4 * 1024 * 1024,
+            )?;
+            write(&server.join(name), &bytes)?;
+        }
+        let sdk = artifacts.join("sdk-candidate");
+        fs::create_dir(&sdk)?;
+        self.sdk_source
+            .write(&sdk.join("source"), &sdk.join("captured-browser"))
+            .map_err(io::Error::other)?;
+        let mut sums = String::new();
+        for package in crate::distribution::SdkPackage::ALL {
+            let name = format!("{}-{}.crate", package.name(), self.sdk.version());
+            copy_checked(
+                &self.sdk_root.join(&name),
+                &sdk.join(&name),
+                self.sdk.checksum(package),
+                16 * 1024 * 1024,
+            )?;
+            sums.push_str(&format!("{}  {name}\n", self.sdk.checksum(package)));
+        }
+        write(&sdk.join("SHA256SUMS"), sums.as_bytes())?;
+        write(
+            &sdk.join("SOURCE.sha256"),
+            format!("{}\n", self.sdk.source_digest()).as_bytes(),
+        )?;
+        Ok(())
+    }
 }
 
 pub(in crate::release_check) fn checksum(path: &Path, maximum: u64) -> io::Result<String> {
