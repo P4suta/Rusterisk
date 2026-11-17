@@ -90,6 +90,14 @@ name = "resource_subscriptions"
 path = "../tests/resource_subscriptions.rs"
 
 [[test]]
+name = "settings_lifetimes"
+path = "../tests/settings_lifetimes.rs"
+
+[[test]]
+name = "settings_provenance"
+path = "../tests/settings_provenance.rs"
+
+[[test]]
 name = "stasis_ownership"
 path = "../tests/stasis_ownership.rs"
 
