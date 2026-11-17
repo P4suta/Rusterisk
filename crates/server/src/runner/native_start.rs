@@ -3,6 +3,9 @@ use crate::{control::NativeStartCapsule, CallKey, ControlError};
 use rusterisk_core::SettingsGeneration;
 use tokio::sync::oneshot;
 
+#[cfg(test)]
+mod tests;
+
 impl Controller {
     pub(crate) async fn take_native_profile(
         &self,
