@@ -30,7 +30,7 @@ use signaling_flow::{Disconnection, SignalingRoute};
 mod transfer;
 mod transport;
 mod websocket_framing;
-pub use configuration::PreparedEngineConfiguration;
+pub use configuration::{AdmissionMode, PreparedEngineConfiguration};
 pub use contact::{
     parse_registration_contacts, ContactBindings, ContactError, RegistrationContact,
     RegistrationContacts,
@@ -520,6 +520,7 @@ impl PendingInvite {
 
 pub struct Engine {
     config: Config,
+    admission: AdmissionMode,
     protocol: Protocol,
     configuration_generation: u64,
     seed: [u8; 32],
@@ -550,6 +551,7 @@ impl Engine {
     pub fn new(config: Config, seed: [u8; 32]) -> Self {
         Self {
             config,
+            admission: AdmissionMode::Open,
             protocol: Protocol::Udp,
             configuration_generation: 1,
             seed,
@@ -700,6 +702,16 @@ impl Engine {
             return Ok(Output::response(
                 route,
                 self.render_response(&request, 481, "Call/Transaction Does Not Exist", "", "")?,
+            ));
+        }
+        if self.admission == AdmissionMode::Quiesced
+            && (request.method == Method::Register
+                || (request.method == Method::Invite
+                    && request.to_header()?.typed()?.tag().is_none()))
+        {
+            return Ok(Output::response(
+                route,
+                self.render_response(&request, 503, "Service Unavailable", "", "")?,
             ));
         }
         if self.cache.len() + self.refers.pending.len() >= 256 {
