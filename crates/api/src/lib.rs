@@ -1339,6 +1339,18 @@ pub fn openapi() -> Value {
             entry[operation.method.as_str()]["requestBody"] = json!({"content": {"application/json": {"schema": {"$ref": "#/components/schemas/EventFilterRequest"}}}});
         }
     }
+    for operation in MANAGEMENT_OPERATIONS {
+        let operation = operation.metadata();
+        let mut responses = Map::new();
+        responses.insert(
+            operation.success_status.to_string(),
+            json!({"description": "Configuration applied"}),
+        );
+        let entry = paths.entry(operation.path).or_insert_with(|| json!({}));
+        entry["servers"] = json_array([json!({"url": "/"})]);
+        let security = json_array([json!({"basicAuth": []})]);
+        entry[operation.method.as_str()] = json!({"operationId": operation.id, "parameters": parameters(operation, None), "responses": responses, "security": security});
+    }
     let servers = json_array([json!({"url": "/ari"})]);
     json!({"openapi": "3.1.0", "info": {"title": "Rusterisk", "version": env!("CARGO_PKG_VERSION")}, "servers": servers, "paths": paths, "components": {"schemas": schemas(), "securitySchemes": {"basicAuth": {"type": "http", "scheme": "basic"}}}})
 }
