@@ -44,3 +44,26 @@ fn interop_dry_run_reports_local_ports_deadlines_and_cleanup() -> Result<(), std
     assert!(stdout.contains("docker rm --force rusterisk-interop-preview"));
     Ok(())
 }
+
+#[test]
+fn interop_dry_run_requires_a_fresh_server_and_the_shared_sipp_comparison(
+) -> Result<(), std::io::Error> {
+    let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or_else(|| std::io::Error::other("workspace missing"))?;
+    let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+        .args(["interop", "--dry-run"])
+        .current_dir(workspace)
+        .env("PATH", "")
+        .output()?;
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(
+        "budget=300s cargo build --locked --package rusterisk-server --bin rusterisk --target-dir target --jobs 1"
+    ), "{stdout}");
+    assert!(
+        stdout.contains("SIPp: authenticated registration and removal with Asterisk and Rusterisk"),
+        "{stdout}"
+    );
+    Ok(())
+}

@@ -8,6 +8,19 @@ use xtask::{
     },
 };
 
+const SERVER_BUILD: [&str; 10] = [
+    "build",
+    "--locked",
+    "--package",
+    "rusterisk-server",
+    "--bin",
+    "rusterisk",
+    "--target-dir",
+    "target",
+    "--jobs",
+    "1",
+];
+
 fn perform(supervisor: &mut CommandSupervisor, step: &Step) -> Result<(), ProcessError> {
     supervisor.run(Command::new("docker").args(&step.arguments), step.budget)
 }
@@ -105,6 +118,8 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
     let start = plan.start();
     let cleanup = plan.cleanup();
     println!("preflight: node-check");
+    println!("budget=300s cargo {}", SERVER_BUILD.join(" "));
+    println!("SIPp: authenticated registration and removal with Asterisk and Rusterisk");
     for step in [
         &start,
         &plan.port(),
@@ -150,6 +165,26 @@ pub fn execute(execute: bool) -> Result<(), TaskError> {
                 )
                 .map_err(TaskError::Process)
         })?;
+        supervisor
+            .run(
+                Command::new("cargo").args(SERVER_BUILD),
+                Duration::from_secs(300),
+            )
+            .map_err(TaskError::Process)?;
+        #[cfg(unix)]
+        {
+            let root = std::env::current_dir()?;
+            let comparison = xtask::reference::compare_sipp_registrations_with(
+                &root,
+                &root.join("target/debug/rusterisk"),
+                &mut supervisor,
+            )?;
+            println!(
+                "SIPp completed calls: Asterisk={}, Rusterisk={}",
+                comparison.completed_calls(xtask::reference::SippAdapter::Asterisk),
+                comparison.completed_calls(xtask::reference::SippAdapter::Rusterisk),
+            );
+        }
         execute_owned(
             &mut supervisor,
             &plan,
