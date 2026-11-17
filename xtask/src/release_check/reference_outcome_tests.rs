@@ -10,6 +10,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[path = "aggregate/reference.rs"]
+mod aggregate;
+
 #[derive(Clone, Copy)]
 enum Fault {
     None,

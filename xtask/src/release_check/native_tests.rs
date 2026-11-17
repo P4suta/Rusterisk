@@ -11,6 +11,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[path = "aggregate/native.rs"]
+mod aggregate;
+
 #[derive(Clone, Copy)]
 enum Fault {
     None,

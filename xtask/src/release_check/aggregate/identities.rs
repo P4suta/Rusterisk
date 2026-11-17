@@ -7,6 +7,10 @@ use crate::{
     server_distribution::ServerTarget,
 };
 
+#[cfg(all(test, unix))]
+#[path = "checksums.rs"]
+mod checksum_tests;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ArchiveSha256([u8; 32]);
 

@@ -17,6 +17,12 @@ pub use outcome::RunnerOutcome;
 pub use profile::{CandidateImages, CandidateProfile};
 use projections::ProjectionSet;
 
+#[cfg(test)]
+pub(super) mod profile_fixture;
+#[cfg(test)]
+#[path = "aggregate/profile_tests.rs"]
+mod profile_tests;
+
 #[derive(Debug)]
 pub enum CandidateCheckError {
     Missing(RequiredGate),
