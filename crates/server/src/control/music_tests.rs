@@ -11,6 +11,7 @@ use rusterisk_media::Frame;
 mod capacity;
 mod early;
 mod hold;
+mod settings;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
