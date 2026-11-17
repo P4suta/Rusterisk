@@ -19,6 +19,8 @@ mod endpoints;
 mod external_media;
 mod initial_variables;
 mod music;
+#[cfg(test)]
+mod music_tests;
 mod playback;
 mod recording;
 mod stasis;
