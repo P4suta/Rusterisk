@@ -225,7 +225,7 @@ impl Call {
         }
     }
 
-    pub const fn music_gate(self) -> AudioGate {
+    pub const fn generated_audio_gate(self) -> AudioGate {
         match self.media {
             MediaState::Active | MediaState::Held => self.peer_direction.restrict(self.mute),
             MediaState::Waiting | MediaState::Released => AudioGate::Closed,
