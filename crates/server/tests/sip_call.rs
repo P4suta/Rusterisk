@@ -26,6 +26,8 @@ use rusterisk_sip::{Direction, DtmfFormat, Session};
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
+#[path = "sip_call/early_music.rs"]
+mod early_music;
 use tokio::net::UdpSocket;
 use tower::ServiceExt;
 
