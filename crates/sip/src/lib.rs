@@ -32,7 +32,7 @@ pub use contact::{
 };
 pub use destination::{Destination, StaticTarget, TargetHost};
 pub use incoming::RejectReason;
-pub use outgoing::Outbound;
+pub use outgoing::{ForkTeardownFailure, Outbound};
 pub use registration_client::{
     RegistrationAuthentication, RegistrationGrant, RegistrationIdentity, RegistrationResponse,
     RegistrationTransaction, RegistrationTransactionEvent,
@@ -295,6 +295,11 @@ impl Session {
 }
 
 pub enum SipEvent {
+    ForkTeardownFailed {
+        id: String,
+        generation: u64,
+        failure: ForkTeardownFailure,
+    },
     AttendedTransferRequested {
         id: String,
         generation: u64,
@@ -476,6 +481,7 @@ pub struct Engine {
     pending: BTreeMap<String, PendingInvite>,
     contacts: registrar::Bindings,
     outgoing: BTreeMap<String, outgoing::Outgoing>,
+    forks: outgoing::Forks,
     incoming: BTreeMap<String, incoming::Incoming>,
     transactions: transactions::Transactions,
     refers: transfer::owners::Owners,
@@ -505,6 +511,7 @@ impl Engine {
             pending: BTreeMap::new(),
             contacts: registrar::Bindings::default(),
             outgoing: BTreeMap::new(),
+            forks: outgoing::Forks::default(),
             incoming: BTreeMap::new(),
             transactions: transactions::Transactions::default(),
             refers: transfer::owners::Owners::default(),

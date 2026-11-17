@@ -279,6 +279,13 @@ impl Signaling {
                         .await?;
                 }
                 SipEvent::ReferSubscriptionEnded { refer } => self.settle_refer(listener, refer),
+                SipEvent::ForkTeardownFailed {
+                    id,
+                    generation,
+                    failure,
+                } => {
+                    tracing::warn!(channel = %id, generation, ?failure, "forked SIP dialog teardown failed");
+                }
                 SipEvent::EndpointContact {
                     endpoint,
                     generation,

@@ -944,6 +944,7 @@ fn rejected_invites_release_admission_and_retransmit_the_tagged_final_response(
     let id = match &incoming.events[0] {
         SipEvent::Incoming { id, .. } => id.clone(),
         SipEvent::AttendedTransferRequested { .. }
+        | SipEvent::ForkTeardownFailed { .. }
         | SipEvent::BlindTransferRequested { .. }
         | SipEvent::ReferSubscriptionEnded { .. }
         | SipEvent::EndpointContact { .. }
@@ -985,6 +986,7 @@ fn incoming_id(output: &rusterisk_sip::Output) -> Result<String, SipError> {
         Some(SipEvent::Incoming { id, .. }) => Ok(id.clone()),
         Some(
             SipEvent::AttendedTransferRequested { .. }
+            | SipEvent::ForkTeardownFailed { .. }
             | SipEvent::BlindTransferRequested { .. }
             | SipEvent::ReferSubscriptionEnded { .. }
             | SipEvent::EndpointContact { .. }
@@ -1429,3 +1431,5 @@ fn sending_info_uses_the_existing_dialog_and_retries_without_ending_the_call(
     }
     Ok(())
 }
+#[path = "identity/forked_answers.rs"]
+mod forked_answers;

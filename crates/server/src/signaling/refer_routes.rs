@@ -66,6 +66,7 @@ impl Signaling {
                 SipEvent::AttendedTransferRequested { .. }
                 | SipEvent::BlindTransferRequested { .. }
                 | SipEvent::EndpointContact { .. }
+                | SipEvent::ForkTeardownFailed { .. }
                 | SipEvent::PeerDirection { .. }
                 | SipEvent::DtmfReceived { .. }
                 | SipEvent::Ringing { .. }

@@ -67,6 +67,7 @@ fn incoming_direction_answers_keep_local_security_and_established_roles() -> Res
         .find_map(|event| match event {
             SipEvent::Incoming { id, .. } => Some(id.clone()),
             SipEvent::AttendedTransferRequested { .. }
+            | SipEvent::ForkTeardownFailed { .. }
             | SipEvent::BlindTransferRequested { .. }
             | SipEvent::ReferSubscriptionEnded { .. }
             | SipEvent::EndpointContact { .. }

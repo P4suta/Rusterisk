@@ -7,6 +7,9 @@ use rsipstack::sip::{
 };
 use rusterisk_config::{Auth, Codec, Protocol};
 use std::net::SocketAddr;
+mod forked;
+pub use forked::ForkTeardownFailure;
+pub(crate) use forked::Forks;
 
 pub struct Outbound {
     pub id: String,
@@ -798,6 +801,7 @@ impl Engine {
     }
 
     fn tick_inner(&mut self, now: u64) -> Result<Output, SipError> {
+        self.forks.expire(now)?;
         let expired = self.transactions.expire(now);
         let mut output = Output {
             datagrams: Vec::new(),
@@ -975,6 +979,19 @@ impl Engine {
                     output
                         .datagrams
                         .push(Datagram::new(peer, previous.ack.clone()));
+                } else if (200..300).contains(&previous.response.status_code.code())
+                    && (200..300).contains(&response.status_code.code())
+                    && previous.response.to_header()?.typed()?.tag()
+                        != response.to_header()?.typed()?.tag()
+                {
+                    return forked::receive(
+                        dialog,
+                        &mut self.forks,
+                        &mut self.transactions,
+                        &response,
+                        previous.expires,
+                        now,
+                    );
                 }
                 return Ok(output);
             }
