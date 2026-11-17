@@ -1,15 +1,26 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
 use std::{
     ffi::OsStr,
-    fs::File,
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
-    os::{fd::OwnedFd, unix::net::UnixStream},
     path::Path,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use xtask::process::{CommandStream, CommandSupervisor, ProcessError, SupervisedCommand};
+#[cfg(unix)]
+use std::{
+    fs::File,
+    os::{fd::OwnedFd, unix::net::UnixStream},
+};
+#[cfg(unix)]
+use xtask::process::CommandStream;
+use xtask::process::{CommandSupervisor, ProcessError, SupervisedCommand};
+
+#[cfg(windows)]
+#[path = "owned_command/windows_output.rs"]
+mod windows_output;
+#[cfg(windows)]
+use windows_output::Output;
 
 const MODE: &str = "RUSTERISK_OWNED_COMMAND_FIXTURE";
 const PRIVATE: &str = "RUSTERISK_OWNED_COMMAND_PRIVATE";
@@ -86,11 +97,16 @@ fn request(mode: &str) -> io::Result<SupervisedCommand> {
     Ok(request)
 }
 
+#[cfg(unix)]
+type OutputReader = UnixStream;
+
+#[cfg(unix)]
 struct Output {
-    stdout: UnixStream,
-    stderr: UnixStream,
+    stdout: OutputReader,
+    stderr: OutputReader,
 }
 
+#[cfg(unix)]
 fn output_pair() -> io::Result<(UnixStream, CommandStream)> {
     let (reader, writer) = UnixStream::pair()?;
     reader.set_read_timeout(Some(Duration::from_millis(250)))?;
@@ -100,6 +116,7 @@ fn output_pair() -> io::Result<(UnixStream, CommandStream)> {
     ))
 }
 
+#[cfg(unix)]
 impl Output {
     fn capture(request: &mut SupervisedCommand) -> io::Result<Self> {
         let (stdout, output) = output_pair()?;
@@ -109,7 +126,7 @@ impl Output {
     }
 
     fn read(self) -> io::Result<(String, String)> {
-        fn read(stream: UnixStream) -> io::Result<String> {
+        fn read(stream: OutputReader) -> io::Result<String> {
             let mut bytes = Vec::new();
             stream.take(16_385).read_to_end(&mut bytes)?;
             verify(
@@ -263,6 +280,7 @@ fn owned_command_worker() -> Result<(), ProcessError> {
             writeln!(io::stderr(), "owned cleanup diagnostic")?;
             Ok(())
         }
+        #[cfg(unix)]
         Some("interrupt-owner") => supervised(|supervisor| {
             signal_hook::low_level::raise(signal_hook::consts::SIGINT)?;
             let operation = supervisor.run_owned(request("failure")?, Duration::from_secs(2));
@@ -337,9 +355,22 @@ fn owned_commands_apply_environment_removal_and_clear_without_global_mutation(
 #[test]
 fn owned_failure_preserves_the_primary_status_and_runs_owned_cleanup() -> Result<(), ProcessError> {
     let mut operation = request("failure")?;
-    let operation_output = Output::capture(&mut operation)?;
     let mut cleanup = request("cleanup")?;
-    let cleanup_output = Output::capture(&mut cleanup)?;
+    let operation_output = Output::capture(&mut operation)?;
+    let cleanup_output = match Output::capture(&mut cleanup) {
+        Ok(output) => output,
+        Err(error) => {
+            drop(operation);
+            drop(cleanup);
+            return combine(
+                Err(error.into()),
+                operation_output
+                    .read()
+                    .map(|_| ())
+                    .map_err(ProcessError::from),
+            );
+        }
+    };
     let result = supervised(|supervisor| {
         let operation = supervisor.run_owned(operation, Duration::from_secs(2));
         let cleanup = supervisor.run_cleanup_owned(cleanup, Duration::from_secs(2));
@@ -411,6 +442,7 @@ fn rejected_owned_commands_release_output_files_before_spawning() -> Result<(), 
 }
 
 #[test]
+#[cfg(unix)]
 fn owned_cleanup_remains_available_after_a_primary_interrupt() -> Result<(), ProcessError> {
     supervised(|supervisor| {
         supervisor.run_owned(request("interrupt-owner")?, Duration::from_secs(5))
