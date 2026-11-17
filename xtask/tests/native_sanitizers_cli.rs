@@ -1,4 +1,5 @@
 use std::process::Command;
+#[cfg(unix)]
 #[path = "sdk_candidate_build/fixture.rs"]
 mod fixture;
 

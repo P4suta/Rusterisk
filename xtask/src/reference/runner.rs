@@ -1,3 +1,5 @@
+#[cfg(any(unix, test))]
+use super::Interop;
 use super::ReferenceImage;
 #[cfg(unix)]
 use super::{
@@ -5,13 +7,15 @@ use super::{
     commands::{combine, docker, owned_step, CommandPhase, Commands},
     copy_configuration, media_address, native_server_build, published_address,
     resources::{reference_ready, reference_versions, start_reference, Reference},
-    Interop, ReferenceCase, SippAdapter,
+    ReferenceCase, SippAdapter,
 };
 use crate::process::{CommandSupervisor, ProcessError};
+#[cfg(any(unix, test))]
+use std::io;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::{
-    fs, io,
+    fs,
     process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -38,7 +42,7 @@ pub(crate) struct ReferenceRunner {
 }
 
 impl ReferenceRunner {
-    #[cfg(unix)]
+    #[cfg(any(unix, test))]
     pub(crate) fn configuration_path(source: &Path, owner: &str) -> io::Result<PathBuf> {
         if !source.is_absolute()
             || source.components().any(|component| {

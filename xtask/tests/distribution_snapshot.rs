@@ -125,7 +125,7 @@ fn distribution_snapshot_binds_source_licenses_documentation_and_tools(
 #[test]
 fn distribution_snapshot_refuses_missing_oversize_and_redirected_inputs(
 ) -> Result<(), std::io::Error> {
-    using_project("invalid", |root, parent| {
+    using_project("invalid", |root, _parent| {
         std::fs::remove_file(root.join("docs/rust-sdk.md"))?;
         assert!(SourceSnapshot::read(root).is_err());
         write(root, "docs/rust-sdk.md", &[b'x'; 65537])?;
@@ -136,8 +136,8 @@ fn distribution_snapshot_refuses_missing_oversize_and_redirected_inputs(
         std::fs::remove_file(root.join("crates/client/NOTICE"))?;
         #[cfg(unix)]
         {
-            std::fs::rename(root.join("docs"), parent.join("outside"))?;
-            std::os::unix::fs::symlink(parent.join("outside"), root.join("docs"))?;
+            std::fs::rename(root.join("docs"), _parent.join("outside"))?;
+            std::os::unix::fs::symlink(_parent.join("outside"), root.join("docs"))?;
             assert!(SourceSnapshot::read(root).is_err());
         }
         Ok(())
