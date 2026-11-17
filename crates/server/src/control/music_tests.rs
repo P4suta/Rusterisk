@@ -9,6 +9,7 @@ use rusterisk_core::{MediaTaskKind, MediaTaskState, MediaTaskToken};
 use rusterisk_media::Frame;
 
 mod capacity;
+mod early;
 mod hold;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
