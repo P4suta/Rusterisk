@@ -10,13 +10,17 @@ fn failure(error: impl std::fmt::Display) -> Error {
     Error::Io(std::io::Error::other(error.to_string()))
 }
 
-pub async fn prepare(configuration: &Path) -> Result<(StoragePort, StorageWorker), Error> {
-    let data = configuration.join("native-data");
-    std::fs::create_dir(&data)?;
-    for root in [data.as_path(), configuration] {
+pub async fn prepare(
+    configuration: &Path,
+    data: &Path,
+) -> Result<(StoragePort, StorageWorker), Error> {
+    std::fs::create_dir_all(data)?;
+    for root in [data, configuration] {
         super::playback_position::prepare(root)?;
     }
-    let (storage, worker) = StorageWorker::start(data.clone()).await.map_err(failure)?;
+    let (storage, worker) = StorageWorker::start(data.to_owned())
+        .await
+        .map_err(failure)?;
     let prepared = async {
         for (language, name, sample) in [
             ("en", "digits/rusterisk-one", 1234),
@@ -32,7 +36,7 @@ pub async fn prepare(configuration: &Path) -> Result<(StoragePort, StorageWorker
             }
             recording.finish().await.map_err(failure)?;
             let source = data.join("recordings").join(format!("{id}.wav"));
-            for root in [data.as_path(), configuration] {
+            for root in [data, configuration] {
                 let destination = root
                     .join("sounds")
                     .join(language)

@@ -330,7 +330,9 @@ async fn compare_resources(
     .map_err(|_| Error::Invalid("native WebSocket configuration"))?;
     let fixture_root = std::env::var("RUSTERISK_REFERENCE_CONFIGURATION")
         .map_err(|_| Error::Invalid("reference configuration directory is required"))?;
-    let (storage, storage_worker) = sounds::prepare(std::path::Path::new(&fixture_root)).await?;
+    let native_data = std::path::Path::new(&fixture_root).join("native-data");
+    let (storage, storage_worker) =
+        sounds::prepare(std::path::Path::new(&fixture_root), &native_data).await?;
     let (controller, runner, effects) = rusterisk_server::Controller::new(configuration.clone(), 4);
     let (media, hub, notices) = rusterisk_server::media::MediaHub::new(4);
     let signaling = rusterisk_server::signaling::Signaling::bind(
