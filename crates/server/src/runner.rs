@@ -59,6 +59,10 @@ impl Credentials {
 }
 
 enum Request {
+    Info {
+        only: Option<String>,
+        reply: oneshot::Sender<Result<rusterisk_api::AsteriskInfo, ControlError>>,
+    },
     BindNativeProfiles(crate::call_profiles::BoundNativeProfiles),
     TakeNativeProfile {
         key: CallKey,
@@ -142,7 +146,6 @@ pub struct Controller {
     requests: mpsc::Sender<Request>,
     signals: mpsc::Sender<Signal>,
     shutdown: watch::Sender<bool>,
-    info: crate::server_info::ServerInfo,
 }
 
 pub struct Runner {
@@ -222,13 +225,11 @@ impl Controller {
         let (effects, effect_receiver) = mpsc::channel(128);
         let (shutdown, shutdown_receiver) = watch::channel(false);
         let control = Control::with_configuration(capacity, &config);
-        let info = control.server_info().clone();
         (
             Self {
                 requests,
                 signals,
                 shutdown,
-                info,
             },
             Runner {
                 control,
@@ -257,8 +258,18 @@ impl Controller {
         self.shutdown.send_replace(true);
     }
 
-    pub(crate) fn server_info(&self, only: Option<&str>) -> rusterisk_api::AsteriskInfo {
-        self.info.selected(only)
+    pub(crate) async fn server_info(
+        &self,
+        only: Option<&str>,
+    ) -> Result<rusterisk_api::AsteriskInfo, ControlError> {
+        let (reply, receiver) = oneshot::channel();
+        self.requests
+            .try_send(Request::Info {
+                only: only.map(str::to_owned),
+                reply,
+            })
+            .map_err(|_| ControlError::Capacity)?;
+        receive(receiver).await
     }
 
     pub fn shutdown_signal(&self) -> watch::Receiver<bool> {
@@ -511,6 +522,12 @@ impl Runner {
 
     fn request(&mut self, request: Request, now_ms: u64) -> Result<(), ControlError> {
         match request {
+            Request::Info { only, reply } => {
+                let selected = self.control.server_info().selected(only.as_deref());
+                if reply.send(Ok(selected)).is_err() {
+                    tracing::debug!("Server info requester disconnected");
+                }
+            }
             Request::BindNativeProfiles(profiles) => {
                 self.control.bind_native_profiles(profiles)?;
             }

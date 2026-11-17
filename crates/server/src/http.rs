@@ -383,10 +383,12 @@ async fn dispatch(
         .into_response());
     }
     if method == Method::GET && path == "/ari/asterisk/info" {
-        return Ok(
-            Json(controller.server_info(parameters.get("only").map(String::as_str)))
-                .into_response(),
-        );
+        return Ok(Json(
+            controller
+                .server_info(parameters.get("only").map(String::as_str))
+                .await?,
+        )
+        .into_response());
     }
     if method == Method::GET && path == "/rusterisk/capabilities" {
         let operations: Vec<Value> = rusterisk_api::OPERATIONS
