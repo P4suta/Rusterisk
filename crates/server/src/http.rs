@@ -388,7 +388,7 @@ async fn dispatch(
     if method == Method::GET && path == "/ari/asterisk/ping" {
         return Ok(Json(rusterisk_api::AsteriskPing {
             ping: "pong".into(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: crate::utc_timestamps::now_default(),
             asterisk_id: "rusterisk".into(),
         })
         .into_response());

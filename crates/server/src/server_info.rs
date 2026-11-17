@@ -14,7 +14,7 @@ impl ServerInfo {
     }
 
     pub(crate) fn new(capacity: usize) -> Self {
-        let startup = chrono::Utc::now().to_rfc3339();
+        let startup = crate::utc_timestamps::now_default();
         Self {
             entity_id: uuid::Uuid::new_v4(),
             last_reload: startup.clone(),

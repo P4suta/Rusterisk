@@ -40,6 +40,22 @@ async fn info_filters_are_case_insensitive_and_keep_process_identity_and_startup
     let runner = tokio::spawn(runner.run());
     let result = async {
         let app = router(controller.clone());
+        let ping = app
+            .clone()
+            .oneshot(request("/ari/asterisk/ping", true)?)
+            .await
+            .map_err(|error| ControlError::Adapter(error.to_string()))?;
+        assert_eq!(ping.status(), StatusCode::OK);
+        let bytes = ping
+            .into_body()
+            .collect()
+            .await
+            .map_err(|error| ControlError::Adapter(error.to_string()))?
+            .to_bytes();
+        let ping: rusterisk_api::AsteriskPing = serde_json::from_slice(&bytes)?;
+        assert_eq!(ping.ping, "pong");
+        assert!(ping.timestamp.ends_with("+00:00"));
+        assert!(ping.timestamp.parse::<jiff::Timestamp>().is_ok());
         let denied = app
             .clone()
             .oneshot(request("/ari/asterisk/info", false)?)
@@ -84,7 +100,8 @@ async fn info_filters_are_case_insensitive_and_keep_process_identity_and_startup
                 }
             }
             if let Some(status) = info.status {
-                assert!(chrono::DateTime::parse_from_rfc3339(&status.startup_time).is_ok());
+                assert!(status.startup_time.parse::<jiff::Timestamp>().is_ok());
+                assert!(status.startup_time.ends_with("+00:00"));
                 assert_eq!(status.last_reload_time, status.startup_time);
                 if let Some(previous) = startup.replace(status.startup_time.clone()) {
                     assert_eq!(previous, status.startup_time);

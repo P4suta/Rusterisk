@@ -415,7 +415,7 @@ impl Controller {
 }
 
 fn timestamp() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    crate::utc_timestamps::now_millis()
 }
 
 impl Runner {

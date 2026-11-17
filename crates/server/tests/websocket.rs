@@ -103,6 +103,10 @@ async fn websocket_upgrade_registers_the_app_before_returning_and_streams_real_e
             .ok_or(ControlError::Capacity)?
             .map_err(failure)?;
         let event: Event = serde_json::from_str(message.to_text().map_err(failure)?)?;
+        assert!(event.timestamp.parse::<jiff::Timestamp>().is_ok());
+        let (_, fraction) = event.timestamp.rsplit_once('.').ok_or(ControlError::Invalid("Event timestamp has no millisecond fraction"))?;
+        assert_eq!(fraction.len(), 4);
+        assert!(fraction.ends_with('Z'));
         if !matches!(event.kind, EventKind::BridgeCreated { bridge } if bridge.id.as_str() == "conversation") {
             return Err(ControlError::Invalid("Expected the bridge event"));
         }
