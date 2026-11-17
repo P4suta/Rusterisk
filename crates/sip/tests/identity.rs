@@ -11,6 +11,8 @@ use rsipstack::sip::{HeadersExt, SipMessage};
 use rusterisk_config::Config;
 use rusterisk_sip::{Engine, Session, SipError, SipEvent};
 
+#[path = "identity/early_media.rs"]
+mod early_media;
 #[path = "identity/required_options.rs"]
 mod required_options;
 #[path = "identity/required_options_capacity.rs"]

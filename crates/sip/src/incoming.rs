@@ -18,6 +18,94 @@ enum State {
     },
 }
 
+#[derive(PartialEq, Eq)]
+pub(super) struct LocalAnswer {
+    generation: u64,
+    local: SocketAddr,
+    body: String,
+    telephone: Option<crate::DtmfFormat>,
+    security: crate::SessionSecurity,
+    version: u64,
+}
+
+impl LocalAnswer {
+    fn prepare(
+        invite: &PendingInvite,
+        generation: u64,
+        local: SocketAddr,
+        description: Option<&crate::WebRtcDescription>,
+    ) -> Result<Self, SipError> {
+        if generation == 0 || local.port() == 0 {
+            return Err(SipError::Capacity);
+        }
+        let (body, telephone, security) = match (&invite.session.security, description) {
+            (crate::SessionSecurity::Rtp, None) => (
+                invite.session.answer(local, generation)?,
+                invite.session.telephone,
+                crate::SessionSecurity::Rtp,
+            ),
+            (crate::SessionSecurity::WebRtc(_), Some(description)) => {
+                match description.setup() {
+                    crate::DtlsSetup::Active | crate::DtlsSetup::Passive => {}
+                    crate::DtlsSetup::ActPass => return Err(SipError::Unsupported),
+                }
+                let local_session = Session::parse(description.as_str(), &[invite.session.codec])?;
+                if local_session.payload_type != invite.session.payload_type {
+                    return Err(SipError::Unsupported);
+                }
+                let security = crate::media_direction::establish(
+                    &local_session.security,
+                    &invite.session.security,
+                )?;
+                let body = match &security {
+                    crate::SessionSecurity::WebRtc(description) => description.as_str().to_owned(),
+                    crate::SessionSecurity::Rtp => return Err(SipError::Unsupported),
+                };
+                (body, local_session.telephone, security)
+            }
+            (crate::SessionSecurity::Rtp, Some(_)) | (crate::SessionSecurity::WebRtc(_), None) => {
+                return Err(SipError::Unsupported)
+            }
+        };
+        let version = crate::media_direction::version(&security, generation)?;
+        let answer = Self {
+            generation,
+            local,
+            body,
+            telephone,
+            security,
+            version,
+        };
+        if invite
+            .early_answer
+            .as_ref()
+            .is_some_and(|early| early != &answer)
+        {
+            return Err(SipError::Unsupported);
+        }
+        Ok(answer)
+    }
+
+    fn response(
+        &self,
+        invite: &PendingInvite,
+        code: u16,
+        phrase: &str,
+    ) -> Result<Vec<u8>, SipError> {
+        let extra = format!(
+            "Contact: {}\r\nAllow: INVITE, ACK, CANCEL, BYE, OPTIONS\r\nSupported: \r\n",
+            crate::transport::contact(invite.protocol, invite.local, invite.uri_security)
+        );
+        response(
+            &tagged(&invite.request, &invite.local_tag)?,
+            code,
+            phrase,
+            &extra,
+            &self.body,
+        )
+    }
+}
+
 pub(crate) struct Incoming {
     invite: PendingInvite,
     generation: u64,
@@ -329,11 +417,16 @@ impl Engine {
     }
 
     pub fn ring(&mut self, id: &str) -> Result<Output, SipError> {
+        self.ring_at(id, 0)
+    }
+
+    pub fn ring_at(&mut self, id: &str, now: u64) -> Result<Output, SipError> {
         let invite = self
             .pending
             .values()
             .find(|invite| invite.id == id)
             .ok_or(SipError::InvalidPacket)?;
+        let next = crate::ServerRetry::provisional_deadline(now)?;
         let bytes = response(
             &tagged(&invite.request, &invite.local_tag)?,
             180,
@@ -349,8 +442,57 @@ impl Engine {
         {
             cached.bytes = bytes.clone();
             cached.expires = None;
+            cached.retry = Some(crate::ServerRetry::Provisional { next });
         }
         Ok(Output::response(peer, bytes))
+    }
+
+    pub fn progress(
+        &mut self,
+        id: &str,
+        generation: u64,
+        local: SocketAddr,
+        now: u64,
+    ) -> Result<Output, SipError> {
+        self.progress_inner(id, generation, local, None, now)
+    }
+
+    pub fn progress_with_sdp(
+        &mut self,
+        id: &str,
+        generation: u64,
+        local: SocketAddr,
+        description: &crate::WebRtcDescription,
+        now: u64,
+    ) -> Result<Output, SipError> {
+        self.progress_inner(id, generation, local, Some(description), now)
+    }
+
+    fn progress_inner(
+        &mut self,
+        id: &str,
+        generation: u64,
+        local: SocketAddr,
+        description: Option<&crate::WebRtcDescription>,
+        now: u64,
+    ) -> Result<Output, SipError> {
+        let invite = self.pending.get_mut(id).ok_or(SipError::InvalidPacket)?;
+        let prepared = LocalAnswer::prepare(invite, generation, local, description)?;
+        let next = crate::ServerRetry::provisional_deadline(now)?;
+        let bytes = prepared.response(invite, 183, "Session Progress")?;
+        if invite.early_answer.is_none() {
+            invite.early_answer = Some(prepared);
+        }
+        for cached in self
+            .cache
+            .values_mut()
+            .filter(|cached| cached.peer == invite.peer && cached.request == invite.request)
+        {
+            cached.bytes = bytes.clone();
+            cached.expires = None;
+            cached.retry = Some(crate::ServerRetry::Provisional { next });
+        }
+        Ok(Output::response(invite.peer, bytes))
     }
 
     pub fn answer(
@@ -391,51 +533,21 @@ impl Engine {
             .find(|(_, invite)| invite.id == id)
             .ok_or(SipError::InvalidPacket)?;
         let key = key.clone();
-        let (body, telephone, local_security) = match (&invite.session.security, description) {
-            (crate::SessionSecurity::Rtp, None) => (
-                invite.session.answer(local, generation)?,
-                invite.session.telephone,
-                crate::SessionSecurity::Rtp,
-            ),
-            (crate::SessionSecurity::WebRtc(_), Some(description)) => {
-                match description.setup() {
-                    crate::DtlsSetup::Active | crate::DtlsSetup::Passive => {}
-                    crate::DtlsSetup::ActPass => return Err(SipError::Unsupported),
-                }
-                let local_session = Session::parse(description.as_str(), &[invite.session.codec])?;
-                if local_session.payload_type != invite.session.payload_type {
-                    return Err(SipError::Unsupported);
-                }
-                let security = crate::media_direction::establish(
-                    &local_session.security,
-                    &invite.session.security,
-                )?;
-                let body = match &security {
-                    crate::SessionSecurity::WebRtc(description) => description.as_str().to_owned(),
-                    crate::SessionSecurity::Rtp => return Err(SipError::Unsupported),
-                };
-                (body, local_session.telephone, security)
-            }
-            (crate::SessionSecurity::Rtp, Some(_)) | (crate::SessionSecurity::WebRtc(_), None) => {
-                return Err(SipError::Unsupported)
-            }
-        };
-        let answer_version = crate::media_direction::version(&local_security, generation)?;
-        let extra = format!(
-            "Contact: {}\r\nAllow: INVITE, ACK, CANCEL, BYE, OPTIONS\r\nSupported: \r\n",
-            crate::transport::contact(invite.protocol, invite.local, invite.uri_security)
-        );
-        let bytes = response(
-            &tagged(&invite.request, &invite.local_tag)?,
-            200,
-            "OK",
-            &extra,
-            &body,
-        )?;
+        let prepared = LocalAnswer::prepare(invite, generation, local, description)?;
+        let answer = invite.early_answer.as_ref().unwrap_or(&prepared);
+        let bytes = answer.response(invite, 200, "OK")?;
         let sequence = invite.request.cseq_header()?.typed()?.seq;
         let remote_target = invite.remote_target.clone();
         let offer = invite.request.body.clone();
         let mut invite = self.pending.remove(&key).ok_or(SipError::InvalidPacket)?;
+        let LocalAnswer {
+            generation,
+            local,
+            telephone,
+            security: local_security,
+            version: answer_version,
+            ..
+        } = invite.early_answer.take().unwrap_or(prepared);
         invite.session.telephone = telephone;
         self.update_invite_reply(&invite, &bytes, now)?;
         let mut output = Output::response(invite.peer, bytes.clone());
@@ -474,7 +586,7 @@ impl Engine {
         peer: SocketAddr,
     ) -> Result<(), SipError> {
         for cached in self.cache.values_mut() {
-            if let Some(retry) = &cached.retry {
+            if let Some(crate::ServerRetry::Final { tag, .. }) = &cached.retry {
                 if cached.peer == peer
                     && cached.request.call_id_header()?.value() == request.call_id_header()?.value()
                     && cached.request.cseq_header()?.typed()?.seq
@@ -483,7 +595,7 @@ impl Engine {
                         == RequestIdentity::for_invite(request, peer)?
                     && cached.request.from_header()?.typed()? == request.from_header()?.typed()?
                     && request.to_header()?.typed()?.tag().map(|tag| tag.value())
-                        == Some(retry.tag.as_str())
+                        == Some(tag.as_str())
                 {
                     cached.retry = None;
                 }
@@ -711,6 +823,13 @@ impl Engine {
     }
 
     pub(crate) fn incoming_tick(&mut self, now: u64) -> Result<Output, SipError> {
+        let provisional_next = if self.cache.values().any(|cached| {
+            matches!(cached.retry.as_ref(), Some(crate::ServerRetry::Provisional { next }) if *next <= now)
+        }) {
+            Some(crate::ServerRetry::provisional_deadline(now)?)
+        } else {
+            None
+        };
         self.cache
             .retain(|_, cached| cached.expires.is_none_or(|expires| expires > now));
         self.incoming.retain(|_, dialog| {
@@ -721,14 +840,28 @@ impl Engine {
             datagrams: Vec::new(),
             events: Vec::new(),
         };
+        if let Some(provisional_next) = provisional_next {
+            for cached in self.cache.values_mut() {
+                if let Some(crate::ServerRetry::Provisional { next }) = &mut cached.retry {
+                    if *next <= now {
+                        output.datagrams.push(Datagram {
+                            peer: cached.peer,
+                            bytes: cached.bytes.clone(),
+                            origin: cached.origin,
+                        });
+                        *next = provisional_next;
+                    }
+                }
+            }
+        }
         for cached in self.cache.values_mut() {
-            if let Some(retry) = &mut cached.retry {
-                if retry.next <= now && self.protocol == rusterisk_config::Protocol::Udp {
+            if let Some(crate::ServerRetry::Final { next, interval, .. }) = &mut cached.retry {
+                if *next <= now && self.protocol == rusterisk_config::Protocol::Udp {
                     output
                         .datagrams
                         .push(Datagram::new(cached.peer, cached.bytes.clone()));
-                    retry.interval = (retry.interval * 2).min(4000);
-                    retry.next = now.saturating_add(retry.interval);
+                    *interval = (*interval * 2).min(4000);
+                    *next = now.saturating_add(*interval);
                 }
             }
         }

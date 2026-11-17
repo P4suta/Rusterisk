@@ -430,13 +430,22 @@ struct Cached {
     origin: DatagramOrigin,
 }
 
-struct ServerRetry {
-    next: u64,
-    interval: u64,
-    tag: String,
+enum ServerRetry {
+    Provisional {
+        next: u64,
+    },
+    Final {
+        next: u64,
+        interval: u64,
+        tag: String,
+    },
 }
 
 impl ServerRetry {
+    fn provisional_deadline(now: u64) -> Result<u64, SipError> {
+        now.checked_add(60_000).ok_or(SipError::Capacity)
+    }
+
     fn for_reply(request: &Request, bytes: &[u8], now: u64) -> Result<Option<Self>, SipError> {
         if request.method != Method::Invite {
             return Ok(None);
@@ -450,7 +459,7 @@ impl ServerRetry {
         }
         let to = response.to_header()?.typed()?;
         let tag = to.tag().ok_or(SipError::InvalidPacket)?.value().to_owned();
-        Ok(Some(Self {
+        Ok(Some(Self::Final {
             next: now.saturating_add(500),
             interval: 500,
             tag,
@@ -468,6 +477,7 @@ pub struct PendingInvite {
     uri_security: transport::UriSecurity,
     remote_target: dialog_target::DialogTarget,
     authority: ReferAuthority,
+    early_answer: Option<incoming::LocalAnswer>,
 }
 
 pub struct Engine {
@@ -817,6 +827,7 @@ impl Engine {
                                 uri_security: incoming_target.security,
                                 remote_target: incoming_target.target,
                                 authority,
+                                early_answer: None,
                             },
                         );
                         self.render_response(&request, 100, "Trying", "", "")?
