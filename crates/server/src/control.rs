@@ -23,6 +23,10 @@ mod music;
 mod music_tests;
 mod playback;
 mod recording;
+#[cfg(test)]
+mod settings;
+#[cfg(test)]
+mod settings_tests;
 mod stasis;
 mod subscriptions;
 mod transfer;
