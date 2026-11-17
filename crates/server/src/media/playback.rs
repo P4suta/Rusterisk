@@ -7,6 +7,9 @@ use std::task::Poll;
 use std::time::{Duration, Instant};
 use tokio::sync::oneshot;
 
+#[cfg(test)]
+mod held_channel_tests;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaybackControl {
     Pause,
