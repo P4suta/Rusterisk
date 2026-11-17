@@ -1,0 +1,155 @@
+use crate::{
+    distribution::{SdkConsumerScope, SdkPort},
+    process::{CommandSupervisor, ProcessError},
+    release_check::{native_artifacts::read_regular, CapturedReleaseSource},
+};
+use std::{
+    fs, io,
+    path::Path,
+    process::{Command, Stdio},
+    time::Duration,
+};
+
+const MSRV: &str = "1.89.0";
+
+pub(super) struct Port<'a> {
+    pub(super) supervisor: CommandSupervisor,
+    pub(super) development: &'a str,
+}
+
+impl SdkPort for Port<'_> {
+    fn run(&mut self, command: &mut Command, budget: Duration) -> Result<(), ProcessError> {
+        command.env("RUSTUP_TOOLCHAIN", self.development);
+        self.supervisor.run(command, budget)
+    }
+
+    fn finish(self) -> Result<(), ProcessError> {
+        self.supervisor.finish()
+    }
+}
+
+fn invalid() -> io::Error {
+    io::Error::other("SDK native tool outputs differ from their captured toolchain or host profile")
+}
+
+fn field<'a>(text: &'a str, key: &str) -> io::Result<&'a str> {
+    let mut values = text.lines().filter_map(|line| line.strip_prefix(key));
+    let value = values.next().ok_or_else(invalid)?;
+    if value.is_empty() || value.len() > 256 || values.next().is_some() {
+        return Err(invalid());
+    }
+    Ok(value)
+}
+
+pub(super) fn channel(captured: &CapturedReleaseSource) -> io::Result<String> {
+    let bytes = captured
+        .files()
+        .find(|(path, _)| *path == Path::new("rust-toolchain.toml"))
+        .map(|(_, bytes)| bytes)
+        .ok_or_else(invalid)?;
+    let value: toml::Value = toml::from_str(std::str::from_utf8(bytes).map_err(io::Error::other)?)
+        .map_err(io::Error::other)?;
+    let channel = value
+        .get("toolchain")
+        .and_then(|table| table.get("channel"))
+        .and_then(toml::Value::as_str)
+        .ok_or_else(invalid)?;
+    semver::Version::parse(channel).map_err(io::Error::other)?;
+    Ok(channel.to_owned())
+}
+
+pub(super) fn host(os: &str, architecture: &str) -> io::Result<&'static str> {
+    match (os, architecture) {
+        ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
+        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
+        ("linux", "aarch64") => Ok("aarch64-unknown-linux-gnu"),
+        ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu"),
+        _ => Err(invalid()),
+    }
+}
+
+pub(super) fn check(
+    captured: &CapturedReleaseSource,
+    directory: &Path,
+    os: &str,
+    architecture: &str,
+) -> io::Result<()> {
+    let development = channel(captured)?;
+    let host = host(os, architecture)?;
+    for scope in SdkConsumerScope::ALL {
+        let expected = match scope {
+            SdkConsumerScope::CoreMsrv => MSRV,
+            SdkConsumerScope::Sdk => development.as_str(),
+        };
+        for program in ["rustc", "cargo"] {
+            let root = directory.join(scope.label());
+            let output = read_regular(&root.join(format!("{program}.stdout.txt")), 65_536)?;
+            if !read_regular(&root.join(format!("{program}.stderr.txt")), 4096)?.is_empty() {
+                return Err(invalid());
+            }
+            let text = std::str::from_utf8(&output).map_err(io::Error::other)?;
+            let first = text.lines().next().ok_or_else(invalid)?;
+            let hash = field(text, "commit-hash: ")?;
+            if !first.starts_with(&format!("{program} {expected} ("))
+                || field(text, "release: ")? != expected
+                || field(text, "host: ")? != host
+                || hash.len() != 40
+                || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn capture(
+    captured: &CapturedReleaseSource,
+    root: &Path,
+    supervisor: &mut CommandSupervisor,
+) -> io::Result<()> {
+    let development = channel(captured)?;
+    let directory = root.join("tools");
+    fs::create_dir(&directory)?;
+    for scope in SdkConsumerScope::ALL {
+        let channel = match scope {
+            SdkConsumerScope::CoreMsrv => MSRV,
+            SdkConsumerScope::Sdk => development.as_str(),
+        };
+        let destination = directory.join(scope.label());
+        fs::create_dir(&destination)?;
+        for program in ["rustc", "cargo"] {
+            let stdout = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(destination.join(format!("{program}.stdout.txt")))?;
+            let stderr = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(destination.join(format!("{program}.stderr.txt")))?;
+            let mut command = match scope {
+                SdkConsumerScope::CoreMsrv => {
+                    let mut command = Command::new("rustup");
+                    command.args(["run", MSRV, program]);
+                    command
+                }
+                SdkConsumerScope::Sdk => Command::new(program),
+            };
+            command
+                .args(["--version", "--verbose"])
+                .env("RUSTUP_TOOLCHAIN", channel)
+                .stdin(Stdio::null())
+                .stdout(stdout)
+                .stderr(stderr);
+            supervisor
+                .run(&mut command, Duration::from_secs(15))
+                .map_err(io::Error::other)?;
+        }
+    }
+    check(
+        captured,
+        &directory,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )
+}

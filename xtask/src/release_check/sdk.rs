@@ -13,6 +13,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+mod artifacts;
+
+#[cfg(any(test, doctest))]
+#[path = "sdk_artifact_contracts.rs"]
+mod artifact_contracts;
+
 pub struct SdkOutcome<'a> {
     captured: &'a CapturedReleaseSource,
     projection: InputKey,
@@ -236,6 +243,47 @@ impl CapturedReleaseSource {
             &paths.artifacts,
             supervisor,
         )
+    }
+
+    /// Publishes retained SDK native results after complete owned cleanup.
+    pub fn verify_sdk_artifact(
+        &self,
+        candidate: &Path,
+        published: &Path,
+    ) -> Result<SdkOutcome<'_>, SdkRunError> {
+        #[cfg(unix)]
+        {
+            artifacts::produce(self, candidate, published)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (candidate, published);
+            Err(SdkRunError::new(
+                "SDK artifact supervision",
+                Failure::Process(ProcessError::UnsupportedSupervision),
+            ))
+        }
+    }
+
+    /// Revalidates retained SDK results with the selected candidate bytes.
+    pub fn read_sdk_artifact(
+        &self,
+        artifact: &Path,
+        candidate: &Path,
+    ) -> Result<SdkOutcome<'_>, SdkRunError> {
+        #[cfg(unix)]
+        {
+            artifacts::read(self, artifact, candidate)
+                .map_err(|error| SdkRunError::new("SDK artifact reader", Failure::Io(error)))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (artifact, candidate);
+            Err(SdkRunError::new(
+                "SDK artifact reader",
+                Failure::Process(ProcessError::UnsupportedSupervision),
+            ))
+        }
     }
 }
 

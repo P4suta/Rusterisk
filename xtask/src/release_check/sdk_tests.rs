@@ -14,6 +14,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "sdk_tests/reusable_artifacts.rs"]
+mod reusable_artifacts;
+
 mod archive_fixture {
     use crate as xtask;
     include!(concat!(
