@@ -5,6 +5,7 @@ use rusterisk_core::ContactPresence;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
+mod configuration;
 mod contact;
 mod destination;
 mod dialog_target;
@@ -29,6 +30,7 @@ use signaling_flow::{Disconnection, SignalingRoute};
 mod transfer;
 mod transport;
 mod websocket_framing;
+pub use configuration::PreparedEngineConfiguration;
 pub use contact::{
     parse_registration_contacts, ContactBindings, ContactError, RegistrationContact,
     RegistrationContacts,
