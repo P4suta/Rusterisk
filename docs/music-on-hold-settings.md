@@ -31,5 +31,37 @@ The [Asterisk sample](https://github.com/asterisk/asterisk/blob/22.9.0/configs/s
 
 Unsupported modes, sorting values, options, duplicates, and invalid bounds report `musiconhold.conf` and the offending line.
 Parsing validates definitions without opening audio files or resolving a data directory.
-Audio-file validation, bounded inventories, runtime playback, and publication of replacement settings require separate adapters.
 The [configuration decision](adr/parse-file-music-classes-before-reading-audio.md) records the schema boundary.
+
+## Audio assets
+
+Class directories resolve beneath `--data-dir`, whose default is `data`.
+The example class reads files directly from `data/moh`.
+The loader ignores hidden files, subdirectories, and extensions other than lowercase `.wav`.
+Symbolic links and Windows reparse points fail validation, including ignored entries.
+Names that differ only by ASCII case also fail validation.
+Every class needs at least one nonempty audio file.
+
+The loader accepts mono, signed 16-bit little-endian pulse-code modulation in `.wav` files.
+Files require the canonical 44-byte header with no extra chunks.
+Supported sample rates are 8,000, 12,000, 16,000, 24,000, 32,000, 44,100, and 48,000 Hz.
+The loader decodes every file before admitting the catalog.
+Project limits are 64 files per class, 256 file references across classes, and 512 visited directory entries, including ignored entries.
+A file can occupy at most 16 MiB, and all file references can total at most 64 MiB, including headers.
+Each class reference counts toward the total file and byte limits.
+
+## Startup validation
+
+Validate definitions and assets with the same data directory used by the server.
+
+```sh
+rusterisk --config-dir config --data-dir data --check-config
+```
+
+Validation reports the class's `directory` line in `musiconhold.conf` when an asset fails.
+The command neither creates a missing data directory nor binds listening ports.
+Server startup prepares every configured class before binding listeners.
+An invalid class prevents startup even when no channel has selected the class.
+An empty catalog requires no music directory.
+The [catalog decision](adr/prepare-bounded-music-catalogs-before-publication.md) records the bounds and metadata checks.
+Applying replacement settings to a running server remains pending.
