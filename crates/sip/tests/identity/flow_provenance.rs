@@ -14,6 +14,8 @@ use rusterisk_sip::{
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
+#[path = "flow_provenance/admission.rs"]
+mod admission;
 #[path = "flow_provenance/bindings.rs"]
 mod bindings;
 #[path = "flow_provenance/outgoing.rs"]
