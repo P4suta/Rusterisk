@@ -205,6 +205,9 @@ impl CapturedReleaseSource {
 
     pub fn write(&self, source: &Path, state: &Path) -> Result<(), ReleaseSourceError> {
         self.distribution.write(source, state)?;
+        for directory in DIRECTORIES {
+            fs::create_dir_all(source.join(directory))?;
+        }
         for file in &self.extra {
             let path = source.join(&file.path);
             fs::create_dir_all(path.parent().ok_or(ReleaseSourceError::Invalid)?)?;

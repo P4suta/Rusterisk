@@ -41,6 +41,34 @@ fn using_source(
 }
 
 #[test]
+fn captured_sources_keep_required_empty_directories_through_copy_and_check() -> io::Result<()> {
+    using_source("empty-directories", |_captured, source| {
+        let directories = [
+            "api",
+            "containers",
+            ".github/workflows",
+            "tests/interop/node-ari-client",
+            "tests/interop/sipp",
+            "docs/adr",
+        ];
+        for directory in directories {
+            let path = source.join(directory);
+            std::fs::remove_dir_all(&path)?;
+            std::fs::create_dir_all(path)?;
+        }
+        let empty = CapturedReleaseSource::read(source).map_err(io::Error::other)?;
+        let copy = source.with_file_name("empty-source-copy");
+        empty
+            .write(&copy, &source.with_file_name("empty-source-state"))
+            .map_err(io::Error::other)?;
+        for directory in directories {
+            assert!(copy.join(directory).is_dir(), "{directory}");
+        }
+        empty.check(&copy).map_err(io::Error::other)
+    })
+}
+
+#[test]
 fn one_release_source_contains_each_runner_projection_and_its_governing_inputs() -> io::Result<()> {
     using_source("projections", |captured, source| {
         let browser = xtask::browser::SourceSnapshot::read(source).map_err(io::Error::other)?;
