@@ -15,6 +15,9 @@ use rusterisk_sip::{
 };
 use std::net::SocketAddr;
 
+#[path = "bindings/admission.rs"]
+mod admission;
+
 fn configuration(protocol: Protocol) -> Result<Config, SipError> {
     let mut config = settings(protocol)?;
     config
