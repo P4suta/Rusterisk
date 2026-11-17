@@ -29,13 +29,17 @@ enum Phase {
 
 pub(super) struct Pending {
     native: NativeStart,
-    caller: String,
-    timeout: Option<u32>,
+    call: CallStart,
     listener: usize,
     setup: SetupKey,
     route: Route,
     phase: Phase,
     cancel: watch::Sender<bool>,
+}
+
+pub(super) struct CallStart {
+    pub(super) caller: String,
+    pub(super) timeout: Option<u32>,
 }
 
 pub(super) struct NativeStart {
@@ -69,15 +73,14 @@ impl Signaling {
     ) -> Result<(), ControlError> {
         let catalog = crate::call_profiles::NativeProfileCatalog::new(&self.config);
         let profile = catalog.capture(&endpoint)?;
-        self.queue_native_profile(key, endpoint, caller, timeout, profile, now)
+        self.queue_native_profile(key, endpoint, CallStart { caller, timeout }, profile, now)
     }
 
     pub(super) fn queue_native_profile(
         &mut self,
         key: CallKey,
         endpoint: String,
-        caller: String,
-        timeout: Option<u32>,
+        call: CallStart,
         profile: crate::NativeCallProfile,
         now: u64,
     ) -> Result<(), ControlError> {
@@ -139,8 +142,7 @@ impl Signaling {
             key.clone(),
             Pending {
                 native,
-                caller,
-                timeout,
+                call,
                 listener,
                 setup,
                 route,
@@ -230,8 +232,7 @@ impl Signaling {
                     .start_resolved(
                         completed.key.clone(),
                         pending.native,
-                        pending.caller,
-                        pending.timeout,
+                        pending.call,
                         None,
                         now,
                     )
@@ -260,8 +261,7 @@ impl Signaling {
                                 self.start_resolved(
                                     completed.key.clone(),
                                     pending.native,
-                                    pending.caller,
-                                    pending.timeout,
+                                    pending.call,
                                     Some(peer),
                                     now,
                                 )
@@ -351,8 +351,7 @@ impl Signaling {
             .start_resolved(
                 key.clone(),
                 pending.native,
-                pending.caller,
-                pending.timeout,
+                pending.call,
                 Some(connection.peer),
                 now,
             )

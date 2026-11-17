@@ -537,20 +537,18 @@ impl Signaling {
         &mut self,
         key: CallKey,
         endpoint: String,
-        caller: String,
-        timeout: Option<u32>,
+        call: outbound::CallStart,
         profile: crate::NativeCallProfile,
         now: u64,
     ) -> Result<(), ControlError> {
-        self.queue_native_profile(key, endpoint, caller, timeout, profile, now)
+        self.queue_native_profile(key, endpoint, call, profile, now)
     }
 
     async fn start_resolved(
         &mut self,
         key: CallKey,
         native: outbound::NativeStart,
-        caller: String,
-        timeout: Option<u32>,
+        call: outbound::CallStart,
         resolved_peer: Option<SocketAddr>,
         now: u64,
     ) -> Result<(), ControlError> {
@@ -588,6 +586,7 @@ impl Signaling {
         let local = sockets.local_addr().map_err(failure)?;
         let local_rtp = profile.advertised(local);
         let dtmf = profile.dtmf;
+        let outbound::CallStart { caller, timeout } = call;
         let outbound = Outbound {
             id: key.id.as_str().into(),
             generation: key.generation,
@@ -849,8 +848,14 @@ impl Signaling {
                 };
                 let started = match profile {
                     Ok(profile) => {
-                        self.start(key.clone(), endpoint, caller, timeout, profile, now)
-                            .await
+                        self.start(
+                            key.clone(),
+                            endpoint,
+                            outbound::CallStart { caller, timeout },
+                            profile,
+                            now,
+                        )
+                        .await
                     }
                     Err(error) => Err(error),
                 };
