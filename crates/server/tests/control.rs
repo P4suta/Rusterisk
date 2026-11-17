@@ -2,6 +2,9 @@ use rusterisk_api::{ChannelId, EventKind};
 use rusterisk_core::{AudioGate, MuteDirection};
 use rusterisk_server::{Action, Control, ControlError, Effect, IncomingCall, Milestone, Signal};
 
+#[path = "control/music.rs"]
+mod music;
+
 fn id(value: &str) -> Result<ChannelId, ControlError> {
     Ok(ChannelId::try_from(value.to_owned())?)
 }
