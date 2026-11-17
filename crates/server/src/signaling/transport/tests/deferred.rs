@@ -77,7 +77,7 @@ async fn media_acknowledgements_never_send_old_answers_on_replacement_connection
         signaling
             .output(0, answer(&key, peer, b"old answer"), 0)
             .await?;
-        signaling.network.ports.remove(&(0, peer));
+        signaling.network.ports.remove(&previous.key);
         let mut current = signaling.network.reserve(0, peer)?;
         assert!(current.key.generation > previous.key.generation);
         signaling
@@ -159,7 +159,7 @@ async fn closed_deferred_answers_suppress_cached_retries_on_replacement_connecti
             signaling
                 .network
                 .ports
-                .get_mut(&(0, peer))
+                .get_mut(&reserved.key)
                 .ok_or(ControlError::Capacity)?
                 .state = super::super::ConnectionState::Closing(ControlError::Capacity);
             Some(reserved)
@@ -169,7 +169,9 @@ async fn closed_deferred_answers_suppress_cached_retries_on_replacement_connecti
         signaling
             .output(0, answer(&key, peer, b"closed answer"), 0)
             .await?;
-        signaling.network.ports.remove(&(0, peer));
+        if let Some(previous) = &previous {
+            signaling.network.ports.remove(&previous.key);
+        }
         drop(previous);
         let mut replacement = signaling.network.reserve(0, peer)?;
         let mut retry = answer(&key, peer, b"closed answer");

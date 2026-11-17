@@ -1244,7 +1244,7 @@ impl Signaling {
                             match self.listeners[packet.listener].engine.receive(&packet.bytes, packet.peer, now) {
                             Ok(output) => self.output(packet.listener, output, now).await?,
                             Err(error) => {
-                                self.network.refuse(packet.listener, packet.peer);
+                                self.network.refuse(packet.route());
                                 tracing::debug!(transport = %self.listeners[packet.listener].name, %error, "signaling input refused");
                             }
                             }

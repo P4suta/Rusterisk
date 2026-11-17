@@ -1,6 +1,7 @@
 use super::{Registrations, State};
 use crate::ControlError;
 use rusterisk_config::{Config, MAX_REGISTRATIONS};
+mod current_flow;
 mod dns;
 mod generations;
 mod minimum_expiration;

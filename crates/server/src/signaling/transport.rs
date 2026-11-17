@@ -157,7 +157,7 @@ pub(super) enum Input {
 
 pub(super) struct Network {
     listeners: Vec<ListenerSocket>,
-    ports: BTreeMap<(usize, SocketAddr), Port>,
+    ports: BTreeMap<ConnectionKey, Port>,
     jobs: JoinSet<Result<(), ControlError>>,
     sender: mpsc::Sender<StreamPacket>,
     received: mpsc::Receiver<StreamPacket>,
@@ -216,6 +216,35 @@ async fn listen(listeners: &[ListenerSocket]) -> Result<ListenerInput, ControlEr
 }
 
 impl Network {
+    fn peer_ports(&self, listener: usize, peer: SocketAddr) -> impl Iterator<Item = &Port> {
+        self.ports
+            .range(
+                ConnectionKey {
+                    listener,
+                    peer,
+                    generation: 0,
+                }..=ConnectionKey {
+                    listener,
+                    peer,
+                    generation: u64::MAX,
+                },
+            )
+            .map(|(_, port)| port)
+    }
+
+    fn legacy_connection(
+        &self,
+        listener: usize,
+        peer: SocketAddr,
+    ) -> Result<Option<ConnectionKey>, ControlError> {
+        let mut ports = self.peer_ports(listener, peer);
+        let key = ports.next().map(|port| port.key);
+        if ports.next().is_some() {
+            return Err(ControlError::Conflict("Signaling peer has multiple flows"));
+        }
+        Ok(key)
+    }
+
     pub(super) fn native_profiles(
         &self,
         requested: &[rusterisk_config::Transport],
@@ -259,8 +288,8 @@ impl Network {
             ),
             Route::Stream(key) => self
                 .ports
-                .get(&(key.listener, key.peer))
-                .is_some_and(|port| port.key == key && matches!(port.state, ConnectionState::Open)),
+                .get(&key)
+                .is_some_and(|port| matches!(port.state, ConnectionState::Open)),
             Route::Closed { .. } => false,
         }
     }
@@ -278,14 +307,28 @@ impl Network {
             ListenerSocket::Datagram(_) => Route::Datagram { listener, peer },
             ListenerSocket::Stream(_)
             | ListenerSocket::Encrypted { .. }
-            | ListenerSocket::WebSocket { .. } => match self.ports.get(&(listener, peer)) {
+            | ListenerSocket::WebSocket { .. } => match self
+                .legacy_connection(listener, peer)?
+                .and_then(|key| self.ports.get(&key))
+            {
                 Some(port) if matches!(port.state, ConnectionState::Open) => {
-                    Route::Stream(port.key)
+                    return self.capture_connection(port.key);
                 }
                 Some(_) | None => Route::Closed { listener, peer },
             },
         };
         Ok(DeliveryRoute(route))
+    }
+
+    pub(super) fn capture_connection(
+        &self,
+        key: ConnectionKey,
+    ) -> Result<DeliveryRoute, ControlError> {
+        self.ports
+            .get(&key)
+            .filter(|port| matches!(port.state, ConnectionState::Open))
+            .map(|_| DeliveryRoute(Route::Stream(key)))
+            .ok_or(ControlError::Conflict("Signaling flow is not open"))
     }
 
     pub(super) fn defer(
@@ -323,7 +366,11 @@ impl Network {
         if !self.current(route) {
             return Ok(false);
         }
-        self.send(route.listener(), packet).await?;
+        match route.0 {
+            Route::Datagram { listener, .. } => self.send(listener, packet).await?,
+            Route::Stream(key) => self.send_stream(key, packet.bytes)?,
+            Route::Closed { .. } => return Ok(false),
+        }
         Ok(true)
     }
 
@@ -408,10 +455,7 @@ impl Network {
     }
 
     fn reserve(&mut self, listener: usize, peer: SocketAddr) -> Result<Reserved, ControlError> {
-        if self.connection_slots() >= 64
-            || self.jobs.len() >= 64
-            || self.ports.contains_key(&(listener, peer))
-        {
+        if self.connection_slots() >= 64 || self.jobs.len() >= 64 {
             return Err(ControlError::Capacity);
         }
         self.generation = self
@@ -426,7 +470,7 @@ impl Network {
         let (packets, input) = mpsc::channel(8);
         let (stop, stopped) = watch::channel(false);
         self.ports.insert(
-            (listener, peer),
+            key,
             Port {
                 key,
                 packets,
@@ -518,13 +562,20 @@ impl Network {
                 ))
             };
         }
+        let key = self
+            .legacy_connection(listener, packet.peer)?
+            .ok_or(ControlError::Conflict("Signaling flow is not admitted"))?;
+        self.send_stream(key, packet.bytes)
+    }
+
+    fn send_stream(&mut self, key: ConnectionKey, bytes: Vec<u8>) -> Result<(), ControlError> {
         let port = self
             .ports
-            .get_mut(&(listener, packet.peer))
+            .get_mut(&key)
             .ok_or(ControlError::Conflict("Signaling flow is not admitted"))?;
         match &port.state {
             ConnectionState::Open => {
-                if let Err(error) = port.packets.try_send(packet.bytes) {
+                if let Err(error) = port.packets.try_send(bytes) {
                     port.state = ConnectionState::Closing(failure(error));
                     port.stop.send_replace(true);
                 }
@@ -553,15 +604,15 @@ impl Network {
                 },
                 packet = self.received.recv() => {
                     let packet = packet.ok_or(ControlError::Capacity)?;
-                    if !self.ports.get(&(packet.key.listener, packet.key.peer)).is_some_and(|port| port.key == packet.key) { continue; }
+                    if !self.ports.contains_key(&packet.key) { continue; }
                     match packet.item {
                         StreamEvent::Message(bytes) => {
-                            if self.ports.get(&(packet.key.listener, packet.key.peer)).is_some_and(|port| matches!(port.state, ConnectionState::Open)) {
+                            if self.ports.get(&packet.key).is_some_and(|port| matches!(port.state, ConnectionState::Open)) {
                                 return Ok(Input::Packet(Received { listener: packet.key.listener, peer: packet.key.peer, route: DeliveryRoute(Route::Stream(packet.key)), bytes }));
                             }
                         },
                         StreamEvent::Finished(mut result) => {
-                            if let Some(port) = self.ports.remove(&(packet.key.listener, packet.key.peer)) {
+                            if let Some(port) = self.ports.remove(&packet.key) {
                                 if let ConnectionState::Closing(error) = port.state { result = Err(error); }
                             }
                             return Ok(Input::Closed { key: packet.key, result });
@@ -576,11 +627,16 @@ impl Network {
         }
     }
 
-    pub(super) fn refuse(&mut self, listener: usize, peer: SocketAddr) {
-        if let Some(port) = self.ports.get_mut(&(listener, peer)) {
-            port.state =
-                ConnectionState::Closing(ControlError::Invalid("Invalid signaling packet"));
-            port.stop.send_replace(true);
+    pub(super) fn refuse(&mut self, route: DeliveryRoute) {
+        match route.0 {
+            Route::Stream(key) => {
+                if let Some(port) = self.ports.get_mut(&key) {
+                    port.state =
+                        ConnectionState::Closing(ControlError::Invalid("Invalid signaling packet"));
+                    port.stop.send_replace(true);
+                }
+            }
+            Route::Datagram { .. } | Route::Closed { .. } => {}
         }
     }
 

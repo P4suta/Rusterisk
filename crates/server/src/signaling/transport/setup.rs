@@ -186,8 +186,8 @@ impl Network {
             | ListenerSocket::Encrypted { .. }
             | ListenerSocket::WebSocket { .. } => {
                 let port = self
-                    .ports
-                    .get(&(listener, peer))
+                    .legacy_connection(listener, peer)?
+                    .and_then(|key| self.ports.get(&key))
                     .filter(|port| matches!(port.state, ConnectionState::Open))
                     .ok_or(ControlError::Conflict("Registered signaling flow closed"))?;
                 Ok(RegisteredRoute::Stream(port.key))
@@ -203,8 +203,8 @@ impl Network {
             ),
             RegisteredRoute::Stream(key) => self
                 .ports
-                .get(&(key.listener, key.peer))
-                .is_some_and(|port| port.key == key && matches!(port.state, ConnectionState::Open)),
+                .get(&key)
+                .is_some_and(|port| matches!(port.state, ConnectionState::Open)),
         }
     }
 
@@ -336,10 +336,13 @@ impl Network {
             return Err(ControlError::Conflict("Signaling setup cancelled"));
         }
         preparation.identity = encryption.as_ref().map(|_| resolved.identity().to_owned());
+        let preparation = self
+            .preparations
+            .get(&key)
+            .ok_or(ControlError::Conflict("Signaling setup ended"))?;
         let reused = reusable_candidate(resolved.peers(), local, |peer| {
-            self.ports
-                .get(&(key.listener, peer))
-                .filter(|port| preparation.matches_flow(port))
+            self.peer_ports(key.listener, peer)
+                .find(|port| preparation.matches_flow(port))
                 .map(|port| port.key)
         })?;
         if let Some(connection) = reused {
@@ -389,13 +392,11 @@ impl Network {
         if *preparation.stop.borrow() || prepared.reply.is_closed() {
             return Err(ControlError::Conflict("Signaling setup cancelled"));
         }
-        if let Some(port) = self.ports.get(&(prepared.key.listener, prepared.peer)) {
-            if !preparation.matches_flow(port) {
-                return Err(ControlError::Conflict(
-                    "Signaling peer belongs to a different flow identity",
-                ));
-            }
-            let key = port.key;
+        let matching = self
+            .peer_ports(prepared.key.listener, prepared.peer)
+            .find(|port| preparation.matches_flow(port))
+            .map(|port| port.key);
+        if let Some(key) = matching {
             match prepared.reply {
                 PreparedReply::Candidate(reply) => reply
                     .send(CandidateDecision::Reuse)
@@ -425,7 +426,7 @@ impl Network {
         let (packets, receiver) = mpsc::channel(8);
         let stopped = preparation.stop.subscribe();
         self.ports.insert(
-            (key.listener, key.peer),
+            key,
             Port {
                 key,
                 packets,
@@ -443,7 +444,7 @@ impl Network {
             })
             .is_err()
         {
-            self.ports.remove(&(key.listener, key.peer));
+            self.ports.remove(&key);
             return Err(ControlError::Conflict("Signaling setup owner closed"));
         }
         self.setups.remove(&prepared.key);
@@ -472,7 +473,7 @@ impl Network {
                     })
                     .map(|port| port.key);
                 flow.map(|flow| {
-                    self.ports.remove(&(flow.listener, flow.peer));
+                    self.ports.remove(&flow);
                     super::Input::Closed { key: flow, result }
                 })
             }

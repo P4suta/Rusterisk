@@ -26,7 +26,7 @@ async fn captured_stream_routes_keep_their_connection_generation_across_many_pac
         assert!(network.send_on(route, packet(peer, bytes)).await?);
         assert_eq!(previous.packets.try_recv().map_err(failure)?, bytes);
     }
-    network.ports.remove(&(0, peer));
+    network.ports.remove(&previous.key);
     let mut current = network.reserve(0, peer)?;
     assert!(!network.send_on(route, packet(peer, b"stale")).await?);
     assert!(matches!(
@@ -49,7 +49,7 @@ async fn missing_or_closing_route_captures_never_attach_to_replacement_connectio
             let previous = network.reserve(0, peer)?;
             network
                 .ports
-                .get_mut(&(0, peer))
+                .get_mut(&previous.key)
                 .ok_or(ControlError::Capacity)?
                 .state = ConnectionState::Closing(ControlError::Capacity);
             Some(previous)
@@ -59,7 +59,9 @@ async fn missing_or_closing_route_captures_never_attach_to_replacement_connectio
         let route = network.capture(0, peer)?;
         assert_eq!(route.listener(), 0);
         assert_eq!(route.peer(), peer);
-        network.ports.remove(&(0, peer));
+        if let Some(previous) = &previous {
+            network.ports.remove(&previous.key);
+        }
         drop(previous);
         let mut replacement = network.reserve(0, peer)?;
         assert!(!network.send_on(route, packet(peer, b"old")).await?);
@@ -91,7 +93,7 @@ async fn captured_routes_reject_peer_changes_and_oversize_packets_before_deliver
         Err(ControlError::Capacity)
     ));
     assert!(matches!(
-        network.ports.get(&(0, peer)).map(|port| &port.state),
+        network.ports.get(&connection.key).map(|port| &port.state),
         Some(ConnectionState::Open)
     ));
     assert!(matches!(

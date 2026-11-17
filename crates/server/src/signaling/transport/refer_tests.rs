@@ -205,7 +205,7 @@ async fn cached_reply_flow(usage: Usage) -> Result<(), ControlError> {
             .map_err(failure)?;
         signaling.output(0, replay, 10).await?;
         status(&original.packets.try_recv().map_err(failure)?, 202)?;
-        signaling.network.ports.remove(&(0, peer));
+        signaling.network.ports.remove(&original.key);
         let mut replacement = signaling.network.reserve(0, peer)?;
         let target = "unrelated-target";
         let started = signaling.listeners[0].engine.originate(Outbound {

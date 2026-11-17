@@ -72,17 +72,15 @@ async fn output_saturation_closes_only_the_owning_connection_generation() -> Res
     peer.write_all(OPTIONS).await.map_err(failure)?;
     assert!(matches!(network.next().await?, Input::Packet(_)));
     let key = network
-        .ports
-        .get(&(0, source))
-        .ok_or(ControlError::Capacity)?
-        .key;
+        .legacy_connection(0, source)?
+        .ok_or(ControlError::Capacity)?;
     for _ in 0..9 {
         network
             .send(0, Datagram::new(source, OPTIONS.to_vec()))
             .await?;
     }
     assert!(matches!(
-        network.ports.get(&(0, source)).map(|port| &port.state),
+        network.ports.get(&key).map(|port| &port.state),
         Some(ConnectionState::Closing(_))
     ));
     let Input::Closed {
@@ -106,7 +104,7 @@ async fn delayed_packets_and_completions_cannot_close_a_replacement_generation(
     let mut network = network().await?;
     let peer = "127.0.0.1:5061".parse().map_err(failure)?;
     let Reserved { key: previous, .. } = network.reserve(0, peer)?;
-    network.ports.remove(&(0, peer));
+    network.ports.remove(&previous);
     let Reserved {
         key: current,
         packets,
@@ -142,7 +140,7 @@ async fn delayed_packets_and_completions_cannot_close_a_replacement_generation(
     assert_eq!(
         network
             .ports
-            .get(&(0, peer))
+            .get(&current)
             .ok_or(ControlError::Capacity)?
             .key,
         current

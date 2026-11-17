@@ -7,6 +7,8 @@ use hickory_resolver::proto::rr::Name;
 use rusterisk_config::{Config, Protocol, RegistrarUri, RegistrationAddress, RegistrationUriError};
 use std::num::NonZeroU64;
 
+mod coexisting_flows;
+
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
 }
@@ -127,7 +129,7 @@ async fn admission(case: Case, kind: AdmissionKind) -> Result<(), ControlError> 
         let port = fixture
             .network
             .ports
-            .get_mut(&(0, peer))
+            .get_mut(&existing)
             .ok_or(ControlError::Capacity)?;
         port.identity = Some("provider.test".into());
         port.tls_profile = Some(profile);
@@ -184,7 +186,7 @@ async fn admission(case: Case, kind: AdmissionKind) -> Result<(), ControlError> 
                 fixture
                     .network
                     .ports
-                    .get_mut(&(0, peer))
+                    .get_mut(&existing)
                     .ok_or(ControlError::Capacity)?
                     .state =
                     super::ConnectionState::Closing(ControlError::Conflict("Stream closing"));
@@ -194,7 +196,7 @@ async fn admission(case: Case, kind: AdmissionKind) -> Result<(), ControlError> 
                 fixture
                     .network
                     .ports
-                    .get(&(0, peer))
+                    .get(&existing)
                     .ok_or(ControlError::Capacity)?
                     .stop
                     .send_replace(true);
@@ -240,13 +242,22 @@ async fn admission(case: Case, kind: AdmissionKind) -> Result<(), ControlError> 
             peer,
             reply,
         });
-        let matches = matches!(
+        let reuse = matches!(
             case,
             Case::Matching | Case::EquivalentDomain | Case::CapturedBeforeReplacement
         );
+        let rejected = matches!(case, Case::Cancelled | Case::Stale | Case::ClosedReply);
+        let mut admitted_owners = None;
         match result {
-            Ok(ConnectionAdmission::Ready(key)) if matches && key == existing => {}
-            Err(ControlError::Conflict(_)) if !matches => {}
+            Ok(ConnectionAdmission::Ready(key)) if reuse && key == existing => {}
+            Ok(ConnectionAdmission::Ready(key))
+                if !reuse
+                    && !rejected
+                    && key != existing
+                    && matches!(kind, AdmissionKind::Connected) => {}
+            Ok(ConnectionAdmission::Continue)
+                if !reuse && !rejected && matches!(kind, AdmissionKind::Candidate) => {}
+            Err(ControlError::Conflict(_)) if rejected => {}
             Ok(key) => {
                 return Err(ControlError::Adapter(format!(
                     "TLS profile {case:?} reused unexpected connection {key:?}"
@@ -258,24 +269,35 @@ async fn admission(case: Case, kind: AdmissionKind) -> Result<(), ControlError> 
                 )))
             }
         }
-        if matches {
+        if !rejected {
             match receiver.as_mut().ok_or(ControlError::Capacity)? {
                 ReplyReceiver::Candidate(receiver) => match receiver.try_recv().map_err(failure)? {
-                    CandidateDecision::Reuse => {}
-                    CandidateDecision::Connect => {
+                    CandidateDecision::Reuse if reuse => {}
+                    CandidateDecision::Connect if !reuse => {}
+                    CandidateDecision::Reuse | CandidateDecision::Connect => {
                         return Err(ControlError::Invalid(
-                            "Matching candidate opened another flow",
+                            "TLS candidate changed its verified reuse decision",
                         ));
                     }
                 },
                 ReplyReceiver::Connected(receiver) => {
-                    if !matches!(
-                        receiver.try_recv(),
-                        Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-                    ) {
-                        return Err(ControlError::Invalid(
-                            "Matching connection received another reservation",
-                        ));
+                    if reuse {
+                        if !matches!(
+                            receiver.try_recv(),
+                            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+                        ) {
+                            return Err(ControlError::Invalid(
+                                "Matching connection received another reservation",
+                            ));
+                        }
+                    } else {
+                        let admitted = receiver.try_recv().map_err(failure)?;
+                        if admitted.key == existing || admitted.key.generation != setup.generation {
+                            return Err(ControlError::Invalid(
+                                "New TLS connection changed its reserved generation",
+                            ));
+                        }
+                        admitted_owners = Some(admitted);
                     }
                 }
             }
@@ -283,13 +305,14 @@ async fn admission(case: Case, kind: AdmissionKind) -> Result<(), ControlError> 
         let port = fixture
             .network
             .ports
-            .get(&(0, peer))
+            .get(&existing)
             .ok_or(ControlError::Capacity)?;
         if port.key != existing || *port.stop.borrow() != matches!(case, Case::Stopped) {
             return Err(ControlError::Invalid(
-                "Rejected preparation changed the admitted flow",
+                "TLS preparation changed the previous flow",
             ));
         }
+        drop(admitted_owners);
         Ok(())
     }
     .await;
@@ -297,7 +320,7 @@ async fn admission(case: Case, kind: AdmissionKind) -> Result<(), ControlError> 
 }
 
 #[tokio::test]
-async fn prepared_tls_profiles_reject_replaced_settings_and_preserve_admitted_flow_ownership(
+async fn prepared_tls_profiles_preserve_existing_owners_and_admit_distinct_verified_flows(
 ) -> Result<(), ControlError> {
     for case in CASES {
         admission(case, AdmissionKind::Connected).await?;

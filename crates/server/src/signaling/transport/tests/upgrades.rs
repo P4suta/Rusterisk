@@ -58,10 +58,8 @@ async fn expired_upgrade_senders_cannot_attach_to_a_replacement_generation(
     let replacement = network.upgrade(Scheme::Ws, peer)?;
     assert!(
         network
-            .ports
-            .get(&(0, peer))
+            .legacy_connection(0, peer)?
             .ok_or(ControlError::Capacity)?
-            .key
             .generation
             > previous.generation
     );

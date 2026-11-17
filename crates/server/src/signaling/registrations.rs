@@ -711,7 +711,7 @@ impl Signaling {
                     SetupLifetime::Configuration(completed.lease),
                 ) {
                     Ok(ConnectionSetup::Reused(connection)) => {
-                        let route = self.network.capture(connection.listener, connection.peer)?;
+                        let route = self.network.capture_connection(connection)?;
                         client.state = State::Ready {
                             at: now,
                             route: Route::Stream(route),
@@ -762,7 +762,7 @@ impl Signaling {
         match self.network.admit_prepared(prepared) {
             Ok(ConnectionAdmission::Continue) => {}
             Ok(ConnectionAdmission::Ready(connection)) => {
-                let route = self.network.capture(connection.listener, connection.peer)?;
+                let route = self.network.capture_connection(connection)?;
                 client.state = State::Ready {
                     at: now,
                     route: Route::Stream(route),

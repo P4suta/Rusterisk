@@ -85,13 +85,16 @@ async fn registered_routes_reject_closing_and_replaced_connection_generations(
     assert!(matches!(network.next().await?, Input::Packet(_)));
     let previous = network.registered_route(0, source)?;
     assert!(network.route_is_current(previous));
-    network.refuse(0, source);
+    network.refuse(network.capture(0, source)?);
     assert!(!network.route_is_current(previous));
     assert!(matches!(
         network.registered_route(0, source),
         Err(ControlError::Conflict(_))
     ));
-    network.ports.remove(&(0, source));
+    let key = network
+        .legacy_connection(0, source)?
+        .ok_or(ControlError::Capacity)?;
+    network.ports.remove(&key);
     let Reserved { packets, stop, .. } = network.reserve(0, source)?;
     let current = network.registered_route(0, source)?;
     assert!(!network.route_is_current(previous));
