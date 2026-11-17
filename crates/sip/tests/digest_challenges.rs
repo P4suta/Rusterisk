@@ -292,3 +292,5 @@ fn alternating_authentication_scopes_renew_the_existing_nonce_count_and_entity_d
     }
     Ok(())
 }
+#[path = "digest_challenges/starting_profile.rs"]
+mod starting_profile;

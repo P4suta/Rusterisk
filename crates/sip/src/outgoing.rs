@@ -3,13 +3,16 @@ use crate::{
     Session, SessionSecurity, SipError, SipEvent,
 };
 use rsipstack::sip::{
-    headers::untyped::ToTypedHeader, Header, HeadersExt, Method, Request, Response, SipMessage, Uri,
+    headers::untyped::ToTypedHeader, Header, HeadersExt, Method, Request, Response, SipMessage,
 };
 use rusterisk_config::{Auth, Codec, Protocol};
 use std::net::SocketAddr;
 mod forked;
+mod profile;
 pub use forked::ForkTeardownFailure;
 pub(crate) use forked::Forks;
+pub use profile::{OutboundProfile, PreparedOutbound};
+use profile::{RouteSelection, SelectedOutbound};
 
 pub struct Outbound {
     pub id: String,
@@ -18,6 +21,13 @@ pub struct Outbound {
     pub caller: String,
     pub local_rtp: SocketAddr,
     pub timeout_ms: Option<u64>,
+}
+
+struct ValidatedOutbound {
+    outbound: Outbound,
+    deadline: Option<u64>,
+    transaction_deadline: u64,
+    now: u64,
 }
 
 enum State {
@@ -594,6 +604,48 @@ impl Engine {
         sdp: Option<&str>,
         now: u64,
     ) -> Result<Output, SipError> {
+        let request = self.validate_outbound(outbound, now)?;
+        let profile = OutboundProfile::capture(&self.config, &request.outbound.endpoint)?;
+        let selection = match resolved_peer {
+            Some(_) => RouteSelection::Static,
+            None => RouteSelection::RegisteredFirst,
+        };
+        let selected = profile.select(&self.contacts, selection, now)?;
+        self.originate_selected(request, selected, resolved_peer, sdp)
+    }
+
+    pub fn prepare_outbound(
+        &self,
+        profile: OutboundProfile,
+        now: u64,
+    ) -> Result<PreparedOutbound, SipError> {
+        profile
+            .select(&self.contacts, RouteSelection::RegisteredFirst, now)?
+            .prepare()
+    }
+
+    pub fn originate_prepared(
+        &mut self,
+        outbound: Outbound,
+        prepared: PreparedOutbound,
+        resolved_peer: Option<SocketAddr>,
+        description: Option<&crate::WebRtcDescription>,
+        now: u64,
+    ) -> Result<Output, SipError> {
+        let request = self.validate_outbound(outbound, now)?;
+        self.originate_selected(
+            request,
+            prepared.into_selected(),
+            resolved_peer,
+            description.map(crate::WebRtcDescription::as_str),
+        )
+    }
+
+    fn validate_outbound(
+        &self,
+        outbound: Outbound,
+        now: u64,
+    ) -> Result<ValidatedOutbound, SipError> {
         if self.outgoing.len() >= 64
             || outbound.id.is_empty()
             || outbound.id.len() > 128
@@ -620,13 +672,33 @@ impl Engine {
             .map(|timeout| now.checked_add(timeout).ok_or(SipError::Capacity))
             .transpose()?;
         let transaction_deadline = now.checked_add(32_000).ok_or(SipError::Capacity)?;
-        let endpoint = self
-            .config
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.name == outbound.endpoint)
-            .ok_or(SipError::InvalidPacket)?
-            .clone();
+        Ok(ValidatedOutbound {
+            outbound,
+            deadline,
+            transaction_deadline,
+            now,
+        })
+    }
+
+    fn originate_selected(
+        &mut self,
+        validated: ValidatedOutbound,
+        selected: SelectedOutbound,
+        resolved_peer: Option<SocketAddr>,
+        sdp: Option<&str>,
+    ) -> Result<Output, SipError> {
+        let ValidatedOutbound {
+            outbound,
+            deadline,
+            transaction_deadline,
+            now,
+        } = validated;
+        if outbound.endpoint != selected.profile.endpoint.name {
+            return Err(SipError::InvalidPacket);
+        }
+        let peer = selected.peer(resolved_peer)?;
+        let profile = selected.profile;
+        let endpoint = profile.endpoint;
         if endpoint.webrtc != sdp.is_some() {
             return Err(SipError::Unsupported);
         }
@@ -640,34 +712,11 @@ impl Engine {
         } else {
             SessionSecurity::Rtp
         };
-        let transport = self
-            .config
-            .transports
-            .iter()
-            .find(|transport| transport.name == endpoint.transport)
-            .ok_or(SipError::InvalidPacket)?;
-        let registered = self.contacts.best(&endpoint.aors, now);
-        let contact = self
-            .config
-            .aors
-            .iter()
-            .filter(|aor| endpoint.aors.contains(&aor.name))
-            .find_map(|aor| aor.contact.as_deref());
-        let uri = match (resolved_peer, registered, contact) {
-            (Some(_), _, Some(contact)) | (None, None, Some(contact)) => Uri::try_from(contact)?,
-            (None, Some(contact), _) => contact.contact.uri().clone(),
-            (Some(_), _, None) | (None, None, None) => return Err(SipError::InvalidPacket),
-        };
-        let peer = match resolved_peer.or(registered.map(|contact| contact.peer)) {
-            Some(peer) => peer,
-            None => uri.host_with_port.to_string().parse::<SocketAddr>()?,
-        };
-        if peer.port() == 0 || peer.ip().is_unspecified() || peer.ip().is_multicast() {
-            return Err(SipError::InvalidPacket);
-        }
+        let transport = profile.transport;
+        let uri = selected.uri;
         let signaling = transport.bind;
         let protocol = transport.protocol;
-        let uri_security = crate::transport::UriSecurity::target(protocol, &uri)?;
+        let uri_security = selected.security;
         let token = self.token()?;
         let body = match sdp {
             Some(sdp) => sdp.to_owned(),
@@ -688,7 +737,7 @@ impl Engine {
         let invite = request(&bytes)?;
         let call_id = invite.call_id_header()?.value().to_owned();
         let dialog = Outgoing {
-            authority: crate::ReferAuthority::configured_peer(&endpoint),
+            authority: profile.authority,
             id: outbound.id,
             generation: outbound.generation,
             peer,
@@ -708,12 +757,7 @@ impl Engine {
             },
             cseq: 1,
             remote_cseq: None,
-            credentials: endpoint
-                .outbound_auth
-                .iter()
-                .filter_map(|name| self.config.auth.iter().find(|auth| &auth.name == name))
-                .cloned()
-                .collect(),
+            credentials: profile.credentials,
             challenges: Vec::new(),
             origin_encoding: crate::digest::CredentialEncoding::Unspecified,
             proxy_encoding: crate::digest::CredentialEncoding::Unspecified,

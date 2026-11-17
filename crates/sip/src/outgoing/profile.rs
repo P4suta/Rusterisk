@@ -1,0 +1,205 @@
+use crate::{
+    registrar::Bindings, transport::UriSecurity, Destination, ReferAuthority, SipError,
+    StaticTarget,
+};
+use rsipstack::sip::Uri;
+use rusterisk_config::{Auth, Config, Endpoint, Transport};
+use std::net::SocketAddr;
+
+const MAX_VALUE_BYTES: usize = 4096;
+const MAX_REFERENCES: usize = 4096;
+const MAX_CREDENTIALS: usize = 8;
+
+pub struct OutboundProfile {
+    pub(super) endpoint: Endpoint,
+    pub(super) transport: Transport,
+    pub(super) credentials: Vec<Auth>,
+    pub(super) authority: ReferAuthority,
+    contact: Option<Uri>,
+}
+
+pub struct PreparedOutbound {
+    selected: SelectedOutbound,
+    destination: Destination,
+}
+
+pub(super) enum RouteSelection {
+    RegisteredFirst,
+    Static,
+}
+
+#[derive(Clone, Copy)]
+enum SelectedRoute {
+    Registered(SocketAddr),
+    Static,
+}
+
+pub(super) struct SelectedOutbound {
+    pub(super) profile: OutboundProfile,
+    pub(super) uri: Uri,
+    pub(super) security: UriSecurity,
+    route: SelectedRoute,
+}
+
+impl OutboundProfile {
+    pub fn capture(config: &Config, endpoint: &str) -> Result<Self, SipError> {
+        let endpoint = config
+            .endpoints
+            .iter()
+            .find(|candidate| candidate.name == endpoint)
+            .ok_or(SipError::InvalidPacket)?;
+        let transport = config
+            .transports
+            .iter()
+            .find(|transport| transport.name == endpoint.transport)
+            .ok_or(SipError::InvalidPacket)?;
+        check_settings(endpoint, transport)?;
+        let mut credentials = Vec::with_capacity(endpoint.outbound_auth.len());
+        for name in &endpoint.outbound_auth {
+            let auth = config
+                .auth
+                .iter()
+                .find(|auth| &auth.name == name)
+                .ok_or(SipError::InvalidPacket)?;
+            for value in [&auth.name, &auth.username, &auth.realm] {
+                check_value(value)?;
+            }
+            check_value(auth.password.expose())?;
+            credentials.push(auth.clone());
+        }
+        let contact = config
+            .aors
+            .iter()
+            .filter(|aor| endpoint.aors.contains(&aor.name))
+            .find_map(|aor| aor.contact.as_deref())
+            .map(|contact| {
+                if contact.len() > 2048 {
+                    return Err(SipError::Capacity);
+                }
+                Uri::try_from(contact).map_err(SipError::from)
+            })
+            .transpose()?;
+        Ok(Self {
+            endpoint: endpoint.clone(),
+            transport: transport.clone(),
+            credentials,
+            authority: ReferAuthority::configured_peer(endpoint),
+            contact,
+        })
+    }
+
+    pub(super) fn select(
+        self,
+        contacts: &Bindings,
+        selection: RouteSelection,
+        now: u64,
+    ) -> Result<SelectedOutbound, SipError> {
+        let registered = match selection {
+            RouteSelection::RegisteredFirst => contacts.best(&self.endpoint.aors, now),
+            RouteSelection::Static => None,
+        };
+        let (uri, route) = match registered {
+            Some(binding) => (
+                binding.contact.uri().clone(),
+                SelectedRoute::Registered(binding.peer),
+            ),
+            None => (
+                self.contact.clone().ok_or(SipError::InvalidPacket)?,
+                SelectedRoute::Static,
+            ),
+        };
+        let security = UriSecurity::target(self.transport.protocol, &uri)?;
+        Ok(SelectedOutbound {
+            profile: self,
+            uri,
+            security,
+            route,
+        })
+    }
+}
+
+impl SelectedOutbound {
+    pub(super) fn prepare(self) -> Result<PreparedOutbound, SipError> {
+        let destination = match self.route {
+            SelectedRoute::Registered(peer) => Destination::Registered(peer),
+            SelectedRoute::Static => Destination::Static(StaticTarget::from_uri(
+                self.profile.transport.protocol,
+                &self.uri.to_string(),
+            )?),
+        };
+        Ok(PreparedOutbound {
+            selected: self,
+            destination,
+        })
+    }
+
+    pub(super) fn peer(&self, resolved: Option<SocketAddr>) -> Result<SocketAddr, SipError> {
+        let peer = match (&self.route, resolved) {
+            (SelectedRoute::Registered(peer), None) => *peer,
+            (SelectedRoute::Registered(_), Some(_)) => return Err(SipError::InvalidPacket),
+            (SelectedRoute::Static, Some(peer)) => peer,
+            (SelectedRoute::Static, None) => {
+                self.uri.host_with_port.to_string().parse::<SocketAddr>()?
+            }
+        };
+        if peer.port() == 0 || peer.ip().is_unspecified() || peer.ip().is_multicast() {
+            return Err(SipError::InvalidPacket);
+        }
+        Ok(peer)
+    }
+}
+
+impl PreparedOutbound {
+    pub fn destination(&self) -> &Destination {
+        &self.destination
+    }
+
+    pub(super) fn into_selected(self) -> SelectedOutbound {
+        self.selected
+    }
+}
+
+fn check_value(value: &str) -> Result<(), SipError> {
+    if value.len() > MAX_VALUE_BYTES {
+        return Err(SipError::Capacity);
+    }
+    Ok(())
+}
+
+fn check_settings(endpoint: &Endpoint, transport: &Transport) -> Result<(), SipError> {
+    if endpoint.outbound_auth.len() > MAX_CREDENTIALS
+        || endpoint.aors.len() > MAX_REFERENCES
+        || endpoint.codecs.len() > MAX_REFERENCES
+    {
+        return Err(SipError::Capacity);
+    }
+    for references in [&endpoint.aors, &endpoint.outbound_auth] {
+        references.iter().try_fold(0usize, |total, value| {
+            total
+                .checked_add(value.len())
+                .filter(|bytes| *bytes <= MAX_VALUE_BYTES)
+                .ok_or(SipError::Capacity)
+        })?;
+    }
+    for value in [
+        &endpoint.name,
+        &endpoint.transport,
+        &endpoint.auth,
+        &endpoint.context,
+        &transport.name,
+    ]
+    .into_iter()
+    .chain(&endpoint.aors)
+    .chain(&endpoint.outbound_auth)
+    {
+        check_value(value)?;
+    }
+    if let Some(path) = &transport.ca_list_file {
+        check_value(path)?;
+    }
+    if let Some(files) = &transport.tls {
+        check_value(&files.certificate)?;
+        check_value(&files.private_key)?;
+    }
+    Ok(())
+}

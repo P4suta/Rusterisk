@@ -32,7 +32,7 @@ pub use contact::{
 };
 pub use destination::{Destination, StaticTarget, TargetHost};
 pub use incoming::RejectReason;
-pub use outgoing::{ForkTeardownFailure, Outbound};
+pub use outgoing::{ForkTeardownFailure, Outbound, OutboundProfile, PreparedOutbound};
 pub use registration_client::{
     RegistrationAuthentication, RegistrationGrant, RegistrationIdentity, RegistrationResponse,
     RegistrationTransaction, RegistrationTransactionEvent,
