@@ -19,7 +19,7 @@ fn mutation_uses_the_authoritative_source_manifest_and_test_inventory() -> io::R
         assert_eq!(captured.targets(), shared.targets());
         assert_eq!(captured.tests(), shared.tests());
         assert_eq!(captured.targets().len(), 24);
-        assert_eq!(captured.tests().len(), 69);
+        assert_eq!(captured.tests().len(), 70);
         let plan = crate::core_mutation::plan(IMAGE).map_err(io::Error::other)?;
         for phase in PHASES {
             assert!(plan
@@ -48,7 +48,7 @@ fn mutation_completion_requires_generated_and_both_supplementary_native_results(
         });
         let outcome = finish(checked, Ok(())).map_err(io::Error::other)?;
         assert_eq!(outcome.image(), IMAGE);
-        assert_eq!(outcome.test_count(), 69);
+        assert_eq!(outcome.test_count(), 70);
         assert_eq!(
             SourceInputs::new(outcome.inputs())
                 .map_err(io::Error::other)?
