@@ -7,16 +7,16 @@ status: proposed
 
 ## Context
 
-The fixture uses `projectService: true`.
+The comparison fixture and browser example use `projectService: true`.
 [The pinned parser bypasses glob project resolution](https://github.com/typescript-eslint/typescript-eslint/blob/v8.72.2/packages/typescript-estree/src/parseSettings/createParseSettings.ts#L210-L218).
 Its glob resolver brings [unpatched picomatch repetition](https://github.com/advisories/GHSA-fc5q-39xc-vjpf).
 
 ## Decision
 
-Replace that dependency with a private fixture-owned adapter.
+Replace that dependency with one private adapter shared by both fixtures.
 Export `isDynamicPattern` and `globSync`, throwing an identifiable unsupported error whenever invoked.
 Preserve typed linting and its rejecting fixtures.
-Require `projectService: true` and reject `parserOptions.project` in the fixture profile.
+Require `projectService: true` and reject `parserOptions.project` in both fixture profiles.
 Validate the exact local path, manifest, runtime resolution, bounded source inventory, and captured sources through maintained gates.
 Keep existing advisory allowances unchanged.
 
@@ -35,4 +35,5 @@ Reconsider after an upstream release passes equivalent checks.
 
 ## Confirmation
 
-Require clean installation, unchanged semantic lint rejection, adapter-call rejection, tampering and redirected-link rejection, complete source capture, and audit restricted to the existing nine legacy packages.
+Require clean installation, unchanged semantic lint rejection, adapter-call rejection, tampering and redirected-link rejection, and complete source capture.
+Restrict comparison audit findings to the existing nine legacy packages and require no browser audit findings.
