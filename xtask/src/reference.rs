@@ -6,6 +6,7 @@ mod comparison;
 mod comparison_tests;
 mod configuration;
 mod interop;
+mod music;
 #[cfg(unix)]
 mod resources;
 mod runner;
@@ -18,6 +19,7 @@ pub use interop::{
     callback_address, media_address, published_address, CallbackHost, Interop, SipTransferCase,
     SippAdapter,
 };
+pub use music::{prepare_music_fixture, ReferenceMusicFixture};
 pub(crate) use runner::ReferenceRunner;
 #[cfg(unix)]
 pub use sipp_comparison::{compare_sipp_registrations_with, SippRegistrationComparison};
