@@ -1106,12 +1106,20 @@ fn candidate_scope(first_owner: u128, second_owner: u128) -> Result<(), Settings
     second.cancel(cancelled)?;
     let selected = second.prepare()?;
     let current = second.current();
+    assert!(foreign.follows(first.current()));
+    assert!(selected.follows(current));
+    assert!(!foreign.follows(current));
+    assert!(!current.matches_candidate(selected));
     for rejected in [foreign, cancelled] {
         assert!(second.cancel(rejected).is_err());
         assert!(second.commit(rejected).is_err());
         assert_eq!(second.current(), current);
     }
     let published = second.commit(selected)?;
+    assert!(published.generation().matches_candidate(selected));
+    assert!(!published.generation().matches_candidate(cancelled));
+    assert!(!published.generation().matches_candidate(foreign));
+    assert!(!selected.follows(published.generation()));
     assert_eq!(second.current(), published.generation());
     assert!(second.slot(current).is_err());
     first.cancel(foreign)?;
