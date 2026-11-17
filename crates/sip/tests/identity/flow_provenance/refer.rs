@@ -64,6 +64,13 @@ fn refer_origin_and_cached_acceptance_keep_their_independent_flow() -> Result<()
         assert_eq!(first(&foreign)?.origin(), DatagramOrigin::Direct);
         assert!(foreign.events.is_empty());
         let requested = refer(engine.receive_on_flow(wire.as_bytes(), PEER, original, 5)?)?;
+        assert_eq!(
+            engine
+                .refer_identity(requested.key())
+                .ok_or(SipError::InvalidPacket)?
+                .flow(),
+            Some(original)
+        );
         let accepted = engine.refer_progress(requested.key(), ReferProgress::Trying, 6)?;
         scoped(&accepted, original);
         assert_eq!(accepted.datagrams.len(), 2);
@@ -119,6 +126,20 @@ fn notification_receipts_and_disconnect_release_only_their_own_flow() -> Result<
         let second_refer =
             refer(engine.receive_on_flow(second_wire.as_bytes(), PEER, another, 9)?)?;
         assert_ne!(first_refer.key(), second_refer.key());
+        assert_eq!(
+            engine
+                .refer_identity(first_refer.key())
+                .ok_or(SipError::InvalidPacket)?
+                .flow(),
+            Some(original)
+        );
+        assert_eq!(
+            engine
+                .refer_identity(second_refer.key())
+                .ok_or(SipError::InvalidPacket)?
+                .flow(),
+            Some(another)
+        );
         let accepted = engine.refer_progress(first_refer.key(), ReferProgress::Trying, 10)?;
         scoped(&accepted, original);
         engine.receive_on_flow(

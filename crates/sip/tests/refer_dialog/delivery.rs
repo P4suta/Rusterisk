@@ -20,6 +20,7 @@ fn delivery_identity_matches_only_its_peer_dialog_and_refer_sequence() -> Result
         .refer_identity(requested.key())
         .ok_or(SipError::InvalidPacket)?;
     assert_eq!(identity.peer(), fixture.peer);
+    assert_eq!(identity.flow(), None);
     let local_tag = format!(
         "tag={}",
         fixture
