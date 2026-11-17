@@ -14,11 +14,12 @@ Registration routing keeps only the selected peer.
 
 Keep at most eight resolved candidates for User Datagram Protocol (UDP) registration.
 Advance only after a checked 503.
-Keep eight peer retry deadlines per client across success, exhaustion, and resolution changes.
-Reserve capacity before selecting another peer.
+Keep eight peer deadlines per client across success, exhaustion, and resolution changes.
+Reserve capacity before peer selection.
 Wait when full.
 Never evict unexpired deadlines.
-Preserve Request-URI, Call-ID, From-tag, and Contact while changing the branch and incrementing CSeq as [REGISTER requires](https://www.rfc-editor.org/rfc/rfc3261.html#section-10.2).
+Preserve Request-URI, Call-ID, From-tag, and Contact as project policy.
+Use fresh branches and increasing CSeq under [RFC 3261 §10.2](https://www.rfc-editor.org/rfc/rfc3261.html#section-10.2).
 Keep original Domain Name System (DNS) deadlines and cacheability distinct from transaction deadlines.
 Keep starting settings, configuration leases, and cancellation checks.
 Preserve sixteen registrations, sixteen shared setups, and sixty-four connections.
