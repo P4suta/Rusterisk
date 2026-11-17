@@ -1,5 +1,8 @@
 use rusterisk_media::{AudioTarget, Frame, Gate, MediaError, Mixer};
 
+#[path = "mixing/music.rs"]
+mod music;
+
 fn frame(value: i16) -> Result<Frame, MediaError> {
     Frame::new(&[value; 960], 48000)
 }

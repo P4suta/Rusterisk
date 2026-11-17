@@ -142,7 +142,20 @@ impl<K: Ord + Clone> Mixer<K> {
         &mut self,
         playback: &[(AudioTarget<K>, Frame)],
     ) -> Result<MixedAudio<K>, MediaError> {
-        if playback.len() > 64 {
+        self.tick_with_music(playback, &[])
+    }
+
+    pub fn tick_with_music(
+        &mut self,
+        playback: &[(AudioTarget<K>, Frame)],
+        music: &[(K, Gate, Frame)],
+    ) -> Result<MixedAudio<K>, MediaError> {
+        if playback
+            .len()
+            .checked_add(music.len())
+            .filter(|count| *count <= 64)
+            .is_none()
+        {
             return Err(MediaError::Capacity);
         }
         for (target, frame) in playback {
@@ -154,6 +167,23 @@ impl<K: Ord + Clone> Mixer<K> {
                     return Err(MediaError::UnknownStream)
                 }
                 AudioTarget::Channel(_) | AudioTarget::Bridge(_) => {}
+            }
+        }
+        if music
+            .iter()
+            .map(|(key, _, _)| key)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != music.len()
+        {
+            return Err(MediaError::InvalidRoute);
+        }
+        for (key, _, frame) in music {
+            if frame.rate() != 48000 || frame.samples().len() != MAX_SAMPLES {
+                return Err(MediaError::InvalidFrame);
+            }
+            if !self.inputs.contains_key(key) {
+                return Err(MediaError::UnknownStream);
             }
         }
         let frames: Vec<_> = self
@@ -172,26 +202,35 @@ impl<K: Ord + Clone> Mixer<K> {
         let mut output = Vec::with_capacity(frames.len());
         for (key, bridge, gate, _) in &frames {
             let mut sum = [0i32; MAX_SAMPLES];
-            if bridge.is_some() && gate.sends() {
-                for (source, source_bridge, _, frame) in &frames {
-                    if source != key && source_bridge == bridge {
-                        if let Some(frame) = frame {
-                            for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
-                                *sum += i32::from(*sample);
+            if let Some((_, music_gate, frame)) = music.iter().find(|(target, _, _)| target == key)
+            {
+                if music_gate.sends() {
+                    for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
+                        *sum = i32::from(*sample);
+                    }
+                }
+            } else {
+                if bridge.is_some() && gate.sends() {
+                    for (source, source_bridge, _, frame) in &frames {
+                        if source != key && source_bridge == bridge {
+                            if let Some(frame) = frame {
+                                for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
+                                    *sum += i32::from(*sample);
+                                }
                             }
                         }
                     }
                 }
-            }
-            if gate.sends() {
-                for (target, frame) in playback {
-                    let matches = match target {
-                        AudioTarget::Channel(destination) => destination == key,
-                        AudioTarget::Bridge(destination) => Some(*destination) == *bridge,
-                    };
-                    if matches {
-                        for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
-                            *sum += i32::from(*sample);
+                if gate.sends() {
+                    for (target, frame) in playback {
+                        let matches = match target {
+                            AudioTarget::Channel(destination) => destination == key,
+                            AudioTarget::Bridge(destination) => Some(*destination) == *bridge,
+                        };
+                        if matches {
+                            for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
+                                *sum += i32::from(*sample);
+                            }
                         }
                     }
                 }
