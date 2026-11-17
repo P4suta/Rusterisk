@@ -9,6 +9,7 @@ use crate::{
 #[derive(Clone, Copy, kani::Arbitrary)]
 enum Input {
     Ring,
+    AdmitEarly,
     Answer,
     Cancel,
     Hangup,
@@ -48,6 +49,47 @@ fn input(call: Call, operation: Input) -> Call {
     let app = StasisApplication::new(1);
     let result = match operation {
         Input::Ring => Ok(call.apply(CallEvent::Ring).call()),
+        Input::AdmitEarly => {
+            let admitted = call.admit_early_media();
+            assert_eq!(admitted.is_ok(), call.state() == CallState::Ringing);
+            match admitted {
+                Ok(early) => {
+                    assert_eq!(early.state(), CallState::Ringing);
+                    assert_eq!(early.media(), MediaState::Early);
+                    assert_eq!(early.generation(), call.generation());
+                    assert_eq!(early.media_connection(), call.media_connection());
+                    assert_eq!(early.connection_claim(), call.connection_claim());
+                    assert_eq!(early.mute, call.mute);
+                    assert_eq!(early.peer_direction(), call.peer_direction());
+                    assert_eq!(early.bridge(), call.bridge());
+                    assert_eq!(early.stasis(), call.stasis());
+                    assert_eq!(early.audio_gate(), AudioGate::Closed);
+                    assert_eq!(
+                        early.generated_audio_gate(),
+                        call.peer_direction.restrict(call.mute)
+                    );
+                    assert_eq!(early.admit_early_media(), Ok(early));
+                    let answered = early.apply(CallEvent::Answer).call();
+                    assert_eq!(
+                        answered,
+                        Call {
+                            state: CallState::Up,
+                            media: MediaState::Active,
+                            ..early
+                        }
+                    );
+                }
+                Err(error) => assert_eq!(
+                    error,
+                    if call.state() == CallState::Ended {
+                        CoreError::Ended
+                    } else {
+                        CoreError::NotRinging
+                    }
+                ),
+            }
+            admitted
+        }
         Input::Answer => Ok(call.apply(CallEvent::Answer).call()),
         Input::Cancel => Ok(call.apply(CallEvent::Cancel).call()),
         Input::Hangup => Ok(call.apply(CallEvent::Hangup).call()),
@@ -71,6 +113,7 @@ fn input(call: Call, operation: Input) -> Call {
             CoreError::ConnectionClaimed
             | CoreError::Ended
             | CoreError::NotAnswered
+            | CoreError::NotRinging
             | CoreError::NotHeld
             | CoreError::AlreadyBridged
             | CoreError::WrongBridge
@@ -90,6 +133,7 @@ fn terminal_release_is_absorbing() {
         call = input(call, operation);
     }
     let before = call.state();
+    let media_before = call.media();
     call = call.apply(kani::any::<Terminal>().event()).call();
     assert_eq!(call.generation(), generation);
     assert_eq!(call.state(), CallState::Ended);
@@ -110,6 +154,7 @@ fn terminal_release_is_absorbing() {
     kani::cover!(before == CallState::Ringing);
     kani::cover!(before == CallState::Up);
     kani::cover!(before == CallState::Ended);
+    kani::cover!(media_before == MediaState::Early);
 }
 
 #[kani::proof]
@@ -557,8 +602,9 @@ fn attended_arbitrary_call() -> Call {
         },
         media: match kani::any::<u8>() {
             0 => MediaState::Waiting,
-            1 => MediaState::Active,
-            2 => MediaState::Held,
+            1 => MediaState::Early,
+            2 => MediaState::Active,
+            3 => MediaState::Held,
             _ => MediaState::Released,
         },
         connection: match kani::any::<u8>() {

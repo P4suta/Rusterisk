@@ -2,6 +2,9 @@ use rusterisk_core::{
     AudioGate, Call, CallEvent, CoreError, MediaState, MuteDirection, PeerMediaDirection,
 };
 
+#[path = "music_gate/early.rs"]
+mod early;
+
 const DIRECTIONS: [(PeerMediaDirection, bool, bool); 4] = [
     (PeerMediaDirection::SendReceive, true, true),
     (PeerMediaDirection::SendOnly, true, false),

@@ -66,6 +66,7 @@ pub enum CallState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaState {
     Waiting,
+    Early,
     Active,
     Held,
     Released,
@@ -150,6 +151,7 @@ pub enum CoreError {
     ConnectionClaimed,
     Ended,
     NotAnswered,
+    NotRinging,
     NotHeld,
     AlreadyBridged,
     WrongBridge,
@@ -221,19 +223,34 @@ impl Call {
     pub const fn audio_gate(self) -> AudioGate {
         match self.media {
             MediaState::Active => self.peer_direction.restrict(self.mute),
-            MediaState::Waiting | MediaState::Held | MediaState::Released => AudioGate::Closed,
+            MediaState::Waiting | MediaState::Early | MediaState::Held | MediaState::Released => {
+                AudioGate::Closed
+            }
         }
     }
 
     pub const fn generated_audio_gate(self) -> AudioGate {
         match self.media {
-            MediaState::Active | MediaState::Held => self.peer_direction.restrict(self.mute),
+            MediaState::Early | MediaState::Active | MediaState::Held => {
+                self.peer_direction.restrict(self.mute)
+            }
             MediaState::Waiting | MediaState::Released => AudioGate::Closed,
         }
     }
 
     pub const fn peer_direction(self) -> PeerMediaDirection {
         self.peer_direction
+    }
+
+    pub fn admit_early_media(mut self) -> Result<Self, CoreError> {
+        match self.state {
+            CallState::Down | CallState::Up => Err(CoreError::NotRinging),
+            CallState::Ended => Err(CoreError::Ended),
+            CallState::Ringing => {
+                self.media = MediaState::Early;
+                Ok(self)
+            }
+        }
     }
 
     pub fn with_peer_direction(mut self, direction: PeerMediaDirection) -> Result<Self, CoreError> {
@@ -356,7 +373,7 @@ impl Call {
     pub fn resume(mut self) -> Result<Self, CoreError> {
         match self.media {
             MediaState::Released => Err(CoreError::Ended),
-            MediaState::Waiting | MediaState::Active => Err(CoreError::NotHeld),
+            MediaState::Waiting | MediaState::Early | MediaState::Active => Err(CoreError::NotHeld),
             MediaState::Held => {
                 self.media = MediaState::Active;
                 Ok(self)
