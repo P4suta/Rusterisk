@@ -1,4 +1,4 @@
-use super::ProcessError;
+use super::{ProcessError, SupervisedCommand};
 use std::{
     process::Command,
     time::{Duration, Instant},
@@ -47,6 +47,14 @@ impl CommandSupervisor {
         }
     }
 
+    pub fn run_owned(
+        &mut self,
+        command: SupervisedCommand,
+        budget: Duration,
+    ) -> Result<(), ProcessError> {
+        self.run(&mut command.into_std(), budget)
+    }
+
     pub fn run(&mut self, command: &mut Command, budget: Duration) -> Result<(), ProcessError> {
         let deadline = Instant::now()
             .checked_add(budget)
@@ -64,6 +72,14 @@ impl CommandSupervisor {
             let _ = (command, deadline);
             Err(ProcessError::UnsupportedSupervision)
         }
+    }
+
+    pub fn run_cleanup_owned(
+        &mut self,
+        command: SupervisedCommand,
+        budget: Duration,
+    ) -> Result<(), ProcessError> {
+        self.run_cleanup(&mut command.into_std(), budget)
     }
 
     pub fn run_cleanup(
