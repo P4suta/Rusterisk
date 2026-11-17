@@ -41,11 +41,11 @@ fn reload_names_the_live_server_and_reads_credentials_separately_from_replacemen
 
 #[test]
 fn reload_rejects_password_arguments_startup_paths_and_implicit_destinations() {
-    for arguments in [
-        vec!["reload"],
-        vec!["reload", "--server"],
-        vec!["reload", "--username"],
-        vec![
+    let cases: &[&[&str]] = &[
+        &["reload"],
+        &["reload", "--server"],
+        &["reload", "--username"],
+        &[
             "reload",
             "--server",
             "",
@@ -53,7 +53,7 @@ fn reload_rejects_password_arguments_startup_paths_and_implicit_destinations() {
             "operator",
             "--password-stdin",
         ],
-        vec![
+        &[
             "reload",
             "--server",
             "http://127.0.0.1:8088",
@@ -61,21 +61,22 @@ fn reload_rejects_password_arguments_startup_paths_and_implicit_destinations() {
             "",
             "--password-stdin",
         ],
-        vec![
+        &[
             "reload",
             "--server",
             "http://127.0.0.1:8088",
             "--username",
             "operator",
         ],
-        vec![
+        &[
             "reload",
             "--server",
             "http://127.0.0.1:8088",
             "--password-stdin",
         ],
-    ] {
-        assert!(parse(&arguments).is_err(), "{arguments:?}");
+    ];
+    for arguments in cases {
+        assert!(parse(arguments).is_err(), "{arguments:?}");
     }
     for option in ["--password", "--config-dir", "--data-dir", "--check-config"] {
         assert!(parse(&[
@@ -94,12 +95,13 @@ fn reload_rejects_password_arguments_startup_paths_and_implicit_destinations() {
 
 #[test]
 fn reload_preserves_argument_capacity_and_rejects_ambiguous_options() {
-    for extra in [
-        vec!["--server", "http://127.0.0.1:8089"],
-        vec!["--username", "another-user"],
-        vec!["--password-stdin"],
-        vec!["reload"],
-    ] {
+    let cases: &[&[&str]] = &[
+        &["--server", "http://127.0.0.1:8089"],
+        &["--username", "another-user"],
+        &["--password-stdin"],
+        &["reload"],
+    ];
+    for extra in cases {
         let mut arguments = vec![
             "reload",
             "--server",
@@ -108,7 +110,7 @@ fn reload_preserves_argument_capacity_and_rejects_ambiguous_options() {
             "operator",
             "--password-stdin",
         ];
-        arguments.extend(extra);
+        arguments.extend_from_slice(extra);
         assert!(parse(&arguments).is_err(), "{arguments:?}");
     }
     assert_eq!(parse(&["reload"; 17]), Err(CliError::Capacity));
