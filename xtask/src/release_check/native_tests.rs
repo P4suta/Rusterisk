@@ -34,6 +34,8 @@ struct Fixture {
     runs: usize,
     cleanups: usize,
     late_mutations: usize,
+    expected_temporary: Option<PathBuf>,
+    observed_temporary: Option<PathBuf>,
 }
 
 struct Port<'a> {
@@ -65,6 +67,32 @@ impl NativePort for Port<'_> {
                 .get_envs()
                 .find_map(|(key, value)| (key == name).then_some(value))
         };
+        if let Some(expected) = &self.fixture.expected_temporary {
+            let temporary = environment("TMPDIR").flatten().ok_or_else(|| {
+                io::Error::other("Native security inherited its temporary directory")
+            })?;
+            for key in ["TMPDIR", "TMP", "TEMP"] {
+                require(
+                    environment(key) == Some(Some(temporary)),
+                    "Native security temporary environment aliases disagree",
+                )?;
+            }
+            let temporary = Path::new(temporary);
+            require(
+                temporary.is_absolute()
+                    && temporary.is_dir()
+                    && temporary.canonicalize()? == expected.canonicalize()?,
+                "Native security temporary state escaped its owned workspace",
+            )?;
+            let replacement = temporary.join("cargo-deny/std-replacement-data");
+            require(
+                !replacement.exists(),
+                "Native security reused a populated std replacement cache",
+            )?;
+            fs::create_dir_all(&replacement)?;
+            fs::write(replacement.join("owned-marker"), b"owned replacement cache")?;
+            self.fixture.observed_temporary = Some(temporary.to_owned());
+        }
         require(
             environment("MISE_TRUSTED_CONFIG_PATHS") == Some(Some(source.as_os_str()))
                 && environment("MISE_CEILING_PATHS") == Some(Some(source.as_os_str())),
@@ -113,6 +141,13 @@ impl NativePort for Port<'_> {
 
     fn finish(self) -> Result<(), ProcessError> {
         self.fixture.cleanups += 1;
+        if let Some(temporary) = &self.fixture.observed_temporary {
+            require(
+                fs::read(temporary.join("cargo-deny/std-replacement-data/owned-marker"))?
+                    == b"owned replacement cache",
+                "Native temporary state was removed before supervised children finished",
+            )?;
+        }
         match self.fixture.fault {
             Fault::CleanupFailure | Fault::WorkAndCleanupFailure => {
                 Err(ProcessError::InvalidOutput)
@@ -159,6 +194,8 @@ fn using_fixture(
         runs: 0,
         cleanups: 0,
         late_mutations: 0,
+        expected_temporary: None,
+        observed_temporary: None,
     };
     let operation = test(&captured, &mut fixture);
     let cleanup = fs::remove_dir_all(parent);
@@ -279,6 +316,57 @@ fn native_failure_and_supervisor_cleanup_failure_both_remain_identifiable() -> i
         )?;
         require(!working.exists(), "Combined failure retained owned state")
     })
+}
+
+#[test]
+fn native_security_keeps_owned_temporary_state_until_supervisor_cleanup() -> io::Result<()> {
+    for fault in [
+        Fault::None,
+        Fault::WorkFailure,
+        Fault::TimedOut,
+        Fault::Interrupted,
+        Fault::CleanupFailure,
+        Fault::WorkAndCleanupFailure,
+    ] {
+        using_fixture("security", |captured, fixture| {
+            fixture.fault = fault;
+            let working = fixture.working.clone();
+            fixture.expected_temporary = Some(working.join("state/temporary"));
+            let result = verify_with(
+                captured,
+                NativePlan::new(NativeGate::Security),
+                &working,
+                Port { fixture, captured },
+            );
+            if matches!(fault, Fault::None) {
+                require(
+                    matches!(
+                        result.map_err(io::Error::other)?,
+                        NativeOutcome::Security(_)
+                    ),
+                    "Native security returned a different outcome",
+                )?;
+            } else {
+                require(
+                    result.is_err(),
+                    "Failed native security produced an outcome",
+                )?;
+            }
+            require(
+                fixture.observed_temporary.is_some(),
+                "Native security never received its owned temporary environment",
+            )?;
+            require(
+                fixture.cleanups == 1,
+                "Native temporary state skipped supervisor cleanup",
+            )?;
+            require(
+                !working.exists(),
+                "Native security retained temporary state after cleanup",
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn captured_input(

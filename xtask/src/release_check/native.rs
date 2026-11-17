@@ -224,6 +224,22 @@ impl Workspace {
             .env_remove("CARGO_TARGET_DIR")
             .env("CARGO_BUILD_JOBS", "1")
             .env("RUST_TEST_THREADS", "1");
+        match plan.gate {
+            NativeGate::Fast => {}
+            NativeGate::Security => {
+                let temporary = self.state.join("temporary");
+                fs::create_dir(&temporary).map_err(|error| {
+                    NativeGateError::new("native temporary directory", Failure::Io(error))
+                })?;
+                let temporary = temporary.canonicalize().map_err(|error| {
+                    NativeGateError::new("native temporary path", Failure::Io(error))
+                })?;
+                command
+                    .env("TMPDIR", &temporary)
+                    .env("TMP", &temporary)
+                    .env("TEMP", &temporary);
+            }
+        }
         Ok(command)
     }
 }
