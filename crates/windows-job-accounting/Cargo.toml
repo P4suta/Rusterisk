@@ -1,0 +1,48 @@
+[package]
+name = "rusterisk-windows-job-accounting"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["rlib"]
+proc-macro = false
+test = false
+bench = false
+doctest = false
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", default-features = false, features = [
+  "Win32_Foundation",
+  "Win32_System_JobObjects",
+] }
+
+[lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+unfulfilled_lint_expectations = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+await_holding_lock = "deny"
+clone_on_ref_ptr = "deny"
+disallowed_types = "deny"
+exit = "deny"
+let_underscore_future = "deny"
+mem_forget = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+wildcard_enum_match_arm = "deny"

@@ -1,4 +1,11 @@
 [[exceptions]]
+path = "crates/windows-job-accounting/src/lib.rs"
+item = "active_processes"
+lint = "unsafe_code"
+adr = "docs/adr/assign-windows-command-trees-to-jobs-during-creation.md"
+rationale = "Read one basic Job accounting record through a borrowed handle."
+
+[[exceptions]]
 path = "crates/media/src/lib.rs"
 item = "AudioSocket"
 lint = "clippy::large_enum_variant"

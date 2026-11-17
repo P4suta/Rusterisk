@@ -28,7 +28,8 @@ Use concrete types, generics, exhaustive enums, moved ownership, and borrows.
 Reject dynamic dispatch, `Box`, `Arc`, `Rc`, `RefCell`, and shared domain locks in project code.
 Never substitute a single-element vector for heap indirection.
 Reject unbounded queues, recoverable panics, ignored failures, and locks held across awaits.
-Project code must remain free of `unsafe`.
+Keep `unsafe_code = "forbid"` for every workspace member except the private Windows Job accounting crate.
+Permit only its registered `active_processes` query and check its complete source and manifest through the policy gate.
 The syntax gate covers all workspace production code and tests.
 Clippy checks resolved types through aliases and wrappers.
 Register necessary lint expectations in `api/policy-exceptions.toml` with the exact item, reason, and architecture decision.

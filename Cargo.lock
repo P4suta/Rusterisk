@@ -2475,6 +2475,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusterisk-windows-job-accounting"
+version = "0.1.0"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rusticata-macros"
 version = "4.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3782,6 +3789,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "windows-spawn"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2de3bd5b666ddb82bdd91c438afbe6a413fc21725d10e3e0b8d1d1c4afdd91c6"
+dependencies = [
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "windows-strings"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3940,6 +3956,7 @@ version = "0.1.0"
 dependencies = [
  "flate2",
  "rusterisk-config",
+ "rusterisk-windows-job-accounting",
  "rustix",
  "semver",
  "serde",
@@ -3949,6 +3966,7 @@ dependencies = [
  "syn 2.0.119",
  "tar",
  "toml",
+ "windows-spawn",
  "zip",
 ]
 

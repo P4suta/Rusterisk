@@ -8,6 +8,7 @@ members = [
   "crates/storage",
   "crates/server",
   "crates/sip",
+  "crates/windows-job-accounting",
   "xtask",
 ]
 exclude = ["vendor/str0m"]
