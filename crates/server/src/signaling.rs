@@ -77,7 +77,14 @@ impl DigitDelivery {
 struct Received {
     listener: usize,
     peer: SocketAddr,
+    route: transport::DeliveryRoute,
     bytes: Vec<u8>,
+}
+
+impl Received {
+    fn route(&self) -> transport::DeliveryRoute {
+        self.route
+    }
 }
 
 type PlaybackResult = (MediaOwner, MediaTaskToken, Result<(), ControlError>);

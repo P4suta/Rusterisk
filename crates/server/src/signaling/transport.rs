@@ -49,14 +49,14 @@ pub(super) struct ConnectionKey {
     generation: u64,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum Route {
     Datagram { listener: usize, peer: SocketAddr },
     Stream(ConnectionKey),
     Closed { listener: usize, peer: SocketAddr },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct DeliveryRoute(Route);
 
 impl DeliveryRoute {
@@ -183,6 +183,10 @@ async fn listen(listeners: &[ListenerSocket]) -> Result<ListenerInput, ControlEr
                             return Poll::Ready(Ok(ListenerInput::Datagram(Received {
                                 listener: index,
                                 peer,
+                                route: DeliveryRoute(Route::Datagram {
+                                    listener: index,
+                                    peer,
+                                }),
                                 bytes: buffer.filled().to_vec(),
                             })));
                         }
@@ -553,7 +557,7 @@ impl Network {
                     match packet.item {
                         StreamEvent::Message(bytes) => {
                             if self.ports.get(&(packet.key.listener, packet.key.peer)).is_some_and(|port| matches!(port.state, ConnectionState::Open)) {
-                                return Ok(Input::Packet(Received { listener: packet.key.listener, peer: packet.key.peer, bytes }));
+                                return Ok(Input::Packet(Received { listener: packet.key.listener, peer: packet.key.peer, route: DeliveryRoute(Route::Stream(packet.key)), bytes }));
                             }
                         },
                         StreamEvent::Finished(mut result) => {

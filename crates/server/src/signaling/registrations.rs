@@ -866,6 +866,11 @@ impl Signaling {
             client.listener == packet.listener
                 && client.state.peer() == Some(packet.peer)
                 && matches!(client.state, State::Trying { .. })
+                && match client.state.route() {
+                    Some(Route::Stream(route)) => route == packet.route(),
+                    Some(Route::Datagram(_)) => true,
+                    None => false,
+                }
         }) else {
             return false;
         };
