@@ -100,6 +100,9 @@ browser-build *arguments="--dry-run":
 interop *arguments="":
     cargo run --locked --target-dir target/xtask --package xtask -- interop {{ arguments }}
 
+release-check *arguments="--dry-run":
+    cargo run --locked --target-dir target/xtask --package xtask -- release-check {{ arguments }}
+
 core-proofs *arguments="--dry-run":
     cargo run --locked --target-dir target/xtask --package xtask -- core-proofs {{ arguments }}
 
