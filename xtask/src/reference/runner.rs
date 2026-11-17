@@ -1,24 +1,30 @@
-#[cfg(any(unix, test))]
-use super::Interop;
 use super::ReferenceImage;
 #[cfg(unix)]
 use super::{
     callback_address,
     commands::{combine, docker, owned_step, CommandPhase, Commands},
-    copy_configuration, media_address, native_server_build, published_address,
+    media_address, native_server_build, published_address,
     resources::{reference_ready, reference_versions, start_reference, Reference},
     ReferenceCase, SippAdapter,
 };
-use crate::process::{CommandSupervisor, ProcessError};
 #[cfg(any(unix, test))]
-use std::io;
+use super::{copy_configuration, prepare_music_fixture, Interop};
+use crate::process::{CommandSupervisor, ProcessError};
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 use std::{
     fs,
+    io::{self, Write},
+};
+#[cfg(unix)]
+use std::{
     process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(test)]
+#[path = "runner_configuration_tests.rs"]
+mod configuration_tests;
 
 #[cfg(unix)]
 fn identity() -> io::Result<String> {
@@ -42,6 +48,38 @@ pub(crate) struct ReferenceRunner {
 }
 
 impl ReferenceRunner {
+    #[cfg(any(unix, test))]
+    pub(crate) fn prepare_configuration(source: &Path, destination: &Path) -> io::Result<()> {
+        copy_configuration(source, destination)?;
+        let operation = (|| {
+            let music = prepare_music_fixture(destination)?;
+            fs::create_dir(destination.join("sounds"))?;
+            for (relative, bytes) in music.native_files() {
+                let path = destination.join("native").join(relative);
+                fs::create_dir_all(
+                    path.parent()
+                        .ok_or_else(|| io::Error::other("native music parent missing"))?,
+                )?;
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)?;
+                file.write_all(bytes)?;
+                file.flush()?;
+            }
+            Ok(())
+        })();
+        match operation {
+            Ok(()) => Ok(()),
+            Err(primary) => match fs::remove_dir_all(destination) {
+                Ok(()) => Err(primary),
+                Err(cleanup) => Err(io::Error::other(format!(
+                    "{primary}; reference configuration cleanup failed: {cleanup}"
+                ))),
+            },
+        }
+    }
+
     #[cfg(any(unix, test))]
     pub(crate) fn configuration_path(source: &Path, owner: &str) -> io::Result<PathBuf> {
         if !source.is_absolute()
@@ -157,8 +195,7 @@ impl ReferenceRunner {
             Reference::new(&owner, commands.directory.join("reference.cid"), &plan)?;
         let operation = (|| {
             fs::create_dir_all(source.join("target/interop"))?;
-            copy_configuration(&source.join("tests/interop/asterisk"), &configuration)?;
-            fs::create_dir(configuration.join("sounds"))?;
+            Self::prepare_configuration(&source.join("tests/interop/asterisk"), &configuration)?;
             let id = start_reference(
                 &mut reference,
                 &plan,
