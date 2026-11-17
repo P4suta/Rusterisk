@@ -1,5 +1,6 @@
 use crate::server_distribution::ServerTarget;
 
+mod aggregate;
 #[cfg(all(test, unix))]
 mod candidate_fixtures;
 mod candidate_run;
@@ -10,6 +11,10 @@ mod reference;
 mod sdk;
 mod server;
 mod source;
+pub use aggregate::{
+    CandidateCheckError, CandidateChecks, CandidateImages, CandidateProfile,
+    CompletedCandidateChecks, RunnerOutcome,
+};
 pub use inputs::{InputError, InputKey, SourceInputs};
 pub use native::{FastOutcome, NativeGateError, SecurityOutcome};
 pub use oci::{OciOutcome, OciRunError};
@@ -17,6 +22,10 @@ pub use reference::{ReferenceOutcome, ReferenceRunError};
 pub use sdk::{SdkOutcome, SdkRunError};
 pub use server::{ServerOutcome, ServerRunError};
 pub use source::{CapturedReleaseSource, ReleaseSourceError};
+
+#[cfg(any(test, doctest))]
+#[path = "release_check/aggregate/contracts.rs"]
+mod aggregate_contracts;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinuxOciTarget {
