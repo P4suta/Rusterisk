@@ -1,9 +1,14 @@
 use std::time::Duration;
+#[cfg(unix)]
+mod commands;
 mod comparison;
 #[cfg(test)]
 mod comparison_tests;
 mod configuration;
 mod interop;
+#[cfg(unix)]
+mod resources;
+mod runner;
 #[cfg(unix)]
 mod sipp_comparison;
 mod sipp_statistics;
@@ -13,9 +18,28 @@ pub use interop::{
     callback_address, media_address, published_address, CallbackHost, Interop, SipTransferCase,
     SippAdapter,
 };
+pub(crate) use runner::ReferenceRunner;
 #[cfg(unix)]
 pub use sipp_comparison::{compare_sipp_registrations_with, SippRegistrationComparison};
 pub use sipp_statistics::validate_sipp_statistics;
+
+pub fn native_server_build() -> Step {
+    step(
+        &[
+            "build",
+            "--locked",
+            "--package",
+            "rusterisk-server",
+            "--bin",
+            "rusterisk",
+            "--target-dir",
+            "target",
+            "--jobs",
+            "1",
+        ],
+        300,
+    )
+}
 
 pub struct Step {
     pub arguments: Vec<String>,
