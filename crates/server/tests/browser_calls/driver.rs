@@ -6,7 +6,7 @@ use rusterisk_client::{
 use rusterisk_server::ControlError;
 use std::{
     io::{self, Write},
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     pin::Pin,
     task::{Context, Poll},
@@ -20,6 +20,7 @@ const RECORDING_NAME: &str = "browser-known";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BrowserBackend {
     Rusterisk,
+    PackagedRusterisk,
     Asterisk,
 }
 
@@ -27,6 +28,7 @@ impl BrowserBackend {
     pub(super) fn select(value: Option<&str>) -> Result<Self, ControlError> {
         match value {
             None | Some("rusterisk") => Ok(Self::Rusterisk),
+            Some("packaged-rusterisk") => Ok(Self::PackagedRusterisk),
             Some("asterisk") => Ok(Self::Asterisk),
             Some(_) => Err(failure("unknown browser call fixture")),
         }
@@ -34,8 +36,25 @@ impl BrowserBackend {
 
     const fn name(self) -> &'static str {
         match self {
-            Self::Rusterisk => "rusterisk",
+            Self::Rusterisk | Self::PackagedRusterisk => "rusterisk",
             Self::Asterisk => "asterisk",
+        }
+    }
+
+    pub(super) fn ui_bind(self) -> SocketAddr {
+        let port = match self {
+            Self::Rusterisk | Self::Asterisk => 0,
+            Self::PackagedRusterisk => 3000,
+        };
+        SocketAddr::from((Ipv4Addr::LOCALHOST, port))
+    }
+
+    pub(super) fn external_server(self) -> Option<SocketAddr> {
+        match self {
+            Self::Rusterisk => None,
+            Self::PackagedRusterisk | Self::Asterisk => {
+                Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 8088)))
+            }
         }
     }
 }
@@ -245,6 +264,39 @@ impl BrowserRun<'_> {
             .and_then(|inputs| inputs.save(&PathBuf::from(artifacts).join("runtime")))
             .map_err(failure)?;
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::BrowserBackend;
+    use rusterisk_server::ControlError;
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn packaged_rusterisk_joins_the_owned_server_with_an_exact_browser_origin(
+    ) -> Result<(), ControlError> {
+        for (selected, ui_port, server_port, route) in [
+            (None, 0, None, "rusterisk"),
+            (Some("rusterisk"), 0, None, "rusterisk"),
+            (Some("asterisk"), 0, Some(8088), "asterisk"),
+            (Some("packaged-rusterisk"), 3000, Some(8088), "rusterisk"),
+        ] {
+            let backend = BrowserBackend::select(selected)?;
+            assert_eq!(
+                backend.ui_bind(),
+                SocketAddr::from((Ipv4Addr::LOCALHOST, ui_port)),
+                "{selected:?}"
+            );
+            assert_eq!(
+                backend.external_server(),
+                server_port.map(|port| SocketAddr::from((Ipv4Addr::LOCALHOST, port))),
+                "{selected:?}"
+            );
+            assert_eq!(backend.name(), route, "{selected:?}");
+        }
+        assert!(BrowserBackend::select(Some("external")).is_err());
         Ok(())
     }
 }

@@ -13,11 +13,7 @@ use rusterisk_config::Config;
 use rusterisk_media::Frame;
 use rusterisk_server::{runtime::Server, ControlError};
 use rusterisk_storage::{Recorder, WaveReader};
-use std::{
-    net::{Ipv4Addr, SocketAddr},
-    path::Path,
-    time::Duration,
-};
+use std::{net::SocketAddr, path::Path, time::Duration};
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -219,18 +215,11 @@ async fn actual_browser_calls_exchange_known_audio_and_store_both_senders(
     let backend = BrowserBackend::select(selected.as_deref())?;
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/browser");
     let app = assets::router(&root).map_err(failure)?;
-    let listener = TcpListener::bind("127.0.0.1:0").await.map_err(failure)?;
-    match backend {
-        BrowserBackend::Rusterisk => rusterisk(&root, app, listener).await,
-        BrowserBackend::Asterisk => {
-            browser(
-                &root,
-                app,
-                listener,
-                SocketAddr::from((Ipv4Addr::LOCALHOST, 8088)),
-                backend,
-            )
-            .await
-        }
+    let listener = TcpListener::bind(backend.ui_bind())
+        .await
+        .map_err(failure)?;
+    match backend.external_server() {
+        Some(address) => browser(&root, app, listener, address, backend).await,
+        None => rusterisk(&root, app, listener).await,
     }
 }
