@@ -8,6 +8,8 @@ pub use snapshot::{SourceError, SourceSnapshot};
 mod native;
 pub use native::{validate_execution, validate_inventory, BrowserInventory, NativeError};
 mod executor;
+#[cfg(unix)]
+pub use executor::execute_comparison;
 #[cfg(any(unix, test))]
 mod runtime_inputs;
 #[cfg(test)]

@@ -30,6 +30,7 @@ impl SipTransferCase {
 pub struct Interop {
     name: String,
     configuration: String,
+    internal_network: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -108,7 +109,21 @@ impl Interop {
         Ok(Self {
             name: format!("rusterisk-interop-{identity}"),
             configuration: configuration.into(),
+            internal_network: None,
         })
+    }
+
+    #[cfg(unix)]
+    pub(super) fn for_browser(
+        identity: &str,
+        configuration: &str,
+        network_id: &str,
+    ) -> Result<Self, ReferenceError> {
+        let mut plan = Self::new(identity, configuration)?;
+        let id = super::resources::container_id(network_id.as_bytes())
+            .map_err(|_| ReferenceError::InvalidIdentity)?;
+        plan.internal_network = Some(id.into());
+        Ok(plan)
     }
 
     pub fn start(&self) -> Step {
@@ -120,6 +135,10 @@ impl Interop {
     }
 
     pub fn start_for(&self, callback: CallbackHost) -> Step {
+        let [network_flag, network_value] = self
+            .internal_network
+            .as_deref()
+            .map_or(["--publish", "127.0.0.1::8088"], |id| ["--network", id]);
         let mut start = step(
             &[
                 "run",
@@ -143,8 +162,8 @@ impl Interop {
                 "/var/log/asterisk:uid=65532,gid=65532,mode=0700,size=8m",
                 "--tmpfs",
                 "/tmp:mode=1777,size=16m",
-                "--publish",
-                "127.0.0.1::8088",
+                network_flag,
+                network_value,
                 "--mount",
                 &format!(
                     "type=bind,source={},target=/etc/asterisk,readonly",
@@ -168,11 +187,12 @@ impl Interop {
             ],
             30,
         );
-        match callback {
-            CallbackHost::DockerGateway => start
+        match (self.internal_network.as_ref(), callback) {
+            (Some(_), _) => start.arguments.insert(1, "--pull=never".into()),
+            (None, CallbackHost::DockerGateway) => start
                 .arguments
                 .insert(1, "--add-host=host.docker.internal:host-gateway".into()),
-            CallbackHost::ManagedDns => {}
+            (None, CallbackHost::ManagedDns) => {}
         }
         start
     }
@@ -212,5 +232,26 @@ impl Interop {
 
     pub fn cleanup(&self) -> Step {
         step(&["rm", "--force", &self.name], 30)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod browser_tests {
+    use super::*;
+
+    #[test]
+    fn browser_reference_uses_only_its_owned_internal_network() -> Result<(), ReferenceError> {
+        let network = "a".repeat(64);
+        let plan = Interop::for_browser("browser", "/fixture/asterisk", &network)?;
+        let arguments = plan.start().arguments;
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["--network", network.as_str()]));
+        assert!(arguments.iter().any(|argument| argument == "--pull=never"));
+        assert!(!arguments
+            .iter()
+            .any(|argument| { argument == "--publish" || argument.starts_with("--add-host") }));
+        assert!(Interop::for_browser("browser", "/fixture/asterisk", "bridge").is_err());
+        Ok(())
     }
 }

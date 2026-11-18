@@ -5,6 +5,8 @@ use super::{
 pub use crate::core_proofs::Execution;
 use crate::process::{run, CommandSupervisor, ProcessError};
 use crate::reference::Step;
+#[cfg(unix)]
+use crate::reference::{with_browser_reference, ReferenceImage};
 use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -230,24 +232,29 @@ fn preserve(root: &Path, state: &Path, identity: &str) -> Result<PathBuf, io::Er
             )?;
         }
     }
-    let artifacts = state.join("browser-artifacts");
-    match std::fs::symlink_metadata(&artifacts) {
-        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
-            copy_tree(
-                &artifacts,
-                &destination.join("screenshots"),
-                0,
-                &mut count,
-                &mut total,
-            )?
+    for (name, output) in [
+        ("browser-artifacts", "screenshots"),
+        ("reference-browser-artifacts", "reference-screenshots"),
+    ] {
+        let artifacts = state.join(name);
+        match std::fs::symlink_metadata(&artifacts) {
+            Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {
+                copy_tree(
+                    &artifacts,
+                    &destination.join(output),
+                    0,
+                    &mut count,
+                    &mut total,
+                )?
+            }
+            Ok(_) => {
+                return Err(io::Error::other(
+                    "browser screenshots must be an owned directory",
+                ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
         }
-        Ok(_) => {
-            return Err(io::Error::other(
-                "browser screenshots must be an owned directory",
-            ))
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
     }
     println!("browser artifacts: {}", destination.display());
     Ok(destination)
@@ -298,6 +305,8 @@ pub struct PreparedBrowserRun {
     identity: String,
     directory: PathBuf,
     plan: RunPlan,
+    #[cfg(unix)]
+    reference: Option<ReferenceImage>,
 }
 
 /// Native completion requires successful validation and cleanup.
@@ -360,6 +369,8 @@ impl PreparedBrowserRun {
             identity,
             directory,
             plan,
+            #[cfg(unix)]
+            reference: None,
         })
     }
 
@@ -420,6 +431,13 @@ impl PreparedBrowserRun {
                 phase.label(),
                 step.budget.as_secs(),
                 step.arguments.join(" ")
+            );
+        }
+        #[cfg(unix)]
+        if let Some(image) = &self.reference {
+            println!(
+                "browser reference image={} isolated bridge, browser and reference combined CPU=2 memory=2GiB",
+                image.as_str()
             );
         }
     }
@@ -552,6 +570,8 @@ fn run_prepared_with(
         identity,
         directory,
         plan,
+        #[cfg(unix)]
+        reference,
     } = prepared;
     let source = directory.join("source");
     let state = directory.join("state");
@@ -608,7 +628,44 @@ fn run_prepared_with(
             snapshot.check_original(&source)?;
             snapshot.check_browser(&state)?;
         }
-        inventory.ok_or(RunError::Native(NativeError))
+        let inventory = inventory.ok_or(RunError::Native(NativeError))?;
+        #[cfg(unix)]
+        if let Some(image) = reference {
+            let mut profile = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(state.join("reference-images.txt"))?;
+            writeln!(
+                profile,
+                "source={}\nbrowser={}\nasterisk={}",
+                snapshot.digest(),
+                plan.image(),
+                image.as_str()
+            )?;
+            profile.flush()?;
+            let count = with_browser_reference(&source, &state, &identity, &image, |id| {
+                let step = plan.reference_step(id).map_err(io::Error::other)?;
+                run_phase(
+                    &root,
+                    &state,
+                    "reference-run",
+                    step,
+                    plan.cleanup(Phase::Run),
+                    &mut perform,
+                )
+                .map_err(io::Error::other)?;
+                super::runtime_inputs::RuntimeInputs::read(
+                    &state.join("reference-browser-artifacts/runtime"),
+                )?;
+                validate_execution(
+                    &read(&state.join("reference-browser-results.json"))?,
+                    &inventory,
+                )
+                .map_err(io::Error::other)
+            })?;
+            println!("browser: {count} inventoried Asterisk scenarios passed once");
+        }
+        Ok(inventory)
     })();
     let checked = snapshot
         .check_original(&source)
@@ -672,5 +729,23 @@ pub fn execute(execution: Execution, image: &str) -> Result<(), RunError> {
             let prepared = PreparedBrowserRun::read(&std::env::current_dir()?, image)?;
             prepared.run().map(|_| ())
         }
+    }
+}
+
+#[cfg(unix)]
+pub fn execute_comparison(
+    execution: Execution,
+    image: &str,
+    reference: &str,
+) -> Result<(), RunError> {
+    let reference = ReferenceImage::parse_inspection(reference).map_err(io::Error::other)?;
+    let mut prepared = PreparedBrowserRun::read(&std::env::current_dir()?, image)?;
+    prepared.reference = Some(reference);
+    match execution {
+        Execution::DryRun => {
+            prepared.print();
+            Ok(())
+        }
+        Execution::Run => prepared.run().map(|_| ()),
     }
 }

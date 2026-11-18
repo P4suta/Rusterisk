@@ -1,5 +1,9 @@
 use std::time::Duration;
 #[cfg(unix)]
+mod browser;
+#[cfg(unix)]
+mod browser_network;
+#[cfg(unix)]
 mod commands;
 mod comparison;
 #[cfg(test)]
@@ -15,6 +19,8 @@ mod runner;
 #[cfg(unix)]
 mod sipp_comparison;
 mod sipp_statistics;
+#[cfg(unix)]
+pub(crate) use browser::with_browser_reference;
 pub use comparison::{ReferenceCase, ReferenceImage};
 pub use configuration::copy_configuration;
 pub use interop::{

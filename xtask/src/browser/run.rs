@@ -121,6 +121,22 @@ impl RunPlan {
     }
 
     pub fn step(&self, phase: Phase) -> Step {
+        self.step_in(phase, None)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn reference_step(&self, id: &str) -> Result<Step, BrowserError> {
+        if id.len() != 64
+            || !id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(BrowserError::Plan);
+        }
+        Ok(self.step_in(Phase::Run, Some(id)))
+    }
+
+    fn step_in(&self, phase: Phase, reference: Option<&str>) -> Step {
         let file_size = if phase == Phase::Compile {
             "fsize=536870912:536870912"
         } else {
@@ -139,25 +155,43 @@ impl RunPlan {
             | Phase::Bundle
             | Phase::Inventory => 30,
         };
+        let network = match reference {
+            Some(id) => format!("--network=container:{id}"),
+            None if phase.downloads() => "--network=bridge".into(),
+            None => "--network=none".into(),
+        };
+        let [cpus, memory, swap, report, artifacts] = if reference.is_some() {
+            [
+                "--cpus=1",
+                "--memory=1536m",
+                "--memory-swap=1536m",
+                "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/reference-browser-results.json",
+                "--env=RUSTERISK_BROWSER_ARTIFACTS=/state/reference-browser-artifacts",
+            ]
+        } else {
+            [
+                "--cpus=2",
+                "--memory=2g",
+                "--memory-swap=2g",
+                "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/browser-results.json",
+                "--env=RUSTERISK_BROWSER_ARTIFACTS=/state/browser-artifacts",
+            ]
+        };
         let mut arguments: Vec<String> = [
             "run",
             "--rm",
             "--pull=never",
             "--name",
             &self.name(phase),
-            "--cpus=2",
-            "--memory=2g",
-            "--memory-swap=2g",
+            cpus,
+            memory,
+            swap,
             if phase == Phase::Run {
                 "--pids-limit=512"
             } else {
                 "--pids-limit=256"
             },
-            if phase.downloads() {
-                "--network=bridge"
-            } else {
-                "--network=none"
-            },
+            &network,
             "--read-only",
             "--init",
             "--shm-size=512m",
@@ -190,8 +224,8 @@ impl RunPlan {
             "--env=HOME=/state/home",
             "--env=XDG_CACHE_HOME=/state/cache",
             "--env=TMPDIR=/state/tmp",
-            "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/browser-results.json",
-            "--env=RUSTERISK_BROWSER_ARTIFACTS=/state/browser-artifacts",
+            report,
+            artifacts,
             "--entrypoint=/usr/bin/timeout",
             self.image.as_str(),
             "--signal=TERM",
@@ -201,6 +235,9 @@ impl RunPlan {
         .into_iter()
         .map(str::to_owned)
         .collect();
+        if reference.is_some() {
+            arguments.insert(1, "--env=RUSTERISK_BROWSER_SERVER=asterisk".into());
+        }
         let package = ["--prefix", "examples/browser"];
         match phase {
             Phase::RustVersion => arguments.extend(["rustc", "-vV"].map(str::to_owned)),
@@ -307,5 +344,49 @@ impl RunPlan {
                 .collect(),
             budget: Duration::from_secs(30),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod reference_tests {
+    use super::*;
+
+    #[test]
+    fn comparison_joins_the_verified_container_only_for_native_browser_use(
+    ) -> Result<(), BrowserError> {
+        let image = format!("sha256:{}", "b".repeat(64));
+        let id = "a".repeat(64);
+        let plan = RunPlan::new("compare", "/source", "/state", &image)?;
+        let reference = plan.reference_step(&id)?;
+        for expected in [
+            format!("--network=container:{id}"),
+            "--cpus=1".to_owned(),
+            "--memory=1536m".to_owned(),
+            "--env=RUSTERISK_BROWSER_SERVER=asterisk".to_owned(),
+            "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/reference-browser-results.json".to_owned(),
+            "--env=RUSTERISK_BROWSER_ARTIFACTS=/state/reference-browser-artifacts".to_owned(),
+        ] {
+            assert!(reference.arguments.contains(&expected));
+        }
+        assert_eq!(
+            reference
+                .arguments
+                .iter()
+                .filter(|arg| arg.starts_with("--network="))
+                .count(),
+            1
+        );
+        assert!(plan.reference_step("another-container").is_err());
+        assert!(plan
+            .step(Phase::Run)
+            .arguments
+            .iter()
+            .any(|argument| argument == "--network=none"));
+        assert!(plan
+            .step(Phase::Compile)
+            .arguments
+            .iter()
+            .any(|argument| argument == "--network=none"));
+        Ok(())
     }
 }

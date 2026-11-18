@@ -343,6 +343,7 @@ impl SourceSnapshot {
             "xtask/fuzz/tests",
             "xtask/fuzz/fuzz_targets",
             "tests/interop/asterisk",
+            "tests/interop/asterisk-browser",
         ] {
             optional_walk(root, Path::new(path), &mut files)?;
         }
