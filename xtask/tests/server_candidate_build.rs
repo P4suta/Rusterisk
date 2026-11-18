@@ -1,11 +1,14 @@
 #[path = "sdk_candidate_build/fixture.rs"]
 mod fixture;
 use fixture::{using_project, write};
-use std::{io, path::PathBuf};
+use std::{io, path::PathBuf, time::Duration};
 use xtask::{
     distribution::SdkCandidateBuildError,
     process::ProcessError,
-    server_distribution::{check_server_tar_gzip, CapturedServer, ServerPayload, ServerTarget},
+    server_distribution::{
+        check_server_tar_gzip, CapturedServer, NativeServerBuildLimits, ServerCandidate,
+        ServerPayload, ServerTarget,
+    },
 };
 
 fn binary() -> Vec<u8> {
@@ -14,6 +17,117 @@ fn binary() -> Vec<u8> {
     bytes[4..8].copy_from_slice(&0x0100000cu32.to_le_bytes());
     bytes[12..16].copy_from_slice(&2u32.to_le_bytes());
     bytes
+}
+
+fn windows_binary() -> Vec<u8> {
+    let mut bytes = vec![0; 256];
+    bytes[..2].copy_from_slice(b"MZ");
+    bytes[60..64].copy_from_slice(&64u32.to_le_bytes());
+    bytes[64..68].copy_from_slice(b"PE\0\0");
+    bytes[68..70].copy_from_slice(&0x8664u16.to_le_bytes());
+    bytes[70..72].copy_from_slice(&1u16.to_le_bytes());
+    bytes[84..86].copy_from_slice(&112u16.to_le_bytes());
+    bytes[86..88].copy_from_slice(&2u16.to_le_bytes());
+    bytes[88..90].copy_from_slice(&0x20bu16.to_le_bytes());
+    bytes[104..108].copy_from_slice(&4096u32.to_le_bytes());
+    bytes[156..158].copy_from_slice(&3u16.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn explicit_native_build_limits_reach_cargo_and_preserve_windows_candidate_cleanup(
+) -> Result<(), SdkCandidateBuildError> {
+    for timeout in [false, true] {
+        using_project("server-explicit-limits", |root, parent| {
+            write(
+                root,
+                "docs/server-distribution.md",
+                b"Startup instructions.\n",
+            )?;
+            let capture = CapturedServer::read(root, ServerTarget::WindowsX86_64)?;
+            let destination = parent.join("candidate");
+            let limits = NativeServerBuildLimits::new(1, 1800)?;
+            let mut execution = None;
+            let mut phases = Vec::new();
+            let result = capture.build_with_limits(&destination, limits, |command, budget| {
+                let command = command.into_std();
+                let phase = command
+                    .get_args()
+                    .next()
+                    .and_then(|argument| argument.to_str())
+                    .ok_or(ProcessError::InvalidOutput)?;
+                phases.push(phase.to_owned());
+                let source = command
+                    .get_current_dir()
+                    .ok_or(ProcessError::InvalidOutput)?;
+                execution = source.parent().map(std::path::Path::to_owned);
+                assert_ne!(source, root);
+                assert_eq!(std::fs::read(source.join("config/http.conf"))?, b"fixture");
+                let environment: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+                assert_eq!(
+                    environment
+                        .get(std::ffi::OsStr::new("CARGO_BUILD_JOBS"))
+                        .copied()
+                        .flatten(),
+                    Some(std::ffi::OsStr::new("1"))
+                );
+                match phase {
+                    "fetch" => assert_eq!(budget, Duration::from_secs(180)),
+                    "build" => {
+                        assert_eq!(budget, Duration::from_secs(1800));
+                        let arguments: Vec<_> = command.get_args().collect();
+                        assert!(arguments
+                            .windows(2)
+                            .any(|pair| pair[0] == "--jobs" && pair[1] == "1"));
+                        let target = PathBuf::from(
+                            environment
+                                .get(std::ffi::OsStr::new("CARGO_TARGET_DIR"))
+                                .copied()
+                                .flatten()
+                                .ok_or(ProcessError::InvalidOutput)?,
+                        );
+                        if timeout {
+                            let state = target.parent().ok_or(ProcessError::InvalidOutput)?;
+                            std::fs::write(state.join("build.txt"), b"injected build timeout\n")?;
+                            return Err(ProcessError::Timeout);
+                        }
+                        write(
+                            &target,
+                            "x86_64-pc-windows-msvc/release/rusterisk.exe",
+                            &windows_binary(),
+                        )?;
+                    }
+                    _ => return Err(ProcessError::InvalidOutput),
+                }
+                Ok(())
+            });
+            assert_eq!(phases, ["fetch", "build"]);
+            assert!(!execution
+                .ok_or_else(|| io::Error::other("execution directory missing"))?
+                .exists());
+            if timeout {
+                let error = result
+                    .err()
+                    .ok_or_else(|| io::Error::other("timed out build passed"))?;
+                assert!(error.to_string().contains("deadline exceeded"));
+                assert_eq!(
+                    std::fs::read(destination.join("build.txt"))?,
+                    b"injected build timeout\n"
+                );
+                assert!(!destination.join("SHA256SUMS").exists());
+            } else {
+                result?;
+                let candidate = ServerCandidate::read(&destination, ServerTarget::WindowsX86_64)?;
+                assert_eq!(candidate.source_digest(), capture.source_digest());
+                assert!(candidate
+                    .files()
+                    .any(|(path, bytes)| path == "bin/rusterisk.exe" && bytes == windows_binary()));
+            }
+            capture.check(root)?;
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 #[test]

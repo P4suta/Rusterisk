@@ -1,6 +1,52 @@
 use std::{path::Path, process::Command};
 
 #[test]
+fn native_server_plan_reports_the_selected_build_limits() -> std::io::Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    let plan = |options: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args([
+                "distribution",
+                "server",
+                "plan",
+                "--target",
+                "x86_64-pc-windows-msvc",
+            ])
+            .args(options)
+            .current_dir(&root)
+            .env("PATH", "")
+            .output()
+    };
+    for (options, jobs, timeout) in [
+        (&[][..], "2", "900"),
+        (
+            &["--jobs", "1", "--build-timeout-seconds", "1800"][..],
+            "1",
+            "1800",
+        ),
+    ] {
+        let output = plan(options)?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("phase=fetch budget=180s cargo fetch --locked"));
+        assert!(stdout.contains(&format!(
+            "phase=build budget={timeout}s cargo build --locked"
+        )));
+        assert!(stdout.contains(&format!("--jobs {jobs} --target-dir")));
+    }
+    for (jobs, seconds) in [("0", "1800"), ("1", "0"), ("1", "65536")] {
+        let output = plan(&["--jobs", jobs, "--build-timeout-seconds", seconds])?;
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+    }
+    Ok(())
+}
+
+#[test]
 fn sdk_input_check_runs_without_cargo_docker_or_registry_access() -> Result<(), std::io::Error> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let output = Command::new(env!("CARGO_BIN_EXE_xtask"))

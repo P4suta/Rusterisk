@@ -33,11 +33,11 @@ distribution-sdk-check-content candidate:
 distribution-sdk-verify candidate:
     cargo run --locked --target-dir target/xtask --package xtask -- distribution sdk verify --candidate {{ quote(candidate) }}
 
-distribution-server-plan target:
-    cargo run --locked --target-dir target/xtask --package xtask -- distribution server plan --target {{ quote(target) }}
+distribution-server-plan target jobs="2" build_timeout_seconds="900":
+    cargo run --locked --target-dir target/xtask --package xtask -- distribution server plan --target {{ quote(target) }} --jobs {{ quote(jobs) }} --build-timeout-seconds {{ quote(build_timeout_seconds) }}
 
-distribution-server-build target:
-    cargo run --locked --target-dir target/xtask --package xtask -- distribution server build --target {{ quote(target) }}
+distribution-server-build target jobs="2" build_timeout_seconds="900":
+    cargo run --locked --target-dir target/xtask --package xtask -- distribution server build --target {{ quote(target) }} --jobs {{ quote(jobs) }} --build-timeout-seconds {{ quote(build_timeout_seconds) }}
 
 distribution-server-plan-container target image:
     cargo run --locked --target-dir target/xtask --package xtask -- distribution server plan-container --target {{ quote(target) }} --image {{ quote(image) }}

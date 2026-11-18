@@ -13,13 +13,14 @@ pub use zip::write_server_zip;
 mod zip_read;
 pub use zip_read::check_server_zip;
 mod build;
-pub use build::{ServerBuildPhase, ServerBuildPlan};
+pub use build::{NativeServerBuildLimits, ServerBuildPhase, ServerBuildPlan};
 mod capture;
 pub use capture::CapturedServer;
 mod candidate;
 mod command;
 pub use command::{
-    build_server_in_container_with, build_server_with, plan_server, plan_server_container,
+    build_server_in_container_with, build_server_with, build_server_with_limits, plan_server,
+    plan_server_container, plan_server_with_limits,
 };
 mod read;
 pub use read::ServerCandidate;

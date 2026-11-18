@@ -1,6 +1,6 @@
 use super::{
-    CapturedServer, ServerBuildCommandMode, ServerBuildPhase, ServerBuildPlan,
-    ServerContainerBuildPlan, ServerTarget,
+    CapturedServer, NativeServerBuildLimits, ServerBuildCommandMode, ServerBuildPhase,
+    ServerBuildPlan, ServerContainerBuildPlan, ServerTarget,
 };
 use crate::process::{ProcessError, SupervisedCommand};
 use std::{
@@ -10,6 +10,14 @@ use std::{
 };
 
 pub fn plan_server(root: &Path, target: ServerTarget) -> io::Result<()> {
+    plan_server_with_limits(root, target, NativeServerBuildLimits::default())
+}
+
+pub fn plan_server_with_limits(
+    root: &Path,
+    target: ServerTarget,
+    limits: NativeServerBuildLimits,
+) -> io::Result<()> {
     let capture = CapturedServer::read(root, target)?;
     println!(
         "server source={} target={} candidate={}",
@@ -18,7 +26,12 @@ pub fn plan_server(root: &Path, target: ServerTarget) -> io::Result<()> {
         capture.name().file_name()
     );
     let directory = std::env::temp_dir().join("rusterisk-server-preview");
-    let plan = ServerBuildPlan::new(&directory.join("source"), &directory.join("state"), target)?;
+    let plan = ServerBuildPlan::new_with_limits(
+        &directory.join("source"),
+        &directory.join("state"),
+        target,
+        limits,
+    )?;
     for phase in ServerBuildPhase::ALL {
         let step = plan.step(phase);
         println!(
@@ -72,9 +85,18 @@ pub(super) fn ensure_directory(path: &Path) -> io::Result<()> {
 pub fn build_server_with(
     root: &Path,
     target: ServerTarget,
+    perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
+) -> io::Result<PathBuf> {
+    build_server_with_limits(root, target, NativeServerBuildLimits::default(), perform)
+}
+
+pub fn build_server_with_limits(
+    root: &Path,
+    target: ServerTarget,
+    limits: NativeServerBuildLimits,
     mut perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
 ) -> io::Result<PathBuf> {
-    build_server_using(root, target, None, |command, budget, _| {
+    build_server_using(root, target, None, limits, |command, budget, _| {
         perform(command, budget)
     })
 }
@@ -93,13 +115,20 @@ pub fn build_server_in_container_with(
         target,
         image,
     )?;
-    build_server_using(root, target, Some(image), perform)
+    build_server_using(
+        root,
+        target,
+        Some(image),
+        NativeServerBuildLimits::default(),
+        perform,
+    )
 }
 
 fn build_server_using(
     root: &Path,
     target: ServerTarget,
     image: Option<&str>,
+    limits: NativeServerBuildLimits,
     mut perform: impl FnMut(
         SupervisedCommand,
         Duration,
@@ -126,7 +155,7 @@ fn build_server_using(
     io::stdout().flush()?;
     match image {
         Some(image) => capture.build_in_container_with(&candidate, image, perform)?,
-        None => capture.build_with(&candidate, |command, budget| {
+        None => capture.build_with_limits(&candidate, limits, |command, budget| {
             perform(command, budget, ServerBuildCommandMode::Work)
         })?,
     }

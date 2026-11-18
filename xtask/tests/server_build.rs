@@ -1,5 +1,45 @@
 use std::{path::Path, time::Duration};
-use xtask::server_distribution::{ServerBuildPhase, ServerBuildPlan, ServerTarget};
+use xtask::server_distribution::{
+    NativeServerBuildLimits, ServerBuildPhase, ServerBuildPlan, ServerTarget,
+};
+
+#[test]
+fn explicit_native_build_limits_change_only_jobs_and_the_build_deadline() -> std::io::Result<()> {
+    let source = std::env::temp_dir().join("rusterisk-server-limited-source");
+    let state = std::env::temp_dir().join("rusterisk-server-limited-state");
+    let limits = NativeServerBuildLimits::new(1, 1800)?;
+    for target in ServerTarget::ALL {
+        let default = ServerBuildPlan::new(&source, &state, target)?;
+        let explicit = ServerBuildPlan::new_with_limits(&source, &state, target, limits)?;
+        let fetch = explicit.step(ServerBuildPhase::Fetch);
+        assert_eq!(
+            fetch.arguments,
+            default.step(ServerBuildPhase::Fetch).arguments
+        );
+        assert_eq!(fetch.budget, Duration::from_secs(180));
+        let build = explicit.step(ServerBuildPhase::Build);
+        let mut expected = default.step(ServerBuildPhase::Build).arguments;
+        let jobs = expected
+            .windows(2)
+            .position(|pair| pair[0] == "--jobs")
+            .ok_or_else(|| std::io::Error::other("default build jobs missing"))?;
+        expected[jobs + 1] = "1".to_owned();
+        assert_eq!(build.arguments, expected);
+        assert_eq!(build.budget, Duration::from_secs(1800));
+        assert_eq!(explicit.executable(), default.executable());
+    }
+    Ok(())
+}
+
+#[test]
+fn native_build_limits_require_positive_jobs_and_a_positive_bounded_timeout() -> std::io::Result<()>
+{
+    for (jobs, seconds) in [(0, 1800), (1, 0), (0, 0)] {
+        assert!(NativeServerBuildLimits::new(jobs, seconds).is_err());
+    }
+    NativeServerBuildLimits::new(1, u16::MAX)?;
+    Ok(())
+}
 
 #[test]
 fn server_builds_select_one_release_executable_with_locked_bounded_steps() -> std::io::Result<()> {

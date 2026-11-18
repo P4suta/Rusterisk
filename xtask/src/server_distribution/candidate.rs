@@ -1,7 +1,7 @@
 use super::{
     check_server_tar_gzip, check_server_zip, write_server_tar_gzip, write_server_zip,
-    ArchiveFormat, CapturedServer, ServerBuildCommandMode, ServerBuildPhase, ServerBuildPlan,
-    ServerContainerBuildPlan, ServerPayload,
+    ArchiveFormat, CapturedServer, NativeServerBuildLimits, ServerBuildCommandMode,
+    ServerBuildPhase, ServerBuildPlan, ServerContainerBuildPlan, ServerPayload,
 };
 use crate::process::{CommandStream, ProcessError, SupervisedCommand};
 use sha2::{Digest, Sha256};
@@ -93,9 +93,18 @@ impl CapturedServer {
     pub fn build_with(
         &self,
         destination: &Path,
+        perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
+    ) -> io::Result<()> {
+        self.build_with_limits(destination, NativeServerBuildLimits::default(), perform)
+    }
+
+    pub fn build_with_limits(
+        &self,
+        destination: &Path,
+        limits: NativeServerBuildLimits,
         mut perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
     ) -> io::Result<()> {
-        self.build_using(destination, None, |command, budget, _| {
+        self.build_using(destination, None, limits, |command, budget, _| {
             perform(command, budget)
         })
     }
@@ -118,13 +127,19 @@ impl CapturedServer {
             self.name().target(),
             image,
         )?;
-        self.build_using(destination, Some(image), perform)
+        self.build_using(
+            destination,
+            Some(image),
+            NativeServerBuildLimits::default(),
+            perform,
+        )
     }
 
     fn build_using(
         &self,
         destination: &Path,
         image: Option<&str>,
+        limits: NativeServerBuildLimits,
         mut perform: impl FnMut(
             SupervisedCommand,
             Duration,
@@ -153,7 +168,9 @@ impl CapturedServer {
         let state = directory.join("state");
         let operation = (|| {
             self.write(&source, &state)?;
-            let plan = ServerBuildPlan::new(&source, &state, self.name().target())?;
+            let plan =
+                ServerBuildPlan::new_with_limits(&source, &state, self.name().target(), limits)?;
+            let jobs = plan.limits().jobs().to_string();
             let container = image
                 .map(|image| {
                     ServerContainerBuildPlan::new(
@@ -201,7 +218,7 @@ impl CapturedServer {
                     .map_err(io::Error::other)?
                     .env("CARGO_TARGET_DIR", state.join("target"))
                     .map_err(io::Error::other)?
-                    .env("CARGO_BUILD_JOBS", "2")
+                    .env("CARGO_BUILD_JOBS", &jobs)
                     .map_err(io::Error::other)?
                     .env("MISE_TRUSTED_CONFIG_PATHS", &source)
                     .map_err(io::Error::other)?

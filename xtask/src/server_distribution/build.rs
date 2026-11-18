@@ -2,9 +2,52 @@ use super::ServerTarget;
 use crate::reference::Step;
 use std::{
     io,
+    num::{NonZeroU16, NonZeroUsize},
     path::{Component, Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeServerBuildLimits {
+    jobs: NonZeroUsize,
+    build_timeout_seconds: NonZeroU16,
+}
+
+impl NativeServerBuildLimits {
+    pub fn new(jobs: usize, build_timeout_seconds: u16) -> io::Result<Self> {
+        let jobs = NonZeroUsize::new(jobs)
+            .ok_or_else(|| io::Error::other("native server build jobs must be positive"))?;
+        let build_timeout_seconds = NonZeroU16::new(build_timeout_seconds)
+            .ok_or_else(|| io::Error::other("native server build timeout must be positive"))?;
+        let limits = Self {
+            jobs,
+            build_timeout_seconds,
+        };
+        if Instant::now().checked_add(limits.build_timeout()).is_none() {
+            return Err(io::Error::other(
+                "native server build deadline exceeds the platform clock",
+            ));
+        }
+        Ok(limits)
+    }
+
+    pub(super) const fn jobs(self) -> NonZeroUsize {
+        self.jobs
+    }
+
+    fn build_timeout(self) -> Duration {
+        Duration::from_secs(u64::from(self.build_timeout_seconds.get()))
+    }
+}
+
+impl Default for NativeServerBuildLimits {
+    fn default() -> Self {
+        Self {
+            jobs: NonZeroUsize::MIN.saturating_add(1),
+            build_timeout_seconds: NonZeroU16::MIN.saturating_add(899),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ServerBuildPhase {
@@ -28,6 +71,7 @@ pub struct ServerBuildPlan {
     state: PathBuf,
     target: ServerTarget,
     target_directory: String,
+    limits: NativeServerBuildLimits,
 }
 
 fn absolute(path: &Path) -> bool {
@@ -42,6 +86,15 @@ fn absolute(path: &Path) -> bool {
 
 impl ServerBuildPlan {
     pub fn new(source: &Path, state: &Path, target: ServerTarget) -> io::Result<Self> {
+        Self::new_with_limits(source, state, target, NativeServerBuildLimits::default())
+    }
+
+    pub fn new_with_limits(
+        source: &Path,
+        state: &Path,
+        target: ServerTarget,
+        limits: NativeServerBuildLimits,
+    ) -> io::Result<Self> {
         if !absolute(source)
             || !absolute(state)
             || source.starts_with(state)
@@ -61,6 +114,7 @@ impl ServerBuildPlan {
             state: state.to_owned(),
             target,
             target_directory,
+            limits,
         })
     }
 
@@ -72,6 +126,10 @@ impl ServerBuildPlan {
     }
     pub const fn target(&self) -> ServerTarget {
         self.target
+    }
+
+    pub(super) const fn limits(&self) -> NativeServerBuildLimits {
+        self.limits
     }
 
     pub fn executable(&self) -> PathBuf {
@@ -89,6 +147,7 @@ impl ServerBuildPlan {
     }
 
     pub fn step(&self, phase: ServerBuildPhase) -> Step {
+        let jobs = self.limits.jobs().to_string();
         let (arguments, seconds) = match phase {
             ServerBuildPhase::Fetch => (
                 ["fetch", "--locked", "--target", self.target.triple()]
@@ -109,13 +168,13 @@ impl ServerBuildPlan {
                     "--target",
                     self.target.triple(),
                     "--jobs",
-                    "2",
+                    &jobs,
                     "--target-dir",
                     &self.target_directory,
                 ]
                 .map(str::to_owned)
                 .to_vec(),
-                900,
+                self.limits.build_timeout().as_secs(),
             ),
         };
         Step {

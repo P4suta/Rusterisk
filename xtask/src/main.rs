@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use xtask::server_distribution::NativeServerBuildLimits;
 mod interop;
 mod release_cli;
 mod security;
@@ -335,11 +336,10 @@ fn execute() -> Result<(), TaskError> {
         [task, scope, operation] if task == "distribution" && scope == "sdk" && operation == "build" => distribution_sdk_build(),
         [task, scope, operation, flag, candidate] if task == "distribution" && scope == "sdk" && operation == "check-content" && flag == "--candidate" => distribution_sdk_content(Path::new(candidate)),
         [task, scope, operation, flag, candidate] if task == "distribution" && scope == "sdk" && operation == "verify" && flag == "--candidate" => distribution_sdk_verify(Path::new(candidate)),
-        [task, scope, operation, flag, target] if task == "distribution" && scope == "server" && operation == "plan" && flag == "--target" => {
-            let target = xtask::server_distribution::ServerTarget::parse(target).map_err(|error| TaskError::Contract(error.to_string()))?;
-            xtask::server_distribution::plan_server(&std::env::current_dir()?, target).map_err(TaskError::Io)
-        },
-        [task, scope, operation, flag, target] if task == "distribution" && scope == "server" && operation == "build" && flag == "--target" => distribution_server_build(target),
+        [task, scope, operation, flag, target] if task == "distribution" && scope == "server" && operation == "plan" && flag == "--target" => distribution_server_plan(target, NativeServerBuildLimits::default()),
+        [task, scope, operation, flag, target] if task == "distribution" && scope == "server" && operation == "build" && flag == "--target" => distribution_server_build(target, NativeServerBuildLimits::default()),
+        [task, scope, operation, target_flag, target, jobs_flag, jobs, timeout_flag, seconds] if task == "distribution" && scope == "server" && operation == "plan" && target_flag == "--target" && jobs_flag == "--jobs" && timeout_flag == "--build-timeout-seconds" => distribution_server_plan(target, native_server_build_limits(jobs, seconds)?),
+        [task, scope, operation, target_flag, target, jobs_flag, jobs, timeout_flag, seconds] if task == "distribution" && scope == "server" && operation == "build" && target_flag == "--target" && jobs_flag == "--jobs" && timeout_flag == "--build-timeout-seconds" => distribution_server_build(target, native_server_build_limits(jobs, seconds)?),
         [task, scope, operation, target_flag, target, image_flag, image] if task == "distribution" && scope == "server" && operation == "plan-container" && target_flag == "--target" && image_flag == "--image" => {
             let target = xtask::server_distribution::ServerTarget::parse(target).map_err(|error| TaskError::Contract(error.to_string()))?;
             xtask::server_distribution::plan_server_container(&std::env::current_dir()?, target, image).map_err(TaskError::Io)
@@ -401,7 +401,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|(check-content|verify) --candidate <path>>|distribution server <<plan|build> --target <triple>|<plan-container|build-container> --target <triple> --image <digest>|<check-content|export-oci> --candidate <path> --target <triple>|check-startup --candidate <path> [--target <triple> [--rosetta]]|verify --candidate <path> --sdk-candidate <path>|verify-oci --candidate <path> --target <triple> --archive <path> --sdk-candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|(check-content|verify) --candidate <path>>|distribution server <<plan|build> --target <triple> [--jobs <jobs> --build-timeout-seconds <seconds>]|<plan-container|build-container> --target <triple> --image <digest>|<check-content|export-oci> --candidate <path> --target <triple>|check-startup --candidate <path> [--target <triple> [--rosetta]]|verify --candidate <path> --sdk-candidate <path>|verify-oci --candidate <path> --target <triple> --archive <path> --sdk-candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
         )),
     }
 }
@@ -641,13 +641,40 @@ fn distribution_server_container(target: &str, image: &str) -> Result<(), TaskEr
     }
 }
 
-fn distribution_server_build(target: &str) -> Result<(), TaskError> {
+fn native_server_build_limits(
+    jobs: &str,
+    seconds: &str,
+) -> Result<NativeServerBuildLimits, TaskError> {
+    let jobs = jobs
+        .parse()
+        .map_err(|_| TaskError::Contract("invalid native server build jobs".into()))?;
+    let seconds = seconds
+        .parse()
+        .map_err(|_| TaskError::Contract("invalid native server build timeout".into()))?;
+    NativeServerBuildLimits::new(jobs, seconds).map_err(TaskError::Io)
+}
+
+fn distribution_server_plan(
+    target: &str,
+    limits: NativeServerBuildLimits,
+) -> Result<(), TaskError> {
+    let target = xtask::server_distribution::ServerTarget::parse(target)
+        .map_err(|error| TaskError::Contract(error.to_string()))?;
+    xtask::server_distribution::plan_server_with_limits(&std::env::current_dir()?, target, limits)
+        .map_err(TaskError::Io)
+}
+
+fn distribution_server_build(
+    target: &str,
+    limits: NativeServerBuildLimits,
+) -> Result<(), TaskError> {
     let target = xtask::server_distribution::ServerTarget::parse(target)
         .map_err(|error| TaskError::Contract(error.to_string()))?;
     let mut supervisor = xtask::process::CommandSupervisor::new().map_err(TaskError::Process)?;
-    let operation = xtask::server_distribution::build_server_with(
+    let operation = xtask::server_distribution::build_server_with_limits(
         &std::env::current_dir()?,
         target,
+        limits,
         |command, budget| supervisor.run_owned(command, budget),
     )
     .map(|_| ())
