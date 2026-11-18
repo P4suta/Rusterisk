@@ -1,4 +1,5 @@
 use std::process::Command;
+use xtask::{core_miri::CapturedCoreMiri, core_mutation::CapturedCoreMutation};
 
 const IMAGE: &str = "registry.example/core-assurance@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -7,7 +8,16 @@ fn assurance_dry_runs_bind_actual_tests_and_require_no_daemon() -> Result<(), st
     let project = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .ok_or_else(|| std::io::Error::other("workspace missing"))?;
-    for task in ["core-miri", "core-mutation"] {
+    let miri = CapturedCoreMiri::read(project).map_err(std::io::Error::other)?;
+    let mutation = CapturedCoreMutation::read(project).map_err(std::io::Error::other)?;
+    for (task, targets, tests) in [
+        ("core-miri", miri.targets().len(), miri.tests().len()),
+        (
+            "core-mutation",
+            mutation.targets().len(),
+            mutation.tests().len(),
+        ),
+    ] {
         let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
             .args([task, "--dry-run", "--image", IMAGE])
             .current_dir(project)
@@ -20,8 +30,12 @@ fn assurance_dry_runs_bind_actual_tests_and_require_no_daemon() -> Result<(), st
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
         for expected in [
-            "22 integration targets",
-            "62 tests",
+            format!("{targets} integration targets"),
+            format!("{tests} tests"),
+        ] {
+            assert!(stdout.contains(&expected), "{expected}");
+        }
+        for expected in [
             "--cpus=2",
             "--memory=2g",
             "budget=900s",
