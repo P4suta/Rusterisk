@@ -1,6 +1,7 @@
 use crate::server_distribution::ServerTarget;
 
 mod aggregate;
+mod browser;
 #[cfg(all(test, unix))]
 mod candidate_fixtures;
 mod candidate_run;
@@ -9,6 +10,8 @@ mod cli_inputs;
 mod cli_inputs_tests;
 #[cfg(any(test, doctest))]
 mod core_mutation_artifact_tests;
+#[cfg(unix)]
+mod docker_tools;
 mod input_fuzz;
 mod inputs;
 mod miri;

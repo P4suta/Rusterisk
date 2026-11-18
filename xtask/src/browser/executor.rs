@@ -11,6 +11,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+mod retained;
+#[cfg(unix)]
+pub(crate) use retained::{read as read_retained, run as run_retained, BrowserExecution};
 #[cfg(test)]
 mod tests;
 
@@ -40,6 +44,11 @@ pub enum RunError {
     SupervisorCleanup {
         operation: String,
         cleanup: ProcessError,
+    },
+    Retained {
+        preceding: Option<String>,
+        stage: &'static str,
+        failure: io::Error,
     },
 }
 impl std::fmt::Display for RunError {
@@ -73,6 +82,16 @@ impl std::fmt::Display for RunError {
                 formatter,
                 "{operation}; browser process supervisor cleanup failed: {cleanup}"
             ),
+            Self::Retained {
+                preceding,
+                stage,
+                failure,
+            } => {
+                if let Some(preceding) = preceding {
+                    write!(formatter, "{preceding}; ")?;
+                }
+                write!(formatter, "{stage}: {failure}")
+            }
         }
     }
 }
@@ -236,7 +255,7 @@ fn preserve(root: &Path, state: &Path, identity: &str) -> Result<PathBuf, io::Er
 fn version(phase: Phase, bytes: &[u8]) -> Result<(), RunError> {
     let text = std::str::from_utf8(bytes).map_err(|_| NativeError)?;
     let valid = match phase {
-        Phase::RustVersion => {
+        Phase::RustVersion | Phase::CargoVersion => {
             text.lines()
                 .filter(|line| *line == "release: 1.99.0")
                 .count()
@@ -253,6 +272,7 @@ fn version(phase: Phase, bytes: &[u8]) -> Result<(), RunError> {
                     == 1
         }
         Phase::NodeVersion => text.trim_end() == "v26.13.1",
+        Phase::NpmVersion => text.trim_end() == "11.20.0",
         Phase::BrowserVersion => text.trim_end() == "Version 1.65.1",
         Phase::Fetch
         | Phase::Install
@@ -539,10 +559,21 @@ fn run_prepared_with(
             }
             let bytes = read(&path)?;
             match phase {
-                Phase::RustVersion | Phase::NodeVersion | Phase::BrowserVersion => {
-                    version(phase, &bytes)?
+                Phase::RustVersion
+                | Phase::CargoVersion
+                | Phase::NodeVersion
+                | Phase::NpmVersion
+                | Phase::BrowserVersion => version(phase, &bytes)?,
+                Phase::Inventory => {
+                    let bytes = read(&report)?;
+                    inventory = Some(validate_inventory(&bytes)?);
+                    let mut saved = std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(state.join("browser-inventory.json"))?;
+                    saved.write_all(&bytes)?;
+                    saved.flush()?;
                 }
-                Phase::Inventory => inventory = Some(validate_inventory(&read(&report)?)?),
                 Phase::Run => {
                     let count = validate_execution(
                         &read(&report)?,

@@ -2,6 +2,8 @@
 mod assets;
 #[path = "browser_calls/resources.rs"]
 mod resources;
+#[path = "../../../xtask/src/browser/runtime_inputs.rs"]
+mod runtime_inputs;
 use rusterisk_config::Config;
 use rusterisk_media::Frame;
 use rusterisk_server::{runtime::Server, ControlError, Credentials};
@@ -168,8 +170,8 @@ async fn actual_browser_calls_exchange_known_audio_and_store_both_senders(
             .env("RUSTERISK_BROWSER_UI", format!("http://{ui}"))
             .env("RUSTERISK_BROWSER_API", format!("http://{address}/ari/"))
             .env("RUSTERISK_BROWSER_SIGNALING", format!("ws://{address}/ws"))
-            .env("RUSTERISK_BROWSER_ALICE_AUDIO", left)
-            .env("RUSTERISK_BROWSER_BOB_AUDIO", right)
+            .env("RUSTERISK_BROWSER_ALICE_AUDIO", &left)
+            .env("RUSTERISK_BROWSER_BOB_AUDIO", &right)
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn()
@@ -199,7 +201,14 @@ async fn actual_browser_calls_exchange_known_audio_and_store_both_senders(
             }
             return Err(primary);
         }
-        recording(&data.path().join("recordings/browser-known.wav"))
+        let recorded = data.path().join("recordings/browser-known.wav");
+        recording(&recorded)?;
+        if let Some(artifacts) = std::env::var_os("RUSTERISK_BROWSER_ARTIFACTS") {
+            runtime_inputs::RuntimeInputs::new(ui, address, &left, &right, &recorded)
+                .and_then(|inputs| inputs.save(&std::path::PathBuf::from(artifacts).join("runtime")))
+                .map_err(failure)?;
+        }
+        Ok(())
     }.await;
     controller.shutdown();
     let mut failures = Vec::with_capacity(3);

@@ -2,7 +2,10 @@ use super::{finish, run_prepared_with, BrowserCommand, PreparedBrowserRun, RunEr
 use crate::{browser::Phase, process::ProcessError, release_check::SourceInputs};
 use std::io;
 
+mod artifacts;
 mod fixture;
+#[cfg(unix)]
+mod retained;
 use fixture::{using_fixture, Fault};
 
 fn prepared_in_fixture(fixture: &fixture::Fixture) -> io::Result<PreparedBrowserRun> {

@@ -5,7 +5,9 @@ use std::time::Duration;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     RustVersion,
+    CargoVersion,
     NodeVersion,
+    NpmVersion,
     Fetch,
     Install,
     BrowserVersion,
@@ -19,9 +21,11 @@ pub enum Phase {
 }
 
 impl Phase {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::RustVersion,
+        Self::CargoVersion,
         Self::NodeVersion,
+        Self::NpmVersion,
         Self::Fetch,
         Self::Install,
         Self::BrowserVersion,
@@ -37,7 +41,9 @@ impl Phase {
     pub const fn label(self) -> &'static str {
         match self {
             Self::RustVersion => "rust-version",
+            Self::CargoVersion => "cargo-version",
             Self::NodeVersion => "node-version",
+            Self::NpmVersion => "npm-version",
             Self::Fetch => "fetch",
             Self::Install => "install",
             Self::BrowserVersion => "browser-version",
@@ -64,6 +70,21 @@ pub struct RunPlan {
 }
 
 impl RunPlan {
+    #[cfg(unix)]
+    pub(super) fn identity(&self) -> &str {
+        &self.identity
+    }
+
+    #[cfg(unix)]
+    pub(super) fn source(&self) -> &str {
+        &self.source
+    }
+
+    #[cfg(unix)]
+    pub(super) fn state(&self) -> &str {
+        &self.state
+    }
+
     pub fn image(&self) -> &str {
         self.image.as_str()
     }
@@ -110,7 +131,9 @@ impl RunPlan {
             Phase::Install | Phase::Types | Phase::Run => 180,
             Phase::Check => 120,
             Phase::RustVersion
+            | Phase::CargoVersion
             | Phase::NodeVersion
+            | Phase::NpmVersion
             | Phase::BrowserVersion
             | Phase::Unit
             | Phase::Bundle
@@ -181,7 +204,9 @@ impl RunPlan {
         let package = ["--prefix", "examples/browser"];
         match phase {
             Phase::RustVersion => arguments.extend(["rustc", "-vV"].map(str::to_owned)),
+            Phase::CargoVersion => arguments.extend(["cargo", "-vV"].map(str::to_owned)),
             Phase::NodeVersion => arguments.extend(["node", "--version"].map(str::to_owned)),
+            Phase::NpmVersion => arguments.extend(["npm", "--version"].map(str::to_owned)),
             Phase::Fetch => arguments.extend(["cargo", "fetch", "--locked"].map(str::to_owned)),
             Phase::Install => arguments.extend(
                 [

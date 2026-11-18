@@ -111,6 +111,49 @@ fn project(root: &Path) -> io::Result<()> {
 }
 
 impl Fixture {
+    #[cfg(unix)]
+    pub fn write_retained_runtime(&self) -> io::Result<()> {
+        use crate::browser::{runtime_inputs::RuntimeInputs, runtime_inputs_tests::wave};
+        use std::net::{Ipv4Addr, SocketAddr};
+
+        let state = self.working()?.join("state");
+        let recordings = state.join("runtime-source/recordings");
+        std::fs::create_dir_all(&recordings)?;
+        let alice = recordings.join("alice-microphone.wav");
+        let bob = recordings.join("bob-microphone.wav");
+        let recording = recordings.join("browser-known.wav");
+        wave(&alice, 48000, &[440.0])?;
+        wave(&bob, 48000, &[660.0])?;
+        wave(&recording, 8000, &[440.0, 660.0])?;
+        let artifacts = state.join("browser-artifacts");
+        std::fs::create_dir(&artifacts)?;
+        RuntimeInputs::new(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 48101)),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 48102)),
+            &alice,
+            &bob,
+            &recording,
+        )?
+        .save(&artifacts.join("runtime"))?;
+        let png = [
+            137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1,
+            8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 96, 0, 2,
+            0, 0, 5, 0, 1, 165, 246, 69, 64, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        ];
+        for name in [
+            "browser-320.png",
+            "browser-768.png",
+            "browser-1280.png",
+            "browser-landscape.png",
+            "browser-enlarged.png",
+            "browser-enlarged-spacing.png",
+            "browser-forced-colors.png",
+        ] {
+            std::fs::write(artifacts.join(name), png)?;
+        }
+        Ok(())
+    }
+
     pub fn working(&self) -> io::Result<&Path> {
         self.temporary
             .as_deref()
@@ -157,8 +200,11 @@ impl Fixture {
             .ok_or(ProcessError::InvalidOutput)?;
         self.temporary = state.parent().map(Path::to_owned);
         let text = match phase {
-            Phase::RustVersion => "release: 1.99.0\nhost: aarch64-unknown-linux-gnu\n",
+            Phase::RustVersion | Phase::CargoVersion => {
+                "release: 1.99.0\nhost: aarch64-unknown-linux-gnu\n"
+            }
             Phase::NodeVersion => "v26.13.1\n",
+            Phase::NpmVersion => "11.20.0\n",
             Phase::BrowserVersion => "Version 1.65.1\n",
             Phase::Fetch
             | Phase::Install

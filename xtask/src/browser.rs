@@ -8,9 +8,16 @@ pub use snapshot::{SourceError, SourceSnapshot};
 mod native;
 pub use native::{validate_execution, validate_inventory, BrowserInventory, NativeError};
 mod executor;
+#[cfg(any(unix, test))]
+mod runtime_inputs;
+#[cfg(test)]
+#[path = "browser/runtime_inputs/tests.rs"]
+mod runtime_inputs_tests;
 pub use executor::{
     execute, execute_with, BrowserOutcome, Execution, PreparedBrowserRun, RunError,
 };
+#[cfg(unix)]
+pub(crate) use executor::{read_retained, run_retained, BrowserExecution};
 use std::{
     io::{Read, Write},
     path::Path,
