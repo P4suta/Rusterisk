@@ -8,13 +8,17 @@ mod driver;
 mod resources;
 #[path = "../../../xtask/src/browser/runtime_inputs.rs"]
 mod runtime_inputs;
-use driver::{download_recording, BrowserRun};
+use driver::{combine, download_recording, BrowserBackend, BrowserRun};
 use rusterisk_config::Config;
 use rusterisk_media::Frame;
 use rusterisk_server::{runtime::Server, ControlError};
 use rusterisk_storage::{Recorder, WaveReader};
-use std::{path::Path, time::Duration};
-use tokio::{net::TcpListener, task::JoinHandle};
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    path::Path,
+    time::Duration,
+};
+use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
@@ -76,6 +80,17 @@ fn recording(path: &Path) -> Result<(), ControlError> {
 }
 
 #[test]
+fn selects_only_the_local_and_reference_browser_fixtures() -> Result<(), ControlError> {
+    assert_eq!(BrowserBackend::select(None)?, BrowserBackend::Rusterisk);
+    assert_eq!(
+        BrowserBackend::select(Some("asterisk"))?,
+        BrowserBackend::Asterisk
+    );
+    assert!(BrowserBackend::select(Some("external")).is_err());
+    Ok(())
+}
+
+#[test]
 fn stored_audio_requires_both_known_senders_even_when_one_sender_is_loud(
 ) -> Result<(), ControlError> {
     let root = tempfile::tempdir().map_err(failure)?;
@@ -121,13 +136,49 @@ async fn joined(mut task: JoinHandle<Result<(), ControlError>>) -> Result<(), Co
     }
 }
 
-#[tokio::test]
-#[ignore = "requires the bounded browser verification container"]
-async fn actual_browser_calls_exchange_known_audio_and_store_both_senders(
+async fn browser(
+    root: &Path,
+    app: axum::Router,
+    listener: TcpListener,
+    server: SocketAddr,
+    backend: BrowserBackend,
 ) -> Result<(), ControlError> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/browser");
-    let app = assets::router(&root).map_err(failure)?;
-    let listener = TcpListener::bind("127.0.0.1:0").await.map_err(failure)?;
+    let ui = listener.local_addr().map_err(failure)?;
+    let data = tempfile::tempdir().map_err(failure)?;
+    let left = tone(data.path(), "alice-microphone", 440.0)?;
+    let right = tone(data.path(), "bob-microphone", 660.0)?;
+    let recorded = data.path().join("recordings/browser-known.wav");
+    let (shutdown, stopped) = oneshot::channel::<()>();
+    let serving = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(async move {
+                match stopped.await {
+                    Ok(()) | Err(_) => {}
+                }
+            })
+            .await
+            .map_err(failure)
+    });
+    let operation = BrowserRun {
+        directory: root,
+        ui,
+        server,
+        backend,
+        alice: &left,
+        bob: &right,
+        recording: &recorded,
+    }
+    .run()
+    .await;
+    drop(shutdown);
+    combine(operation, joined(serving).await)
+}
+
+async fn rusterisk(
+    root: &Path,
+    app: axum::Router,
+    listener: TcpListener,
+) -> Result<(), ControlError> {
     let ui = listener.local_addr().map_err(failure)?;
     let mut sip = "[browser]\ntype=transport\nprotocol=ws\nbind=127.0.0.1\n".to_owned();
     for name in ["alice", "bob"] {
@@ -146,48 +197,40 @@ async fn actual_browser_calls_exchange_known_audio_and_store_both_senders(
     config.http.bind.set_port(0);
     config.rtp.start = 0;
     config.rtp.end = 0;
-    let data = tempfile::tempdir().map_err(failure)?;
     let storage = tempfile::tempdir().map_err(failure)?;
-    let left = tone(data.path(), "alice-microphone", 440.0)?;
-    let right = tone(data.path(), "bob-microphone", 660.0)?;
     let server = Server::bind(config, 8, storage.path().to_owned()).await?;
     let address = server.local_addr()?;
     let controller = server.controller();
-    let mut stopped = controller.shutdown_signal();
-    let serving_ui = tokio::spawn(async move {
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async move {
-                while !*stopped.borrow_and_update() {
-                    if stopped.changed().await.is_err() {
-                        break;
-                    }
-                }
-            })
-            .await
-            .map_err(failure)
-    });
     let serving = tokio::spawn(server.run());
-    let recorded = data.path().join("recordings/browser-known.wav");
-    let result = BrowserRun {
-        directory: &root,
-        ui,
-        server: address,
-        alice: &left,
-        bob: &right,
-        recording: &recorded,
-    }
-    .run()
-    .await;
+    let operation = browser(root, app, listener, address, BrowserBackend::Rusterisk).await;
     controller.shutdown();
-    let mut failures = Vec::with_capacity(3);
-    for outcome in [result, joined(serving_ui).await, joined(serving).await] {
-        if let Err(error) = outcome {
-            failures.push(error.to_string());
+    combine(operation, joined(serving).await)
+}
+
+#[tokio::test]
+#[ignore = "requires the bounded browser verification container"]
+async fn actual_browser_calls_exchange_known_audio_and_store_both_senders(
+) -> Result<(), ControlError> {
+    let selected = match std::env::var("RUSTERISK_BROWSER_SERVER") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(failure(error)),
+    };
+    let backend = BrowserBackend::select(selected.as_deref())?;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/browser");
+    let app = assets::router(&root).map_err(failure)?;
+    let listener = TcpListener::bind("127.0.0.1:0").await.map_err(failure)?;
+    match backend {
+        BrowserBackend::Rusterisk => rusterisk(&root, app, listener).await,
+        BrowserBackend::Asterisk => {
+            browser(
+                &root,
+                app,
+                listener,
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 8088)),
+                backend,
+            )
+            .await
         }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failure(failures.join("; ")))
     }
 }

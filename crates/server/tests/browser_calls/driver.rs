@@ -13,6 +13,29 @@ use tokio::io::AsyncWrite;
 
 const MAX_RECORDING_BYTES: usize = 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BrowserBackend {
+    Rusterisk,
+    Asterisk,
+}
+
+impl BrowserBackend {
+    pub(super) fn select(value: Option<&str>) -> Result<Self, ControlError> {
+        match value {
+            None | Some("rusterisk") => Ok(Self::Rusterisk),
+            Some("asterisk") => Ok(Self::Asterisk),
+            Some(_) => Err(failure("unknown browser call fixture")),
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Rusterisk => "rusterisk",
+            Self::Asterisk => "asterisk",
+        }
+    }
+}
+
 struct AudioBuffer(Vec<u8>);
 
 impl AsyncWrite for AudioBuffer {
@@ -39,7 +62,7 @@ impl AsyncWrite for AudioBuffer {
     }
 }
 
-fn combine(
+pub(super) fn combine(
     operation: Result<(), ControlError>,
     cleanup: Result<(), ControlError>,
 ) -> Result<(), ControlError> {
@@ -84,6 +107,7 @@ pub(super) struct BrowserRun<'a> {
     pub directory: &'a Path,
     pub ui: SocketAddr,
     pub server: SocketAddr,
+    pub backend: BrowserBackend,
     pub alice: &'a Path,
     pub bob: &'a Path,
     pub recording: &'a Path,
@@ -112,6 +136,7 @@ impl BrowserRun<'_> {
                 "test",
             ])
             .env("RUSTERISK_BROWSER_UI", format!("http://{}", self.ui))
+            .env("RUSTERISK_BROWSER_SERVER", self.backend.name())
             .env(
                 "RUSTERISK_BROWSER_API",
                 format!("http://{}/ari/", self.server),
