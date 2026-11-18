@@ -350,6 +350,14 @@ impl SourceSnapshot {
         parents(root, Path::new("examples/browser"))?;
         browser(&root.join("examples/browser"), &mut files)?;
         shared_adapter(root, &mut files)?;
+        for relative in [
+            "tests/interop/node-ari-client/eslint.config.mjs",
+            "tests/interop/node-ari-client/tsconfig.json",
+        ] {
+            let path = Path::new(relative);
+            parents(root, path)?;
+            add(&root.join(path), path, &mut files)?;
+        }
         vendor(root, &manifest, &mut files)?;
         files.sort_by(|left, right| left.path.cmp(&right.path));
         if files.windows(2).any(|pair| pair[0].path == pair[1].path) {

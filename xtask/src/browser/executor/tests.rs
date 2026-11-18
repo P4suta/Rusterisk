@@ -31,6 +31,25 @@ fn prepared_in_fixture(fixture: &fixture::Fixture) -> io::Result<PreparedBrowser
 }
 
 #[test]
+fn browser_capture_includes_the_lint_configuration_embedded_by_xtask() -> io::Result<()> {
+    using_fixture(|fixture| {
+        let prepared = prepared_in_fixture(fixture)?;
+        for relative in [
+            "tests/interop/node-ari-client/eslint.config.mjs",
+            "tests/interop/node-ari-client/tsconfig.json",
+        ] {
+            let path = std::path::Path::new(relative);
+            assert_eq!(
+                prepared.inputs().find(|(file, _)| *file == path),
+                Some((path, b"fixture".as_slice())),
+                "{relative}"
+            );
+        }
+        Ok(())
+    })
+}
+
+#[test]
 fn preparing_and_displaying_a_browser_plan_never_executes() -> io::Result<()> {
     using_fixture(|fixture| {
         let prepared =

@@ -107,6 +107,13 @@ fn project(root: &Path) -> io::Result<()> {
             b"fixture",
         )?;
     }
+    for file in ["eslint.config.mjs", "tsconfig.json"] {
+        write(
+            root,
+            &format!("tests/interop/node-ari-client/{file}"),
+            b"fixture",
+        )?;
+    }
     Ok(())
 }
 
