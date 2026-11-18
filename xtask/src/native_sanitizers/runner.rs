@@ -326,6 +326,7 @@ pub(super) struct CheckedNative {
     pub(super) plan: NativeSanitizerPlan,
     pub(super) inventories: [NativeInventory; 3],
     pub(super) total: usize,
+    #[cfg(unix)]
     pub(super) probe_codes: [i32; 2],
 }
 
@@ -364,6 +365,7 @@ impl CapturedNative {
         self.source.files()
     }
 
+    #[cfg(unix)]
     pub(super) fn check_source(&self, source: &Path) -> Result<(), NativeError> {
         self.source.check(source).map_err(NativeError::Source)
     }
@@ -539,16 +541,26 @@ impl CapturedNative {
                     )
                     .into());
                 };
-                let [Some(address), Some(undefined)] = probe_codes else {
+                #[cfg(unix)]
+                let [Some(address), Some(undefined)] = probe_codes
+                else {
                     return Err(io::Error::other(
                         "native execution requires both observed sanitizer exit codes",
                     )
                     .into());
                 };
+                #[cfg(not(unix))]
+                if !matches!(probe_codes, [Some(_), Some(_)]) {
+                    return Err(io::Error::other(
+                        "native execution requires both observed sanitizer exit codes",
+                    )
+                    .into());
+                }
                 Ok(CheckedNative {
                     plan,
                     inventories: [media, storage, tls],
                     total,
+                    #[cfg(unix)]
                     probe_codes: [address, undefined],
                 })
             })();
