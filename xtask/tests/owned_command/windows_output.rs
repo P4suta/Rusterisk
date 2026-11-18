@@ -4,11 +4,26 @@ use std::{
     io::{self, Read},
     os::windows::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use xtask::process::{CommandStream, SupervisedCommand};
 
 const MAX_OUTPUT: usize = 16_384;
+const SHARING_VIOLATION: i32 = 32;
+
+fn open_exclusive(path: &Path) -> io::Result<fs::File> {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        match OpenOptions::new().read(true).share_mode(0).open(path) {
+            Err(error)
+                if error.raw_os_error() == Some(SHARING_VIOLATION) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            result => return result,
+        }
+    }
+}
 
 struct TempDir {
     path: PathBuf,
@@ -60,7 +75,7 @@ fn read(path: &Path) -> io::Result<String> {
         metadata.is_file() && !metadata.file_type().is_symlink(),
         "Owned command output was not a regular file",
     )?;
-    let file = OpenOptions::new().read(true).share_mode(0).open(path)?;
+    let file = open_exclusive(path)?;
     let metadata = file.metadata()?;
     verify(
         metadata.is_file() && metadata.len() <= MAX_OUTPUT as u64,

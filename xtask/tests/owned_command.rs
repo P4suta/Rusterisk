@@ -153,6 +153,7 @@ fn accept(listener: &TcpListener) -> io::Result<TcpStream> {
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
+                stream.set_nonblocking(false)?;
                 stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                 stream.set_write_timeout(Some(Duration::from_secs(2)))?;
                 return Ok(stream);
@@ -179,10 +180,12 @@ fn descendant() -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     stream.write_all(b"R")?;
+    let mut byte = [0];
+    stream.read_exact(&mut byte)?;
+    verify(byte == *b"R", "Owned descendant readiness was not observed")?;
     let mut ready = TcpStream::connect_timeout(&address(READY)?, Duration::from_secs(2))?;
     ready.write_all(b"R")?;
     drop(ready);
-    let mut byte = [0];
     stream.read_exact(&mut byte)?;
     verify(byte == *b"P", "Invalid owned descendant probe")?;
     stream.write_all(b"A")?;
@@ -518,11 +521,17 @@ fn disconnected(error: &io::Error) -> bool {
     )
 }
 
-fn descendant_stopped(listener: &TcpListener) -> io::Result<()> {
+fn observe_descendant(listener: &TcpListener) -> io::Result<TcpStream> {
     let mut stream = accept(listener)?;
     let mut byte = [0];
     stream.read_exact(&mut byte)?;
     verify(byte == *b"R", "Owned descendant was never ready")?;
+    stream.write_all(b"R")?;
+    Ok(stream)
+}
+
+fn descendant_stopped(mut stream: TcpStream) -> io::Result<()> {
+    let mut byte = [0];
     if let Err(error) = stream.write_all(b"P") {
         return if disconnected(&error) {
             Ok(())
@@ -548,17 +557,27 @@ fn descendant_stopped(listener: &TcpListener) -> io::Result<()> {
 #[test]
 fn owned_timeout_and_early_leader_exit_stop_live_descendants() -> Result<(), ProcessError> {
     for mode in ["waiting-leader", "successful-leader", "failed-leader"] {
+        eprintln!("Owned descendant mode: {mode}");
         let listener = TcpListener::bind("127.0.0.1:0")?;
         let mut command = request(mode)?;
         checked(command.env(ADDRESS, listener.local_addr()?.to_string()))?;
         let output = Output::capture(&mut command)?;
         let budget = if mode == "waiting-leader" {
-            Duration::from_millis(700)
+            Duration::from_secs(2)
         } else {
             Duration::from_secs(5)
         };
-        let result = supervised(|supervisor| supervisor.run_owned(command, budget));
-        let descendant = descendant_stopped(&listener).map_err(ProcessError::from);
+        let (result, descendant) = std::thread::scope(|scope| {
+            let observer = scope.spawn(|| observe_descendant(&listener));
+            let result = supervised(|supervisor| supervisor.run_owned(command, budget));
+            let descendant = observer
+                .join()
+                .map_err(|_| io::Error::other("Owned descendant observer failed"))
+                .and_then(|stream| stream)
+                .and_then(descendant_stopped)
+                .map_err(ProcessError::from);
+            (result, descendant)
+        });
         let streams = output.read().map_err(ProcessError::from);
         let expected = match mode {
             "waiting-leader" => matches!(result, Err(ProcessError::Timeout)),
