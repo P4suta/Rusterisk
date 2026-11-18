@@ -14,6 +14,9 @@ use std::{
 #[cfg(test)]
 mod tests;
 
+#[cfg(unix)]
+pub(super) mod retained;
+
 #[derive(Clone, Copy)]
 pub enum Execution {
     DryRun,

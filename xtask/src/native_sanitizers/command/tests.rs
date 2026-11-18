@@ -2,7 +2,10 @@ use super::{finish, plan, CapturedNative, CommandMode, NativeError, Scope};
 use crate::{process::ProcessError, release_check::SourceInputs};
 use std::io;
 
+mod artifacts;
 mod fixture;
+#[cfg(unix)]
+mod retained;
 use fixture::{using_fixture, Fault, IMAGE, PHASES};
 
 #[test]

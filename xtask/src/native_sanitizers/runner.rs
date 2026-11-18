@@ -93,7 +93,7 @@ fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
         .write_all(bytes)
 }
 
-fn output(path: &Path) -> io::Result<Vec<u8>> {
+pub(super) fn output(path: &Path) -> io::Result<Vec<u8>> {
     let metadata = fs::symlink_metadata(path)?;
     if !metadata.file_type().is_file() || metadata.len() > 4 * 1024 * 1024 {
         return Err(io::Error::other(
@@ -110,7 +110,7 @@ fn output(path: &Path) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn compiler(phase: Phase, bytes: &[u8]) -> io::Result<()> {
+pub(super) fn compiler(phase: Phase, bytes: &[u8], architecture: &str) -> io::Result<()> {
     let text = std::str::from_utf8(bytes).map_err(io::Error::other)?;
     let valid = match phase {
         Phase::ClangVersion => text
@@ -118,7 +118,7 @@ fn compiler(phase: Phase, bytes: &[u8]) -> io::Result<()> {
             .next()
             .is_some_and(|line| line.starts_with("Debian clang version 14.0.6")),
         Phase::RustVersion => {
-            let host = match std::env::consts::ARCH {
+            let host = match architecture {
                 "aarch64" => "host: aarch64-unknown-linux-gnu",
                 "x86_64" => "host: x86_64-unknown-linux-gnu",
                 _ => return Err(io::Error::other("unsupported native sanitizer host")),
@@ -148,6 +148,7 @@ fn phase(
     selected: Phase,
     source: &Path,
     destination: &Path,
+    probe_codes: &mut [Option<i32>; 2],
     perform: &mut impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
 ) -> Result<Vec<u8>, NativeError> {
     let step = plan.step(selected);
@@ -207,21 +208,28 @@ fn phase(
                     )
                 }
             };
-            validate_rejection(defect, code, &bytes)
-                .map(|()| bytes)
-                .map_err(|error| NativeError::Check {
-                    phase: selected,
-                    error,
-                })
+            (|| {
+                validate_rejection(defect, code, &bytes)?;
+                let index = match defect {
+                    Defect::Address => 0,
+                    Defect::Undefined => 1,
+                };
+                probe_codes[index] = Some(code.ok_or_else(|| {
+                    io::Error::other("native sanitizer probe has no observed exit code")
+                })?);
+                Ok(bytes)
+            })()
+            .map_err(|error| NativeError::Check {
+                phase: selected,
+                error,
+            })
         }
-        (_, Ok(()), Ok(bytes)) => {
-            compiler(selected, &bytes)
-                .map(|()| bytes)
-                .map_err(|error| NativeError::Check {
-                    phase: selected,
-                    error,
-                })
-        }
+        (_, Ok(()), Ok(bytes)) => compiler(selected, &bytes, std::env::consts::ARCH)
+            .map(|()| bytes)
+            .map_err(|error| NativeError::Check {
+                phase: selected,
+                error,
+            }),
         (_, Err(error), Ok(bytes)) => {
             eprintln!("{}", String::from_utf8_lossy(&bytes));
             Err(NativeError::Process {
@@ -318,6 +326,7 @@ pub(super) struct CheckedNative {
     pub(super) plan: NativeSanitizerPlan,
     pub(super) inventories: [NativeInventory; 3],
     pub(super) total: usize,
+    pub(super) probe_codes: [i32; 2],
 }
 
 fn reserve_directory(parent: &Path, identity: &str) -> io::Result<(String, PathBuf)> {
@@ -353,6 +362,10 @@ impl CapturedNative {
 
     pub fn inputs(&self) -> impl Iterator<Item = (&Path, &[u8])> {
         self.source.files()
+    }
+
+    pub(super) fn check_source(&self, source: &Path) -> Result<(), NativeError> {
+        self.source.check(source).map_err(NativeError::Source)
     }
 
     pub fn run_with(
@@ -415,8 +428,16 @@ impl CapturedNative {
                 image,
             )?;
             let operation = (|| {
+                let mut probe_codes = [None, None];
                 for selected in [Phase::ClangVersion, Phase::RustVersion] {
-                    phase(&plan, selected, &source, destination, &mut perform)?;
+                    phase(
+                        &plan,
+                        selected,
+                        &source,
+                        destination,
+                        &mut probe_codes,
+                        &mut perform,
+                    )?;
                 }
                 for defect in Defect::ALL {
                     phase(
@@ -424,6 +445,7 @@ impl CapturedNative {
                         Phase::CompileProbe(defect),
                         &source,
                         destination,
+                        &mut probe_codes,
                         &mut perform,
                     )?;
                     phase(
@@ -431,23 +453,39 @@ impl CapturedNative {
                         Phase::RejectProbe(defect),
                         &source,
                         destination,
+                        &mut probe_codes,
                         &mut perform,
                     )?;
                 }
-                phase(&plan, Phase::Fetch, &source, destination, &mut perform)?;
+                phase(
+                    &plan,
+                    Phase::Fetch,
+                    &source,
+                    destination,
+                    &mut probe_codes,
+                    &mut perform,
+                )?;
                 for scope in Scope::ALL {
                     let bytes = phase(
                         &plan,
                         Phase::Build(scope),
                         &source,
                         destination,
+                        &mut probe_codes,
                         &mut perform,
                     )?;
                     if scope == Scope::Tls {
                         for archive in native_archives(&bytes)? {
                             copy_archive(&archive, &state)?;
                             let selected = Phase::InspectArchive(archive.library());
-                            let bytes = phase(&plan, selected, &source, destination, &mut perform)?;
+                            let bytes = phase(
+                                &plan,
+                                selected,
+                                &source,
+                                destination,
+                                &mut probe_codes,
+                                &mut perform,
+                            )?;
                             validate_instrumented_archive(&bytes).map_err(|error| {
                                 NativeError::Check {
                                     phase: selected,
@@ -461,7 +499,14 @@ impl CapturedNative {
                 let mut inventories = [None, None, None];
                 for (scope, retained) in Scope::ALL.into_iter().zip(&mut inventories) {
                     let selected = Phase::Inventory(scope);
-                    let bytes = phase(&plan, selected, &source, destination, &mut perform)?;
+                    let bytes = phase(
+                        &plan,
+                        selected,
+                        &source,
+                        destination,
+                        &mut probe_codes,
+                        &mut perform,
+                    )?;
                     let inventory = NativeInventory::parse(scope, &bytes).map_err(|error| {
                         NativeError::Check {
                             phase: selected,
@@ -469,7 +514,14 @@ impl CapturedNative {
                         }
                     })?;
                     let selected = Phase::Run(scope);
-                    let bytes = phase(&plan, selected, &source, destination, &mut perform)?;
+                    let bytes = phase(
+                        &plan,
+                        selected,
+                        &source,
+                        destination,
+                        &mut probe_codes,
+                        &mut perform,
+                    )?;
                     let count = inventory
                         .validate(&bytes)
                         .map_err(|error| NativeError::Check {
@@ -487,10 +539,17 @@ impl CapturedNative {
                     )
                     .into());
                 };
+                let [Some(address), Some(undefined)] = probe_codes else {
+                    return Err(io::Error::other(
+                        "native execution requires both observed sanitizer exit codes",
+                    )
+                    .into());
+                };
                 Ok(CheckedNative {
                     plan,
                     inventories: [media, storage, tls],
                     total,
+                    probe_codes: [address, undefined],
                 })
             })();
             follow(

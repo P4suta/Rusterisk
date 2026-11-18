@@ -17,6 +17,7 @@ mod native_artifacts;
 mod native_artifacts_tests;
 mod oci;
 mod reference;
+mod sanitizers;
 mod sdk;
 mod server;
 mod source;

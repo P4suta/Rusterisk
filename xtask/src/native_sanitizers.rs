@@ -7,6 +7,8 @@ pub use archives::{native_archives, validate_instrumented_archive, NativeArchive
 mod runner;
 pub use runner::{CapturedNative, CommandMode, NativeError};
 mod command;
+#[cfg(unix)]
+pub(crate) use command::retained::NativeExecution;
 pub use command::{execute, plan, Execution, NativeOutcome};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
