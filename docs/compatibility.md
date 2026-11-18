@@ -148,5 +148,6 @@ Incoming and configured outgoing WebSocket comparisons check start and status me
 Both control formats also compare buffering, flow control, queue markers, pause, resume, manual answer, and telephone digit notifications.
 The reference distinguishes case-sensitive technology lists from case-insensitive endpoint detail queries.
 See [reference comparisons](reference-comparisons.md) for scope and resource limits.
-The native browser campaign verifies received audio and stored recordings on Linux ARM64 loopback.
-Broader reference signaling calls, browser calls with Asterisk, supported-platform distributions, and physical `HT813` observations remain unverified.
+The paired browser campaign verifies received audio and stored recordings on Rusterisk and Asterisk 22.9.0 on Linux ARM64.
+The Windows x86-64 candidate passed archive content checks and native startup.
+Broader reference signaling calls, the remaining distribution checks, and physical `HT813` observations remain unverified.

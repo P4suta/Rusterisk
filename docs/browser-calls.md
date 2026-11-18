@@ -57,6 +57,7 @@ Use `--dry-run` to inspect the selected images and limits.
 mise x -- just interop browser --run --image "$browser_image" --reference-image "$asterisk_image"
 ```
 
-The Linux ARM64 campaign passed on loopback with Playwright `1.65.1`, Chromium `159.0.8154.6`, and the configured `ulaw` codec.
-The campaign matched 660 Hz at Alice, 440 Hz at Bob, and both test signals in the stored recording.
-VoiceOver, network address translation (NAT) traversal, [Traversal Using Relays around NAT](https://www.rfc-editor.org/rfc/rfc8656.html) media relays, and browser calls with Asterisk `22.9.0` remain unverified by the campaign.
+Both servers passed on Linux ARM64 with Playwright `1.65.1`, Chromium `159.0.8154.6`, and the `ulaw` codec.
+The runs matched 660 Hz at Alice, 440 Hz at Bob, and both test signals in each stored recording.
+The tests use loopback signaling and gather Asterisk media candidates on the isolated bridge.
+VoiceOver, network address translation (NAT) traversal, and [Traversal Using Relays around NAT](https://www.rfc-editor.org/rfc/rfc8656.html) media relays remain unverified.
