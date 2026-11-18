@@ -3,6 +3,22 @@ use xtask::server_distribution::{
     NativeServerBuildLimits, ServerBuildPhase, ServerBuildPlan, ServerTarget,
 };
 
+#[cfg(windows)]
+#[test]
+fn windows_cargo_uses_ordinary_drive_paths_for_owned_targets() -> std::io::Result<()> {
+    let source = Path::new(r"\\?\C:\capture\source");
+    let state = Path::new(r"\\?\C:\capture\state");
+    let plan = ServerBuildPlan::new(source, state, ServerTarget::WindowsX86_64)?;
+    let build = plan.step(ServerBuildPhase::Build);
+    assert_eq!(
+        build.arguments.last().map(String::as_str),
+        Some(r"C:\capture\state\target")
+    );
+    assert_eq!(plan.state(), state);
+    assert!(plan.executable().starts_with(state));
+    Ok(())
+}
+
 #[test]
 fn explicit_native_build_limits_change_only_jobs_and_the_build_deadline() -> std::io::Result<()> {
     let source = std::env::temp_dir().join("rusterisk-server-limited-source");

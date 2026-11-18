@@ -1,3 +1,4 @@
+use super::build::cargo_path;
 use super::{
     check_server_tar_gzip, check_server_zip, write_server_tar_gzip, write_server_zip,
     ArchiveFormat, CapturedServer, NativeServerBuildLimits, ServerBuildCommandMode,
@@ -171,6 +172,7 @@ impl CapturedServer {
             let plan =
                 ServerBuildPlan::new_with_limits(&source, &state, self.name().target(), limits)?;
             let jobs = plan.limits().jobs().to_string();
+            let command_source = cargo_path(&source)?;
             let container = image
                 .map(|image| {
                     ServerContainerBuildPlan::new(
@@ -214,13 +216,13 @@ impl CapturedServer {
                     command.arg(argument).map_err(io::Error::other)?;
                 }
                 command
-                    .current_dir(&source)
+                    .current_dir(command_source)
                     .map_err(io::Error::other)?
-                    .env("CARGO_TARGET_DIR", state.join("target"))
+                    .env("CARGO_TARGET_DIR", plan.target_directory())
                     .map_err(io::Error::other)?
                     .env("CARGO_BUILD_JOBS", &jobs)
                     .map_err(io::Error::other)?
-                    .env("MISE_TRUSTED_CONFIG_PATHS", &source)
+                    .env("MISE_TRUSTED_CONFIG_PATHS", command_source)
                     .map_err(io::Error::other)?
                     .env(
                         "CARGO_NET_OFFLINE",

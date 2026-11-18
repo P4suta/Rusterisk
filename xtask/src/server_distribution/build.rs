@@ -84,6 +84,20 @@ fn absolute(path: &Path) -> bool {
             .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
 }
 
+pub(super) fn cargo_path(path: &Path) -> io::Result<&Path> {
+    #[cfg(windows)]
+    if matches!(path.components().next(), Some(Component::Prefix(prefix))
+        if matches!(prefix.kind(), std::path::Prefix::VerbatimDisk(_)))
+    {
+        return path
+            .to_str()
+            .and_then(|value| value.strip_prefix(r"\\?\"))
+            .map(Path::new)
+            .ok_or_else(|| io::Error::other("Windows Cargo path is not a UTF-8 drive path"));
+    }
+    Ok(path)
+}
+
 impl ServerBuildPlan {
     pub fn new(source: &Path, state: &Path, target: ServerTarget) -> io::Result<Self> {
         Self::new_with_limits(source, state, target, NativeServerBuildLimits::default())
@@ -104,8 +118,8 @@ impl ServerBuildPlan {
                 "server builds require separate absolute source and state paths",
             ));
         }
-        let target_directory = state
-            .join("target")
+        let target_path = state.join("target");
+        let target_directory = cargo_path(&target_path)?
             .to_str()
             .ok_or_else(|| io::Error::other("server target directory is not UTF-8"))?
             .to_owned();
@@ -123,6 +137,10 @@ impl ServerBuildPlan {
     }
     pub fn state(&self) -> &Path {
         &self.state
+    }
+
+    pub(super) fn target_directory(&self) -> &str {
+        &self.target_directory
     }
     pub const fn target(&self) -> ServerTarget {
         self.target
