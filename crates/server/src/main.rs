@@ -6,6 +6,9 @@ use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+#[cfg(all(test, unix))]
+mod shutdown_signal_tests;
+
 enum AppError {
     Arguments(CliError),
     Config(ConfigError),
@@ -95,21 +98,52 @@ fn runtime() -> Result<tokio::runtime::Runtime, AppError> {
         .map_err(AppError::Runtime)
 }
 
-#[cfg(unix)]
-async fn shutdown_signal() -> Result<(), io::Error> {
-    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
-    tokio::select! {
-        result = tokio::signal::ctrl_c() => result,
-        result = terminate.recv() => result.ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "Termination signal channel closed")),
+struct ShutdownSignal {
+    #[cfg(unix)]
+    interrupt: tokio::signal::unix::Signal,
+    #[cfg(unix)]
+    terminate: tokio::signal::unix::Signal,
+    #[cfg(not(unix))]
+    interrupt: tokio::signal::windows::CtrlC,
+}
+
+impl ShutdownSignal {
+    fn register() -> io::Result<Self> {
+        #[cfg(unix)]
+        {
+            Ok(Self {
+                interrupt: tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::interrupt(),
+                )?,
+                terminate: tokio::signal::unix::signal(
+                    tokio::signal::unix::SignalKind::terminate(),
+                )?,
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            Ok(Self {
+                interrupt: tokio::signal::windows::ctrl_c()?,
+            })
+        }
+    }
+
+    async fn recv(&mut self) -> io::Result<()> {
+        #[cfg(unix)]
+        let received = tokio::select! {
+            received = self.interrupt.recv() => received,
+            received = self.terminate.recv() => received,
+        };
+        #[cfg(not(unix))]
+        let received = self.interrupt.recv().await;
+        received.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::BrokenPipe, "Shutdown signal channel closed")
+        })
     }
 }
 
-#[cfg(not(unix))]
-async fn shutdown_signal() -> Result<(), io::Error> {
-    tokio::signal::ctrl_c().await
-}
-
 async fn start(directory: PathBuf, data_directory: PathBuf) -> Result<(), AppError> {
+    let mut shutdown = ShutdownSignal::register().map_err(AppError::Runtime)?;
     let server = Server::bind_from_directory(directory, 64, data_directory)
         .await
         .map_err(AppError::Control)?;
@@ -119,7 +153,7 @@ async fn start(directory: PathBuf, data_directory: PathBuf) -> Result<(), AppErr
     tokio::pin!(serving);
     tokio::select! {
         result = &mut serving => result.map_err(AppError::Control),
-        signal = shutdown_signal() => {
+        signal = shutdown.recv() => {
             controller.shutdown();
             let cleanup = serving.await;
             match (signal, cleanup) {
