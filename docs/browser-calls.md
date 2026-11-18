@@ -77,5 +77,8 @@ mise x -- just interop browser --run --image "$browser_image" \
   --server-candidate "$server_candidate"
 ```
 
+Repeat the command with `--reference-first` after the candidate path to run Asterisk first.
+Use the same images and candidate for both trial orders.
+
 The resource reports record elapsed driver time and the change in the [server container's processor usage counter](https://docs.kernel.org/admin-guide/cgroup-v2.html).
 The reports also capture server process resident memory before and after each driver run.
