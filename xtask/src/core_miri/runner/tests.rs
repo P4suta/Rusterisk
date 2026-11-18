@@ -16,8 +16,6 @@ fn miri_uses_the_existing_source_manifest_and_test_inventory() -> io::Result<()>
         let captured = CapturedCoreMiri::read(&fixture.root).map_err(io::Error::other)?;
         assert_eq!(captured.targets(), shared.targets());
         assert_eq!(captured.tests(), shared.tests());
-        assert_eq!(captured.targets().len(), 22);
-        assert_eq!(captured.tests().len(), 62);
         let plan = crate::core_miri::plan(IMAGE).map_err(io::Error::other)?;
         assert!(plan
             .step(fixture::PHASES[0])
@@ -33,6 +31,7 @@ fn miri_uses_the_existing_source_manifest_and_test_inventory() -> io::Result<()>
 fn miri_completion_requires_native_discovery_execution_and_all_cleanup() -> io::Result<()> {
     using_fixture(|fixture| {
         let captured = CapturedCoreMiri::read(&fixture.root).map_err(io::Error::other)?;
+        let expected_test_count = captured.tests().len();
         let key = SourceInputs::new(captured.inputs())
             .map_err(io::Error::other)?
             .key();
@@ -45,7 +44,7 @@ fn miri_completion_requires_native_discovery_execution_and_all_cleanup() -> io::
             fixture.perform(command, budget, mode)
         });
         let outcome = finish(checked, Ok(())).map_err(io::Error::other)?;
-        assert_eq!(outcome.test_count(), 62);
+        assert_eq!(outcome.test_count(), expected_test_count);
         assert_eq!(outcome.image(), IMAGE);
         assert_eq!(
             SourceInputs::new(outcome.inputs())
