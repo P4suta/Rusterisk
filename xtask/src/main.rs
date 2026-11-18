@@ -450,7 +450,7 @@ fn distribution_sdk_verify(candidate: &Path) -> Result<(), TaskError> {
     let root = std::env::current_dir()?;
     let mut supervisor = xtask::process::CommandSupervisor::new().map_err(TaskError::Process)?;
     let operation = xtask::distribution::verify_sdk_with(&root, candidate, |command, budget| {
-        supervisor.run(command, budget)
+        supervisor.run_owned(command, budget)
     })
     .map(|_| ())
     .map_err(|error| TaskError::Contract(error.to_string()));

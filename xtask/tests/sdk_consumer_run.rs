@@ -8,7 +8,7 @@ mod captured_fixture;
 use std::time::Duration;
 use xtask::{
     distribution::{verify_sdk_consumers_with, verify_sdk_with, SdkContents},
-    process::ProcessError,
+    process::{ProcessError, SupervisedCommand},
 };
 
 #[test]
@@ -24,6 +24,7 @@ fn a_failed_owned_command_stops_verification_preserves_diagnostics_and_reaps_the
             let mut calls = 0;
             let outcome =
                 verify_sdk_consumers_with(&contents, &execution, &artifacts, |command, budget| {
+                    let command = SupervisedCommand::into_std(command);
                     calls += 1;
                     assert_eq!(budget, Duration::from_secs(180));
                     assert_eq!(command.get_program(), "rustup");

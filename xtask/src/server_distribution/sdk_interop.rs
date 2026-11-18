@@ -47,7 +47,7 @@ pub fn verify_server_sdk_with(
             &contents,
             &consumer_execution,
             &artifacts.join("consumer"),
-            |command, budget| supervisor.run(command, budget),
+            |command, budget| supervisor.run_owned(command, budget),
         )
         .map_err(io::Error::other)?,
     );
@@ -69,7 +69,9 @@ pub fn verify_server_sdk_with(
             prepared
                 .take()
                 .ok_or_else(|| io::Error::other("SDK consumer ownership ended"))?
-                .run_with(&target, |command, budget| service.run(command, budget))
+                .run_with(&target, |command, budget| {
+                    service.run_owned(command, budget)
+                })
                 .map(|_| ())
                 .map_err(io::Error::other)
         },

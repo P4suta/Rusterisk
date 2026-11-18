@@ -1,4 +1,5 @@
-use std::{net::SocketAddr, process::Command};
+use crate::process::{CommandRequestError, SupervisedCommand};
+use std::net::SocketAddr;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SdkHttpTargetError {
@@ -74,15 +75,16 @@ impl<'a> SdkHttpTarget<'a> {
         self.address
     }
 
-    pub fn configure(&self, command: &mut Command) {
+    pub fn configure(&self, command: &mut SupervisedCommand) -> Result<(), CommandRequestError> {
         command
             .env(
                 "RUSTERISK_SDK_HTTP_ADDRESS",
                 format!("http://{}", self.address),
-            )
-            .env("RUSTERISK_SDK_HTTP_USERNAME", self.username)
-            .env("RUSTERISK_SDK_HTTP_PASSWORD", self.password)
-            .env("RUSTERISK_SDK_HTTP_VERSION", self.version)
-            .env("RUSTERISK_SDK_HTTP_BRIDGE", self.bridge);
+            )?
+            .env("RUSTERISK_SDK_HTTP_USERNAME", self.username)?
+            .env("RUSTERISK_SDK_HTTP_PASSWORD", self.password)?
+            .env("RUSTERISK_SDK_HTTP_VERSION", self.version)?
+            .env("RUSTERISK_SDK_HTTP_BRIDGE", self.bridge)?;
+        Ok(())
     }
 }

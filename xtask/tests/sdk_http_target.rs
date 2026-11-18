@@ -1,5 +1,5 @@
-use std::{net::SocketAddr, process::Command};
-use xtask::distribution::SdkHttpTarget;
+use std::net::SocketAddr;
+use xtask::{distribution::SdkHttpTarget, process::SupervisedCommand};
 
 fn address(value: &str) -> Result<SocketAddr, std::io::Error> {
     value.parse().map_err(std::io::Error::other)
@@ -70,8 +70,11 @@ fn child_configuration_uses_environment_values_without_secret_arguments(
         "sdk-run",
     )
     .map_err(std::io::Error::other)?;
-    let mut command = Command::new("consumer");
-    target.configure(&mut command);
+    let mut command = SupervisedCommand::new("consumer").map_err(std::io::Error::other)?;
+    target
+        .configure(&mut command)
+        .map_err(std::io::Error::other)?;
+    let command = command.into_std();
     assert!(command.get_args().next().is_none());
     let values: std::collections::BTreeMap<_, _> = command.get_envs().collect();
     for (key, expected) in [

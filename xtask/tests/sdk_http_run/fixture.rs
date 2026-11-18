@@ -1,7 +1,7 @@
-use std::{path::Path, process::Command, time::Duration};
+use std::{path::Path, time::Duration};
 use xtask::{
     distribution::{SdkConsumerPlan, SdkConsumerScope, SdkRuntimeIdentity},
-    process::ProcessError,
+    process::{ProcessError, SupervisedCommand},
 };
 
 pub fn candidate(
@@ -25,10 +25,14 @@ pub fn candidate(
 pub fn perform_preparation(
     execution: &Path,
     phase: usize,
-    command: &mut Command,
+    command: SupervisedCommand,
     budget: Duration,
 ) -> Result<(), ProcessError> {
     let plan = SdkConsumerPlan::new(&execution.join("work"), &execution.join("state"))?;
+    let command = command.into_std();
+    assert!(!command
+        .get_envs()
+        .any(|(name, _)| name.to_string_lossy().starts_with("RUSTERISK_SDK_HTTP_")));
     assert_eq!(command.get_program(), "cargo");
     assert_eq!(
         command.get_current_dir(),

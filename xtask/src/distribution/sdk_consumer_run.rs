@@ -3,11 +3,12 @@ use super::{
     SdkConsumerPhase, SdkConsumerScope, SdkConsumerWorkspace, SdkContents, SdkContentsError,
     SdkHttpTarget, SdkMetadataError, SdkPackage,
 };
-use crate::process::{CommandSupervisor, ProcessError};
+use crate::process::{
+    CommandRequestError, CommandStream, CommandSupervisor, ProcessError, SupervisedCommand,
+};
 use std::{
     io::{Read, Write},
     path::Path,
-    process::{Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -15,6 +16,10 @@ use std::{
 pub enum SdkConsumerRunError {
     Io(std::io::Error),
     Contents(SdkContentsError),
+    Request {
+        phase: SdkConsumerPhase,
+        source: CommandRequestError,
+    },
     Process {
         phase: SdkConsumerPhase,
         source: ProcessError,
@@ -37,6 +42,13 @@ impl std::fmt::Display for SdkConsumerRunError {
         match self {
             Self::Io(error) => error.fmt(formatter),
             Self::Contents(error) => error.fmt(formatter),
+            Self::Request { phase, source } => {
+                write!(
+                    formatter,
+                    "SDK consumer phase {} request: {source}",
+                    phase.label()
+                )
+            }
             Self::Process { phase, source } => {
                 write!(formatter, "SDK consumer phase {}: {source}", phase.label())
             }
@@ -62,13 +74,13 @@ impl From<std::io::Error> for SdkConsumerRunError {
 }
 
 pub(crate) trait SdkPort {
-    fn run(&mut self, command: &mut Command, budget: Duration) -> Result<(), ProcessError>;
+    fn run(&mut self, command: SupervisedCommand, budget: Duration) -> Result<(), ProcessError>;
     fn finish(self) -> Result<(), ProcessError>;
 }
 
 impl SdkPort for CommandSupervisor {
-    fn run(&mut self, command: &mut Command, budget: Duration) -> Result<(), ProcessError> {
-        CommandSupervisor::run(self, command, budget)
+    fn run(&mut self, command: SupervisedCommand, budget: Duration) -> Result<(), ProcessError> {
+        CommandSupervisor::run_owned(self, command, budget)
     }
 
     fn finish(self) -> Result<(), ProcessError> {
@@ -82,9 +94,9 @@ struct Callback<F> {
 
 impl<F> SdkPort for Callback<F>
 where
-    F: FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+    F: FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
 {
-    fn run(&mut self, command: &mut Command, budget: Duration) -> Result<(), ProcessError> {
+    fn run(&mut self, command: SupervisedCommand, budget: Duration) -> Result<(), ProcessError> {
         (self.perform)(command, budget)
     }
 
@@ -111,7 +123,7 @@ fn ensure_directory(path: &Path) -> Result<(), std::io::Error> {
 pub fn verify_sdk_with(
     root: &Path,
     candidate: &Path,
-    perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+    perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
 ) -> Result<std::path::PathBuf, SdkConsumerRunError> {
     let contents = SdkContents::read(candidate).map_err(SdkConsumerRunError::Contents)?;
     let mut parent = std::fs::canonicalize(root)?;
@@ -191,7 +203,7 @@ pub(super) fn follow_up<T>(
 pub(super) fn phase(
     workspace: &SdkConsumerWorkspace<'_>,
     phase: SdkConsumerPhase,
-    perform: &mut impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+    perform: &mut impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
 ) -> Result<(), SdkConsumerRunError> {
     phase_with_target(workspace, phase, None, perform)
 }
@@ -200,7 +212,7 @@ pub(super) fn phase_with_target(
     workspace: &SdkConsumerWorkspace<'_>,
     phase: SdkConsumerPhase,
     target: Option<&SdkHttpTarget<'_>>,
-    perform: &mut impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+    perform: &mut impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
 ) -> Result<(), SdkConsumerRunError> {
     workspace.check_sources()?;
     let plan = workspace.plan();
@@ -219,25 +231,29 @@ pub(super) fn phase_with_target(
         .create_new(true)
         .open(plan.state().join(stderr(phase)))?;
     let step = plan.step(phase);
-    let mut command = Command::new(plan.program(phase));
-    command
-        .args(step.arguments)
-        .current_dir(plan.directory(phase.scope()))
-        .env("CARGO_TARGET_DIR", plan.target(phase.scope()))
-        .env("CARGO_BUILD_JOBS", "2")
-        .env("CARGO_NET_OFFLINE", "true")
-        .stdin(Stdio::null())
-        .stdout(output)
-        .stderr(diagnostic);
-    let budget = if let Some(target) = target {
-        target.configure(&mut command);
-        Duration::from_secs(60)
-    } else {
-        step.budget
-    };
+    let command = (|| -> Result<SupervisedCommand, CommandRequestError> {
+        let mut command = SupervisedCommand::new(plan.program(phase))?;
+        for argument in &step.arguments {
+            command.arg(argument)?;
+        }
+        command
+            .current_dir(plan.directory(phase.scope()))?
+            .env("CARGO_TARGET_DIR", plan.target(phase.scope()))?
+            .env("CARGO_BUILD_JOBS", "2")?
+            .env("CARGO_NET_OFFLINE", "true")?;
+        if let Some(target) = target {
+            target.configure(&mut command)?;
+        }
+        command
+            .stdout(CommandStream::File(output))
+            .stderr(CommandStream::File(diagnostic));
+        Ok(command)
+    })()
+    .map_err(|source| SdkConsumerRunError::Request { phase, source })?;
+    let budget = target.map_or(step.budget, |_| Duration::from_secs(60));
     let started = Instant::now();
-    let result = perform(&mut command, budget)
-        .map_err(|source| SdkConsumerRunError::Process { phase, source });
+    let result =
+        perform(command, budget).map_err(|source| SdkConsumerRunError::Process { phase, source });
     println!(
         "SDK consumer phase={} elapsed={:.3}s",
         phase.label(),
@@ -304,7 +320,7 @@ pub(super) fn check_run_output(
 fn run(
     contents: &SdkContents,
     workspace: &SdkConsumerWorkspace<'_>,
-    mut perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+    mut perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
 ) -> Result<(), SdkConsumerRunError> {
     for scope in SdkConsumerScope::ALL {
         phase(
@@ -375,7 +391,7 @@ pub fn verify_sdk_consumers_with(
     contents: &SdkContents,
     execution: &Path,
     artifacts: &Path,
-    perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+    perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
 ) -> Result<(), SdkConsumerRunError> {
     verify_sdk_consumers_supervised(contents, execution, artifacts, Callback { perform })
 }

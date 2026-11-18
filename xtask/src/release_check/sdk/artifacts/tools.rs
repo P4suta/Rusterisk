@@ -1,6 +1,6 @@
 use crate::{
     distribution::{SdkConsumerScope, SdkPort},
-    process::{CommandSupervisor, ProcessError},
+    process::{CommandSupervisor, ProcessError, SupervisedCommand},
     release_check::{native_artifacts::read_regular, CapturedReleaseSource},
 };
 use std::{
@@ -18,9 +18,15 @@ pub(super) struct Port<'a> {
 }
 
 impl SdkPort for Port<'_> {
-    fn run(&mut self, command: &mut Command, budget: Duration) -> Result<(), ProcessError> {
-        command.env("RUSTUP_TOOLCHAIN", self.development);
-        self.supervisor.run(command, budget)
+    fn run(
+        &mut self,
+        mut command: SupervisedCommand,
+        budget: Duration,
+    ) -> Result<(), ProcessError> {
+        command
+            .env("RUSTUP_TOOLCHAIN", self.development)
+            .map_err(io::Error::other)?;
+        self.supervisor.run_owned(command, budget)
     }
 
     fn finish(self) -> Result<(), ProcessError> {

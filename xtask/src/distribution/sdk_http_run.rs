@@ -5,10 +5,9 @@ use super::{
 };
 #[cfg(unix)]
 use super::{SdkConsumerPlan, SdkPackage, SdkRuntimeIdentity};
-use crate::process::ProcessError;
+use crate::process::{ProcessError, SupervisedCommand};
 use std::{
     path::{Path, PathBuf},
-    process::Command,
     time::Duration,
 };
 
@@ -92,7 +91,7 @@ pub(crate) fn check_sdk_http_results(
 fn prepare(
     contents: &SdkContents,
     workspace: &SdkConsumerWorkspace<'_>,
-    mut perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+    mut perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
 ) -> Result<Vec<u8>, SdkConsumerRunError> {
     let scope = SdkConsumerScope::Sdk;
     io::phase(
@@ -132,7 +131,7 @@ impl<'a> PreparedSdkHttpConsumer<'a> {
         contents: &'a SdkContents,
         execution: &Path,
         artifacts: &Path,
-        perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+        perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
     ) -> Result<Self, SdkConsumerRunError> {
         io::create_artifacts(contents, execution, artifacts)?;
         let workspace = SdkConsumerWorkspace::create_http(contents, execution)?;
@@ -164,7 +163,7 @@ impl<'a> PreparedSdkHttpConsumer<'a> {
     fn execute(
         &self,
         target: &SdkHttpTarget<'_>,
-        mut perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+        mut perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
     ) -> Result<(), SdkConsumerRunError> {
         let workspace = self
             .workspace
@@ -181,7 +180,7 @@ impl<'a> PreparedSdkHttpConsumer<'a> {
     pub fn run_with(
         mut self,
         target: &SdkHttpTarget<'_>,
-        perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+        perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
     ) -> Result<PathBuf, SdkConsumerRunError> {
         let operation = self
             .execute(target, perform)

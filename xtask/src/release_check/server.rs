@@ -226,7 +226,7 @@ fn verify_server_recorded<'a>(
                 &loaded.sdk,
                 &workspace.consumer(),
                 &request.artifacts.join("consumer"),
-                |command, budget| commands.run(command, budget),
+                |command, budget| commands.run(&mut command.into_std(), budget),
             )
             .map_err(|error| RunError::consumer("server SDK preparation", error))?,
         );
@@ -250,7 +250,9 @@ fn verify_server_recorded<'a>(
                     .ok_or_else(|| {
                         io::Error::other("prepared server SDK consumer ownership ended")
                     })?
-                    .run_with(&target, |command, budget| service.run(command, budget))
+                    .run_with(&target, |command, budget| {
+                        service.run(&mut command.into_std(), budget)
+                    })
                     .map(|_| ())
                     .map_err(io::Error::other)
             },

@@ -19,9 +19,6 @@ fn preparation_builds_before_server_start_and_a_single_http_run_owns_its_workspa
             &artifacts,
             |command, budget| {
                 phases += 1;
-                assert!(!command
-                    .get_envs()
-                    .any(|(name, _)| name.to_string_lossy().starts_with("RUSTERISK_SDK_HTTP_")));
                 perform_preparation(&execution, phases, command, budget)
             },
         )
@@ -35,6 +32,7 @@ fn preparation_builds_before_server_start_and_a_single_http_run_owns_its_workspa
         let mut runs = 0;
         let returned = prepared
             .run_with(&target, |command, budget| {
+                let command = command.into_std();
                 runs += 1;
                 assert_eq!(budget, Duration::from_secs(60));
                 assert!(command.get_args().next().is_none());

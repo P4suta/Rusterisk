@@ -4,7 +4,7 @@ use crate::{
         CapturedSdk, SdkConsumerAction, SdkConsumerPhase, SdkConsumerPlan, SdkConsumerScope,
         SdkContents, SdkPackage,
     },
-    process::ProcessError,
+    process::{ProcessError, SupervisedCommand},
     release_check::{CapturedReleaseSource, SourceInputs},
 };
 use std::{
@@ -274,8 +274,9 @@ impl Fixture {
 }
 
 impl SdkPort for Port<'_> {
-    fn run(&mut self, command: &mut Command, budget: Duration) -> Result<(), ProcessError> {
-        let phase = self.fixture.check_command(command, budget)?;
+    fn run(&mut self, command: SupervisedCommand, budget: Duration) -> Result<(), ProcessError> {
+        let command = command.into_std();
+        let phase = self.fixture.check_command(&command, budget)?;
         self.fixture.phases.push(phase);
         self.fixture.write_native(phase)?;
         if let Some(error) = self.fixture.fail_phase(phase) {
