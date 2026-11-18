@@ -8,10 +8,17 @@ const BASE: &str = r"\\?\C:\release-inputs";
 
 #[test]
 fn windows_release_inputs_reject_drive_relative_paths() {
-    for value in [r"C:captured-source", r"D:captured-source", r"\\?\D:captured-source"] {
+    for value in [
+        r"C:captured-source",
+        r"D:captured-source",
+        r"\\?\D:captured-source",
+    ] {
         let mut path = PathBuf::from(value);
         assert!(
-            matches!(resolve(&mut path, Path::new(BASE)), Err(ReleaseInputError::Path)),
+            matches!(
+                resolve(&mut path, Path::new(BASE)),
+                Err(ReleaseInputError::Path)
+            ),
             "Drive-relative Windows input was accepted: {value}"
         );
     }
@@ -22,7 +29,10 @@ fn windows_release_inputs_reject_root_relative_paths() {
     for value in [r"\captured-source", "/captured-source"] {
         let mut path = PathBuf::from(value);
         assert!(
-            matches!(resolve(&mut path, Path::new(BASE)), Err(ReleaseInputError::Path)),
+            matches!(
+                resolve(&mut path, Path::new(BASE)),
+                Err(ReleaseInputError::Path)
+            ),
             "Root-relative Windows input was accepted: {value}"
         );
     }
