@@ -7,9 +7,12 @@ mod candidate_run;
 mod cli_inputs;
 #[cfg(test)]
 mod cli_inputs_tests;
+#[cfg(any(test, doctest))]
+mod core_mutation_artifact_tests;
 mod input_fuzz;
 mod inputs;
 mod miri;
+mod mutation;
 mod native;
 #[cfg(unix)]
 mod native_artifacts;

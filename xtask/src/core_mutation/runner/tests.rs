@@ -7,7 +7,7 @@ use crate::{
 };
 use std::io;
 #[path = "tests/fixture.rs"]
-mod fixture;
+pub(super) mod fixture;
 use fixture::{using_fixture, Fault, IMAGE, PHASES};
 
 #[test]

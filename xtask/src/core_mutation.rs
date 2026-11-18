@@ -6,6 +6,8 @@ mod capture;
 mod runner;
 pub use crate::core_assurance::Execution;
 pub use capture::CapturedCoreMutation;
+#[cfg(unix)]
+pub(crate) use runner::MutationExecution;
 pub use runner::{execute, plan, CoreMutationOutcome};
 
 pub enum CoreMutationError {

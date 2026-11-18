@@ -23,6 +23,19 @@ const PHASES: [Phase; 6] = [
     Phase::FieldBuild(FieldMutation::ConnectionClaim),
     Phase::FieldTests(FieldMutation::ConnectionClaim),
 ];
+#[cfg(unix)]
+mod retained;
+#[cfg(unix)]
+mod tools;
+#[cfg(unix)]
+pub(crate) use retained::MutationExecution;
+
+#[derive(Clone, Copy)]
+enum NativeFiles {
+    Diagnostic,
+    #[cfg(unix)]
+    Retained,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommandMode {
     Work,
@@ -221,18 +234,29 @@ fn run_phase(
     plan: &CoreAssurancePlan,
     phase: Phase,
     state: &Path,
+    files: NativeFiles,
     perform: &mut impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
-) -> Result<(), CoreMutationError> {
+) -> Result<i32, CoreMutationError> {
     let output = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(state.join(format!("{}.txt", phase.label())))?;
     let step = plan.step(phase);
-    let result = perform(
-        Command::new("docker").args(step.arguments).stdout(output),
-        step.budget,
-        CommandMode::Work,
-    );
+    let mut command = Command::new("docker");
+    command.args(step.arguments).stdout(output);
+    match files {
+        NativeFiles::Diagnostic => {}
+        #[cfg(unix)]
+        NativeFiles::Retained => {
+            command.stderr(
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(state.join(format!("{}.stderr.txt", phase.label())))?,
+            );
+        }
+    }
+    let result = perform(&mut command, step.budget, CommandMode::Work);
     let cleanup = match &result {
         Ok(()) | Err(ProcessError::Status(_)) => Ok(()),
         Err(
@@ -256,13 +280,13 @@ fn run_phase(
         Err(ProcessError::Status(status))
             if matches!(phase, Phase::FieldTests(_)) && status.code() == Some(101) =>
         {
-            Ok(())
+            Ok(101)
         }
         Ok(()) => {
             if matches!(phase, Phase::FieldTests(_)) {
                 Err(CoreMutationError::Assurance(AssuranceError::Results))
             } else {
-                Ok(())
+                Ok(0)
             }
         }
         Err(source) => Err(CoreMutationError::Phase { phase, source }),
@@ -274,38 +298,91 @@ fn run_phase(
     )
 }
 
-fn verify_with(
+struct WorkingMutation {
     capture: CapturedCoreMutation,
-    image: &str,
-    mut perform: impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
-) -> Result<CheckedMutation, CoreMutationError> {
-    let image = ImageIdentity::parse(image).ok_or(CoreMutationError::Plan)?;
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(io::Error::other)?
-        .as_nanos();
-    let (identity, directory) = reserve(
-        &std::env::temp_dir(),
-        &format!("mutation-{}-{stamp}", std::process::id()),
-    )?;
-    let original = directory.join("original");
-    let source = directory.join("source");
-    let state = directory.join("state");
-    let operation = (|| {
+    image: ImageIdentity,
+    identity: String,
+    directory: PathBuf,
+}
+
+struct NativeMutation {
+    inventory: MutationInventory,
+    exits: [i32; 6],
+}
+
+impl WorkingMutation {
+    fn new(capture: CapturedCoreMutation, image: &str) -> Result<Self, CoreMutationError> {
+        let image = ImageIdentity::parse(image).ok_or(CoreMutationError::Plan)?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
+        let (identity, directory) = reserve(
+            &fs::canonicalize(std::env::temp_dir())?,
+            &format!("mutation-{}-{stamp}", std::process::id()),
+        )?;
+        Ok(Self {
+            capture,
+            image,
+            identity,
+            directory,
+        })
+    }
+
+    fn check(&self) -> Result<(), CoreMutationError> {
+        let original = self.directory.join("original");
+        let mut checked = self
+            .capture
+            .check(&original, &self.directory.join("source"));
+        for mutation in FieldMutation::ALL {
+            checked = follow(
+                checked,
+                self.capture.check_field(
+                    &original,
+                    &self.directory.join(mutation.label()),
+                    mutation,
+                ),
+                "final field mutation input check failed",
+            );
+        }
+        checked
+    }
+
+    fn execute(
+        &self,
+        files: NativeFiles,
+        perform: &mut impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
+    ) -> Result<NativeMutation, CoreMutationError> {
+        let original = self.directory.join("original");
+        let source = self.directory.join("source");
+        let state = self.directory.join("state");
+        let capture = &self.capture;
+        let image = self.image.as_str();
+        let directory = &self.directory;
+        let identity = &self.identity;
         capture.write(&original, &source)?;
         for name in ["cargo", "tmp", "results"] {
             fs::create_dir_all(state.join(name))?;
         }
-        print(&capture, &identity, &directory, image.as_str())?;
+        print(capture, identity, directory, image)?;
+        #[cfg(unix)]
+        if matches!(files, NativeFiles::Retained) {
+            tools::capture(
+                &state,
+                &phase_plan(identity, directory, image, Phase::MutationInventory)?,
+                perform,
+            )?;
+        }
         let mut inventory = None;
         let mut campaign = None;
-        for phase in PHASES {
-            let plan = phase_plan(&identity, &directory, image.as_str(), phase)?;
+        let mut exits = [0; 6];
+        for (index, phase) in PHASES.into_iter().enumerate() {
+            let plan = phase_plan(identity, directory, image, phase)?;
             if let Phase::FieldBuild(mutation) = phase {
                 capture.write_field(&directory.join(mutation.label()), mutation)?;
             }
             let checked = follow(
-                run_phase(&plan, phase, &state, &mut perform),
+                run_phase(&plan, phase, &state, files, perform),
                 capture.check(&original, &source),
                 "mutation input check failed",
             );
@@ -320,7 +397,7 @@ fn verify_with(
                     return Err(CoreMutationError::Plan);
                 }
             };
-            checked?;
+            exits[index] = checked?;
             let bytes = read(&state, Path::new(&format!("{}.txt", phase.label())))?;
             match phase {
                 Phase::MutationInventory => inventory = Some(validate_mutation_inventory(&bytes)?),
@@ -339,33 +416,47 @@ fn verify_with(
                 }
             }
         }
-        let mut checked = capture.check(&original, &source);
-        for mutation in FieldMutation::ALL {
-            checked = follow(
-                checked,
-                capture.check_field(&original, &directory.join(mutation.label()), mutation),
-                "final field mutation input check failed",
-            );
-        }
-        checked?;
+        self.check()?;
         let inventory = inventory.ok_or(CoreMutationError::Plan)?;
         validate_mutation_campaign(
             &campaign.ok_or(CoreMutationError::Plan)?,
             &inventory,
             &FieldMutation::ALL,
         )?;
-        Ok(inventory)
-    })();
-    follow(
-        operation,
-        fs::remove_dir_all(directory).map_err(CoreMutationError::Io),
-        "mutation temporary cleanup failed",
-    )
-    .map(|inventory| CheckedMutation {
-        capture,
-        inventory,
-        image,
-    })
+        Ok(NativeMutation { inventory, exits })
+    }
+
+    fn close(
+        self,
+        operation: Result<NativeMutation, CoreMutationError>,
+    ) -> Result<CheckedMutation, CoreMutationError> {
+        let operation = operation.and_then(|native| {
+            if native.exits != [0, 0, 0, 101, 0, 101] {
+                return Err(CoreMutationError::Plan);
+            }
+            Ok(native)
+        });
+        follow(
+            operation,
+            fs::remove_dir_all(self.directory).map_err(CoreMutationError::Io),
+            "mutation temporary cleanup failed",
+        )
+        .map(|native| CheckedMutation {
+            capture: self.capture,
+            inventory: native.inventory,
+            image: self.image,
+        })
+    }
+}
+
+fn verify_with(
+    capture: CapturedCoreMutation,
+    image: &str,
+    mut perform: impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
+) -> Result<CheckedMutation, CoreMutationError> {
+    let work = WorkingMutation::new(capture, image)?;
+    let operation = work.execute(NativeFiles::Diagnostic, &mut perform);
+    work.close(operation)
 }
 
 pub fn execute(execution: Execution, image: &str) -> Result<(), CoreMutationError> {
