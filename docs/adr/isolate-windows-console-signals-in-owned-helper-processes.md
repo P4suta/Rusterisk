@@ -14,6 +14,7 @@ The [approved exception](assign-windows-command-trees-to-jobs-during-creation.md
 ## Decision
 
 Create each service with `CREATE_NEW_CONSOLE`.
+Start each helper with [`DETACHED_PROCESS`](https://learn.microsoft.com/en-us/windows/win32/procthread/process-creation-flags).
 An owned helper [attaches](https://docs.rs/win32console/0.1.5/win32console/console/struct.WinConsole.html#method.attach_console) to its console.
 After attachment, [`set_ctrl_handler(None, true)`](https://docs.rs/crate/winconsole/0.11.1/source/src/console/console_main.rs) makes only the helper ignore Ctrl+C.
 Keep the helper's process-local ignore setting until exit, without adding a callback.

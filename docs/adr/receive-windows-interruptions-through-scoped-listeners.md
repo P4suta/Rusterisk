@@ -14,6 +14,7 @@ Unix supervision keeps interruption local to each supervisor.
 
 Keep [creation-time Job assignment](assign-windows-command-trees-to-jobs-during-creation.md) and `DropPolicy::Detach`.
 Create one [Tokio `CtrlC`](https://docs.rs/tokio/1.54.1/tokio/signal/windows/struct.CtrlC.html) per supervisor before spawning children.
+Enable [Ctrl+C processing](https://learn.microsoft.com/en-us/windows/console/setconsolectrlhandler) after subscribing because a launcher can pass down an ignore setting.
 Poll with `Context::from_waker(Waker::noop())` in bounded synchronous waits without constructing a runtime.
 Latch interruption locally, reject further ordinary commands, and continue bounded cleanup.
 Keep the receiver through final interruption checks and Job cleanup.
