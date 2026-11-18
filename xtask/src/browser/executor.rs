@@ -6,7 +6,9 @@ pub use crate::core_proofs::Execution;
 use crate::process::{run, CommandSupervisor, ProcessError};
 use crate::reference::Step;
 #[cfg(unix)]
-use crate::reference::{with_browser_package, with_browser_reference, ReferenceImage};
+use crate::reference::{
+    with_browser_package, with_browser_reference, with_measured_browser_reference, ReferenceImage,
+};
 #[cfg(unix)]
 use crate::server_distribution::{ServerCandidate, ServerTarget};
 use std::{
@@ -743,7 +745,7 @@ fn run_prepared_with(
                 image.as_str()
             )?;
             profile.flush()?;
-            let count = with_browser_reference(&source, &state, &identity, image, |id| {
+            let compare = |id: &str| {
                 let step = match &reference.package {
                     Some(_) => plan.matched_reference_step(id),
                     None => plan.reference_step(id),
@@ -766,7 +768,13 @@ fn run_prepared_with(
                     &inventory,
                 )
                 .map_err(io::Error::other)
-            })?;
+            };
+            let count = match &reference.package {
+                Some(_) => {
+                    with_measured_browser_reference(&source, &state, &identity, image, compare)
+                }
+                None => with_browser_reference(&source, &state, &identity, image, compare),
+            }?;
             println!("browser: {count} inventoried Asterisk scenarios passed once");
         }
         Ok(inventory)

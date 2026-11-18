@@ -14,6 +14,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod usage;
+
+enum BrowserTarget<'a> {
+    Reference,
+    MeasuredReference,
+    Package(&'a ServerCandidate),
+}
+
 fn packaged_start(image: &ReferenceImage, plan: &Interop, executable: &Path) -> io::Result<Step> {
     let executable = executable
         .to_str()
@@ -74,7 +82,31 @@ pub(crate) fn with_browser_reference<T>(
     image: &ReferenceImage,
     compare: impl FnOnce(&str) -> io::Result<T>,
 ) -> io::Result<T> {
-    with_browser_target(source, state, identity, image, None, compare)
+    with_browser_target(
+        source,
+        state,
+        identity,
+        image,
+        BrowserTarget::Reference,
+        compare,
+    )
+}
+
+pub(crate) fn with_measured_browser_reference<T>(
+    source: &Path,
+    state: &Path,
+    identity: &str,
+    image: &ReferenceImage,
+    compare: impl FnOnce(&str) -> io::Result<T>,
+) -> io::Result<T> {
+    with_browser_target(
+        source,
+        state,
+        identity,
+        image,
+        BrowserTarget::MeasuredReference,
+        compare,
+    )
 }
 
 pub(crate) fn with_browser_package<T>(
@@ -85,7 +117,14 @@ pub(crate) fn with_browser_package<T>(
     package: &ServerCandidate,
     compare: impl FnOnce(&str) -> io::Result<T>,
 ) -> io::Result<T> {
-    with_browser_target(source, state, identity, image, Some(package), compare)
+    with_browser_target(
+        source,
+        state,
+        identity,
+        image,
+        BrowserTarget::Package(package),
+        compare,
+    )
 }
 
 fn with_browser_target<T>(
@@ -93,9 +132,18 @@ fn with_browser_target<T>(
     state: &Path,
     identity: &str,
     image: &ReferenceImage,
-    package: Option<&ServerCandidate>,
+    target: BrowserTarget<'_>,
     compare: impl FnOnce(&str) -> io::Result<T>,
 ) -> io::Result<T> {
+    let package = match &target {
+        BrowserTarget::Package(package) => Some(*package),
+        BrowserTarget::Reference | BrowserTarget::MeasuredReference => None,
+    };
+    let measurement = match target {
+        BrowserTarget::Reference => None,
+        BrowserTarget::MeasuredReference => Some("asterisk"),
+        BrowserTarget::Package(_) => Some("rusterisk"),
+    };
     let (name, example, server) = match package {
         Some(_) => ("browser-package", "examples/browser/config", "Rusterisk"),
         None => (
@@ -130,18 +178,21 @@ fn with_browser_target<T>(
             Interop::for_browser(identity, configuration, &network_id).map_err(io::Error::other)?;
         let mut reference = Reference::new(identity, directory.join("container.cid"), &plan)?;
         let operation = (|| {
-            let id = match &extracted {
-                Some(server) => {
-                    let step = packaged_start(image, &plan, &server.executable()?)?;
-                    reference.launch(image, step, &mut commands, &mut supervisor)?
-                }
-                None => start_reference(
+            let id = if measurement.is_some() {
+                let mut step = match &extracted {
+                    Some(server) => packaged_start(image, &plan, &server.executable()?)?,
+                    None => image.start(&plan).map_err(io::Error::other)?,
+                };
+                step.arguments.insert(1, "--cgroupns=private".into());
+                reference.launch(image, step, &mut commands, &mut supervisor)?
+            } else {
+                start_reference(
                     &mut reference,
                     &plan,
                     Some(image),
                     &mut commands,
                     &mut supervisor,
-                )?,
+                )?
             };
             commands
                 .run(
@@ -164,7 +215,12 @@ fn with_browser_target<T>(
                     reference_ready(&id, &mut commands, &mut supervisor)?;
                 }
             }
-            compare(&id)
+            match measurement {
+                Some(server) => {
+                    usage::measure(&id, server, state, &mut commands, &mut supervisor, compare)
+                }
+                None => compare(&id),
+            }
         })();
         commands.phase = CommandPhase::Cleanup;
         let operation = operation.map_err(|primary| {

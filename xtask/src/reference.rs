@@ -20,7 +20,9 @@ mod runner;
 mod sipp_comparison;
 mod sipp_statistics;
 #[cfg(unix)]
-pub(crate) use browser::{with_browser_package, with_browser_reference};
+pub(crate) use browser::{
+    with_browser_package, with_browser_reference, with_measured_browser_reference,
+};
 pub use comparison::{ReferenceCase, ReferenceImage};
 pub use configuration::copy_configuration;
 pub use interop::{
