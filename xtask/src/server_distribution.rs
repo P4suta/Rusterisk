@@ -45,7 +45,7 @@ pub use native::{
 #[cfg(any(unix, windows))]
 mod sdk_interop;
 #[cfg(any(unix, windows))]
-pub use sdk_interop::verify_server_sdk_with;
+pub use sdk_interop::{verify_server_sdk_with, verify_server_sdk_with_jobs};
 mod oci_profile;
 pub use oci_profile::{ServerOciProfile, OCI_RUNTIME};
 mod oci_context;

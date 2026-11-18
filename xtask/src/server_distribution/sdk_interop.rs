@@ -3,11 +3,12 @@ use super::{
     ServerCandidate,
 };
 use crate::{
-    distribution::{PreparedSdkHttpConsumer, SdkContents, SdkHttpTarget},
+    distribution::{PreparedSdkHttpConsumer, SdkConsumerPlan, SdkContents, SdkHttpTarget},
     process::CommandSupervisor,
 };
 use std::{
     io::{self, Write},
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -16,6 +17,22 @@ pub fn verify_server_sdk_with(
     root: &Path,
     server_candidate: &Path,
     sdk_candidate: &Path,
+    supervisor: &mut CommandSupervisor,
+) -> io::Result<PathBuf> {
+    verify_server_sdk_with_jobs(
+        root,
+        server_candidate,
+        sdk_candidate,
+        SdkConsumerPlan::DEFAULT_JOBS,
+        supervisor,
+    )
+}
+
+pub fn verify_server_sdk_with_jobs(
+    root: &Path,
+    server_candidate: &Path,
+    sdk_candidate: &Path,
+    jobs: NonZeroUsize,
     supervisor: &mut CommandSupervisor,
 ) -> io::Result<PathBuf> {
     let server = ServerCandidate::read(server_candidate, native_target()?)?;
@@ -43,10 +60,11 @@ pub fn verify_server_sdk_with(
     println!("SDK source: {}", contents.source_digest());
     io::stdout().flush()?;
     let mut prepared = Some(
-        PreparedSdkHttpConsumer::prepare_with(
+        PreparedSdkHttpConsumer::prepare_with_jobs(
             &contents,
             &consumer_execution,
             &artifacts.join("consumer"),
+            jobs,
             |command, budget| supervisor.run_owned(command, budget),
         )
         .map_err(io::Error::other)?,

@@ -1,5 +1,7 @@
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use xtask::distribution::SdkConsumerPlan;
 use xtask::server_distribution::NativeServerBuildLimits;
 mod interop;
 mod release_cli;
@@ -344,7 +346,8 @@ fn execute() -> Result<(), TaskError> {
         [task, scope, operation] if task == "distribution" && scope == "sdk" && operation == "plan" => xtask::distribution::plan_sdk(&std::env::current_dir()?).map_err(|error| TaskError::Contract(error.to_string())),
         [task, scope, operation] if task == "distribution" && scope == "sdk" && operation == "build" => distribution_sdk_build(),
         [task, scope, operation, flag, candidate] if task == "distribution" && scope == "sdk" && operation == "check-content" && flag == "--candidate" => distribution_sdk_content(Path::new(candidate)),
-        [task, scope, operation, flag, candidate] if task == "distribution" && scope == "sdk" && operation == "verify" && flag == "--candidate" => distribution_sdk_verify(Path::new(candidate)),
+        [task, scope, operation, flag, candidate] if task == "distribution" && scope == "sdk" && operation == "verify" && flag == "--candidate" => distribution_sdk_verify(Path::new(candidate), SdkConsumerPlan::DEFAULT_JOBS),
+        [task, scope, operation, flag, candidate, jobs_flag, jobs] if task == "distribution" && scope == "sdk" && operation == "verify" && flag == "--candidate" && jobs_flag == "--consumer-jobs" => distribution_sdk_verify(Path::new(candidate), consumer_jobs(jobs)?),
         [task, scope, operation, flag, target] if task == "distribution" && scope == "server" && operation == "plan" && flag == "--target" => distribution_server_plan(target, NativeServerBuildLimits::default()),
         [task, scope, operation, flag, target] if task == "distribution" && scope == "server" && operation == "build" && flag == "--target" => distribution_server_build(target, NativeServerBuildLimits::default()),
         [task, scope, operation, target_flag, target, jobs_flag, jobs, timeout_flag, seconds] if task == "distribution" && scope == "server" && operation == "plan" && target_flag == "--target" && jobs_flag == "--jobs" && timeout_flag == "--build-timeout-seconds" => distribution_server_plan(target, native_server_build_limits(jobs, seconds)?),
@@ -357,7 +360,8 @@ fn execute() -> Result<(), TaskError> {
         [task, scope, operation, flag, candidate] if task == "distribution" && scope == "server" && operation == "check-startup" && flag == "--candidate" => distribution_server_startup(Path::new(candidate)),
         [task, scope, operation, candidate_flag, candidate, target_flag, target] if task == "distribution" && scope == "server" && operation == "check-startup" && candidate_flag == "--candidate" && target_flag == "--target" => distribution_server_startup_target(Path::new(candidate), Some(target), false),
         [task, scope, operation, candidate_flag, candidate, target_flag, target, translation] if task == "distribution" && scope == "server" && operation == "check-startup" && candidate_flag == "--candidate" && target_flag == "--target" && translation == "--rosetta" => distribution_server_startup_target(Path::new(candidate), Some(target), true),
-        [task, scope, operation, candidate_flag, candidate, sdk_flag, sdk] if task == "distribution" && scope == "server" && operation == "verify" && candidate_flag == "--candidate" && sdk_flag == "--sdk-candidate" => distribution_server_sdk(Path::new(candidate), Path::new(sdk)),
+        [task, scope, operation, candidate_flag, candidate, sdk_flag, sdk] if task == "distribution" && scope == "server" && operation == "verify" && candidate_flag == "--candidate" && sdk_flag == "--sdk-candidate" => distribution_server_sdk(Path::new(candidate), Path::new(sdk), SdkConsumerPlan::DEFAULT_JOBS),
+        [task, scope, operation, candidate_flag, candidate, sdk_flag, sdk, jobs_flag, jobs] if task == "distribution" && scope == "server" && operation == "verify" && candidate_flag == "--candidate" && sdk_flag == "--sdk-candidate" && jobs_flag == "--consumer-jobs" => distribution_server_sdk(Path::new(candidate), Path::new(sdk), consumer_jobs(jobs)?),
         [task, scope, operation, candidate_flag, candidate, target_flag, target, archive_flag, archive, sdk_flag, sdk] if task == "distribution" && scope == "server" && operation == "verify-oci" && candidate_flag == "--candidate" && target_flag == "--target" && archive_flag == "--archive" && sdk_flag == "--sdk-candidate" => distribution_server_oci_sdk(Path::new(candidate), target, Path::new(archive), Path::new(sdk)),
         [task, scope, operation, candidate_flag, candidate, target_flag, target] if task == "distribution" && scope == "server" && operation == "check-content" && candidate_flag == "--candidate" && target_flag == "--target" => {
             let target = xtask::server_distribution::ServerTarget::parse(target).map_err(|error| TaskError::Contract(error.to_string()))?;
@@ -410,7 +414,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|(check-content|verify) --candidate <path>>|distribution server <<plan|build> --target <triple> [--jobs <jobs> --build-timeout-seconds <seconds>]|<plan-container|build-container> --target <triple> --image <digest>|<check-content|export-oci> --candidate <path> --target <triple>|check-startup --candidate <path> [--target <triple> [--rosetta]]|verify --candidate <path> --sdk-candidate <path>|verify-oci --candidate <path> --target <triple> --archive <path> --sdk-candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|interop browser <--dry-run|--run> --image <digest> --reference-image <sha256:image-id>|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|check-content --candidate <path>|verify --candidate <path> [--consumer-jobs <jobs>]>|distribution server <<plan|build> --target <triple> [--jobs <jobs> --build-timeout-seconds <seconds>]|<plan-container|build-container> --target <triple> --image <digest>|<check-content|export-oci> --candidate <path> --target <triple>|check-startup --candidate <path> [--target <triple> [--rosetta]]|verify --candidate <path> --sdk-candidate <path> [--consumer-jobs <jobs>]|verify-oci --candidate <path> --target <triple> --archive <path> --sdk-candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|interop browser <--dry-run|--run> --image <digest> --reference-image <sha256:image-id>|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
         )),
     }
 }
@@ -455,14 +459,21 @@ fn distribution_sdk_content(candidate: &Path) -> Result<(), TaskError> {
     Ok(())
 }
 
-fn distribution_sdk_verify(candidate: &Path) -> Result<(), TaskError> {
+fn consumer_jobs(value: &str) -> Result<NonZeroUsize, TaskError> {
+    value
+        .parse()
+        .map_err(|_| TaskError::Contract("SDK consumer jobs must be a positive integer".into()))
+}
+
+fn distribution_sdk_verify(candidate: &Path, jobs: NonZeroUsize) -> Result<(), TaskError> {
     let root = std::env::current_dir()?;
     let mut supervisor = xtask::process::CommandSupervisor::new().map_err(TaskError::Process)?;
-    let operation = xtask::distribution::verify_sdk_with(&root, candidate, |command, budget| {
-        supervisor.run_owned(command, budget)
-    })
-    .map(|_| ())
-    .map_err(|error| TaskError::Contract(error.to_string()));
+    let operation =
+        xtask::distribution::verify_sdk_with_jobs(&root, candidate, jobs, |command, budget| {
+            supervisor.run_owned(command, budget)
+        })
+        .map(|_| ())
+        .map_err(|error| TaskError::Contract(error.to_string()));
     let cleanup = supervisor.finish();
     match (operation, cleanup) {
         (operation, Ok(())) => operation,
@@ -473,15 +484,20 @@ fn distribution_sdk_verify(candidate: &Path) -> Result<(), TaskError> {
     }
 }
 
-fn distribution_server_sdk(candidate: &Path, sdk: &Path) -> Result<(), TaskError> {
+fn distribution_server_sdk(
+    candidate: &Path,
+    sdk: &Path,
+    jobs: NonZeroUsize,
+) -> Result<(), TaskError> {
     #[cfg(any(unix, windows))]
     {
         let mut supervisor =
             xtask::process::CommandSupervisor::new().map_err(TaskError::Process)?;
-        let operation = xtask::server_distribution::verify_server_sdk_with(
+        let operation = xtask::server_distribution::verify_server_sdk_with_jobs(
             &std::env::current_dir()?,
             candidate,
             sdk,
+            jobs,
             &mut supervisor,
         )
         .map(|_| ())
@@ -496,7 +512,7 @@ fn distribution_server_sdk(candidate: &Path, sdk: &Path) -> Result<(), TaskError
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (candidate, sdk);
+        let _ = (candidate, sdk, jobs);
         Err(TaskError::Process(
             xtask::process::ProcessError::UnsupportedSupervision,
         ))
