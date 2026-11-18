@@ -77,13 +77,20 @@ fn packaged_browser_comparison_requires_a_linux_candidate_before_docker() -> std
         "rusterisk-unavailable-browser-candidate-{}",
         std::process::id()
     ));
-    for (target, reason) in [
+    for (target, order, reason) in [
         (
             "x86_64-pc-windows-msvc",
+            None,
             "requires a Linux server candidate",
         ),
         (
             "aarch64-unknown-linux-gnu",
+            None,
+            "packaged browser server candidate",
+        ),
+        (
+            "aarch64-unknown-linux-gnu",
+            Some("--reference-first"),
             "packaged browser server candidate",
         ),
     ] {
@@ -101,6 +108,7 @@ fn packaged_browser_comparison_requires_a_linux_candidate_before_docker() -> std
                 "--server-candidate",
             ])
             .arg(&missing)
+            .args(order)
             .env("PATH", "")
             .output()?;
         assert!(!output.status.success());

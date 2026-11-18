@@ -316,7 +316,30 @@ pub struct PreparedBrowserRun {
 #[cfg(unix)]
 struct ReferenceRun {
     image: ReferenceImage,
-    package: Option<ServerCandidate>,
+    package: Option<PackagedComparison>,
+}
+
+#[cfg(unix)]
+struct PackagedComparison {
+    candidate: ServerCandidate,
+    order: PackagedOrder,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PackagedOrder {
+    RusteriskFirst,
+    AsteriskFirst,
+}
+
+#[cfg(unix)]
+impl PackagedOrder {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::RusteriskFirst => "rusterisk,asterisk",
+            Self::AsteriskFirst => "asterisk,rusterisk",
+        }
+    }
 }
 
 /// Native completion requires successful validation and cleanup.
@@ -402,7 +425,7 @@ impl PreparedBrowserRun {
     fn with_comparison(
         mut self,
         reference: &str,
-        package: Option<ServerCandidate>,
+        package: Option<PackagedComparison>,
     ) -> Result<Self, RunError> {
         self.reference = Some(ReferenceRun {
             image: ReferenceImage::parse_inspection(reference).map_err(io::Error::other)?,
@@ -484,10 +507,11 @@ impl PreparedBrowserRun {
             );
             if let Some(package) = &reference.package {
                 println!(
-                    "packaged browser server source={} target={} sha256={}",
-                    package.source_digest(),
-                    package.name().target().triple(),
-                    package.checksum()
+                    "packaged browser server source={} target={} sha256={} order={}",
+                    package.candidate.source_digest(),
+                    package.candidate.name().target().triple(),
+                    package.candidate.checksum(),
+                    package.order.label()
                 );
             }
         }
@@ -611,10 +635,13 @@ fn run_phase(
     read(&path).map_err(RunError::Io)
 }
 
-fn run_prepared_with(
+fn run_prepared_with<F>(
     prepared: PreparedBrowserRun,
-    mut perform: impl FnMut(&mut Command, Duration, BrowserCommand) -> Result<(), ProcessError>,
-) -> Result<CheckedBrowserRun, RunError> {
+    mut perform: F,
+) -> Result<CheckedBrowserRun, RunError>
+where
+    F: FnMut(&mut Command, Duration, BrowserCommand) -> Result<(), ProcessError>,
+{
     let prepared = prepared.reserve()?;
     prepared.print();
     let PreparedBrowserRun {
@@ -637,6 +664,16 @@ fn run_prepared_with(
             .as_ref()
             .map(|package| (&reference.image, package))
     });
+    #[cfg(unix)]
+    let (early_reference, late_reference) = match reference.as_ref() {
+        Some(reference)
+            if packaged
+                .is_some_and(|(_, package)| package.order == PackagedOrder::AsteriskFirst) =>
+        {
+            (Some(reference), None)
+        }
+        reference => (None, reference),
+    };
     #[cfg(not(unix))]
     let reference_image = None;
     let source = directory.join("source");
@@ -656,15 +693,81 @@ fn run_prepared_with(
                 .open(state.join("packaged-server.txt"))?;
             writeln!(
                 binding,
-                "source={}\ntarget={}\nsha256={}",
-                package.source_digest(),
-                package.name().target().triple(),
-                package.checksum()
+                "source={}\ntarget={}\nsha256={}\norder={}",
+                package.candidate.source_digest(),
+                package.candidate.name().target().triple(),
+                package.candidate.checksum(),
+                package.order.label()
             )?;
             binding.flush()?;
         }
+        #[cfg(unix)]
+        let run_reference = |reference: &ReferenceRun,
+                             inventory: &BrowserInventory,
+                             perform: &mut F|
+         -> Result<(), RunError> {
+            let image = &reference.image;
+            let mut profile = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(state.join("reference-images.txt"))?;
+            writeln!(
+                profile,
+                "source={}\nbrowser={}\nasterisk={}",
+                snapshot.digest(),
+                plan.image(),
+                image.as_str()
+            )?;
+            profile.flush()?;
+            let mut compare = |id: &str| {
+                let step = match &reference.package {
+                    Some(_) => plan.matched_reference_step(id),
+                    None => plan.reference_step(id),
+                }
+                .map_err(io::Error::other)?;
+                run_phase(
+                    &root,
+                    &state,
+                    "reference-run",
+                    step,
+                    plan.cleanup(Phase::Run),
+                    perform,
+                )
+                .map_err(io::Error::other)
+            };
+            let validate = || {
+                super::runtime_inputs::RuntimeInputs::read(
+                    &state.join("reference-browser-artifacts/runtime"),
+                )?;
+                validate_execution(
+                    &read(&state.join("reference-browser-results.json"))?,
+                    inventory,
+                )
+                .map_err(io::Error::other)
+            };
+            let count = match &reference.package {
+                Some(_) => {
+                    with_measured_browser_reference(&source, &state, &identity, image, compare)?;
+                    validate()?
+                }
+                None => with_browser_reference(&source, &state, &identity, image, |id| {
+                    compare(id)?;
+                    validate()
+                })?,
+            };
+            println!("browser: {count} inventoried Asterisk scenarios passed once");
+            Ok(())
+        };
         for phase in Phase::ALL {
             if phase == Phase::Run {
+                #[cfg(unix)]
+                if let Some(reference) = early_reference {
+                    run_reference(
+                        reference,
+                        inventory.as_ref().ok_or(NativeError)?,
+                        &mut perform,
+                    )?;
+                }
                 std::fs::remove_file(&report)?;
             }
             let mut run = |step| {
@@ -679,12 +782,17 @@ fn run_prepared_with(
             };
             #[cfg(unix)]
             let bytes = match (phase, packaged) {
-                (Phase::Run, Some((image, package))) => {
-                    with_browser_package(&source, &state, &identity, image, package, |id| {
+                (Phase::Run, Some((image, package))) => with_browser_package(
+                    &source,
+                    &state,
+                    &identity,
+                    image,
+                    &package.candidate,
+                    |id| {
                         let step = plan.packaged_step(id).map_err(io::Error::other)?;
                         run(step).map_err(io::Error::other)
-                    })?
-                }
+                    },
+                )?,
                 _ => run(plan.step(phase))?,
             };
             #[cfg(not(unix))]
@@ -731,51 +839,8 @@ fn run_prepared_with(
         }
         let inventory = inventory.ok_or(RunError::Native(NativeError))?;
         #[cfg(unix)]
-        if let Some(reference) = &reference {
-            let image = &reference.image;
-            let mut profile = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(state.join("reference-images.txt"))?;
-            writeln!(
-                profile,
-                "source={}\nbrowser={}\nasterisk={}",
-                snapshot.digest(),
-                plan.image(),
-                image.as_str()
-            )?;
-            profile.flush()?;
-            let compare = |id: &str| {
-                let step = match &reference.package {
-                    Some(_) => plan.matched_reference_step(id),
-                    None => plan.reference_step(id),
-                }
-                .map_err(io::Error::other)?;
-                run_phase(
-                    &root,
-                    &state,
-                    "reference-run",
-                    step,
-                    plan.cleanup(Phase::Run),
-                    &mut perform,
-                )
-                .map_err(io::Error::other)?;
-                super::runtime_inputs::RuntimeInputs::read(
-                    &state.join("reference-browser-artifacts/runtime"),
-                )?;
-                validate_execution(
-                    &read(&state.join("reference-browser-results.json"))?,
-                    &inventory,
-                )
-                .map_err(io::Error::other)
-            };
-            let count = match &reference.package {
-                Some(_) => {
-                    with_measured_browser_reference(&source, &state, &identity, image, compare)
-                }
-                None => with_browser_reference(&source, &state, &identity, image, compare),
-            }?;
-            println!("browser: {count} inventoried Asterisk scenarios passed once");
+        if let Some(reference) = late_reference {
+            run_reference(reference, &inventory, &mut perform)?;
         }
         Ok(inventory)
     })();
@@ -863,6 +928,7 @@ pub fn execute_packaged_comparison(
     reference: &str,
     target: ServerTarget,
     package: &Path,
+    order: PackagedOrder,
 ) -> Result<(), RunError> {
     if !matches!(target, ServerTarget::LinuxArm64 | ServerTarget::LinuxX86_64) {
         return Err(io::Error::other(
@@ -870,13 +936,13 @@ pub fn execute_packaged_comparison(
         )
         .into());
     }
-    let package = ServerCandidate::read(package, target).map_err(|error| {
+    let candidate = ServerCandidate::read(package, target).map_err(|error| {
         io::Error::other(format!(
             "cannot read packaged browser server candidate ({error})"
         ))
     })?;
     let prepared = PreparedBrowserRun::read(&std::env::current_dir()?, image)?
-        .with_comparison(reference, Some(package))?;
+        .with_comparison(reference, Some(PackagedComparison { candidate, order }))?;
     execute_prepared(execution, prepared)
 }
 

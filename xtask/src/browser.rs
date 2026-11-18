@@ -9,7 +9,7 @@ mod native;
 pub use native::{validate_execution, validate_inventory, BrowserInventory, NativeError};
 mod executor;
 #[cfg(unix)]
-pub use executor::{execute_comparison, execute_packaged_comparison};
+pub use executor::{execute_comparison, execute_packaged_comparison, PackagedOrder};
 #[cfg(any(unix, test))]
 mod runtime_inputs;
 #[cfg(test)]
