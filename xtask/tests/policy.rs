@@ -81,19 +81,20 @@ fn accepts_concrete_owned_values_and_ignores_literal_fixture_text() -> Result<()
 }
 
 #[test]
-fn pending_media_size_exception_does_not_admit_erasure_or_wider_suppression(
+fn media_admission_size_exception_does_not_admit_erasure_or_wider_suppression(
 ) -> Result<(), syn::Error> {
     let exception = xtask::Exception {
         path: "crates/server/src/signaling/media.rs".into(),
-        item: "PendingMedia".into(),
+        item: "MediaAdmission".into(),
         lint: "clippy::large_enum_variant".into(),
         adr: "docs/adr/own-webrtc-media-by-call-generation.md".into(),
         rationale: "Keep pending media inline and owned by the call generation.".into(),
     };
     let source = include_str!("../../crates/server/src/signaling/media.rs");
-    assert!(xtask::inspect_with_exceptions(source, std::slice::from_ref(&exception))?.is_empty());
+    let findings = xtask::inspect_with_exceptions(source, std::slice::from_ref(&exception))?;
+    assert!(findings.is_empty(), "{findings:?}");
     for refused in [
-        source.replace("enum PendingMedia", "enum OtherMedia"),
+        source.replace("enum MediaAdmission", "enum OtherMedia"),
         source.replace(
             "Keep pending media inline and owned by the call generation.",
             "Unregistered reason.",
@@ -106,6 +107,10 @@ fn pending_media_size_exception_does_not_admit_erasure_or_wider_suppression(
         source.replace("Rtp(SocketPair)", "Rtp(std::boxed::Box<SocketPair>)"),
         source.replace("Rtp(SocketPair)", "Rtp(std::sync::Arc<SocketPair>)"),
     ] {
+        assert_ne!(
+            refused, source,
+            "media admission counterfactual is unchanged"
+        );
         assert!(
             !xtask::inspect_with_exceptions(&refused, std::slice::from_ref(&exception))?.is_empty()
         );
