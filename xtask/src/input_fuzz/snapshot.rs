@@ -1,4 +1,5 @@
 use super::{normalize_manifest, validate_locks, FuzzError, FuzzFileScope};
+use crate::release_check::SourceInputs;
 use std::{
     collections::BTreeMap,
     io::Read,
@@ -8,9 +9,9 @@ use std::{
 #[cfg(test)]
 mod tests;
 
-pub(super) const MAX_PROJECT_FILES: usize = 1024;
 pub(super) const MAX_VENDOR_FILES: usize = 512;
-pub(super) const MAX_SNAPSHOT_BYTES: usize = 40 * 1024 * 1024;
+pub(super) const MAX_PROJECT_FILES: usize = SourceInputs::MAX_FILES - MAX_VENDOR_FILES;
+pub(super) const MAX_SNAPSHOT_BYTES: usize = SourceInputs::MAX_TOTAL_BYTES;
 
 #[derive(PartialEq, Eq)]
 pub struct File {

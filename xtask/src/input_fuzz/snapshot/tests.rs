@@ -64,6 +64,13 @@ const PATCHED: &[u8] =
 fn project_and_vendor_file_budgets_accept_each_complete_bounded_source_tree(
 ) -> Result<(), FuzzError> {
     fixture("independent-file-budgets", |root, _| {
+        use crate::release_check::{InputError, SourceInputs};
+        assert_eq!(
+            super::MAX_PROJECT_FILES + super::MAX_VENDOR_FILES,
+            SourceInputs::MAX_FILES
+        );
+        assert_eq!(super::MAX_SNAPSHOT_BYTES, SourceInputs::MAX_TOTAL_BYTES);
+        assert_eq!(super::MAX_VENDOR_FILES, 512);
         vendor(root)?;
         let baseline = Snapshot::read(root)?;
         let vendor_files = baseline
@@ -72,28 +79,42 @@ fn project_and_vendor_file_budgets_accept_each_complete_bounded_source_tree(
             .filter(|file| file.path.starts_with("vendor/str0m"))
             .count();
         let project_files = baseline.files.len() - vendor_files;
-        for number in project_files..1024 {
+        for number in project_files..super::MAX_PROJECT_FILES {
             super::write_new(
                 &root.join(format!("xtask/src/count-{number}.rs")),
                 b"fixture",
             )?;
         }
-        for number in vendor_files..512 {
+        for number in vendor_files..super::MAX_VENDOR_FILES {
             super::write_new(
                 &root.join(format!("vendor/str0m/count-{number}.rs")),
                 b"fixture",
             )?;
         }
         let snapshot = Snapshot::read(root)?;
-        assert_eq!(snapshot.files.len(), 1536);
+        assert_eq!(snapshot.files.len(), SourceInputs::MAX_FILES);
+        let inputs = || {
+            snapshot
+                .files
+                .iter()
+                .map(|file| (file.path.as_path(), file.bytes.as_slice()))
+        };
+        assert!(SourceInputs::new(inputs()).is_ok());
+        assert!(matches!(
+            SourceInputs::new(inputs().chain(std::iter::once((
+                Path::new("excess.rs"),
+                b"fixture".as_slice()
+            )))),
+            Err(InputError::Limit)
+        ));
         let project_excess = root.join("xtask/src/count-excess.rs");
         super::write_new(&project_excess, b"fixture")?;
         assert!(matches!(
             Snapshot::read(root),
             Err(FuzzError::FileCount {
                 scope: super::FuzzFileScope::Project,
-                maximum: 1024
-            })
+                maximum
+            }) if maximum == super::MAX_PROJECT_FILES
         ));
         std::fs::remove_file(project_excess)?;
         super::write_new(&root.join("vendor/str0m/count-excess.rs"), b"fixture")?;
@@ -101,8 +122,8 @@ fn project_and_vendor_file_budgets_accept_each_complete_bounded_source_tree(
             Snapshot::read(root),
             Err(FuzzError::FileCount {
                 scope: super::FuzzFileScope::Vendor,
-                maximum: 512
-            })
+                maximum
+            }) if maximum == super::MAX_VENDOR_FILES
         ));
         Ok(())
     })
