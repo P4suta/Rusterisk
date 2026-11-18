@@ -48,6 +48,8 @@ The campaign uses its own typed control fixture.
 The Rust bridge example has separate HTTP and event lifecycle tests.
 The campaign also checks permission recovery, cancellation, keyboard focus, targets, narrow layouts, enlarged text, and spacing.
 Failure reports include bounded process and resource diagnostics.
+The first call scenario measures elapsed milliseconds from just before Alice selects Call.
+Its Playwright attachment records the accepted request to call Bob, both browser answers, and the observed tone at each receiver.
 
 Use the browser image and local Asterisk image ID to run the same scenarios on both servers.
 The reference run requires a Unix host with Docker Engine that supports isolated bridge mode.
