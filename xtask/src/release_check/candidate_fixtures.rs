@@ -303,6 +303,7 @@ pub(super) fn using(
         let capture = CapturedServer::read(&source, target)?;
         let server = sdk.with_file_name("server");
         capture.build_with(&server, |command, _| {
+            let command = command.into_std();
             if command.get_args().next().is_some_and(|arg| arg == "build") {
                 let state = command
                     .get_envs()

@@ -49,10 +49,11 @@ fn captured_linux_builds_package_the_container_output_and_remove_owned_state(
         let mut execution = None;
         let mut calls = 0;
         capture.build_in_container_with(&candidate, IMAGE, |command, budget, mode| {
+            let command = command.into_std();
             assert_eq!(mode, ServerBuildCommandMode::Work);
             assert_eq!(command.get_program(), "docker");
             assert!(budget.as_secs() <= 900);
-            let state = state(command)?;
+            let state = state(&command)?;
             assert!(state.join("cargo").is_dir());
             assert!(state.join("tmp").is_dir());
             execution = state.parent().map(PathBuf::from);
@@ -91,10 +92,11 @@ fn interrupted_container_builds_attempt_cleanup_and_preserve_both_failures(
         let mut calls = 0;
         let candidate = parent.join("candidate");
         let result = capture.build_in_container_with(&candidate, IMAGE, |command, _, mode| {
+            let command = command.into_std();
             calls += 1;
             match mode {
                 ServerBuildCommandMode::Work => {
-                    execution = state(command)?.parent().map(PathBuf::from);
+                    execution = state(&command)?.parent().map(PathBuf::from);
                     Err(ProcessError::Interrupted)
                 }
                 ServerBuildCommandMode::Cleanup => {

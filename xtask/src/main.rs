@@ -623,10 +623,10 @@ fn distribution_server_container(target: &str, image: &str) -> Result<(), TaskEr
         image,
         |command, budget, mode| match mode {
             xtask::server_distribution::ServerBuildCommandMode::Work => {
-                supervisor.run(command, budget)
+                supervisor.run_owned(command, budget)
             }
             xtask::server_distribution::ServerBuildCommandMode::Cleanup => {
-                supervisor.run_cleanup(command, budget)
+                supervisor.run_cleanup_owned(command, budget)
             }
         },
     )
@@ -648,7 +648,7 @@ fn distribution_server_build(target: &str) -> Result<(), TaskError> {
     let operation = xtask::server_distribution::build_server_with(
         &std::env::current_dir()?,
         target,
-        |command, budget| supervisor.run(command, budget),
+        |command, budget| supervisor.run_owned(command, budget),
     )
     .map(|_| ())
     .map_err(TaskError::Io);

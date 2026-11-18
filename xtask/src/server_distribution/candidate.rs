@@ -3,12 +3,11 @@ use super::{
     ArchiveFormat, CapturedServer, ServerBuildCommandMode, ServerBuildPhase, ServerBuildPlan,
     ServerContainerBuildPlan, ServerPayload,
 };
-use crate::process::ProcessError;
+use crate::process::{CommandStream, ProcessError, SupervisedCommand};
 use sha2::{Digest, Sha256};
 use std::{
     io::{self, Read, Write},
     path::{Component, Path},
-    process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 mod execution_directory;
@@ -17,6 +16,10 @@ use execution_directory::BuildDirectory;
 #[cfg(test)]
 #[path = "candidate/execution_directory_tests.rs"]
 mod execution_directory_tests;
+
+#[cfg(all(test, windows))]
+#[path = "candidate/native_command_tests.rs"]
+mod native_command_tests;
 
 fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = std::fs::OpenOptions::new()
@@ -90,7 +93,7 @@ impl CapturedServer {
     pub fn build_with(
         &self,
         destination: &Path,
-        mut perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+        mut perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
     ) -> io::Result<()> {
         self.build_using(destination, None, |command, budget, _| {
             perform(command, budget)
@@ -101,7 +104,11 @@ impl CapturedServer {
         &self,
         destination: &Path,
         image: &str,
-        perform: impl FnMut(&mut Command, Duration, ServerBuildCommandMode) -> Result<(), ProcessError>,
+        perform: impl FnMut(
+            SupervisedCommand,
+            Duration,
+            ServerBuildCommandMode,
+        ) -> Result<(), ProcessError>,
     ) -> io::Result<()> {
         let temporary = std::env::temp_dir();
         ServerContainerBuildPlan::new(
@@ -119,7 +126,7 @@ impl CapturedServer {
         destination: &Path,
         image: Option<&str>,
         mut perform: impl FnMut(
-            &mut Command,
+            SupervisedCommand,
             Duration,
             ServerBuildCommandMode,
         ) -> Result<(), ProcessError>,
@@ -180,17 +187,24 @@ impl CapturedServer {
                     Some(container) => container.step(phase),
                     None => plan.step(phase),
                 };
-                let mut command = Command::new(if container.is_some() {
+                let mut command = SupervisedCommand::new(if container.is_some() {
                     "docker"
                 } else {
                     "cargo"
-                });
+                })
+                .map_err(io::Error::other)?;
+                for argument in step.arguments {
+                    command.arg(argument).map_err(io::Error::other)?;
+                }
                 command
-                    .args(step.arguments)
                     .current_dir(&source)
+                    .map_err(io::Error::other)?
                     .env("CARGO_TARGET_DIR", state.join("target"))
+                    .map_err(io::Error::other)?
                     .env("CARGO_BUILD_JOBS", "2")
+                    .map_err(io::Error::other)?
                     .env("MISE_TRUSTED_CONFIG_PATHS", &source)
+                    .map_err(io::Error::other)?
                     .env(
                         "CARGO_NET_OFFLINE",
                         match phase {
@@ -198,21 +212,25 @@ impl CapturedServer {
                             ServerBuildPhase::Build => "true",
                         },
                     )
-                    .stdin(Stdio::null())
-                    .stdout(output.try_clone()?)
-                    .stderr(output);
+                    .map_err(io::Error::other)?
+                    .stdout(CommandStream::File(output.try_clone()?))
+                    .stderr(CommandStream::File(output));
                 let started = std::time::Instant::now();
-                let result = perform(&mut command, step.budget, ServerBuildCommandMode::Work);
+                let result = perform(command, step.budget, ServerBuildCommandMode::Work);
                 let cleanup = match (&container, &result) {
-                    (Some(container), Err(_)) => {
+                    (Some(container), Err(_)) => (|| {
                         let cleanup = container.cleanup(phase);
-                        perform(
-                            Command::new("docker").args(cleanup.arguments),
-                            cleanup.budget,
-                            ServerBuildCommandMode::Cleanup,
-                        )
-                        .map_err(io::Error::other)
-                    }
+                        let mut command =
+                            SupervisedCommand::new("docker").map_err(io::Error::other)?;
+                        for argument in cleanup.arguments {
+                            command.arg(argument).map_err(io::Error::other)?;
+                        }
+                        command
+                            .stdout(CommandStream::Inherit)
+                            .stderr(CommandStream::Inherit);
+                        perform(command, cleanup.budget, ServerBuildCommandMode::Cleanup)
+                            .map_err(io::Error::other)
+                    })(),
                     (Some(_), Ok(())) | (None, _) => Ok(()),
                 };
                 let result = combine(

@@ -116,6 +116,7 @@ fn candidate_checks_bind_exported_images_to_the_loaded_source_and_file_bytes(
             .map_err(io::Error::other)?;
         let directory = parent.join("candidate");
         capture.build_with(&directory, |command, _| {
+            let command = command.into_std();
             if command.get_args().next().is_some_and(|arg| arg == "build") {
                 let state = command
                     .get_envs()

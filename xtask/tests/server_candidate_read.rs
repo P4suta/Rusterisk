@@ -29,6 +29,7 @@ fn server_candidates_bind_archive_checksum_source_and_executable_bytes(
             CapturedServer::read(root, ServerTarget::MacOsArm64).map_err(io::Error::other)?;
         let directory = parent.join("candidate");
         capture.build_with(&directory, |command, _| {
+            let command = command.into_std();
             if command
                 .get_args()
                 .next()
@@ -114,6 +115,7 @@ fn windows_candidates_check_zip_contents_even_when_the_supplied_checksum_matches
             CapturedServer::read(root, ServerTarget::WindowsX86_64).map_err(io::Error::other)?;
         let directory = parent.join("candidate");
         capture.build_with(&directory, |command, _| {
+            let command = command.into_std();
             if command
                 .get_args()
                 .next()

@@ -32,6 +32,7 @@ fn server_builds_archive_only_the_executable_produced_from_captured_source(
         let mut calls = 0;
         capture
             .build_with(&destination, |command, budget| {
+                let command = command.into_std();
                 calls += 1;
                 let source = command
                     .get_current_dir()
@@ -95,6 +96,7 @@ fn failed_builds_preserve_logs_and_the_primary_error_and_remove_the_execution_co
         let destination = parent.join("candidate");
         let mut execution: Option<PathBuf> = None;
         let result = capture.build_with(&destination, |command, _| {
+            let command = command.into_std();
             let source = command
                 .get_current_dir()
                 .ok_or(ProcessError::InvalidOutput)?;
@@ -148,6 +150,7 @@ fn build_output_for_another_target_cannot_be_packaged_as_the_selected_target(
             CapturedServer::read(root, ServerTarget::MacOsArm64).map_err(io::Error::other)?;
         let destination = parent.join("candidate");
         let result = capture.build_with(&destination, |command, _| {
+            let command = command.into_std();
             if command
                 .get_args()
                 .next()

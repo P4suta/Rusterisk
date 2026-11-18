@@ -23,6 +23,7 @@ fn candidate(root: &Path, parent: &Path) -> io::Result<ServerCandidate> {
     let capture = CapturedServer::read(root, ServerTarget::LinuxArm64).map_err(io::Error::other)?;
     let directory = parent.join("candidate");
     capture.build_with(&directory, |command, _| {
+        let command = command.into_std();
         if command
             .get_args()
             .next()

@@ -2,11 +2,10 @@ use super::{
     CapturedServer, ServerBuildCommandMode, ServerBuildPhase, ServerBuildPlan,
     ServerContainerBuildPlan, ServerTarget,
 };
-use crate::process::ProcessError;
+use crate::process::{ProcessError, SupervisedCommand};
 use std::{
     io::{self, Write},
     path::{Path, PathBuf},
-    process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -73,7 +72,7 @@ pub(super) fn ensure_directory(path: &Path) -> io::Result<()> {
 pub fn build_server_with(
     root: &Path,
     target: ServerTarget,
-    mut perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
+    mut perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
 ) -> io::Result<PathBuf> {
     build_server_using(root, target, None, |command, budget, _| {
         perform(command, budget)
@@ -84,7 +83,7 @@ pub fn build_server_in_container_with(
     root: &Path,
     target: ServerTarget,
     image: &str,
-    perform: impl FnMut(&mut Command, Duration, ServerBuildCommandMode) -> Result<(), ProcessError>,
+    perform: impl FnMut(SupervisedCommand, Duration, ServerBuildCommandMode) -> Result<(), ProcessError>,
 ) -> io::Result<PathBuf> {
     let temporary = std::env::temp_dir();
     ServerContainerBuildPlan::new(
@@ -101,7 +100,11 @@ fn build_server_using(
     root: &Path,
     target: ServerTarget,
     image: Option<&str>,
-    mut perform: impl FnMut(&mut Command, Duration, ServerBuildCommandMode) -> Result<(), ProcessError>,
+    mut perform: impl FnMut(
+        SupervisedCommand,
+        Duration,
+        ServerBuildCommandMode,
+    ) -> Result<(), ProcessError>,
 ) -> io::Result<PathBuf> {
     let capture = CapturedServer::read(root, target)?;
     println!(

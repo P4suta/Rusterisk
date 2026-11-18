@@ -32,6 +32,7 @@ fn image_contexts_copy_only_verified_candidate_bytes_and_remove_owned_files(
             CapturedServer::read(root, ServerTarget::LinuxArm64).map_err(io::Error::other)?;
         let directory = parent.join("candidate");
         capture.build_with(&directory, |command, _| {
+            let command = command.into_std();
             if command
                 .get_args()
                 .next()
