@@ -40,7 +40,79 @@ fn invalid(reason: &'static str) -> RunError {
     io::Error::new(io::ErrorKind::InvalidData, reason).into()
 }
 
+pub(super) fn comparison_profile(
+    bytes: &[u8],
+    source: &str,
+    image: &str,
+    reference: &str,
+) -> Result<(), RunError> {
+    let selected =
+        crate::reference::ReferenceImage::parse_inspection(reference).map_err(io::Error::other)?;
+    if selected.as_str() != reference
+        || bytes != format!("source={source}\nbrowser={image}\nasterisk={reference}\n").as_bytes()
+    {
+        return Err(invalid("paired browser source or immutable images differ"));
+    }
+    Ok(())
+}
+
+pub(super) fn comparison_results(
+    directory: &Path,
+    inventory: &BrowserInventory,
+) -> Result<(), RunError> {
+    native_bytes(&directory.join("reference-run.txt"))?;
+    validate_execution(
+        &native_bytes(&directory.join("reference-browser-results.json"))?,
+        inventory,
+    )?;
+    artifacts(&directory.join("reference-screenshots"))
+}
+
 impl BrowserExecution {
+    pub(crate) fn read_selected(
+        &self,
+        snapshot: SourceSnapshot,
+        image: &str,
+        reference: Option<&str>,
+        directory: &Path,
+    ) -> Result<BrowserOutcome, RunError> {
+        let plan = self.plan(image)?;
+        let inventory = results(directory)?;
+        if let Some(reference) = reference {
+            comparison_profile(
+                &native_bytes(&directory.join("reference-images.txt"))?,
+                &snapshot.digest(),
+                image,
+                reference,
+            )?;
+            comparison_results(directory, &inventory)?;
+        } else {
+            for name in [
+                "reference-images.txt",
+                "reference-browser-results.json",
+                "reference-run.txt",
+                "reference-screenshots",
+            ] {
+                match fs::symlink_metadata(directory.join(name)) {
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                    Ok(_) => {
+                        return Err(invalid(
+                            "paired browser results require a reference selection",
+                        ))
+                    }
+                }
+            }
+        }
+        Ok(BrowserOutcome {
+            snapshot,
+            plan,
+            inventory,
+            artifacts: directory.to_owned(),
+            reference: reference.map(str::to_owned),
+        })
+    }
+
     fn capture(plan: &RunPlan) -> Self {
         Self {
             identity: plan.identity().to_owned(),
@@ -177,10 +249,9 @@ fn screenshot_tree(
     Ok(())
 }
 
-fn artifacts(directory: &Path) -> Result<(), RunError> {
-    let root = directory.join("screenshots");
+fn artifacts(root: &Path) -> Result<(), RunError> {
     let mut remaining = SCREENSHOTS.into_iter().map(str::to_owned).collect();
-    screenshot_tree(&root, Path::new(""), &mut remaining, &mut 0, 0)?;
+    screenshot_tree(root, Path::new(""), &mut remaining, &mut 0, 0)?;
     if !remaining.is_empty() {
         return Err(invalid("browser screenshot inventory is incomplete"));
     }
@@ -213,7 +284,7 @@ fn results(directory: &Path) -> Result<BrowserInventory, RunError> {
         &native_bytes(&directory.join("browser-results.json"))?,
         &inventory,
     )?;
-    artifacts(directory)?;
+    artifacts(&directory.join("screenshots"))?;
     Ok(inventory)
 }
 
@@ -223,14 +294,7 @@ pub(crate) fn read(
     directory: &Path,
     execution: &BrowserExecution,
 ) -> Result<BrowserOutcome, RunError> {
-    let plan = execution.plan(image)?;
-    let inventory = results(directory)?;
-    Ok(BrowserOutcome {
-        snapshot,
-        plan,
-        inventory,
-        artifacts: directory.to_owned(),
-    })
+    execution.read_selected(snapshot, image, None, directory)
 }
 
 pub(super) fn execute_with(
@@ -244,8 +308,14 @@ pub(super) fn execute_with(
     let completed = finish(operation, port.finish())?;
     let execution = BrowserExecution::capture(&completed.plan);
     let image = completed.plan.image().to_owned();
+    let reference = completed.reference;
     copy_tree(&completed.artifacts, destination, 0, &mut 0, &mut 0)?;
-    read(completed.snapshot, &image, destination, &execution)?;
+    execution.read_selected(
+        completed.snapshot,
+        &image,
+        reference.as_deref(),
+        destination,
+    )?;
     Ok(RetainedBrowserRun { execution })
 }
 

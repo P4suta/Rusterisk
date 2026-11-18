@@ -31,6 +31,7 @@ struct Metadata {
     format: u32,
     kind: String,
     image: String,
+    reference: Option<String>,
     os: String,
     architecture: String,
     execution: BrowserExecution,
@@ -187,32 +188,56 @@ fn publication(destination: &Path) -> io::Result<NativeArtifactPublication> {
     ))
 }
 
-fn check(
-    captured: &CapturedReleaseSource,
-    root: &Path,
-    metadata: &Metadata,
-    image: &str,
-) -> Result<BrowserOutcome, RunError> {
-    if metadata.format != 1 || metadata.kind != "browser" || metadata.image != image {
+fn profile(metadata: &Metadata, image: &str, reference: Option<&str>) -> Result<(), RunError> {
+    let kind = if reference.is_some() {
+        "browser-comparison"
+    } else {
+        "browser"
+    };
+    if metadata.format != 1
+        || metadata.kind != kind
+        || metadata.image != image
+        || metadata.reference.as_deref() != reference
+    {
         return Err(error(
             "browser artifact profile",
             invalid("browser artifact format, gate, or immutable image differs"),
         ));
     }
+    Ok(())
+}
+
+fn check(
+    captured: &CapturedReleaseSource,
+    root: &Path,
+    metadata: &Metadata,
+    image: &str,
+    reference: Option<&str>,
+) -> Result<BrowserOutcome, RunError> {
+    profile(metadata, image, reference)?;
     docker_tools::check(root, &metadata.os, &metadata.architecture)
         .map_err(|failure| error("browser retained Docker identity", failure))?;
     let snapshot = bound(captured, &root.join("native/release-source"))?;
-    browser::read_retained(
-        snapshot,
-        image,
-        &root.join("native/browser"),
-        &metadata.execution,
-    )
+    match reference {
+        Some(reference) => metadata.execution.read_selected(
+            snapshot,
+            image,
+            Some(reference),
+            &root.join("native/browser"),
+        ),
+        None => browser::read_retained(
+            snapshot,
+            image,
+            &root.join("native/browser"),
+            &metadata.execution,
+        ),
+    }
 }
 
 fn execute(
     captured: &CapturedReleaseSource,
     image: &str,
+    reference: Option<&str>,
     root: &Path,
 ) -> Result<BrowserExecution, RunError> {
     let workspace = Workspace::create()?;
@@ -230,6 +255,10 @@ fn execute(
                 )
             })?;
         let prepared = PreparedBrowserRun::read(&workspace.source(), image)?;
+        let prepared = match reference {
+            Some(reference) => prepared.with_reference(reference)?,
+            None => prepared,
+        };
         bind_prepared(captured, &prepared)?;
         fs::create_dir(root.join("native"))?;
         let retained = browser::run_retained(prepared, &root.join("native/browser"))?;
@@ -260,37 +289,46 @@ fn execute(
 pub(super) fn produce(
     captured: &CapturedReleaseSource,
     image: &str,
+    reference: Option<&str>,
     destination: &Path,
 ) -> Result<BrowserOutcome, RunError> {
     let publication = publication(destination)?;
-    let completed = execute(captured, image, publication.staging()).and_then(|execution| {
-        let metadata = Metadata {
-            format: 1,
-            kind: "browser".to_owned(),
-            image: image.to_owned(),
-            os: std::env::consts::OS.to_owned(),
-            architecture: std::env::consts::ARCH.to_owned(),
-            execution,
-            files: fingerprints(publication.staging())?,
-        };
-        check(captured, publication.staging(), &metadata, image)?;
-        let bytes = toml::to_string(&metadata).map_err(io::Error::other)?;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(publication.staging().join(METADATA))?;
-        file.write_all(bytes.as_bytes())?;
-        file.flush()?;
-        Ok(())
-    });
+    let completed =
+        execute(captured, image, reference, publication.staging()).and_then(|execution| {
+            let metadata = Metadata {
+                format: 1,
+                kind: if reference.is_some() {
+                    "browser-comparison"
+                } else {
+                    "browser"
+                }
+                .to_owned(),
+                image: image.to_owned(),
+                reference: reference.map(str::to_owned),
+                os: std::env::consts::OS.to_owned(),
+                architecture: std::env::consts::ARCH.to_owned(),
+                execution,
+                files: fingerprints(publication.staging())?,
+            };
+            check(captured, publication.staging(), &metadata, image, reference)?;
+            let bytes = toml::to_string(&metadata).map_err(io::Error::other)?;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(publication.staging().join(METADATA))?;
+            file.write_all(bytes.as_bytes())?;
+            file.flush()?;
+            Ok(())
+        });
     let (published, ()) = publication.publish_completed(completed.map_err(io::Error::other))?;
-    read(captured, published.directory(), image)
+    read(captured, published.directory(), image, reference)
 }
 
 pub(super) fn read(
     captured: &CapturedReleaseSource,
     directory: &Path,
     image: &str,
+    reference: Option<&str>,
 ) -> Result<BrowserOutcome, RunError> {
     let current = fingerprints(directory)?;
     let bytes = read_regular(&directory.join(METADATA), 8 * 1024 * 1024)?;
@@ -313,5 +351,5 @@ pub(super) fn read(
         .chain(std::iter::once(METADATA))
         .collect();
     let published = PublishedNativeArtifact::read(directory, &expected)?;
-    check(captured, published.directory(), &metadata, image)
+    check(captured, published.directory(), &metadata, image, reference)
 }

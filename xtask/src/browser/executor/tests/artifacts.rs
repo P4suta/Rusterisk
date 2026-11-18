@@ -35,6 +35,28 @@ fn invalid_images_cannot_start_or_publish_retained_browser_checks() -> io::Resul
 }
 
 #[test]
+fn invalid_paired_images_cannot_create_retained_browser_state() -> io::Result<()> {
+    using_fixture(|fixture| {
+        let captured = release_source()?;
+        let destination = fixture.root.join("published-pair");
+        let reference = format!("sha256:{}", "b".repeat(64));
+        for (image, reference) in [
+            ("not-a-digest", reference.as_str()),
+            (fixture.image.as_str(), "mutable-reference:latest"),
+        ] {
+            assert!(captured
+                .verify_browser_comparison_artifact(image, reference, &destination)
+                .is_err());
+            assert!(captured
+                .read_browser_comparison_artifact(&destination, image, reference)
+                .is_err());
+            assert!(!destination.exists());
+        }
+        Ok(())
+    })
+}
+
+#[test]
 fn retained_browser_checks_preserve_existing_publication_destinations() -> io::Result<()> {
     using_fixture(|fixture| {
         let captured = release_source()?;

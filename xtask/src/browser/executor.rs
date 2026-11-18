@@ -323,6 +323,7 @@ pub struct BrowserOutcome {
     plan: RunPlan,
     inventory: BrowserInventory,
     artifacts: PathBuf,
+    reference: Option<String>,
 }
 
 impl BrowserOutcome {
@@ -332,6 +333,10 @@ impl BrowserOutcome {
 
     pub fn image(&self) -> &str {
         self.plan.image()
+    }
+
+    pub fn reference_image(&self) -> Option<&str> {
+        self.reference.as_deref()
     }
 
     pub const fn inventory(&self) -> &BrowserInventory {
@@ -376,6 +381,13 @@ impl PreparedBrowserRun {
 
     pub const fn plan(&self) -> &RunPlan {
         &self.plan
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn with_reference(mut self, reference: &str) -> Result<Self, RunError> {
+        self.reference =
+            Some(ReferenceImage::parse_inspection(reference).map_err(io::Error::other)?);
+        Ok(self)
     }
 
     pub fn inputs(&self) -> impl ExactSizeIterator<Item = (&Path, &[u8])> {
@@ -463,6 +475,7 @@ struct CheckedBrowserRun {
     plan: RunPlan,
     inventory: BrowserInventory,
     artifacts: PathBuf,
+    reference: Option<String>,
 }
 
 fn finish(
@@ -475,6 +488,7 @@ fn finish(
             plan: checked.plan,
             inventory: checked.inventory,
             artifacts: checked.artifacts,
+            reference: checked.reference,
         }),
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(RunError::Process(error)),
@@ -573,6 +587,10 @@ fn run_prepared_with(
         #[cfg(unix)]
         reference,
     } = prepared;
+    #[cfg(unix)]
+    let reference_image = reference.as_ref().map(|image| image.as_str().to_owned());
+    #[cfg(not(unix))]
+    let reference_image = None;
     let source = directory.join("source");
     let state = directory.join("state");
     let operation = (|| {
@@ -694,6 +712,7 @@ fn run_prepared_with(
             plan,
             inventory,
             artifacts,
+            reference: reference_image,
         }),
         (Err(error), Ok(())) => Err(error),
         (Ok(_), Err(error)) => Err(RunError::Io(error)),
@@ -738,9 +757,8 @@ pub fn execute_comparison(
     image: &str,
     reference: &str,
 ) -> Result<(), RunError> {
-    let reference = ReferenceImage::parse_inspection(reference).map_err(io::Error::other)?;
-    let mut prepared = PreparedBrowserRun::read(&std::env::current_dir()?, image)?;
-    prepared.reference = Some(reference);
+    let prepared =
+        PreparedBrowserRun::read(&std::env::current_dir()?, image)?.with_reference(reference)?;
     match execution {
         Execution::DryRun => {
             prepared.print();
