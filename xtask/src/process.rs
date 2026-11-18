@@ -86,5 +86,7 @@ pub fn run(command: &mut Command, budget: Duration) -> Result<(), ProcessError> 
 
 mod supervisor;
 pub use supervisor::CommandSupervisor;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use supervisor::RunningCommand;
+#[cfg(windows)]
+pub use supervisor::{signal_owned_console, WINDOWS_CONSOLE_SIGNAL_COMMAND};

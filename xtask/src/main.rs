@@ -248,6 +248,12 @@ fn execute() -> Result<(), TaskError> {
         })
         .collect::<Result<_, _>>()?;
     match arguments.as_slice() {
+        #[cfg(windows)]
+        [task, process_id] if task == xtask::process::WINDOWS_CONSOLE_SIGNAL_COMMAND => {
+            let process_id = process_id.parse()
+                .map_err(|_| TaskError::Contract("invalid owned console process".into()))?;
+            xtask::process::signal_owned_console(process_id).map_err(TaskError::Io)
+        }
         [task, arguments @ ..] if task == "release-check" => release_cli::execute(arguments),
         [task, flag, archive] if task == "vendor-patch" && flag == "--archive" => {
             let count = xtask::vendor::patch(&std::env::current_dir()?, Path::new(archive))

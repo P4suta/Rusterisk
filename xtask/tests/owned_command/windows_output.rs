@@ -1,4 +1,3 @@
-use super::{checked, verify};
 use std::{
     fs::{self, OpenOptions},
     io::{self, Read},
@@ -10,6 +9,14 @@ use xtask::process::{CommandStream, SupervisedCommand};
 
 const MAX_OUTPUT: usize = 16_384;
 const SHARING_VIOLATION: i32 = 32;
+
+fn verify(valid: bool, message: &'static str) -> io::Result<()> {
+    if valid {
+        Ok(())
+    } else {
+        Err(io::Error::other(message))
+    }
+}
 
 fn open_exclusive(path: &Path) -> io::Result<fs::File> {
     let deadline = Instant::now() + Duration::from_secs(1);
@@ -32,7 +39,10 @@ struct TempDir {
 impl TempDir {
     fn create() -> io::Result<Self> {
         let parent = fs::canonicalize(std::env::temp_dir())?;
-        let stamp = checked(SystemTime::now().duration_since(UNIX_EPOCH))?.as_nanos();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
         for attempt in 0..32 {
             let path = parent.join(format!(
                 "rusterisk-owned-output-{}-{stamp}-{attempt}",
@@ -87,7 +97,7 @@ fn read(path: &Path) -> io::Result<String> {
         bytes.len() <= MAX_OUTPUT,
         "Owned command output exceeded its bound",
     )?;
-    checked(String::from_utf8(bytes))
+    String::from_utf8(bytes).map_err(io::Error::other)
 }
 
 impl Output {

@@ -1,13 +1,12 @@
-use super::{unix, CommandSupervisor};
-use crate::process::ProcessError;
-use std::{
-    process::Command,
-    time::{Duration, Instant},
-};
+use super::{native, CommandSupervisor};
+use crate::process::{ProcessError, SupervisedCommand};
+#[cfg(unix)]
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 pub struct RunningCommand<'a> {
     supervisor: &'a mut CommandSupervisor,
-    running: Option<unix::Service>,
+    running: Option<native::Service>,
 }
 
 fn stopped(
@@ -25,7 +24,7 @@ fn stopped(
 }
 
 impl<'a> RunningCommand<'a> {
-    pub(super) fn new(supervisor: &'a mut CommandSupervisor, running: unix::Service) -> Self {
+    pub(super) fn new(supervisor: &'a mut CommandSupervisor, running: native::Service) -> Self {
         Self {
             supervisor,
             running: Some(running),
@@ -33,7 +32,7 @@ impl<'a> RunningCommand<'a> {
     }
 
     pub fn poll(&mut self) -> Result<(), ProcessError> {
-        let service = self.running.as_ref().ok_or(ProcessError::InvalidOutput)?;
+        let service = self.running.as_mut().ok_or(ProcessError::InvalidOutput)?;
         self.supervisor
             .state
             .as_mut()
@@ -41,7 +40,11 @@ impl<'a> RunningCommand<'a> {
             .poll_service(service)
     }
 
-    pub fn run(&mut self, command: &mut Command, budget: Duration) -> Result<(), ProcessError> {
+    fn run_checked(
+        &mut self,
+        budget: Duration,
+        run: impl FnOnce(&mut CommandSupervisor, Duration) -> Result<(), ProcessError>,
+    ) -> Result<(), ProcessError> {
         self.poll()?;
         let remaining = self
             .running
@@ -52,19 +55,27 @@ impl<'a> RunningCommand<'a> {
         if remaining.is_zero() {
             return Err(ProcessError::Timeout);
         }
-        let result = self.supervisor.run(command, budget.min(remaining));
-        let service = self.poll();
-        match (result, service) {
-            (result, Ok(())) => result,
-            (Ok(()), Err(error)) => Err(error),
-            (Err(operation), Err(cleanup)) => Err(ProcessError::Cleanup {
-                operation: operation.to_string(),
-                cleanup: cleanup.to_string(),
-            }),
-        }
+        let result = run(self.supervisor, budget.min(remaining));
+        stopped(result, self.poll())
+    }
+
+    #[cfg(unix)]
+    pub fn run(&mut self, command: &mut Command, budget: Duration) -> Result<(), ProcessError> {
+        self.run_checked(budget, |supervisor, budget| supervisor.run(command, budget))
+    }
+
+    pub fn run_owned(
+        &mut self,
+        command: SupervisedCommand,
+        budget: Duration,
+    ) -> Result<(), ProcessError> {
+        self.run_checked(budget, |supervisor, budget| {
+            supervisor.run_owned(command, budget)
+        })
     }
 
     /// Runs a bounded stop request and waits for the service's actual zero exit.
+    #[cfg(unix)]
     pub fn stop_with(
         mut self,
         command: &mut Command,
@@ -89,11 +100,11 @@ impl<'a> RunningCommand<'a> {
                 Some(state) => state.wait_service(running),
                 None => stopped(
                     Err(ProcessError::InvalidOutput),
-                    unix::abort_service(running),
+                    native::abort_service(running),
                 ),
             }
         } else {
-            unix::abort_service(running)
+            native::abort_service(running)
         };
         stopped(operation, cleanup)
     }
@@ -105,6 +116,17 @@ impl<'a> RunningCommand<'a> {
             .as_mut()
             .ok_or(ProcessError::InvalidOutput)?
             .stop_service(running)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for RunningCommand<'_> {
+    fn drop(&mut self) {
+        if let Some(running) = self.running.take() {
+            if let Err(error) = native::abort_service(running) {
+                eprintln!("process service cleanup failed: {error}");
+            }
+        }
     }
 }
 

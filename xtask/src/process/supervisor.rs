@@ -4,18 +4,20 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod service;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
 mod windows;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use service::RunningCommand;
 #[cfg(unix)]
 use unix as native;
 #[cfg(windows)]
 use windows as native;
+#[cfg(windows)]
+pub use windows::{signal_owned_console, WINDOWS_CONSOLE_SIGNAL_COMMAND};
 
 fn deadline(budget: Duration) -> Result<Instant, ProcessError> {
     Instant::now()
@@ -89,6 +91,28 @@ impl CommandSupervisor {
         {
             Err(ProcessError::UnsupportedSupervision)
         }
+    }
+
+    #[cfg(windows)]
+    pub fn with_console_helper(path: &std::path::Path) -> Result<Self, ProcessError> {
+        Ok(Self {
+            state: Some(windows::Supervisor::with_console_helper(path)?),
+        })
+    }
+
+    #[cfg(any(unix, windows))]
+    pub fn start_service_owned(
+        &mut self,
+        command: SupervisedCommand,
+        budget: Duration,
+    ) -> Result<RunningCommand<'_>, ProcessError> {
+        let deadline = deadline(budget)?;
+        let state = self.state.as_mut().ok_or(ProcessError::InvalidOutput)?;
+        #[cfg(unix)]
+        let running = state.start_service(&mut command.into_std(), deadline)?;
+        #[cfg(windows)]
+        let running = state.start_service(command, deadline)?;
+        Ok(RunningCommand::new(self, running))
     }
 
     pub fn run_owned(

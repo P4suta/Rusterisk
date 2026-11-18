@@ -10,9 +10,7 @@ use std::{
 };
 use xtask::process::{self, CommandSupervisor, ProcessError, SupervisedCommand};
 
-#[path = "../owned_command/windows_output.rs"]
-mod output;
-use output::Output;
+use super::output::Output;
 
 const MODE: &str = "RUSTERISK_WINDOWS_PROJECTION_WORKER";
 const DIRECTORY: &str = "RUSTERISK_WINDOWS_PROJECTION_DIRECTORY";
