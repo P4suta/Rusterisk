@@ -63,3 +63,19 @@ Both servers passed on Linux ARM64 with Playwright `1.65.1`, Chromium `159.0.815
 The runs matched 660 Hz at Alice, 440 Hz at Bob, and both test signals in each stored recording.
 The tests use loopback signaling and gather Asterisk media candidates on the isolated bridge.
 VoiceOver, network address translation (NAT) traversal, and [Traversal Using Relays around NAT](https://www.rfc-editor.org/rfc/rfc8656.html) media relays remain unverified.
+
+## Compare packaged servers
+
+Pass an inspected Linux server candidate to run each server in its own container with one processor and 512 MiB of memory.
+The same browser driver joins each server's isolated network namespace in turn.
+Use a Docker Engine with control group version 2.
+Select the candidate directory and its matching Linux target.
+
+```sh
+mise x -- just interop browser --run --image "$browser_image" \
+  --reference-image "$asterisk_image" --server-target aarch64-unknown-linux-gnu \
+  --server-candidate "$server_candidate"
+```
+
+The resource reports record elapsed driver time and the change in the [server container's processor usage counter](https://docs.kernel.org/admin-guide/cgroup-v2.html).
+The reports also capture server process resident memory before and after each driver run.
