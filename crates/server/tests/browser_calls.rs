@@ -1,12 +1,17 @@
 #[path = "../examples/browser/assets.rs"]
 mod assets;
+#[path = "browser_calls/download_tests.rs"]
+mod download_tests;
+#[path = "browser_calls/driver.rs"]
+mod driver;
 #[path = "browser_calls/resources.rs"]
 mod resources;
 #[path = "../../../xtask/src/browser/runtime_inputs.rs"]
 mod runtime_inputs;
+use driver::{download_recording, BrowserRun};
 use rusterisk_config::Config;
 use rusterisk_media::Frame;
-use rusterisk_server::{runtime::Server, ControlError, Credentials};
+use rusterisk_server::{runtime::Server, ControlError};
 use rusterisk_storage::{Recorder, WaveReader};
 use std::{path::Path, time::Duration};
 use tokio::{net::TcpListener, task::JoinHandle};
@@ -142,9 +147,10 @@ async fn actual_browser_calls_exchange_known_audio_and_store_both_senders(
     config.rtp.start = 0;
     config.rtp.end = 0;
     let data = tempfile::tempdir().map_err(failure)?;
+    let storage = tempfile::tempdir().map_err(failure)?;
     let left = tone(data.path(), "alice-microphone", 440.0)?;
     let right = tone(data.path(), "bob-microphone", 660.0)?;
-    let server = Server::bind(config, 8, data.path().to_owned()).await?;
+    let server = Server::bind(config, 8, storage.path().to_owned()).await?;
     let address = server.local_addr()?;
     let controller = server.controller();
     let mut stopped = controller.shutdown_signal();
@@ -161,55 +167,17 @@ async fn actual_browser_calls_exchange_known_audio_and_store_both_senders(
             .map_err(failure)
     });
     let serving = tokio::spawn(server.run());
-    let result = async {
-        let credentials = Credentials::new("app".into(), "test-password".into())?;
-        let mut subscription = controller.subscribe(credentials, None, "calls".into()).await?;
-        let mut child = tokio::process::Command::new("node")
-            .current_dir(&root)
-            .args(["--max-old-space-size=256", "node_modules/@playwright/test/cli.js", "test"])
-            .env("RUSTERISK_BROWSER_UI", format!("http://{ui}"))
-            .env("RUSTERISK_BROWSER_API", format!("http://{address}/ari/"))
-            .env("RUSTERISK_BROWSER_SIGNALING", format!("ws://{address}/ws"))
-            .env("RUSTERISK_BROWSER_ALICE_AUDIO", &left)
-            .env("RUSTERISK_BROWSER_BOB_AUDIO", &right)
-            .stdin(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(failure)?;
-        let operation = tokio::time::timeout(Duration::from_secs(150), async {
-            let mut events = 0;
-            loop {
-                tokio::select! {
-                    status = child.wait() => {
-                        let status = status.map_err(failure)?;
-                        break if status.success() { Ok(()) } else { Err(failure(format!("browser fixture failed: {status}"))) };
-                    }
-                    event = subscription.events.recv() => {
-                        event.ok_or(ControlError::Capacity)?;
-                        events += 1;
-                        if events > 512 { break Err(ControlError::Capacity); }
-                    }
-                }
-            }
-        }).await.map_err(failure).and_then(|result| result);
-        if let Err(primary) = operation {
-            eprintln!("browser resource counters: {}", resources::snapshot(Path::new("/sys/fs/cgroup")));
-            if child.id().is_some() {
-                if let Err(cleanup) = child.kill().await {
-                    return Err(failure(format!("{primary}; child cleanup failed: {cleanup}")));
-                }
-            }
-            return Err(primary);
-        }
-        let recorded = data.path().join("recordings/browser-known.wav");
-        recording(&recorded)?;
-        if let Some(artifacts) = std::env::var_os("RUSTERISK_BROWSER_ARTIFACTS") {
-            runtime_inputs::RuntimeInputs::new(ui, address, &left, &right, &recorded)
-                .and_then(|inputs| inputs.save(&std::path::PathBuf::from(artifacts).join("runtime")))
-                .map_err(failure)?;
-        }
-        Ok(())
-    }.await;
+    let recorded = data.path().join("recordings/browser-known.wav");
+    let result = BrowserRun {
+        directory: &root,
+        ui,
+        server: address,
+        alice: &left,
+        bob: &right,
+        recording: &recorded,
+    }
+    .run()
+    .await;
     controller.shutdown();
     let mut failures = Vec::with_capacity(3);
     for outcome in [result, joined(serving_ui).await, joined(serving).await] {
