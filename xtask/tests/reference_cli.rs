@@ -68,3 +68,45 @@ fn interop_dry_run_requires_a_fresh_server_and_the_shared_sipp_comparison(
     );
     Ok(())
 }
+
+#[cfg(unix)]
+#[test]
+fn packaged_browser_comparison_requires_a_linux_candidate_before_docker() -> std::io::Result<()> {
+    let image = format!("sha256:{}", "a".repeat(64));
+    let missing = std::env::temp_dir().join(format!(
+        "rusterisk-unavailable-browser-candidate-{}",
+        std::process::id()
+    ));
+    for (target, reason) in [
+        (
+            "x86_64-pc-windows-msvc",
+            "requires a Linux server candidate",
+        ),
+        (
+            "aarch64-unknown-linux-gnu",
+            "packaged browser server candidate",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_xtask"))
+            .args([
+                "interop",
+                "browser",
+                "--dry-run",
+                "--image",
+                &image,
+                "--reference-image",
+                &image,
+                "--server-target",
+                target,
+                "--server-candidate",
+            ])
+            .arg(&missing)
+            .env("PATH", "")
+            .output()?;
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(reason), "{stderr}");
+    }
+    Ok(())
+}

@@ -6,7 +6,9 @@ pub use crate::core_proofs::Execution;
 use crate::process::{run, CommandSupervisor, ProcessError};
 use crate::reference::Step;
 #[cfg(unix)]
-use crate::reference::{with_browser_reference, ReferenceImage};
+use crate::reference::{with_browser_package, with_browser_reference, ReferenceImage};
+#[cfg(unix)]
+use crate::server_distribution::{ServerCandidate, ServerTarget};
 use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -306,7 +308,13 @@ pub struct PreparedBrowserRun {
     directory: PathBuf,
     plan: RunPlan,
     #[cfg(unix)]
-    reference: Option<ReferenceImage>,
+    reference: Option<ReferenceRun>,
+}
+
+#[cfg(unix)]
+struct ReferenceRun {
+    image: ReferenceImage,
+    package: Option<ServerCandidate>,
 }
 
 /// Native completion requires successful validation and cleanup.
@@ -384,9 +392,20 @@ impl PreparedBrowserRun {
     }
 
     #[cfg(unix)]
-    pub(crate) fn with_reference(mut self, reference: &str) -> Result<Self, RunError> {
-        self.reference =
-            Some(ReferenceImage::parse_inspection(reference).map_err(io::Error::other)?);
+    pub(crate) fn with_reference(self, reference: &str) -> Result<Self, RunError> {
+        self.with_comparison(reference, None)
+    }
+
+    #[cfg(unix)]
+    fn with_comparison(
+        mut self,
+        reference: &str,
+        package: Option<ServerCandidate>,
+    ) -> Result<Self, RunError> {
+        self.reference = Some(ReferenceRun {
+            image: ReferenceImage::parse_inspection(reference).map_err(io::Error::other)?,
+            package,
+        });
         Ok(self)
     }
 
@@ -437,6 +456,16 @@ impl PreparedBrowserRun {
     fn print(&self) {
         println!("browser captured source: {}", self.snapshot.digest());
         for phase in Phase::ALL {
+            #[cfg(unix)]
+            if phase == Phase::Run
+                && self
+                    .reference
+                    .as_ref()
+                    .is_some_and(|reference| reference.package.is_some())
+            {
+                println!("phase=run against a packaged server in its isolated bridge namespace");
+                continue;
+            }
             let step = self.plan.step(phase);
             println!(
                 "phase={} budget={}s docker {}",
@@ -446,11 +475,19 @@ impl PreparedBrowserRun {
             );
         }
         #[cfg(unix)]
-        if let Some(image) = &self.reference {
+        if let Some(reference) = &self.reference {
             println!(
                 "browser reference image={} isolated bridge, browser and reference combined CPU=2 memory=2GiB",
-                image.as_str()
+                reference.image.as_str()
             );
+            if let Some(package) = &reference.package {
+                println!(
+                    "packaged browser server source={} target={} sha256={}",
+                    package.source_digest(),
+                    package.name().target().triple(),
+                    package.checksum()
+                );
+            }
         }
     }
 
@@ -588,7 +625,16 @@ fn run_prepared_with(
         reference,
     } = prepared;
     #[cfg(unix)]
-    let reference_image = reference.as_ref().map(|image| image.as_str().to_owned());
+    let reference_image = reference
+        .as_ref()
+        .map(|reference| reference.image.as_str().to_owned());
+    #[cfg(unix)]
+    let packaged = reference.as_ref().and_then(|reference| {
+        reference
+            .package
+            .as_ref()
+            .map(|package| (&reference.image, package))
+    });
     #[cfg(not(unix))]
     let reference_image = None;
     let source = directory.join("source");
@@ -600,18 +646,47 @@ fn run_prepared_with(
         }
         let mut inventory: Option<BrowserInventory> = None;
         let report = state.join("browser-results.json");
+        #[cfg(unix)]
+        if let Some((_, package)) = packaged {
+            let mut binding = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(state.join("packaged-server.txt"))?;
+            writeln!(
+                binding,
+                "source={}\ntarget={}\nsha256={}",
+                package.source_digest(),
+                package.name().target().triple(),
+                package.checksum()
+            )?;
+            binding.flush()?;
+        }
         for phase in Phase::ALL {
             if phase == Phase::Run {
                 std::fs::remove_file(&report)?;
             }
-            let bytes = run_phase(
-                &root,
-                &state,
-                phase.label(),
-                plan.step(phase),
-                plan.cleanup(phase),
-                &mut perform,
-            )?;
+            let mut run = |step| {
+                run_phase(
+                    &root,
+                    &state,
+                    phase.label(),
+                    step,
+                    plan.cleanup(phase),
+                    &mut perform,
+                )
+            };
+            #[cfg(unix)]
+            let bytes = match (phase, packaged) {
+                (Phase::Run, Some((image, package))) => {
+                    with_browser_package(&source, &state, &identity, image, package, |id| {
+                        let step = plan.packaged_step(id).map_err(io::Error::other)?;
+                        run(step).map_err(io::Error::other)
+                    })?
+                }
+                _ => run(plan.step(phase))?,
+            };
+            #[cfg(not(unix))]
+            let bytes = run(plan.step(phase))?;
             match phase {
                 Phase::RustVersion
                 | Phase::CargoVersion
@@ -629,6 +704,12 @@ fn run_prepared_with(
                     saved.flush()?;
                 }
                 Phase::Run => {
+                    #[cfg(unix)]
+                    if packaged.is_some() {
+                        super::runtime_inputs::RuntimeInputs::read(
+                            &state.join("browser-artifacts/runtime"),
+                        )?;
+                    }
                     let count = validate_execution(
                         &read(&report)?,
                         inventory.as_ref().ok_or(NativeError)?,
@@ -648,7 +729,8 @@ fn run_prepared_with(
         }
         let inventory = inventory.ok_or(RunError::Native(NativeError))?;
         #[cfg(unix)]
-        if let Some(image) = reference {
+        if let Some(reference) = &reference {
+            let image = &reference.image;
             let mut profile = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -661,8 +743,12 @@ fn run_prepared_with(
                 image.as_str()
             )?;
             profile.flush()?;
-            let count = with_browser_reference(&source, &state, &identity, &image, |id| {
-                let step = plan.reference_step(id).map_err(io::Error::other)?;
+            let count = with_browser_reference(&source, &state, &identity, image, |id| {
+                let step = match &reference.package {
+                    Some(_) => plan.matched_reference_step(id),
+                    None => plan.reference_step(id),
+                }
+                .map_err(io::Error::other)?;
                 run_phase(
                     &root,
                     &state,
@@ -759,6 +845,35 @@ pub fn execute_comparison(
 ) -> Result<(), RunError> {
     let prepared =
         PreparedBrowserRun::read(&std::env::current_dir()?, image)?.with_reference(reference)?;
+    execute_prepared(execution, prepared)
+}
+
+#[cfg(unix)]
+pub fn execute_packaged_comparison(
+    execution: Execution,
+    image: &str,
+    reference: &str,
+    target: ServerTarget,
+    package: &Path,
+) -> Result<(), RunError> {
+    if !matches!(target, ServerTarget::LinuxArm64 | ServerTarget::LinuxX86_64) {
+        return Err(io::Error::other(
+            "packaged browser comparison requires a Linux server candidate",
+        )
+        .into());
+    }
+    let package = ServerCandidate::read(package, target).map_err(|error| {
+        io::Error::other(format!(
+            "cannot read packaged browser server candidate ({error})"
+        ))
+    })?;
+    let prepared = PreparedBrowserRun::read(&std::env::current_dir()?, image)?
+        .with_comparison(reference, Some(package))?;
+    execute_prepared(execution, prepared)
+}
+
+#[cfg(unix)]
+fn execute_prepared(execution: Execution, prepared: PreparedBrowserRun) -> Result<(), RunError> {
     match execution {
         Execution::DryRun => {
             prepared.print();

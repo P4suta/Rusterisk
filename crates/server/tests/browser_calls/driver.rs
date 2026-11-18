@@ -22,6 +22,7 @@ pub(super) enum BrowserBackend {
     Rusterisk,
     PackagedRusterisk,
     Asterisk,
+    PackagedAsterisk,
 }
 
 impl BrowserBackend {
@@ -30,6 +31,7 @@ impl BrowserBackend {
             None | Some("rusterisk") => Ok(Self::Rusterisk),
             Some("packaged-rusterisk") => Ok(Self::PackagedRusterisk),
             Some("asterisk") => Ok(Self::Asterisk),
+            Some("packaged-asterisk") => Ok(Self::PackagedAsterisk),
             Some(_) => Err(failure("unknown browser call fixture")),
         }
     }
@@ -37,14 +39,14 @@ impl BrowserBackend {
     const fn name(self) -> &'static str {
         match self {
             Self::Rusterisk | Self::PackagedRusterisk => "rusterisk",
-            Self::Asterisk => "asterisk",
+            Self::Asterisk | Self::PackagedAsterisk => "asterisk",
         }
     }
 
     pub(super) fn ui_bind(self) -> SocketAddr {
         let port = match self {
             Self::Rusterisk | Self::Asterisk => 0,
-            Self::PackagedRusterisk => 3000,
+            Self::PackagedRusterisk | Self::PackagedAsterisk => 3000,
         };
         SocketAddr::from((Ipv4Addr::LOCALHOST, port))
     }
@@ -52,7 +54,7 @@ impl BrowserBackend {
     pub(super) fn external_server(self) -> Option<SocketAddr> {
         match self {
             Self::Rusterisk => None,
-            Self::PackagedRusterisk | Self::Asterisk => {
+            Self::PackagedRusterisk | Self::Asterisk | Self::PackagedAsterisk => {
                 Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 8088)))
             }
         }
@@ -282,6 +284,7 @@ mod selection_tests {
             (Some("rusterisk"), 0, None, "rusterisk"),
             (Some("asterisk"), 0, Some(8088), "asterisk"),
             (Some("packaged-rusterisk"), 3000, Some(8088), "rusterisk"),
+            (Some("packaged-asterisk"), 3000, Some(8088), "asterisk"),
         ] {
             let backend = BrowserBackend::select(selected)?;
             assert_eq!(

@@ -2,6 +2,24 @@ use super::BrowserError;
 use crate::reference::{valid_identity, ImageIdentity, Step};
 use std::time::Duration;
 
+const BROWSER_OUTPUTS: [&str; 2] = [
+    "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/browser-results.json",
+    "--env=RUSTERISK_BROWSER_ARTIFACTS=/state/browser-artifacts",
+];
+
+struct ExternalBrowser<'a> {
+    id: &'a str,
+    server: &'static str,
+    outputs: [&'static str; 2],
+}
+
+#[cfg(unix)]
+enum ExternalServer {
+    Reference,
+    Packaged,
+    MatchedReference,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     RustVersion,
@@ -126,6 +144,21 @@ impl RunPlan {
 
     #[cfg(unix)]
     pub(super) fn reference_step(&self, id: &str) -> Result<Step, BrowserError> {
+        self.external_step(id, ExternalServer::Reference)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn packaged_step(&self, id: &str) -> Result<Step, BrowserError> {
+        self.external_step(id, ExternalServer::Packaged)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn matched_reference_step(&self, id: &str) -> Result<Step, BrowserError> {
+        self.external_step(id, ExternalServer::MatchedReference)
+    }
+
+    #[cfg(unix)]
+    fn external_step(&self, id: &str, target: ExternalServer) -> Result<Step, BrowserError> {
         if id.len() != 64
             || !id
                 .bytes()
@@ -133,10 +166,34 @@ impl RunPlan {
         {
             return Err(BrowserError::Plan);
         }
-        Ok(self.step_in(Phase::Run, Some(id)))
+        let reference_outputs = [
+            "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/reference-browser-results.json",
+            "--env=RUSTERISK_BROWSER_ARTIFACTS=/state/reference-browser-artifacts",
+        ];
+        let (server, outputs) = match target {
+            ExternalServer::Reference => {
+                ("--env=RUSTERISK_BROWSER_SERVER=asterisk", reference_outputs)
+            }
+            ExternalServer::Packaged => (
+                "--env=RUSTERISK_BROWSER_SERVER=packaged-rusterisk",
+                BROWSER_OUTPUTS,
+            ),
+            ExternalServer::MatchedReference => (
+                "--env=RUSTERISK_BROWSER_SERVER=packaged-asterisk",
+                reference_outputs,
+            ),
+        };
+        Ok(self.step_in(
+            Phase::Run,
+            Some(ExternalBrowser {
+                id,
+                server,
+                outputs,
+            }),
+        ))
     }
 
-    fn step_in(&self, phase: Phase, reference: Option<&str>) -> Step {
+    fn step_in(&self, phase: Phase, external: Option<ExternalBrowser<'_>>) -> Step {
         let file_size = if phase == Phase::Compile {
             "fsize=536870912:536870912"
         } else {
@@ -155,28 +212,19 @@ impl RunPlan {
             | Phase::Bundle
             | Phase::Inventory => 30,
         };
-        let network = match reference {
-            Some(id) => format!("--network=container:{id}"),
+        let network = match &external {
+            Some(browser) => format!("--network=container:{}", browser.id),
             None if phase.downloads() => "--network=bridge".into(),
             None => "--network=none".into(),
         };
-        let [cpus, memory, swap, report, artifacts] = if reference.is_some() {
-            [
-                "--cpus=1",
-                "--memory=1536m",
-                "--memory-swap=1536m",
-                "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/reference-browser-results.json",
-                "--env=RUSTERISK_BROWSER_ARTIFACTS=/state/reference-browser-artifacts",
-            ]
+        let [cpus, memory, swap] = if external.is_some() {
+            ["--cpus=1", "--memory=1536m", "--memory-swap=1536m"]
         } else {
-            [
-                "--cpus=2",
-                "--memory=2g",
-                "--memory-swap=2g",
-                "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/browser-results.json",
-                "--env=RUSTERISK_BROWSER_ARTIFACTS=/state/browser-artifacts",
-            ]
+            ["--cpus=2", "--memory=2g", "--memory-swap=2g"]
         };
+        let [report, artifacts] = external
+            .as_ref()
+            .map_or(BROWSER_OUTPUTS, |browser| browser.outputs);
         let mut arguments: Vec<String> = [
             "run",
             "--rm",
@@ -235,8 +283,8 @@ impl RunPlan {
         .into_iter()
         .map(str::to_owned)
         .collect();
-        if reference.is_some() {
-            arguments.insert(1, "--env=RUSTERISK_BROWSER_SERVER=asterisk".into());
+        if let Some(browser) = external {
+            arguments.insert(1, browser.server.into());
         }
         let package = ["--prefix", "examples/browser"];
         match phase {
@@ -387,6 +435,35 @@ mod reference_tests {
             .arguments
             .iter()
             .any(|argument| argument == "--network=none"));
+        Ok(())
+    }
+
+    #[test]
+    fn packaged_comparisons_share_limits_and_save_both_reports() -> Result<(), BrowserError> {
+        let image = format!("sha256:{}", "b".repeat(64));
+        let id = "a".repeat(64);
+        let plan = RunPlan::new("compare", "/source", "/state", &image)?;
+        let packaged = plan.packaged_step(&id)?;
+        let reference = plan.matched_reference_step(&id)?;
+        for step in [&packaged, &reference] {
+            for argument in ["--cpus=1", "--memory=1536m", "--memory-swap=1536m"] {
+                assert!(step.arguments.iter().any(|present| present == argument));
+            }
+        }
+        assert!(packaged
+            .arguments
+            .iter()
+            .any(|argument| argument == "--env=RUSTERISK_BROWSER_SERVER=packaged-rusterisk"));
+        assert!(reference
+            .arguments
+            .iter()
+            .any(|argument| argument == "--env=RUSTERISK_BROWSER_SERVER=packaged-asterisk"));
+        assert!(packaged
+            .arguments
+            .iter()
+            .any(|argument| argument == BROWSER_OUTPUTS[0]));
+        assert!(reference.arguments.iter().any(|argument| argument
+            == "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/reference-browser-results.json"));
         Ok(())
     }
 }

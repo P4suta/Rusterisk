@@ -322,13 +322,21 @@ fn execute() -> Result<(), TaskError> {
         [task] if task == "interop" => interop::execute(true),
         [task, mode] if task == "interop" && mode == "--dry-run" => interop::execute(false),
         #[cfg(unix)]
-        [task, fixture, mode, image_flag, image, reference_flag, reference] if task == "interop" && fixture == "browser" && image_flag == "--image" && reference_flag == "--reference-image" => {
+        [task, fixture, mode, image_flag, image, reference_flag, reference, extra @ ..] if task == "interop" && fixture == "browser" && image_flag == "--image" && reference_flag == "--reference-image" => {
             let execution = match mode.as_str() {
                 "--dry-run" => xtask::browser::Execution::DryRun,
                 "--run" => xtask::browser::Execution::Run,
                 _ => return Err(TaskError::Contract("interop browser requires --dry-run or --run".into())),
             };
-            xtask::browser::execute_comparison(execution, image, reference).map_err(|error| TaskError::Contract(error.to_string()))
+            let operation = match extra {
+                [] => xtask::browser::execute_comparison(execution, image, reference),
+                [target_flag, target, candidate_flag, candidate] if target_flag == "--server-target" && candidate_flag == "--server-candidate" => {
+                    let target = xtask::server_distribution::ServerTarget::parse(target).map_err(|error| TaskError::Contract(error.to_string()))?;
+                    xtask::browser::execute_packaged_comparison(execution, image, reference, target, Path::new(candidate))
+                }
+                _ => return Err(TaskError::Contract("interop browser requires --server-target and --server-candidate together".into())),
+            };
+            operation.map_err(|error| TaskError::Contract(error.to_string()))
         }
         [task, mode] if task == "reference-build" && mode == "--dry-run" => reference_build(false),
         [task, mode] if task == "reference-build" && mode == "--run" => reference_build(true),
@@ -414,7 +422,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|check-content --candidate <path>|verify --candidate <path> [--consumer-jobs <jobs>]>|distribution server <<plan|build> --target <triple> [--jobs <jobs> --build-timeout-seconds <seconds>]|<plan-container|build-container> --target <triple> --image <digest>|<check-content|export-oci> --candidate <path> --target <triple>|check-startup --candidate <path> [--target <triple> [--rosetta]]|verify --candidate <path> --sdk-candidate <path> [--consumer-jobs <jobs>]|verify-oci --candidate <path> --target <triple> --archive <path> --sdk-candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|interop browser <--dry-run|--run> --image <digest> --reference-image <sha256:image-id>|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution sdk <plan|build|check-content --candidate <path>|verify --candidate <path> [--consumer-jobs <jobs>]>|distribution server <<plan|build> --target <triple> [--jobs <jobs> --build-timeout-seconds <seconds>]|<plan-container|build-container> --target <triple> --image <digest>|<check-content|export-oci> --candidate <path> --target <triple>|check-startup --candidate <path> [--target <triple> [--rosetta]]|verify --candidate <path> --sdk-candidate <path> [--consumer-jobs <jobs>]|verify-oci --candidate <path> --target <triple> --archive <path> --sdk-candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|interop browser <--dry-run|--run> --image <digest> --reference-image <sha256:image-id> [--server-target <triple> --server-candidate <path>]|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
         )),
     }
 }
