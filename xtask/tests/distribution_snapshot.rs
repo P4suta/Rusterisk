@@ -22,6 +22,8 @@ fn project(root: &Path) -> Result<(), std::io::Error> {
         "xtask/tests/contract.rs",
         "xtask/fuzz/Cargo.toml",
         "xtask/fuzz/Cargo.lock",
+        "tests/interop/node-ari-client/eslint.config.mjs",
+        "tests/interop/node-ari-client/tsconfig.json",
     ] {
         write(root, path, b"fixture")?;
     }

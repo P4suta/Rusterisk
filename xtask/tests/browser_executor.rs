@@ -39,6 +39,8 @@ fn browser_executor_stops_after_a_deadline_cleans_only_the_owned_container_and_r
             "xtask/fuzz/Cargo.toml",
             "xtask/fuzz/Cargo.lock",
             "xtask/fuzz/src/targets.rs",
+            "tests/interop/node-ari-client/eslint.config.mjs",
+            "tests/interop/node-ari-client/tsconfig.json",
         ] {
             write(&root, path, b"fixture")?;
         }

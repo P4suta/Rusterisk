@@ -76,6 +76,8 @@ repository = "https://github.com/P4suta/Rusterisk"
         "config/pjsip.conf",
         "config/rtp.conf",
         "config/extensions.conf",
+        "tests/interop/node-ari-client/eslint.config.mjs",
+        "tests/interop/node-ari-client/tsconfig.json",
     ] {
         write(root, path, b"fixture")?;
     }
