@@ -20,6 +20,7 @@ import {
 	observeCapture,
 } from "./capture-observer.ts";
 import { verifyConnectionRecovery } from "./connection-recovery.ts";
+import { incomingCall } from "./incoming-call.ts";
 
 function target(name: string): string {
 	const value = process.env[name];
@@ -268,9 +269,7 @@ test("actual outgoing and incoming browser calls exchange known audio and save a
 		await phase(
 			"Bob: receive the incoming SIP call",
 			async (): Promise<void> => {
-				await command(
-					"channels?endpoint=PJSIP%2Fbob-endpoint&app=calls&channelId=browser-incoming&callerId=100&timeout=8",
-				);
+				await command(incomingCall(process.env.RUSTERISK_BROWSER_SERVER));
 				await expect(
 					second.getByRole("button", { name: "Answer", exact: true }),
 				).toBeEnabled();
