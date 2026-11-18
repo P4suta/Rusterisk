@@ -1,6 +1,6 @@
 use super::{output::Bounded, ArchiveFormat, ServerPayload};
 use std::io::{self, Write};
-use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipWriter};
+use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, System, ZipWriter};
 
 pub fn write_server_zip(payload: &ServerPayload, writer: impl Write) -> io::Result<()> {
     if payload.name().target().format() != ArchiveFormat::Zip {
@@ -18,6 +18,7 @@ pub fn write_server_zip(payload: &ServerPayload, writer: impl Write) -> io::Resu
             .compression_method(CompressionMethod::Deflated)
             .compression_level(Some(6))
             .last_modified_time(time)
+            .system(System::Unix)
             .unix_permissions(mode)
             .large_file(false);
         archive.start_file(format!("{}/{path}", payload.name().root()), options)?;

@@ -38,6 +38,10 @@ fn zip_candidates_must_match_every_captured_file_and_its_metadata() -> io::Resul
             .map_err(io::Error::other)?,
     ))
     .map_err(io::Error::other)?;
+    assert_eq!(bytes[directory + 5], u8::from(zip::System::Unix));
+    let mut dos = bytes.clone();
+    dos[directory + 5] = u8::from(zip::System::Dos);
+    assert!(check_server_zip(&payload, &dos).is_err());
     let mut parsed = zip::ZipArchive::new(Cursor::new(&bytes)).map_err(io::Error::other)?;
     let compressed = parsed.by_index(0)?.compressed_size();
     let name_size = usize::from(u16::from_le_bytes(
