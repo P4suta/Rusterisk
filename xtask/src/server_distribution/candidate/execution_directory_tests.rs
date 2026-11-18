@@ -18,6 +18,10 @@ fn execution_directory_collisions_preserve_existing_entries_and_remain_bounded()
     let operation = (|| {
         let first = BuildDirectory::reserve(&parent, "same-clock")?;
         let first_path = first.path()?.to_owned();
+        assert!(first_path
+            .file_name()
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(|name| name.len() <= 15));
         std::fs::write(first_path.join("sentinel"), b"preserved")?;
         let second = BuildDirectory::reserve(&parent, "same-clock")?;
         let second_path = second.path()?.to_owned();
@@ -33,7 +37,7 @@ fn execution_directory_collisions_preserve_existing_entries_and_remain_bounded()
         drop(dropped);
         assert!(!dropped_path.exists());
         for sequence in 0..32 {
-            let occupied = parent.join(format!("rusterisk-server-package-full-{sequence}"));
+            let occupied = parent.join(format!("rsk-{:x}-{sequence:x}", std::process::id()));
             std::fs::create_dir(&occupied)?;
             std::fs::write(occupied.join("sentinel"), b"preserved")?;
         }
@@ -42,12 +46,8 @@ fn execution_directory_collisions_preserve_existing_entries_and_remain_bounded()
             .ok_or_else(|| io::Error::other("exhausted directory reservations passed"))?;
         assert_eq!(failure.kind(), io::ErrorKind::AlreadyExists);
         for sequence in 0..32 {
-            assert_eq!(
-                std::fs::read(
-                    parent.join(format!("rusterisk-server-package-full-{sequence}/sentinel"))
-                )?,
-                b"preserved"
-            );
+            let occupied = parent.join(format!("rsk-{:x}-{sequence:x}", std::process::id()));
+            assert_eq!(std::fs::read(occupied.join("sentinel"))?, b"preserved");
         }
         for identity in ["", "../escape", "-prefix", &"a".repeat(62)] {
             assert!(BuildDirectory::reserve(&parent, identity).is_err());

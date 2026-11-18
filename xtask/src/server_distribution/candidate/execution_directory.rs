@@ -21,7 +21,7 @@ impl BuildDirectory {
         }
         for sequence in 0..32 {
             let identity = format!("{identity}-{sequence}");
-            let root = parent.join(format!("rusterisk-server-package-{identity}"));
+            let root = parent.join(format!("rsk-{:x}-{sequence:x}", std::process::id()));
             match std::fs::create_dir(&root) {
                 Ok(()) => {
                     return Ok(Self {
