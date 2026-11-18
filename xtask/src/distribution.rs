@@ -35,7 +35,10 @@ mod sdk_consumer_workspace;
 pub use sdk_consumer_workspace::SdkConsumerWorkspace;
 mod sdk_consumer_run;
 pub(crate) use sdk_consumer_run::{verify_sdk_consumers_supervised, SdkPort};
-pub use sdk_consumer_run::{verify_sdk_consumers_with, verify_sdk_with, SdkConsumerRunError};
+pub use sdk_consumer_run::{
+    verify_sdk_consumers_with, verify_sdk_consumers_with_jobs, verify_sdk_with,
+    verify_sdk_with_jobs, SdkConsumerRunError,
+};
 #[cfg(unix)]
 mod sdk_consumer_results;
 #[cfg(unix)]

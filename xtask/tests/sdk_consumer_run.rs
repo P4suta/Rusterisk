@@ -5,9 +5,12 @@ mod candidate_fixture;
 #[path = "sdk_candidate_build/fixture.rs"]
 mod captured_fixture;
 
-use std::time::Duration;
+use std::{num::NonZeroUsize, time::Duration};
 use xtask::{
-    distribution::{verify_sdk_consumers_with, verify_sdk_with, SdkContents},
+    distribution::{
+        verify_sdk_consumers_with, verify_sdk_consumers_with_jobs, verify_sdk_with,
+        verify_sdk_with_jobs, SdkContents,
+    },
     process::{ProcessError, SupervisedCommand},
 };
 
@@ -58,6 +61,89 @@ fn a_failed_owned_command_stops_verification_preserves_diagnostics_and_reaps_the
                 std::fs::read_to_string(artifacts.join("SOURCE.sha256"))?,
                 format!("{}\n", contents.source_digest())
             );
+            Ok(())
+        },
+    )
+}
+
+#[test]
+fn explicit_jobs_reach_the_owned_command_and_failure_cleanup() -> std::io::Result<()> {
+    candidate_fixture::using_candidate(
+        "consumer-single-job-failure",
+        |_| Ok(()),
+        |candidate| {
+            let contents = SdkContents::read(candidate).map_err(std::io::Error::other)?;
+            let execution = candidate.with_file_name("execution");
+            let artifacts = candidate.with_file_name("artifacts");
+            let mut calls = 0;
+            let result = verify_sdk_consumers_with_jobs(
+                &contents,
+                &execution,
+                &artifacts,
+                NonZeroUsize::MIN,
+                |command, budget| {
+                    calls += 1;
+                    let command = command.into_std();
+                    assert_eq!(command.get_program(), "rustup");
+                    assert_eq!(budget, Duration::from_secs(180));
+                    assert_eq!(
+                        command
+                            .get_envs()
+                            .find(|(name, _)| *name == "CARGO_BUILD_JOBS")
+                            .and_then(|(_, value)| value),
+                        Some(std::ffi::OsStr::new("1"))
+                    );
+                    std::fs::write(
+                        execution.join("state/core-msrv-resolve.stderr.txt"),
+                        b"single-job failure\n",
+                    )?;
+                    Err(ProcessError::Interrupted)
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(calls, 1);
+            assert!(!execution.exists());
+            assert_eq!(
+                std::fs::read(artifacts.join("core-msrv-resolve.stderr.txt"))?,
+                b"single-job failure\n"
+            );
+            Ok(())
+        },
+    )
+}
+
+#[test]
+fn explicit_jobs_reach_the_checkout_verification_entry() -> std::io::Result<()> {
+    candidate_fixture::using_candidate(
+        "consumer-checkout-single-job",
+        |_| Ok(()),
+        |candidate| {
+            let root = candidate.with_file_name("checkout");
+            std::fs::create_dir(&root)?;
+            let mut execution = None;
+            let result = verify_sdk_with_jobs(&root, candidate, NonZeroUsize::MIN, |command, _| {
+                let command = command.into_std();
+                assert_eq!(
+                    command
+                        .get_envs()
+                        .find(|(name, _)| *name == "CARGO_BUILD_JOBS")
+                        .and_then(|(_, value)| value),
+                    Some(std::ffi::OsStr::new("1"))
+                );
+                execution = Some(
+                    command
+                        .get_current_dir()
+                        .and_then(|directory| directory.ancestors().nth(3))
+                        .ok_or_else(|| std::io::Error::other("consumer execution root missing"))?
+                        .to_owned(),
+                );
+                Err(ProcessError::Interrupted)
+            });
+            assert!(result.is_err());
+            let execution = execution.ok_or_else(|| {
+                std::io::Error::other("checkout verification skipped its consumer")
+            })?;
+            assert!(!execution.exists());
             Ok(())
         },
     )

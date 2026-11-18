@@ -1,5 +1,5 @@
-use super::fixture::{candidate, perform_preparation};
-use std::{ffi::OsStr, time::Duration};
+use super::fixture::{candidate, perform_preparation, perform_preparation_with_jobs};
+use std::{ffi::OsStr, num::NonZeroUsize, time::Duration};
 use xtask::{
     distribution::{PreparedSdkHttpConsumer, SdkContents, SdkHttpTarget},
     process::ProcessError,
@@ -54,6 +54,71 @@ fn preparation_builds_before_server_start_and_a_single_http_run_owns_its_workspa
         assert_eq!(runs, 1);
         assert_eq!(returned, artifacts);
         assert!(!execution.exists());
+        assert_eq!(
+            std::fs::read(artifacts.join("sdk-run.stdout.txt"))?,
+            b"SDK HTTP candidate consumer passed\n"
+        );
+        Ok(())
+    })
+}
+
+#[test]
+fn explicit_jobs_reach_http_preparation_and_runtime_cleanup() -> std::io::Result<()> {
+    candidate("prepared-http-single-job", |candidate| {
+        let contents = SdkContents::read(candidate).map_err(std::io::Error::other)?;
+        let execution = candidate.with_file_name("execution");
+        let artifacts = candidate.with_file_name("artifacts");
+        let mut phases = 0;
+        let prepared = PreparedSdkHttpConsumer::prepare_with_jobs(
+            &contents,
+            &execution,
+            &artifacts,
+            NonZeroUsize::MIN,
+            |command, budget| {
+                phases += 1;
+                perform_preparation_with_jobs(
+                    &execution,
+                    phases,
+                    command,
+                    budget,
+                    NonZeroUsize::MIN,
+                )
+            },
+        )
+        .map_err(std::io::Error::other)?;
+        assert_eq!(phases, 3);
+        let target = SdkHttpTarget::new(
+            "127.0.0.1:8088".parse().map_err(std::io::Error::other)?,
+            "api",
+            "fixture-password",
+            "0.1.0",
+            "sdk-run",
+        )
+        .map_err(std::io::Error::other)?;
+        let mut runs = 0;
+        prepared
+            .run_with(&target, |command, budget| {
+                runs += 1;
+                let command = command.into_std();
+                assert_eq!(budget, Duration::from_secs(60));
+                assert!(command.get_args().next().is_none());
+                assert_eq!(
+                    command
+                        .get_envs()
+                        .find(|(name, _)| *name == "CARGO_BUILD_JOBS")
+                        .and_then(|(_, value)| value),
+                    Some(OsStr::new("1"))
+                );
+                std::fs::write(
+                    execution.join("state/sdk-run.stdout.txt"),
+                    b"SDK HTTP candidate consumer passed\n",
+                )?;
+                Ok(())
+            })
+            .map_err(std::io::Error::other)?;
+        assert_eq!(runs, 1);
+        assert!(!execution.exists());
+        assert!(artifacts.join("sdk-build.stderr.txt").is_file());
         assert_eq!(
             std::fs::read(artifacts.join("sdk-run.stdout.txt"))?,
             b"SDK HTTP candidate consumer passed\n"

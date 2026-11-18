@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::{num::NonZeroUsize, path::Path, time::Duration};
 use xtask::{
     distribution::{SdkConsumerPlan, SdkConsumerScope, SdkRuntimeIdentity},
     process::{ProcessError, SupervisedCommand},
@@ -28,8 +28,32 @@ pub fn perform_preparation(
     command: SupervisedCommand,
     budget: Duration,
 ) -> Result<(), ProcessError> {
+    perform_preparation_with_jobs(
+        execution,
+        phase,
+        command,
+        budget,
+        SdkConsumerPlan::DEFAULT_JOBS,
+    )
+}
+
+pub fn perform_preparation_with_jobs(
+    execution: &Path,
+    phase: usize,
+    command: SupervisedCommand,
+    budget: Duration,
+    jobs: NonZeroUsize,
+) -> Result<(), ProcessError> {
     let plan = SdkConsumerPlan::new(&execution.join("work"), &execution.join("state"))?;
     let command = command.into_std();
+    let jobs = jobs.to_string();
+    assert_eq!(
+        command
+            .get_envs()
+            .find(|(name, _)| *name == "CARGO_BUILD_JOBS")
+            .and_then(|(_, value)| value),
+        Some(std::ffi::OsStr::new(&jobs))
+    );
     assert!(!command
         .get_envs()
         .any(|(name, _)| name.to_string_lossy().starts_with("RUSTERISK_SDK_HTTP_")));
@@ -71,7 +95,16 @@ pub fn perform_preparation(
                 crate::http_fixture::bytes(&data, 0)?,
             )?;
         }
-        3 => assert_eq!(budget, Duration::from_secs(900)),
+        3 => {
+            assert_eq!(budget, Duration::from_secs(900));
+            let arguments: Vec<_> = command.get_args().collect();
+            let selected: Vec<_> = arguments
+                .windows(2)
+                .filter(|pair| pair[0] == "--jobs")
+                .map(|pair| pair[1])
+                .collect();
+            assert_eq!(selected, [std::ffi::OsStr::new(&jobs)]);
+        }
         _ => return Err(std::io::Error::other("unexpected preparation phase").into()),
     }
     Ok(())

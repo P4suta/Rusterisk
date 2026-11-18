@@ -1,13 +1,14 @@
 use super::{
     check_sdk_consumer_lock, check_sdk_consumer_metadata, SdkConsumerAction, SdkConsumerLockError,
-    SdkConsumerPhase, SdkConsumerScope, SdkConsumerWorkspace, SdkContents, SdkContentsError,
-    SdkHttpTarget, SdkMetadataError, SdkPackage,
+    SdkConsumerPhase, SdkConsumerPlan, SdkConsumerScope, SdkConsumerWorkspace, SdkContents,
+    SdkContentsError, SdkHttpTarget, SdkMetadataError, SdkPackage,
 };
 use crate::process::{
     CommandRequestError, CommandStream, CommandSupervisor, ProcessError, SupervisedCommand,
 };
 use std::{
     io::{Read, Write},
+    num::NonZeroUsize,
     path::Path,
     time::{Duration, Instant},
 };
@@ -125,6 +126,15 @@ pub fn verify_sdk_with(
     candidate: &Path,
     perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
 ) -> Result<std::path::PathBuf, SdkConsumerRunError> {
+    verify_sdk_with_jobs(root, candidate, SdkConsumerPlan::DEFAULT_JOBS, perform)
+}
+
+pub fn verify_sdk_with_jobs(
+    root: &Path,
+    candidate: &Path,
+    jobs: NonZeroUsize,
+    perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
+) -> Result<std::path::PathBuf, SdkConsumerRunError> {
     let contents = SdkContents::read(candidate).map_err(SdkConsumerRunError::Contents)?;
     let mut parent = std::fs::canonicalize(root)?;
     for component in [".cache", "distributions", "sdk-consumers"] {
@@ -142,7 +152,7 @@ pub fn verify_sdk_with(
     println!("SDK consumer artifacts: {}", artifacts.display());
     println!("SDK consumer source: {}", contents.source_digest());
     std::io::stdout().flush()?;
-    verify_sdk_consumers_with(&contents, &execution, &artifacts, perform)?;
+    verify_sdk_consumers_with_jobs(&contents, &execution, &artifacts, jobs, perform)?;
     println!("SDK candidate consumers passed");
     Ok(artifacts)
 }
@@ -239,7 +249,7 @@ pub(super) fn phase_with_target(
         command
             .current_dir(plan.directory(phase.scope()))?
             .env("CARGO_TARGET_DIR", plan.target(phase.scope()))?
-            .env("CARGO_BUILD_JOBS", "2")?
+            .env("CARGO_BUILD_JOBS", plan.jobs().to_string())?
             .env("CARGO_NET_OFFLINE", "true")?;
         if let Some(target) = target {
             target.configure(&mut command)?;
@@ -393,17 +403,56 @@ pub fn verify_sdk_consumers_with(
     artifacts: &Path,
     perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
 ) -> Result<(), SdkConsumerRunError> {
-    verify_sdk_consumers_supervised(contents, execution, artifacts, Callback { perform })
+    verify_sdk_consumers_with_jobs(
+        contents,
+        execution,
+        artifacts,
+        SdkConsumerPlan::DEFAULT_JOBS,
+        perform,
+    )
+}
+
+pub fn verify_sdk_consumers_with_jobs(
+    contents: &SdkContents,
+    execution: &Path,
+    artifacts: &Path,
+    jobs: NonZeroUsize,
+    perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
+) -> Result<(), SdkConsumerRunError> {
+    verify_sdk_consumers_supervised_with_jobs(
+        contents,
+        execution,
+        artifacts,
+        jobs,
+        Callback { perform },
+    )
 }
 
 pub(crate) fn verify_sdk_consumers_supervised(
     contents: &SdkContents,
     execution: &Path,
     artifacts: &Path,
+    port: impl SdkPort,
+) -> Result<(), SdkConsumerRunError> {
+    verify_sdk_consumers_supervised_with_jobs(
+        contents,
+        execution,
+        artifacts,
+        SdkConsumerPlan::DEFAULT_JOBS,
+        port,
+    )
+}
+
+fn verify_sdk_consumers_supervised_with_jobs(
+    contents: &SdkContents,
+    execution: &Path,
+    artifacts: &Path,
+    jobs: NonZeroUsize,
     mut port: impl SdkPort,
 ) -> Result<(), SdkConsumerRunError> {
     let workspace = match create_artifacts(contents, execution, artifacts).and_then(|()| {
-        SdkConsumerWorkspace::create(contents, execution).map_err(SdkConsumerRunError::Io)
+        SdkConsumerWorkspace::create_with_jobs(contents, execution, jobs)
+            .map_err(SdkConsumerRunError::Io)
     }) {
         Ok(workspace) => workspace,
         Err(error) => {

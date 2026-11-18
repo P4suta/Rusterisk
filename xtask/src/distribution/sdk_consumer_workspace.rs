@@ -2,6 +2,7 @@ use super::{SdkConsumerPlan, SdkConsumerScope, SdkContents, SdkPackage, SdkRunti
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
+    num::NonZeroUsize,
     path::{Component, Path, PathBuf},
 };
 
@@ -240,27 +241,44 @@ impl<'a> SdkConsumerWorkspace<'a> {
         Self::create_with(contents, root, write_new)
     }
 
+    pub fn create_with_jobs(
+        contents: &'a SdkContents,
+        root: &Path,
+        jobs: NonZeroUsize,
+    ) -> Result<Self, std::io::Error> {
+        Self::create_profile(contents, root, None, jobs, write_new)
+    }
+
     pub fn create_with(
         contents: &'a SdkContents,
         root: &Path,
         write: impl FnMut(&Path, &[u8]) -> Result<(), std::io::Error>,
     ) -> Result<Self, std::io::Error> {
-        Self::create_profile(contents, root, None, write)
+        Self::create_profile(contents, root, None, SdkConsumerPlan::DEFAULT_JOBS, write)
     }
 
     pub fn create_http(contents: &'a SdkContents, root: &Path) -> Result<Self, std::io::Error> {
+        Self::create_http_with_jobs(contents, root, SdkConsumerPlan::DEFAULT_JOBS)
+    }
+
+    pub fn create_http_with_jobs(
+        contents: &'a SdkContents,
+        root: &Path,
+        jobs: NonZeroUsize,
+    ) -> Result<Self, std::io::Error> {
         let runtime = SdkRuntimeIdentity::from_contents(contents).map_err(std::io::Error::other)?;
-        Self::create_profile(contents, root, Some(runtime), write_new)
+        Self::create_profile(contents, root, Some(runtime), jobs, write_new)
     }
 
     fn create_profile(
         contents: &'a SdkContents,
         root: &Path,
         runtime: Option<SdkRuntimeIdentity>,
+        jobs: NonZeroUsize,
         mut write: impl FnMut(&Path, &[u8]) -> Result<(), std::io::Error>,
     ) -> Result<Self, std::io::Error> {
         independent(root)?;
-        let plan = SdkConsumerPlan::new(&root.join("work"), &root.join("state"))?;
+        let plan = SdkConsumerPlan::new_with_jobs(&root.join("work"), &root.join("state"), jobs)?;
         let generated = generated(contents, runtime.as_ref())?;
         std::fs::create_dir(root)?;
         let workspace = Self {

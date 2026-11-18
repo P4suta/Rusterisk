@@ -1,4 +1,4 @@
-use std::{path::Path, time::Duration};
+use std::{num::NonZeroUsize, path::Path, time::Duration};
 use xtask::distribution::{SdkConsumerAction, SdkConsumerPhase, SdkConsumerPlan, SdkConsumerScope};
 
 #[test]
@@ -7,6 +7,8 @@ fn independent_consumers_resolve_then_inspect_build_and_run_with_finite_budgets(
     let work = std::env::temp_dir().join("rusterisk-sdk-consumer-work");
     let state = std::env::temp_dir().join("rusterisk-sdk-consumer-state");
     let plan = SdkConsumerPlan::new(&work, &state)?;
+    assert_eq!(plan.jobs(), SdkConsumerPlan::DEFAULT_JOBS);
+    assert_eq!(plan.jobs().get(), 2);
     assert_eq!(plan.work(), work);
     assert_eq!(plan.state(), state);
     assert_eq!(
@@ -106,6 +108,60 @@ fn independent_consumers_resolve_then_inspect_build_and_run_with_finite_budgets(
                 .ok_or_else(|| std::io::Error::other("fixture target is not UTF-8"))?
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn explicit_jobs_change_only_consumer_build_parallelism() -> std::io::Result<()> {
+    let work = std::env::temp_dir().join("rusterisk-sdk-single-job-work");
+    let state = std::env::temp_dir().join("rusterisk-sdk-single-job-state");
+    let default = SdkConsumerPlan::new(&work, &state)?;
+    let selected = SdkConsumerPlan::new_with_jobs(&work, &state, NonZeroUsize::MIN)?;
+    assert_eq!(selected.jobs(), NonZeroUsize::MIN);
+    for phase in SdkConsumerPhase::ALL {
+        let step = selected.step(phase);
+        let baseline = default.step(phase);
+        assert_eq!(selected.program(phase), default.program(phase));
+        assert_eq!(step.budget, baseline.budget);
+        assert_eq!(
+            selected.directory(phase.scope()),
+            default.directory(phase.scope())
+        );
+        assert_eq!(
+            selected.target(phase.scope()),
+            default.target(phase.scope())
+        );
+        if phase.action() == SdkConsumerAction::Build {
+            let arguments: Vec<_> = step.arguments.iter().map(String::as_str).collect();
+            let cargo = if phase.scope() == SdkConsumerScope::CoreMsrv {
+                assert_eq!(
+                    arguments.get(..3),
+                    Some(["run", "1.89.0", "cargo"].as_slice())
+                );
+                arguments.get(3..)
+            } else {
+                Some(arguments.as_slice())
+            }
+            .ok_or_else(|| std::io::Error::other("consumer build command is incomplete"))?;
+            assert_eq!(
+                cargo,
+                [
+                    "build",
+                    "--locked",
+                    "--offline",
+                    "--jobs",
+                    "1",
+                    "--target-dir",
+                    selected.target(phase.scope()).to_str().ok_or_else(|| {
+                        std::io::Error::other("fixture target directory is not UTF-8")
+                    })?
+                ]
+            );
+            assert_eq!(step.budget, Duration::from_secs(900));
+        } else {
+            assert_eq!(step.arguments, baseline.arguments);
+        }
+    }
     Ok(())
 }
 

@@ -1,5 +1,6 @@
 use crate::reference::Step;
 use std::{
+    num::NonZeroUsize,
     path::{Component, Path, PathBuf},
     time::Duration,
 };
@@ -107,6 +108,7 @@ impl Paths {
 pub struct SdkConsumerPlan {
     work: PathBuf,
     state: PathBuf,
+    jobs: NonZeroUsize,
     core: Paths,
     sdk: Paths,
 }
@@ -122,7 +124,17 @@ fn absolute(path: &Path) -> bool {
 }
 
 impl SdkConsumerPlan {
+    pub const DEFAULT_JOBS: NonZeroUsize = NonZeroUsize::MIN.saturating_add(1);
+
     pub fn new(work: &Path, state: &Path) -> Result<Self, std::io::Error> {
+        Self::new_with_jobs(work, state, Self::DEFAULT_JOBS)
+    }
+
+    pub fn new_with_jobs(
+        work: &Path,
+        state: &Path,
+        jobs: NonZeroUsize,
+    ) -> Result<Self, std::io::Error> {
         if !absolute(work) || !absolute(state) || work.starts_with(state) || state.starts_with(work)
         {
             return Err(std::io::Error::other(
@@ -132,6 +144,7 @@ impl SdkConsumerPlan {
         Ok(Self {
             work: work.to_owned(),
             state: state.to_owned(),
+            jobs,
             core: Paths::new(work, state, SdkConsumerScope::CoreMsrv)?,
             sdk: Paths::new(work, state, SdkConsumerScope::Sdk)?,
         })
@@ -142,6 +155,9 @@ impl SdkConsumerPlan {
     }
     pub fn state(&self) -> &Path {
         &self.state
+    }
+    pub const fn jobs(&self) -> NonZeroUsize {
+        self.jobs
     }
 
     fn paths(&self, scope: SdkConsumerScope) -> &Paths {
@@ -191,13 +207,14 @@ impl SdkConsumerPlan {
                 60
             }
             SdkConsumerAction::Build => {
+                let jobs = self.jobs.to_string();
                 arguments.extend(
                     [
                         "build",
                         "--locked",
                         "--offline",
                         "--jobs",
-                        "2",
+                        &jobs,
                         "--target-dir",
                     ]
                     .map(str::to_owned),

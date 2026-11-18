@@ -1,15 +1,14 @@
-#[cfg(unix)]
-use super::SdkConsumerPlan;
 use super::{
     check_sdk_consumer_lock, check_sdk_http_metadata, sdk_consumer_run as io, SdkConsumerAction,
-    SdkConsumerPhase, SdkConsumerRunError, SdkConsumerScope, SdkConsumerWorkspace, SdkContents,
-    SdkHttpTarget, SdkMetadataError, SdkPackage, SdkRuntimeIdentity,
+    SdkConsumerPhase, SdkConsumerPlan, SdkConsumerRunError, SdkConsumerScope, SdkConsumerWorkspace,
+    SdkContents, SdkHttpTarget, SdkMetadataError, SdkPackage, SdkRuntimeIdentity,
 };
 use crate::{
     process::{ProcessError, SupervisedCommand},
     recorded_path::{RecordedPath, RecordedPathFormat},
 };
 use std::{
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -165,8 +164,24 @@ impl<'a> PreparedSdkHttpConsumer<'a> {
         artifacts: &Path,
         perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
     ) -> Result<Self, SdkConsumerRunError> {
+        Self::prepare_with_jobs(
+            contents,
+            execution,
+            artifacts,
+            SdkConsumerPlan::DEFAULT_JOBS,
+            perform,
+        )
+    }
+
+    pub fn prepare_with_jobs(
+        contents: &'a SdkContents,
+        execution: &Path,
+        artifacts: &Path,
+        jobs: NonZeroUsize,
+        perform: impl FnMut(SupervisedCommand, Duration) -> Result<(), ProcessError>,
+    ) -> Result<Self, SdkConsumerRunError> {
         io::create_artifacts(contents, execution, artifacts)?;
-        let workspace = SdkConsumerWorkspace::create_http(contents, execution)?;
+        let workspace = SdkConsumerWorkspace::create_http_with_jobs(contents, execution, jobs)?;
         match prepare(contents, &workspace, perform) {
             Ok(lock) => Ok(Self {
                 workspace: Some(workspace),
