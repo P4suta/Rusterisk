@@ -17,7 +17,39 @@ use std::{
 pub(super) struct Supervisor {
     reader: UnixStream,
     registrations: [SigId; 2],
-    interrupted: bool,
+    interruption: Interruption,
+}
+
+enum Interruption {
+    Quiet,
+    Pending,
+    Reported,
+}
+
+impl Interruption {
+    fn observe(&mut self) {
+        match self {
+            Self::Quiet => *self = Self::Pending,
+            Self::Pending | Self::Reported => {}
+        }
+    }
+
+    fn report(&mut self) -> Result<(), ProcessError> {
+        match self {
+            Self::Quiet => Ok(()),
+            Self::Pending | Self::Reported => {
+                *self = Self::Reported;
+                Err(ProcessError::Interrupted)
+            }
+        }
+    }
+
+    fn finish(&self) -> Result<(), ProcessError> {
+        match self {
+            Self::Quiet | Self::Reported => Ok(()),
+            Self::Pending => Err(ProcessError::Interrupted),
+        }
+    }
 }
 
 pub(super) struct Service {
@@ -237,11 +269,9 @@ impl Supervisor {
         deadline: Instant,
     ) -> Result<Service, ProcessError> {
         if self.pending()? {
-            self.interrupted = true;
+            self.interruption.observe();
         }
-        if self.interrupted {
-            return Err(ProcessError::Interrupted);
-        }
+        self.interruption.report()?;
         let mut group = Group::new()?;
         let pid = group.start(command)?;
         Ok(Service {
@@ -253,11 +283,9 @@ impl Supervisor {
 
     pub(super) fn poll_service(&mut self, service: &Service) -> Result<(), ProcessError> {
         if self.pending()? {
-            self.interrupted = true;
+            self.interruption.observe();
         }
-        if self.interrupted {
-            return Err(ProcessError::Interrupted);
-        }
+        self.interruption.report()?;
         if Instant::now() >= service.deadline {
             return Err(ProcessError::Timeout);
         }
@@ -302,7 +330,7 @@ impl Supervisor {
         Ok(Self {
             reader,
             registrations: [interrupt, terminate],
-            interrupted: false,
+            interruption: Interruption::Quiet,
         })
     }
 
@@ -327,10 +355,10 @@ impl Supervisor {
     ) -> Result<(), ProcessError> {
         loop {
             if self.pending()? {
-                self.interrupted = true;
-                if !cleanup {
-                    return Err(ProcessError::Interrupted);
-                }
+                self.interruption.observe();
+            }
+            if !cleanup {
+                self.interruption.report()?;
             }
             match peek(anchor) {
                 Ok(true) => {
@@ -361,10 +389,10 @@ impl Supervisor {
         cleanup: bool,
     ) -> Result<(), ProcessError> {
         if self.pending()? {
-            self.interrupted = true;
+            self.interruption.observe();
         }
-        if self.interrupted && !cleanup {
-            return Err(ProcessError::Interrupted);
+        if !cleanup {
+            self.interruption.report()?;
         }
         let mut group = Group::new()?;
         let operation = (|| {
@@ -384,16 +412,30 @@ impl Supervisor {
         }
     }
 
-    pub(super) fn finish(self) -> Result<(), ProcessError> {
-        let pending = self.pending();
+    pub(super) fn finish(mut self) -> Result<(), ProcessError> {
+        let operation = self
+            .pending()
+            .map_err(ProcessError::from)
+            .and_then(|pending| {
+                if pending {
+                    self.interruption.observe();
+                }
+                self.interruption.finish()
+            });
         let removed = self.registrations.map(unregister);
-        if removed != [true, true] {
-            return Err(io::Error::other("process signal registration cleanup failed").into());
+        let cleanup = if removed == [true, true] {
+            Ok(())
+        } else {
+            Err(io::Error::other("process signal registration cleanup failed").into())
+        };
+        match (operation, cleanup) {
+            (operation, Ok(())) => operation,
+            (Ok(()), Err(error)) => Err(error),
+            (Err(operation), Err(cleanup)) => Err(ProcessError::Cleanup {
+                operation: operation.to_string(),
+                cleanup: cleanup.to_string(),
+            }),
         }
-        if pending? && !self.interrupted {
-            return Err(ProcessError::Interrupted);
-        }
-        Ok(())
     }
 }
 

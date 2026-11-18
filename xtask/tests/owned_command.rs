@@ -232,6 +232,43 @@ fn environment(mode: &str) -> Result<(), ProcessError> {
     supervised(|supervisor| supervisor.run_owned(child, Duration::from_secs(2)))
 }
 
+#[cfg(unix)]
+fn cleanup_only_interrupt() -> Result<(), ProcessError> {
+    let mut supervisor = CommandSupervisor::new()?;
+    let mut cleanup = request("cleanup")?;
+    let output = Output::capture(&mut cleanup)?;
+    let cleanup = match signal_hook::low_level::raise(signal_hook::consts::SIGINT) {
+        Ok(()) => supervisor.run_cleanup_owned(cleanup, Duration::from_secs(2)),
+        Err(error) => {
+            drop(cleanup);
+            Err(error.into())
+        }
+    };
+    let finished = supervisor.finish();
+    let streams = output
+        .read()
+        .and_then(|(stdout, stderr)| {
+            verify(
+                stdout.contains("owned cleanup marker") && stderr == "owned cleanup diagnostic\n",
+                "Owned cleanup did not execute with an unreported interruption",
+            )
+        })
+        .map_err(ProcessError::from);
+    let cleanup = combine(cleanup, streams);
+    if cleanup.is_ok() {
+        eprintln!("Owned cleanup command and both output markers completed successfully");
+    }
+    let expected = match finished {
+        Err(ProcessError::Interrupted) => Ok(()),
+        Ok(()) => Err(io::Error::other(
+            "Owned cleanup consumed an interruption but supervisor finish returned Ok",
+        )
+        .into()),
+        Err(error) => Err(error),
+    };
+    combine(cleanup, expected)
+}
+
 #[test]
 fn owned_command_worker() -> Result<(), ProcessError> {
     let Some(mode) = std::env::var_os(MODE) else {
@@ -280,6 +317,8 @@ fn owned_command_worker() -> Result<(), ProcessError> {
             writeln!(io::stderr(), "owned cleanup diagnostic")?;
             Ok(())
         }
+        #[cfg(unix)]
+        Some("cleanup-only-interrupt-owner") => cleanup_only_interrupt(),
         #[cfg(unix)]
         Some("interrupt-owner") => supervised(|supervisor| {
             signal_hook::low_level::raise(signal_hook::consts::SIGINT)?;
@@ -447,6 +486,26 @@ fn owned_cleanup_remains_available_after_a_primary_interrupt() -> Result<(), Pro
     supervised(|supervisor| {
         supervisor.run_owned(request("interrupt-owner")?, Duration::from_secs(5))
     })
+}
+
+#[test]
+#[cfg(unix)]
+fn owned_cleanup_reports_interruption_before_any_ordinary_command_observes_it(
+) -> Result<(), ProcessError> {
+    let mut command = request("cleanup-only-interrupt-owner")?;
+    let output = Output::capture(&mut command)?;
+    let operation = supervised(|supervisor| supervisor.run_owned(command, Duration::from_secs(5)));
+    let diagnostics = output.read().map_err(ProcessError::from);
+    match diagnostics {
+        Ok((stdout, stderr)) => {
+            if operation.is_err() {
+                eprintln!("Isolated cleanup worker stdout:\n{stdout}");
+                eprintln!("Isolated cleanup worker stderr:\n{stderr}");
+            }
+            operation
+        }
+        Err(cleanup) => combine(operation, Err(cleanup)),
+    }
 }
 
 fn disconnected(error: &io::Error) -> bool {
