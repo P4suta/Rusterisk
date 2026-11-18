@@ -1,0 +1,58 @@
+format = 1
+source = "missing-source"
+fuzz_architecture = "aarch64-unknown-linux-gnu"
+
+[images]
+reference = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+browser = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+core-proofs = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+core-miri = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+core-mutation = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+input-fuzz = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+native-sanitizers = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+[sdk]
+candidate = "candidates/sdk"
+artifact = "artifacts/sdk"
+
+[checks]
+reference = "artifacts/reference"
+browser = "artifacts/browser"
+core-proofs = "artifacts/core-proofs"
+core-miri = "artifacts/core-miri"
+core-mutation = "artifacts/core-mutation"
+input-fuzz = "artifacts/input-fuzz"
+native-sanitizers = "artifacts/native-sanitizers"
+
+[servers.x86_64-unknown-linux-gnu]
+candidate = "candidates/server-linux-x86_64"
+artifact = "artifacts/server-linux-x86_64"
+execution = "native"
+
+[servers.aarch64-unknown-linux-gnu]
+candidate = "candidates/server-linux-arm64"
+artifact = "artifacts/server-linux-arm64"
+execution = "native"
+
+[servers.aarch64-apple-darwin]
+candidate = "candidates/server-macos-arm64"
+artifact = "artifacts/server-macos-arm64"
+execution = "native"
+
+[servers.x86_64-apple-darwin]
+candidate = "candidates/server-macos-x86_64"
+artifact = "artifacts/server-macos-x86_64"
+execution = "native"
+
+[servers.x86_64-pc-windows-msvc]
+candidate = "candidates/server-windows-x86_64"
+artifact = "artifacts/server-windows-x86_64"
+execution = "native"
+
+[oci.x86_64-unknown-linux-gnu]
+archive = "candidates/oci-linux-x86_64.tar"
+artifact = "artifacts/oci-linux-x86_64"
+
+[oci.aarch64-unknown-linux-gnu]
+archive = "candidates/oci-linux-arm64.tar"
+artifact = "artifacts/oci-linux-arm64"

@@ -1,14 +1,17 @@
-use std::{io, path::Path, process::Command};
+use std::{io, path::Path};
+
+#[path = "release_check_cli/connected.rs"]
+mod connected;
+#[path = "release_check_cli/fixture.rs"]
+mod fixture;
+#[path = "release_check_cli/inputs.rs"]
+mod inputs;
 
 fn invoke(arguments: &[&str]) -> io::Result<std::process::Output> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .ok_or_else(|| io::Error::other("workspace missing"))?;
-    Command::new(env!("CARGO_BIN_EXE_xtask"))
-        .args(arguments)
-        .current_dir(root)
-        .env("PATH", "")
-        .output()
+    fixture::invoke(arguments, root)
 }
 
 #[test]

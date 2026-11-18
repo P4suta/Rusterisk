@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 mod interop;
+mod release_cli;
 mod security;
 
 #[derive(Debug)]
@@ -247,22 +248,7 @@ fn execute() -> Result<(), TaskError> {
         })
         .collect::<Result<_, _>>()?;
     match arguments.as_slice() {
-        [task, mode] if task == "release-check" && mode == "--dry-run" => {
-            println!(
-                "release-check plan: {} required gates",
-                xtask::release_check::RequiredGate::ALL.len()
-            );
-            for gate in xtask::release_check::RequiredGate::ALL {
-                println!("required: {gate}");
-            }
-            Ok(())
-        }
-        [task] if task == "release-check" => Err(TaskError::Contract(
-            "release-check requires explicit runner inputs".into(),
-        )),
-        [task, mode] if task == "release-check" && mode == "--run" => Err(TaskError::Contract(
-            "release-check requires explicit runner inputs".into(),
-        )),
+        [task, arguments @ ..] if task == "release-check" => release_cli::execute(arguments),
         [task, flag, archive] if task == "vendor-patch" && flag == "--archive" => {
             let count = xtask::vendor::patch(&std::env::current_dir()?, Path::new(archive))
                 .map_err(|error| TaskError::Contract(error.to_string()))?;
