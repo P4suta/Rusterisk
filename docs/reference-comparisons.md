@@ -82,6 +82,8 @@ The runner also executes the same blind and attended transfer fixtures with both
 The attended case changes both surviving signals after confirming retirement of the source dialogs.
 The [transfer profile](blind-transfer.md) records received-audio requirements and remaining wire differences.
 
-The scenario doesn't certify complete operation compatibility.
-SIPp scenarios, broader signaling coverage, and browser comparisons still require integration work.
+The runner compares authenticated registration and removal on both servers with [the same SIPp scenario](../tests/interop/sipp/registration.xml).
+The runner requires complete native SIPp call statistics before proceeding to the remaining server cases.
+The paired browser campaign verifies received tones and completed recordings on both servers with [the same browser app](browser-calls.md).
+Broader signaling coverage remains unverified.
 The capability response keeps `call_verified=false` until the required call and audio comparisons pass.
