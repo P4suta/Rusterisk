@@ -20,6 +20,10 @@ import {
 	observeCapture,
 } from "./capture-observer.ts";
 import { verifyConnectionRecovery } from "./connection-recovery.ts";
+import {
+	FirstCallObservations,
+	withFirstCallObservations,
+} from "./first-call-observations.ts";
 import { incomingCall } from "./incoming-call.ts";
 
 function target(name: string): string {
@@ -184,8 +188,9 @@ async function received(
 test("actual outgoing and incoming browser calls exchange known audio and save a recording", async (): Promise<void> => {
 	const processes = new BrowserProcesses();
 	const observations: BrowserProcess[] = [];
+	const callObservations = new FirstCallObservations();
 	let messages = 0;
-	await usingBrowsers(processes, async (): Promise<void> => {
+	const operation = usingBrowsers(processes, async (): Promise<void> => {
 		const alice = await launchBrowser(
 			"Alice",
 			target("RUSTERISK_BROWSER_ALICE_AUDIO"),
@@ -241,6 +246,7 @@ test("actual outgoing and incoming browser calls exchange known audio and save a
 				await first
 					.getByLabel("Destination SIP address")
 					.fill("sip:100@localhost");
+				callObservations.start();
 				await first.getByRole("button", { name: "Call", exact: true }).click();
 				let id: string | undefined;
 				await captureCheckpoint(
@@ -270,6 +276,7 @@ test("actual outgoing and incoming browser calls exchange known audio and save a
 			"Bob: receive the incoming SIP call",
 			async (): Promise<void> => {
 				await command(incomingCall(process.env.RUSTERISK_BROWSER_SERVER));
+				callObservations.mark("bobOriginateHttpAccepted");
 				await expect(
 					second.getByRole("button", { name: "Answer", exact: true }),
 				).toBeEnabled();
@@ -300,6 +307,7 @@ test("actual outgoing and incoming browser calls exchange known audio and save a
 				await expect(second.locator("#call-status")).toHaveText(
 					"Call answered",
 				);
+				callObservations.mark("bothBrowsersAnswered");
 			},
 		);
 		await phase(
@@ -317,8 +325,10 @@ test("actual outgoing and incoming browser calls exchange known audio and save a
 				);
 			},
 		);
-		await received(first, 660, 440);
-		await received(second, 440, 660);
+		await callObservations.observeTones(
+			(): Promise<void> => received(first, 660, 440),
+			(): Promise<void> => received(second, 440, 660),
+		);
 		await phase(
 			"Stop the recording after both native streams arrive",
 			async (): Promise<void> => {
@@ -356,6 +366,15 @@ test("actual outgoing and incoming browser calls exchange known audio and save a
 		);
 	}).catch(
 		(primary: unknown): Promise<never> => browserFailure(primary, observations),
+	);
+	await withFirstCallObservations(
+		callObservations,
+		(): Promise<void> => operation,
+		(body: Buffer): Promise<void> =>
+			test.info().attach("first-call-observations", {
+				body,
+				contentType: "application/json",
+			}),
 	);
 });
 
