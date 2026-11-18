@@ -1,7 +1,7 @@
 use super::retained::{CleanupOutputs, ToolOutputs};
 use super::{
     commands::{arguments, combine, docker, owned_step, read, Commands},
-    ImageIdentity, Interop, ReferenceImage,
+    ImageIdentity, Interop, ReferenceImage, Step,
 };
 use crate::process::{CommandSupervisor, ProcessError};
 use serde::Deserialize;
@@ -138,6 +138,37 @@ impl Reference {
     pub(super) fn name(&self) -> &str {
         &self.name
     }
+
+    pub(super) fn launch(
+        &mut self,
+        image: &ReferenceImage,
+        mut start: Step,
+        commands: &mut Commands<'_>,
+        supervisor: &mut CommandSupervisor,
+    ) -> io::Result<String> {
+        self.image = Some(image.as_str().into());
+        let cidfile = self
+            .cidfile
+            .to_str()
+            .ok_or_else(|| io::Error::other("comparison CID path is not UTF-8"))?;
+        for value in [
+            cidfile.to_owned(),
+            "--cidfile".into(),
+            format!("{OWNERSHIP_LABEL}={}", self.owner),
+            "--label".into(),
+        ] {
+            start.arguments.insert(1, value);
+        }
+        self.attempted = true;
+        commands.run(docker(&start.arguments), start.budget, |command, budget| {
+            supervisor.run(command, budget)
+        })?;
+        let bytes = read(&self.cidfile, 65)?;
+        self.inspect(container_id(&bytes)?, commands, |command, budget| {
+            supervisor.run(command, budget)
+        })
+    }
+
     fn check(&self, id: &str, ownership: Ownership) -> io::Result<String> {
         let image = self
             .image
@@ -308,28 +339,8 @@ pub(super) fn start_reference(
         ));
     }
     let image = ReferenceImage::new(image);
-    reference.image = Some(image.as_str().into());
-    let mut start = image.start(plan).map_err(io::Error::other)?;
-    let cidfile = reference
-        .cidfile
-        .to_str()
-        .ok_or_else(|| io::Error::other("comparison CID path is not UTF-8"))?;
-    for value in [
-        cidfile.to_owned(),
-        "--cidfile".into(),
-        format!("{OWNERSHIP_LABEL}={}", reference.owner),
-        "--label".into(),
-    ] {
-        start.arguments.insert(1, value);
-    }
-    reference.attempted = true;
-    commands.run(docker(&start.arguments), start.budget, |command, budget| {
-        supervisor.run(command, budget)
-    })?;
-    let bytes = read(&reference.cidfile, 65)?;
-    reference.inspect(container_id(&bytes)?, commands, |command, budget| {
-        supervisor.run(command, budget)
-    })
+    let start = image.start(plan).map_err(io::Error::other)?;
+    reference.launch(&image, start, commands, supervisor)
 }
 
 pub(super) fn reference_versions(
