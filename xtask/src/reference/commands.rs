@@ -96,6 +96,10 @@ pub(super) enum CommandPhase {
 }
 
 impl<'a> Commands<'a> {
+    pub(super) fn last_output(&self) -> u8 {
+        self.sequence
+    }
+
     pub(super) fn new(source: &Path, directory: &'a Path) -> io::Result<Self> {
         let profile = fs::canonicalize(directory)?.join("mise-global.toml");
         create(&profile)?.flush()?;

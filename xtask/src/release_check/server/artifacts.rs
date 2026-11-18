@@ -19,7 +19,9 @@ use std::{
 };
 
 mod tools;
-pub(super) use tools::{capture as capture_tools, configure as configure_tools};
+pub(in crate::release_check) use tools::{
+    capture as capture_tools, check as check_tools, configure as configure_tools,
+};
 
 const METADATA: &str = "native-check.toml";
 const FORMAT: u32 = 1;

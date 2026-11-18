@@ -6,6 +6,7 @@ use super::{
     },
     copy_configuration, media_address,
     resources::{reference_ready, reference_versions, start_reference, Reference},
+    retained::{SippContext, SippRun},
     validate_sipp_statistics, Interop, ReferenceImage, SippAdapter,
 };
 use crate::{
@@ -22,9 +23,13 @@ use std::{
 pub struct SippRegistrationComparison {
     asterisk: u64,
     rusterisk: u64,
+    context: SippContext,
 }
 
 impl SippRegistrationComparison {
+    pub(super) fn into_context(self) -> SippContext {
+        self.context
+    }
     pub const fn completed_calls(&self, adapter: SippAdapter) -> u64 {
         match adapter {
             SippAdapter::Asterisk => self.asterisk,
@@ -47,7 +52,7 @@ impl Scenario<'_> {
         target: SocketAddr,
         commands: &mut Commands<'_>,
         mut perform: impl FnMut(&mut Command, Duration) -> Result<(), ProcessError>,
-    ) -> io::Result<u64> {
+    ) -> io::Result<(u64, u8)> {
         let step = owned_step(
             self.plan
                 .sipp_registration(adapter, target, self.local)
@@ -64,7 +69,7 @@ impl Scenario<'_> {
                 observed.diagnostics()
             )));
         }
-        validate_sipp_statistics(&observed.stdout).map_err(|error| {
+        let calls = validate_sipp_statistics(&observed.stdout).map_err(|error| {
             let adapter = match adapter {
                 SippAdapter::Asterisk => "Asterisk",
                 SippAdapter::Rusterisk => "Rusterisk",
@@ -73,7 +78,8 @@ impl Scenario<'_> {
                 "{adapter} SIPp statistics: {error}; {}",
                 observed.diagnostics()
             ))
-        })
+        })?;
+        Ok((calls, commands.last_output()))
     }
 }
 
@@ -125,12 +131,21 @@ fn native_ready(service: &mut RunningCommand<'_>, log: &Path, http: SocketAddr) 
     }
 }
 
+struct NativeObservation {
+    calls: u64,
+    statistics: u8,
+    http: SocketAddr,
+    sip: SocketAddr,
+    version: u8,
+    configuration: u8,
+}
+
 fn native_scenario(
     native: Native<'_>,
     commands: &mut Commands<'_>,
     supervisor: &mut CommandSupervisor,
-    client: impl FnOnce(&mut RunningCommand<'_>, u16, &mut Commands<'_>) -> io::Result<u64>,
-) -> io::Result<u64> {
+    client: impl FnOnce(&mut RunningCommand<'_>, u16, &mut Commands<'_>) -> io::Result<(u64, u8)>,
+) -> io::Result<NativeObservation> {
     let http_reservation = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let sip_reservation = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
     let http = http_reservation.local_addr()?;
@@ -143,6 +158,7 @@ fn native_scenario(
             supervisor.run(command, budget)
         })?
         .exact(format!("rusterisk {}\n", env!("CARGO_PKG_VERSION")).as_bytes())?;
+    let version = commands.last_output();
     let mut check = native.command();
     check.arg("--check-config");
     commands
@@ -150,6 +166,7 @@ fn native_scenario(
             supervisor.run(command, budget)
         })?
         .exact(b"Configuration valid.\n")?;
+    let configuration = commands.last_output();
     let log = native.directory.join("native.stdout");
     let diagnostic = native.directory.join("native.stderr");
     let mut command = native.command();
@@ -165,7 +182,15 @@ fn native_scenario(
         .map_err(io::Error::other)?;
     let operation = (|| {
         native_ready(&mut service, &log, http)?;
-        client(&mut service, sip.port(), commands)
+        let (calls, statistics) = client(&mut service, sip.port(), commands)?;
+        Ok(NativeObservation {
+            calls,
+            statistics,
+            http,
+            sip,
+            version,
+            configuration,
+        })
     })();
     let operation = combine(
         operation,
@@ -195,70 +220,80 @@ fn native_scenario(
 }
 
 fn run(
-    root: &Path,
-    executable: &Path,
+    native: Native<'_>,
     plan: &Interop,
     selected: Option<&ReferenceImage>,
     reference: &mut Reference,
     commands: &mut Commands<'_>,
     supervisor: &mut CommandSupervisor,
-) -> io::Result<SippRegistrationComparison> {
+    owner: &str,
+) -> io::Result<(u64, u64, SippRun)> {
     let directory = commands.directory;
     let configuration = directory.join("asterisk");
-    copy_configuration(&root.join("tests/interop/asterisk"), &configuration)?;
+    copy_configuration(&native.root.join("tests/interop/asterisk"), &configuration)?;
     fs::create_dir(configuration.join("sounds"))?;
     write(
         &configuration.join("sipp-registration.xml"),
-        &read(&root.join("tests/interop/sipp/registration.xml"), 65_536)?,
+        &read(
+            &native.root.join("tests/interop/sipp/registration.xml"),
+            65_536,
+        )?,
     )?;
     let id = start_reference(reference, plan, selected, commands, supervisor)?;
-    reference_versions(&id, commands, supervisor)?;
+    let tools = reference_versions(&id, commands, supervisor)?;
     reference_ready(&id, commands, supervisor)?;
     let step = owned_step(plan.media_address(), reference.name(), &id);
     let observed = commands.run(docker(&step.arguments), step.budget, |command, budget| {
         supervisor.run(command, budget)
     })?;
     let local = media_address(observed.text()?).map_err(io::Error::other)?;
+    let local_output = commands.last_output();
     let step = owned_step(plan.callback_address(), reference.name(), &id);
     let observed = commands.run(docker(&step.arguments), step.budget, |command, budget| {
         supervisor.run(command, budget)
     })?;
     let callback = callback_address(observed.text()?).map_err(io::Error::other)?;
+    let callback_output = commands.last_output();
     let scenario = Scenario {
         plan,
         name: reference.name(),
         id: &id,
         local,
     };
-    let asterisk = scenario.run(
+    let (asterisk, asterisk_statistics) = scenario.run(
         SippAdapter::Asterisk,
         SocketAddr::from((local, 5060)),
         commands,
         |command, budget| supervisor.run(command, budget),
     )?;
-    let runtime = directory.join("native");
-    fs::create_dir(&runtime)?;
-    let rusterisk = native_scenario(
-        Native {
-            root,
-            executable,
-            directory: &runtime,
-        },
-        commands,
-        supervisor,
-        |service, port, commands| {
-            scenario.run(
-                SippAdapter::Rusterisk,
-                SocketAddr::from((callback, port)),
-                commands,
-                |command, budget| service.run(command, budget),
-            )
-        },
-    )?;
-    Ok(SippRegistrationComparison {
+    fs::create_dir(native.directory)?;
+    let rusterisk = native_scenario(native, commands, supervisor, |service, port, commands| {
+        scenario.run(
+            SippAdapter::Rusterisk,
+            SocketAddr::from((callback, port)),
+            commands,
+            |command, budget| service.run(command, budget),
+        )
+    })?;
+    Ok((
         asterisk,
-        rusterisk,
-    })
+        rusterisk.calls,
+        SippRun {
+            owner: owner.to_owned(),
+            directory: directory.to_owned(),
+            id,
+            local,
+            callback,
+            local_output,
+            callback_output,
+            http: rusterisk.http,
+            sip: rusterisk.sip,
+            tools,
+            statistics: [asterisk_statistics, rusterisk.statistics],
+            version: rusterisk.version,
+            configuration: rusterisk.configuration,
+        },
+    ))
 }
 
 pub fn compare_sipp_registrations_with(
@@ -270,6 +305,15 @@ pub fn compare_sipp_registrations_with(
 }
 
 impl ReferenceImage {
+    pub(crate) fn compare_sipp_retained_with(
+        &self,
+        root: &Path,
+        executable: &Path,
+        supervisor: &mut CommandSupervisor,
+        directory: &Path,
+    ) -> io::Result<SippRegistrationComparison> {
+        compare_in(root, executable, Some(self), supervisor, Some(directory))
+    }
     pub fn compare_sipp_registrations_with(
         &self,
         root: &Path,
@@ -286,6 +330,16 @@ fn compare(
     selected: Option<&ReferenceImage>,
     supervisor: &mut CommandSupervisor,
 ) -> io::Result<SippRegistrationComparison> {
+    compare_in(root, executable, selected, supervisor, None)
+}
+
+fn compare_in(
+    root: &Path,
+    executable: &Path,
+    selected: Option<&ReferenceImage>,
+    supervisor: &mut CommandSupervisor,
+    retained: Option<&Path>,
+) -> io::Result<SippRegistrationComparison> {
     let root = fs::canonicalize(root)?;
     let executable = fs::canonicalize(executable)?;
     if !executable.is_file() {
@@ -298,8 +352,10 @@ fn compare(
         .map_err(io::Error::other)?
         .as_nanos();
     let identity = format!("{}-{stamp}", std::process::id());
-    let directory =
-        fs::canonicalize(std::env::temp_dir())?.join(format!("rusterisk-sipp-{identity}"));
+    let directory = match retained {
+        Some(directory) => directory.to_owned(),
+        None => fs::canonicalize(std::env::temp_dir())?.join(format!("rusterisk-sipp-{identity}")),
+    };
     let configuration = directory.join("asterisk");
     let plan = Interop::new(
         &identity,
@@ -317,17 +373,21 @@ fn compare(
                 Err(error),
                 fs::remove_dir_all(&directory),
                 "comparison temporary cleanup",
-            )
+            );
         }
     };
     let operation = run(
-        &root,
-        &executable,
+        Native {
+            root: &root,
+            executable: &executable,
+            directory: &directory.join("native"),
+        },
         &plan,
         selected,
         reference,
         &mut commands,
         supervisor,
+        &identity,
     );
     commands.phase = CommandPhase::Cleanup;
     let operation = if operation.is_err() {
@@ -345,14 +405,27 @@ fn compare(
     } else {
         operation
     };
-    let operation = combine(
-        operation,
-        reference.cleanup(&mut commands, supervisor),
-        "reference cleanup",
-    );
-    combine(
-        operation,
-        fs::remove_dir_all(&directory),
-        "comparison temporary cleanup",
-    )
+    let cleanup = reference.cleanup_recorded(&mut commands, supervisor);
+    let operation = match (operation, cleanup) {
+        (Ok((asterisk, rusterisk, run)), Ok(Some(cleanup))) => Ok(SippRegistrationComparison {
+            asterisk,
+            rusterisk,
+            context: SippContext { run, cleanup },
+        }),
+        (Ok(_), Ok(None)) => Err(io::Error::other(
+            "completed SIPp comparison has no owned cleanup",
+        )),
+        (Err(primary), Ok(_)) | (Ok(_), Err(primary)) => Err(primary),
+        (Err(primary), Err(cleanup)) => Err(io::Error::other(format!(
+            "{primary}; reference cleanup: {cleanup}"
+        ))),
+    };
+    match retained {
+        Some(_) => operation,
+        None => combine(
+            operation,
+            fs::remove_dir_all(&directory),
+            "comparison temporary cleanup",
+        ),
+    }
 }

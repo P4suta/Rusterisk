@@ -1,3 +1,4 @@
+use super::retained::{CleanupOutputs, ToolOutputs};
 use super::{
     commands::{arguments, combine, docker, owned_step, read, Commands},
     ImageIdentity, Interop, ReferenceImage,
@@ -12,7 +13,7 @@ use std::{
 };
 const REFERENCE_IMAGE: &str = "rusterisk-asterisk-reference:22.9.0";
 const OWNERSHIP_LABEL: &str = "io.rusterisk.sipp-comparison";
-fn container_id(bytes: &[u8]) -> io::Result<&str> {
+pub(super) fn container_id(bytes: &[u8]) -> io::Result<&str> {
     let source = std::str::from_utf8(bytes).map_err(io::Error::other)?;
     let id = source.strip_suffix('\n').unwrap_or(source);
     if id.len() != 64
@@ -32,6 +33,42 @@ struct Ownership {
     requested_image: String,
     name: String,
     owner: Option<String>,
+}
+
+fn check_ownership(
+    ownership: Ownership,
+    owner: &str,
+    id: &str,
+    image: &str,
+    name: &str,
+) -> io::Result<String> {
+    if ownership.id != id
+        || ownership.requested_image != image
+        || ownership.name != format!("/{name}")
+        || ownership.owner.as_deref() != Some(owner)
+    {
+        return Err(io::Error::other(
+            "comparison container ownership differs; control refused",
+        ));
+    }
+    Ok(ownership.id)
+}
+
+pub(super) fn validate_reference_ownership(
+    source: &str,
+    owner: &str,
+    id: &str,
+    image: &str,
+    name: &str,
+) -> io::Result<String> {
+    container_id(id.as_bytes())?;
+    check_ownership(
+        serde_json::from_str(source).map_err(io::Error::other)?,
+        owner,
+        id,
+        image,
+        name,
+    )
 }
 
 struct Located {
@@ -102,16 +139,11 @@ impl Reference {
         &self.name
     }
     fn check(&self, id: &str, ownership: Ownership) -> io::Result<String> {
-        if ownership.id != id
-            || self.image.as_deref() != Some(ownership.requested_image.as_str())
-            || ownership.name != format!("/{}", self.name)
-            || ownership.owner.as_deref() != Some(self.owner.as_str())
-        {
-            return Err(io::Error::other(
-                "comparison container ownership differs; control refused",
-            ));
-        }
-        Ok(ownership.id)
+        let image = self
+            .image
+            .as_deref()
+            .ok_or_else(|| io::Error::other("comparison image is missing"))?;
+        check_ownership(ownership, &self.owner, id, image, &self.name)
     }
 
     fn inspect(
@@ -165,24 +197,26 @@ impl Reference {
         })
     }
 
-    pub(super) fn cleanup(
+    pub(super) fn cleanup_recorded(
         &self,
         commands: &mut Commands<'_>,
         supervisor: &mut CommandSupervisor,
-    ) -> io::Result<()> {
+    ) -> io::Result<Option<CleanupOutputs>> {
         let located = self.locate(commands, supervisor)?;
         let operation = (|| {
             let Some(id) = located.id else {
-                return Ok(());
+                return Ok(None);
             };
             let id = self.inspect(&id, commands, |command, budget| {
                 supervisor.run_cleanup(command, budget)
             })?;
+            let inspection = commands.last_output();
             commands.run(
                 docker(&arguments(["rm", "--force", &id])),
                 Duration::from_secs(30),
                 |command, budget| supervisor.run_cleanup(command, budget),
             )?;
+            let removal = commands.last_output();
             let filter = format!("id={id}");
             commands
                 .run(
@@ -198,7 +232,12 @@ impl Reference {
                     Duration::from_secs(10),
                     |command, budget| supervisor.run_cleanup(command, budget),
                 )?
-                .exact(b"")
+                .exact(b"")?;
+            Ok(Some(CleanupOutputs {
+                inspection,
+                removal,
+                absence: commands.last_output(),
+            }))
         })();
         combine(
             operation,
@@ -297,7 +336,7 @@ pub(super) fn reference_versions(
     id: &str,
     commands: &mut Commands<'_>,
     supervisor: &mut CommandSupervisor,
-) -> io::Result<()> {
+) -> io::Result<ToolOutputs> {
     commands
         .run(
             docker(&arguments(["exec", id, "/usr/sbin/asterisk", "-V"])),
@@ -305,26 +344,40 @@ pub(super) fn reference_versions(
             |command, budget| supervisor.run(command, budget),
         )?
         .exact(b"Asterisk 22.9.0\n")?;
+    let asterisk = commands.last_output();
+    let mut status = None;
     let observed = commands.run(
         docker(&arguments(["exec", id, "/usr/local/bin/sipp", "-v"])),
         Duration::from_secs(10),
         |command, budget| match supervisor.run(command, budget) {
-            Err(ProcessError::Status(status)) if status.code() == Some(99) => Ok(()),
+            Err(ProcessError::Status(observed)) if observed.code() == Some(99) => {
+                status = observed.code();
+                Ok(())
+            }
             Ok(()) => Err(ProcessError::InvalidOutput),
             Err(error) => Err(error),
         },
     )?;
-    if observed
-        .text()?
-        .lines()
-        .filter(|line| *line == " SIPp v3.8.0-TLS.")
-        .count()
-        != 1
+    let status = status.ok_or_else(|| io::Error::other("comparison SIPp status is missing"))?;
+    validate_sipp_version(status, observed.text()?)?;
+    Ok(ToolOutputs {
+        asterisk,
+        sipp: commands.last_output(),
+        sipp_status: status,
+    })
+}
+
+pub(super) fn validate_sipp_version(status: i32, text: &str) -> io::Result<()> {
+    if status != 99
+        || text
+            .lines()
+            .filter(|line| *line == " SIPp v3.8.0-TLS.")
+            .count()
+            != 1
     {
-        return Err(io::Error::other(format!(
-            "comparison SIPp version differs; {}",
-            observed.diagnostics()
-        )));
+        return Err(io::Error::other(
+            "comparison SIPp version or exit status differs",
+        ));
     }
     Ok(())
 }

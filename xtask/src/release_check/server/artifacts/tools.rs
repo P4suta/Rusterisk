@@ -39,7 +39,7 @@ fn channel(captured: &CapturedReleaseSource) -> io::Result<String> {
     Ok(channel.to_owned())
 }
 
-pub(in crate::release_check::server) fn configure(
+pub(in crate::release_check) fn configure(
     captured: &CapturedReleaseSource,
     command: &mut Command,
 ) -> io::Result<()> {
@@ -47,7 +47,7 @@ pub(in crate::release_check::server) fn configure(
     Ok(())
 }
 
-pub(super) fn check(
+pub(in crate::release_check) fn check(
     captured: &CapturedReleaseSource,
     directory: &Path,
     os: &str,
@@ -82,7 +82,7 @@ pub(super) fn check(
     Ok(())
 }
 
-pub(in crate::release_check::server) fn capture(
+pub(in crate::release_check) fn capture(
     captured: &CapturedReleaseSource,
     root: &Path,
     supervisor: &mut CommandSupervisor,

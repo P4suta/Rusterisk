@@ -1,4 +1,6 @@
 use super::CapturedReleaseSource;
+#[cfg(unix)]
+mod artifacts;
 use crate::{
     process::ProcessError,
     reference::{ReferenceImage, ReferenceRunner},
@@ -217,6 +219,46 @@ fn verify_reference_with<'a>(
 }
 
 impl CapturedReleaseSource {
+    /// Publishes reference native results after complete owned cleanup.
+    pub fn verify_reference_artifact<'a>(
+        &'a self,
+        image: &'a ReferenceImage,
+        published: &Path,
+    ) -> Result<ReferenceOutcome<'a>, ReferenceRunError> {
+        #[cfg(unix)]
+        {
+            artifacts::produce(self, image, published)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (image, published);
+            Err(ReferenceRunError::new(
+                "reference artifact supervisor",
+                Failure::Process(ProcessError::UnsupportedSupervision),
+            ))
+        }
+    }
+
+    /// Revalidates reference native outputs with the captured source and image.
+    pub fn read_reference_artifact<'a>(
+        &'a self,
+        artifact: &Path,
+        image: &'a ReferenceImage,
+    ) -> Result<ReferenceOutcome<'a>, ReferenceRunError> {
+        #[cfg(unix)]
+        {
+            artifacts::read(self, image, artifact)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (artifact, image);
+            Err(ReferenceRunError::new(
+                "reference artifact reader",
+                Failure::Process(ProcessError::UnsupportedSupervision),
+            ))
+        }
+    }
+
     /// Runs every maintained reference comparison from captured inputs.
     /// Releases supervised processes and owned Docker resources before returning.
     pub fn verify_reference<'a>(
@@ -250,6 +292,10 @@ impl CapturedReleaseSource {
 #[cfg(any(test, doctest))]
 #[path = "reference_outcome_contracts.rs"]
 mod contracts;
+
+#[cfg(any(test, doctest))]
+#[path = "reference_artifact_contracts.rs"]
+mod artifact_contracts;
 
 #[cfg(test)]
 #[path = "reference_outcome_tests.rs"]

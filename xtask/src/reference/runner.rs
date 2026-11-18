@@ -5,6 +5,7 @@ use super::{
     commands::{combine, docker, owned_step, CommandPhase, Commands},
     media_address, native_server_build, published_address,
     resources::{reference_ready, reference_versions, start_reference, Reference},
+    retained::{CaseContext, CaseRun, CaseRuntime, ReferenceNativeContext},
     ReferenceCase, SippAdapter,
 };
 #[cfg(any(unix, test))]
@@ -45,6 +46,13 @@ fn mise(arguments: &[String]) -> Command {
 pub(crate) struct ReferenceRunner {
     state: PathBuf,
     supervisor: CommandSupervisor,
+}
+
+#[cfg(unix)]
+struct CaseExecution<'a> {
+    source: &'a Path,
+    image: &'a ReferenceImage,
+    retained: bool,
 }
 
 impl ReferenceRunner {
@@ -141,6 +149,25 @@ impl ReferenceRunner {
         source: &Path,
         image: &ReferenceImage,
     ) -> Result<(), ProcessError> {
+        self.compare_recorded(source, image, false).map(|_| ())
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn compare_retained(
+        &mut self,
+        source: &Path,
+        image: &ReferenceImage,
+    ) -> Result<ReferenceNativeContext, ProcessError> {
+        self.compare_recorded(source, image, true)
+    }
+
+    #[cfg(unix)]
+    fn compare_recorded(
+        &mut self,
+        source: &Path,
+        image: &ReferenceImage,
+        retained: bool,
+    ) -> Result<ReferenceNativeContext, ProcessError> {
         let directory = self.state.join("reference-comparisons");
         fs::create_dir(&directory)?;
         let mut commands = Commands::new(source, &directory)?;
@@ -161,27 +188,42 @@ impl ReferenceRunner {
         commands.run(mise(&arguments), build.budget, |command, budget| {
             self.supervisor.run(command, budget)
         })?;
-        let comparison = image.compare_sipp_registrations_with(
-            source,
-            &source.join("target/debug/rusterisk"),
-            &mut self.supervisor,
-        )?;
+        let executable = source.join("target/debug/rusterisk");
+        let comparison = if retained {
+            image.compare_sipp_retained_with(
+                source,
+                &executable,
+                &mut self.supervisor,
+                &self.state.join("sipp"),
+            )?
+        } else {
+            image.compare_sipp_registrations_with(source, &executable, &mut self.supervisor)?
+        };
         println!(
             "SIPp completed calls: Asterisk={}, Rusterisk={}",
             comparison.completed_calls(SippAdapter::Asterisk),
             comparison.completed_calls(SippAdapter::Rusterisk),
         );
-        self.compare_cases(source, image, &mut commands)?;
-        Ok(())
+        let sipp = comparison.into_context();
+        let cases = self.compare_cases(
+            &CaseExecution {
+                source,
+                image,
+                retained,
+            },
+            &mut commands,
+        )?;
+        Ok(ReferenceNativeContext { sipp, cases })
     }
 
     #[cfg(unix)]
     fn compare_cases(
         &mut self,
-        source: &Path,
-        image: &ReferenceImage,
+        execution: &CaseExecution<'_>,
         commands: &mut Commands<'_>,
-    ) -> io::Result<()> {
+    ) -> io::Result<CaseContext> {
+        let source = execution.source;
+        let image = execution.image;
         let owner = identity()?;
         let configuration = Self::configuration_path(source, &owner)?;
         let plan = Interop::new(
@@ -196,6 +238,9 @@ impl ReferenceRunner {
         let operation = (|| {
             fs::create_dir_all(source.join("target/interop"))?;
             Self::prepare_configuration(&source.join("tests/interop/asterisk"), &configuration)?;
+            if execution.retained {
+                super::retained::preserve_initial(&configuration, commands.directory)?;
+            }
             let id = start_reference(
                 &mut reference,
                 &plan,
@@ -203,21 +248,24 @@ impl ReferenceRunner {
                 commands,
                 &mut self.supervisor,
             )?;
-            reference_versions(&id, commands, &mut self.supervisor)?;
+            let tools = reference_versions(&id, commands, &mut self.supervisor)?;
             reference_ready(&id, commands, &mut self.supervisor)?;
-            let mut inspect = |step| -> io::Result<String> {
+            let mut inspect = |step| -> io::Result<(String, u8)> {
                 let step = owned_step(step, reference.name(), &id);
                 let observed =
                     commands.run(docker(&step.arguments), step.budget, |command, budget| {
                         self.supervisor.run(command, budget)
                     })?;
-                Ok(observed.text()?.into())
+                Ok((observed.text()?.into(), commands.last_output()))
             };
-            let address = published_address(&inspect(plan.port())?).map_err(io::Error::other)?;
-            let media = media_address(&inspect(plan.media_address())?).map_err(io::Error::other)?;
-            let callback =
-                callback_address(&inspect(plan.callback_address())?).map_err(io::Error::other)?;
-            for case in ReferenceCase::ALL {
+            let (text, address_output) = inspect(plan.port())?;
+            let address = published_address(&text).map_err(io::Error::other)?;
+            let (text, media_output) = inspect(plan.media_address())?;
+            let media = media_address(&text).map_err(io::Error::other)?;
+            let (text, callback_output) = inspect(plan.callback_address())?;
+            let callback = callback_address(&text).map_err(io::Error::other)?;
+            let mut cases = [0; 3];
+            for (case, index) in ReferenceCase::ALL.into_iter().zip(&mut cases) {
                 println!("reference case: {}", case.name());
                 let mut arguments = Vec::with_capacity(12);
                 arguments.push("cargo".into());
@@ -240,8 +288,27 @@ impl ReferenceRunner {
                         observed.diagnostics()
                     ))
                 })?;
+                *index = commands.last_output();
             }
-            Ok(())
+            let runtime = if execution.retained {
+                Some(CaseRuntime::capture(source, &configuration, callback)?)
+            } else {
+                None
+            };
+            Ok(CaseRun {
+                owner,
+                configuration,
+                id,
+                address,
+                media,
+                callback,
+                address_output,
+                media_output,
+                callback_output,
+                tools,
+                cases,
+                runtime,
+            })
         })();
         commands.phase = CommandPhase::Cleanup;
         let operation = if operation.is_err() {
@@ -253,16 +320,24 @@ impl ReferenceRunner {
                     "{error}; reference diagnostics: {diagnostics}"
                 ))),
                 (operation, Err(error)) => combine(operation, Err(error), "reference diagnostics"),
-                (Ok(()), Ok(_)) => Ok(()),
+                (Ok(run), Ok(_)) => Ok(run),
             }
         } else {
             operation
         };
-        combine(
+        match (
             operation,
-            reference.cleanup(commands, &mut self.supervisor),
-            "reference cleanup",
-        )
+            reference.cleanup_recorded(commands, &mut self.supervisor),
+        ) {
+            (Ok(run), Ok(Some(cleanup))) => Ok(CaseContext { run, cleanup }),
+            (Ok(_), Ok(None)) => Err(io::Error::other(
+                "completed reference cases have no owned cleanup",
+            )),
+            (Err(primary), Ok(_)) | (Ok(_), Err(primary)) => Err(primary),
+            (Err(primary), Err(cleanup)) => Err(io::Error::other(format!(
+                "{primary}; reference cleanup: {cleanup}"
+            ))),
+        }
     }
 
     pub(crate) fn finish(self) -> Result<(), ProcessError> {

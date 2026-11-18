@@ -9,6 +9,8 @@ mod interop;
 mod music;
 #[cfg(unix)]
 mod resources;
+#[cfg(unix)]
+mod retained;
 mod runner;
 #[cfg(unix)]
 mod sipp_comparison;
@@ -20,6 +22,8 @@ pub use interop::{
     SippAdapter,
 };
 pub use music::{prepare_music_fixture, ReferenceMusicFixture};
+#[cfg(unix)]
+pub(crate) use retained::ReferenceNativeContext;
 pub(crate) use runner::ReferenceRunner;
 #[cfg(unix)]
 pub use sipp_comparison::{compare_sipp_registrations_with, SippRegistrationComparison};

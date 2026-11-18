@@ -13,6 +13,9 @@ use std::{
 #[path = "aggregate/reference.rs"]
 mod aggregate;
 
+#[path = "reference_outcome_tests/reusable_artifacts.rs"]
+mod reusable_artifacts;
+
 #[derive(Clone, Copy)]
 enum Fault {
     None,
