@@ -43,12 +43,18 @@ mise x -- just distribution-server-check-startup <candidate-directory>
 The startup check selects the host operating system and processor.
 It checks version output and the packaged configuration before starting an extracted executable.
 On Linux and macOS, it also checks system library resolution before startup.
-On Windows, it checks loaded DLL paths while the extracted executable runs.
+On Windows, it checks loaded dynamic-link library paths while the extracted executable runs.
 A separate configuration copy changes only the sample HTTP and SIP listener ports.
 The runner retains bounded command logs under `.cache/distributions/server-startup`.
 It requires a complete readiness record, graceful shutdown, and both listener ports to become available.
 It removes the owned extraction and runtime data after the check.
-The startup check doesn't establish SDK interoperability or verify another operating system.
+The software development kit (SDK) check connects an independent client to the packaged server.
+Use `--consumer-jobs` to control the Cargo jobs for client preparation.
+The default is two jobs.
+
+```sh
+mise x -- cargo run --locked --target-dir target/xtask --package xtask -- distribution server verify --candidate "$server_candidate" --sdk-candidate "$sdk_candidate" --consumer-jobs 1
+```
 
 On Apple silicon, request [Rosetta execution](https://developer.apple.com/documentation/apple-silicon/building-a-universal-macos-binary) explicitly when checking a macOS Intel candidate.
 
