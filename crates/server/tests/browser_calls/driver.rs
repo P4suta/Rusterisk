@@ -1,5 +1,8 @@
 use super::{failure, recording, resources, runtime_inputs};
-use rusterisk_client::{api::ChannelId, Client, Session};
+use rusterisk_client::{
+    api::{ChannelId, EventFilter, EventFilterRequest, EventKind, RecordingState},
+    Client, Session,
+};
 use rusterisk_server::ControlError;
 use std::{
     io::{self, Write},
@@ -12,6 +15,7 @@ use std::{
 use tokio::io::AsyncWrite;
 
 const MAX_RECORDING_BYTES: usize = 1024 * 1024;
+const RECORDING_NAME: &str = "browser-known";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BrowserBackend {
@@ -80,7 +84,7 @@ pub(super) async fn download_recording(
     destination: &Path,
 ) -> Result<(), ControlError> {
     let mut audio = AudioBuffer(Vec::new());
-    let name = ChannelId::try_from("browser-known".to_owned()).map_err(failure)?;
+    let name = ChannelId::try_from(RECORDING_NAME.to_owned()).map_err(failure)?;
     tokio::time::timeout(
         Duration::from_secs(10),
         client.download_stored_recording(&name, &mut audio),
@@ -103,6 +107,25 @@ pub(super) async fn download_recording(
     }
 }
 
+pub(super) fn recording_complete(event: &EventKind) -> Result<bool, ControlError> {
+    if let EventKind::RecordingFinished { recording } = event {
+        return if recording.name != RECORDING_NAME {
+            Ok(false)
+        } else if recording.state == RecordingState::Done && recording.format == "wav" {
+            Ok(true)
+        } else {
+            Err(failure(
+                "browser recording ended without a stored WAVE file",
+            ))
+        };
+    }
+    if matches!(event, EventKind::RecordingFailed { recording } if recording.name == RECORDING_NAME)
+    {
+        return Err(failure("browser recording failed before download"));
+    }
+    Ok(false)
+}
+
 pub(super) struct BrowserRun<'a> {
     pub directory: &'a Path,
     pub ui: SocketAddr,
@@ -119,7 +142,25 @@ impl BrowserRun<'_> {
             .map_err(failure)?;
         let application = ChannelId::try_from("calls".to_owned()).map_err(failure)?;
         let mut subscription = client.subscribe(&application).await.map_err(failure)?;
-        let operation = self.run_subscribed(&client, &mut subscription).await;
+        let operation = async {
+            let filter = EventFilterRequest {
+                allowed: Some(
+                    ["StasisStart", "RecordingFinished", "RecordingFailed"]
+                        .into_iter()
+                        .map(|name| EventFilter {
+                            event_type: name.into(),
+                        })
+                        .collect(),
+                ),
+                disallowed: None,
+            };
+            client
+                .filter_application(application.as_str(), &filter)
+                .await
+                .map_err(failure)?;
+            self.run_subscribed(&client, &mut subscription).await
+        }
+        .await;
         combine(operation, subscription.shutdown().await.map_err(failure))
     }
 
@@ -153,20 +194,31 @@ impl BrowserRun<'_> {
             .map_err(failure)?;
         let operation = tokio::time::timeout(Duration::from_secs(150), async {
             let mut events = 0;
-            loop {
+            let mut browser_done = false;
+            let mut recording_done = false;
+            while !(browser_done && recording_done) {
                 tokio::select! {
-                    status = child.wait() => {
+                    status = child.wait(), if !browser_done => {
                         let status = status.map_err(failure)?;
-                        break if status.success() { Ok(()) } else { Err(failure(format!("browser fixture failed: {status}"))) };
+                        if !status.success() {
+                            return Err(failure(format!("browser fixture failed: {status}")));
+                        }
+                        browser_done = true;
                     }
                     event = subscription.next_event() => {
-                        event.map_err(failure)?;
+                        recording_done |= recording_complete(&event.map_err(failure)?.kind)?;
                         events += 1;
-                        if events > 512 { break Err(ControlError::Capacity); }
+                        if events > 512 {
+                            return Err(ControlError::Capacity);
+                        }
                     }
                 }
             }
-        }).await.map_err(failure).and_then(|result| result);
+            Ok(())
+        })
+        .await
+        .map_err(failure)
+        .and_then(|result| result);
         if let Err(primary) = operation {
             eprintln!(
                 "browser resource counters: {}",

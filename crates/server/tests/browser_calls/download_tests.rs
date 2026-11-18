@@ -2,11 +2,51 @@
 mod native_server;
 
 use super::{failure, recording};
-use rusterisk_client::Error;
+use rusterisk_client::{
+    api::{EventKind, LiveRecording, RecordingState},
+    Error,
+};
 use rusterisk_media::Frame;
 use rusterisk_server::ControlError;
 use rusterisk_storage::Recorder;
 use std::path::{Path, PathBuf};
+
+#[test]
+fn only_the_named_finished_recording_allows_the_download() -> Result<(), ControlError> {
+    let recording = |name: &str, state| LiveRecording {
+        name: name.into(),
+        format: "wav".into(),
+        state,
+        target_uri: "bridge:browser-mix".into(),
+        duration: None,
+        talking_duration: None,
+        silence_duration: None,
+        cause: None,
+    };
+    let finished = |name, state| EventKind::RecordingFinished {
+        recording: recording(name, state),
+    };
+    assert!(super::driver::recording_complete(&finished(
+        "browser-known",
+        RecordingState::Done
+    ))?);
+    assert!(!super::driver::recording_complete(&finished(
+        "another-recording",
+        RecordingState::Done
+    ))?);
+    assert!(super::driver::recording_complete(&finished(
+        "browser-known",
+        RecordingState::Canceled
+    ))
+    .is_err());
+    assert!(
+        super::driver::recording_complete(&EventKind::RecordingFailed {
+            recording: recording("browser-known", RecordingState::Failed),
+        })
+        .is_err()
+    );
+    Ok(())
+}
 
 fn client_failure(error: impl std::fmt::Display) -> Error {
     Error::Io(std::io::Error::other(error.to_string()))
