@@ -6,6 +6,8 @@ mod capture;
 mod runner;
 pub use crate::core_assurance::Execution;
 pub use capture::CapturedCoreMiri;
+#[cfg(unix)]
+pub(crate) use runner::{check_miri_recipe, MiriExecution};
 pub use runner::{execute, plan, CoreMiriOutcome};
 
 pub enum CoreMiriError {

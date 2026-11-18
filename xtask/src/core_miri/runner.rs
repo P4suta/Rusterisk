@@ -14,6 +14,19 @@ use std::{
 };
 
 const PHASES: [Phase; 3] = [Phase::MiriSetup, Phase::MiriInventory, Phase::MiriTests];
+#[cfg(unix)]
+mod retained;
+#[cfg(unix)]
+mod tools;
+#[cfg(unix)]
+pub(crate) use retained::MiriExecution;
+
+#[derive(Clone, Copy)]
+enum NativeFiles {
+    Phases,
+    #[cfg(unix)]
+    Retained,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommandMode {
     Work,
@@ -95,11 +108,16 @@ fn finish(
         cleanup.map_err(CoreMiriError::Process),
         "Miri supervisor cleanup failed",
     )
-    .map(|checked| CoreMiriOutcome {
-        capture: checked.capture,
-        inventory: checked.inventory,
-        image: checked.image,
-    })
+    .map(CheckedMiri::outcome)
+}
+impl CheckedMiri {
+    fn outcome(self) -> CoreMiriOutcome {
+        CoreMiriOutcome {
+            capture: self.capture,
+            inventory: self.inventory,
+            image: self.image,
+        }
+    }
 }
 fn reserve(parent: &Path, identity: &str) -> Result<(String, PathBuf), CoreMiriError> {
     for attempt in 0..32 {
@@ -122,18 +140,39 @@ fn reserve(parent: &Path, identity: &str) -> Result<(String, PathBuf), CoreMiriE
     .into())
 }
 fn read(path: &Path) -> Result<Vec<u8>, CoreMiriError> {
+    for parent in path.ancestors().skip(1) {
+        if !std::fs::symlink_metadata(parent)?.is_dir() {
+            return Err(CoreMiriError::Plan);
+        }
+    }
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.len() > 4 * 1024 * 1024 {
         return Err(CoreMiriError::Plan);
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)?
+    let mut file = std::fs::File::open(path)?;
+    let opened = file.metadata()?;
+    if !opened.is_file()
+        || opened.len() != metadata.len()
+        || opened.modified()? != metadata.modified()?
+    {
+        return Err(CoreMiriError::Plan);
+    }
+    (&mut file)
         .take(4 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > 4 * 1024 * 1024 {
+    let completed = file.metadata()?;
+    if bytes.len() as u64 != opened.len()
+        || completed.len() != opened.len()
+        || completed.modified()? != opened.modified()?
+    {
         return Err(CoreMiriError::Plan);
     }
     Ok(bytes)
+}
+#[cfg(unix)]
+pub(crate) fn check_miri_recipe(bytes: &[u8]) -> Result<(), CoreMiriError> {
+    tools::check_recipe(bytes)
 }
 fn print(capture: &CapturedCoreMiri, plan: &CoreAssurancePlan) {
     println!("core Miri: {} integration targets; {} tests; source snapshot <= 8 MiB; native reports <= 4 MiB",capture.targets().len(),capture.tests().len());
@@ -158,80 +197,126 @@ fn verify_with(
     image: &str,
     mut perform: impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
 ) -> Result<CheckedMiri, CoreMiriError> {
-    let image = ImageIdentity::parse(image).ok_or(CoreMiriError::Plan)?;
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(io::Error::other)?
-        .as_nanos();
-    let (identity, directory) = reserve(
-        &std::env::temp_dir(),
-        &format!("miri-{}-{stamp}", std::process::id()),
-    )?;
-    let original = directory.join("original");
-    let source = directory.join("source");
-    let state = directory.join("state");
-    let operation = (|| {
-        capture.write(&original, &source)?;
+    let work = WorkingMiri::new(capture, image, NativeFiles::Phases)?;
+    let operation = work.execute(&mut perform);
+    work.close(operation)
+}
+
+fn container_result(
+    result: Result<(), ProcessError>,
+    plan: &CoreAssurancePlan,
+    phase: Phase,
+    perform: &mut impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
+) -> Result<(), CoreMiriError> {
+    let cleanup = match &result {
+        Ok(()) | Err(ProcessError::Status(_)) => Ok(()),
+        Err(
+            ProcessError::Io(_)
+            | ProcessError::Timeout
+            | ProcessError::InvalidBudget
+            | ProcessError::InvalidOutput
+            | ProcessError::Interrupted
+            | ProcessError::UnsupportedSupervision
+            | ProcessError::Cleanup { .. },
+        ) => {
+            let step = plan.cleanup(phase);
+            perform(
+                Command::new("docker").args(step.arguments),
+                step.budget,
+                CommandMode::Cleanup,
+            )
+        }
+    };
+    follow(
+        result.map_err(|source| CoreMiriError::Phase { phase, source }),
+        cleanup.map_err(CoreMiriError::Process),
+        "Miri container cleanup failed",
+    )
+}
+
+struct WorkingMiri {
+    capture: CapturedCoreMiri,
+    image: ImageIdentity,
+    identity: String,
+    directory: PathBuf,
+    files: NativeFiles,
+}
+
+impl WorkingMiri {
+    fn new(
+        capture: CapturedCoreMiri,
+        image: &str,
+        files: NativeFiles,
+    ) -> Result<Self, CoreMiriError> {
+        let image = ImageIdentity::parse(image).ok_or(CoreMiriError::Plan)?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(io::Error::other)?
+            .as_nanos();
+        let (identity, directory) = reserve(
+            &std::fs::canonicalize(std::env::temp_dir())?,
+            &format!("miri-{}-{stamp}", std::process::id()),
+        )?;
+        Ok(Self {
+            capture,
+            image,
+            identity,
+            directory,
+            files,
+        })
+    }
+
+    fn plan(&self) -> Result<CoreAssurancePlan, CoreMiriError> {
+        Ok(CoreAssurancePlan::new(
+            &self.identity,
+            self.directory
+                .join("source")
+                .to_str()
+                .ok_or(CoreMiriError::Plan)?,
+            self.directory
+                .join("state")
+                .to_str()
+                .ok_or(CoreMiriError::Plan)?,
+            self.image.as_str(),
+        )?)
+    }
+
+    fn check(&self) -> Result<(), CoreMiriError> {
+        self.capture.check(
+            &self.directory.join("original"),
+            &self.directory.join("source"),
+        )
+    }
+
+    fn execute(
+        &self,
+        perform: &mut impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
+    ) -> Result<MiriInventory, CoreMiriError> {
+        self.capture.write(
+            &self.directory.join("original"),
+            &self.directory.join("source"),
+        )?;
+        let state = self.directory.join("state");
         for name in ["cargo", "tmp", "results"] {
             std::fs::create_dir_all(state.join(name))?;
         }
-        let plan = CoreAssurancePlan::new(
-            &identity,
-            source.to_str().ok_or(CoreMiriError::Plan)?,
-            state.to_str().ok_or(CoreMiriError::Plan)?,
-            image.as_str(),
-        )?;
-        print(&capture, &plan);
+        let plan = self.plan()?;
+        print(&self.capture, &plan);
+        match self.files {
+            NativeFiles::Phases => {}
+            #[cfg(unix)]
+            NativeFiles::Retained => tools::capture(&state, &plan, perform)?,
+        }
         let mut inventory = None;
         for phase in PHASES {
-            let path = state.join(format!("{}.txt", phase.label()));
-            let output = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)?;
-            let step = plan.step(phase);
-            let result = perform(
-                Command::new("docker").args(step.arguments).stdout(output),
-                step.budget,
-                CommandMode::Work,
-            );
-            let cleanup = match &result {
-                Ok(()) | Err(ProcessError::Status(_)) => Ok(()),
-                Err(
-                    ProcessError::Io(_)
-                    | ProcessError::Timeout
-                    | ProcessError::InvalidBudget
-                    | ProcessError::InvalidOutput
-                    | ProcessError::Interrupted
-                    | ProcessError::UnsupportedSupervision
-                    | ProcessError::Cleanup { .. },
-                ) => {
-                    let step = plan.cleanup(phase);
-                    perform(
-                        Command::new("docker").args(step.arguments),
-                        step.budget,
-                        CommandMode::Cleanup,
-                    )
-                }
-            };
-            let result = follow(
-                result.map_err(|source| CoreMiriError::Phase { phase, source }),
-                cleanup.map_err(CoreMiriError::Process),
-                "Miri container cleanup failed",
-            );
-            follow(
-                result,
-                capture.check(&original, &source),
-                "Miri input check failed",
-            )?;
-            let bytes = read(&path)?;
+            let bytes = self.phase(&plan, phase, perform)?;
             match phase {
                 Phase::MiriSetup => {}
                 Phase::MiriInventory => {
                     inventory = Some(validate_miri_discovery(
                         &bytes,
-                        capture.tests(),
-                        capture.targets().len(),
+                        self.capture.tests(),
+                        self.capture.targets().len(),
                     )?)
                 }
                 Phase::MiriTests => {
@@ -244,17 +329,59 @@ fn verify_with(
             }
         }
         inventory.ok_or(CoreMiriError::Plan)
-    })();
-    follow(
-        operation,
-        std::fs::remove_dir_all(directory).map_err(CoreMiriError::Io),
-        "Miri temporary cleanup failed",
-    )
-    .map(|inventory| CheckedMiri {
-        capture,
-        inventory,
-        image,
-    })
+    }
+
+    fn phase(
+        &self,
+        plan: &CoreAssurancePlan,
+        phase: Phase,
+        perform: &mut impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
+    ) -> Result<Vec<u8>, CoreMiriError> {
+        let state = self.directory.join("state");
+        let path = state.join(format!("{}.txt", phase.label()));
+        let output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        let step = plan.step(phase);
+        let mut command = Command::new("docker");
+        command.args(step.arguments).stdout(output);
+        match self.files {
+            NativeFiles::Phases => {}
+            #[cfg(unix)]
+            NativeFiles::Retained => {
+                command.stderr(
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(state.join(format!("{}.stderr.txt", phase.label())))?,
+                );
+            }
+        }
+        let result = perform(&mut command, step.budget, CommandMode::Work);
+        follow(
+            container_result(result, plan, phase, perform),
+            self.check(),
+            "Miri input check failed",
+        )?;
+        read(&path)
+    }
+
+    fn close(
+        self,
+        operation: Result<MiriInventory, CoreMiriError>,
+    ) -> Result<CheckedMiri, CoreMiriError> {
+        follow(
+            operation,
+            std::fs::remove_dir_all(&self.directory).map_err(CoreMiriError::Io),
+            "Miri temporary cleanup failed",
+        )
+        .map(|inventory| CheckedMiri {
+            capture: self.capture,
+            inventory,
+            image: self.image,
+        })
+    }
 }
 pub fn execute(execution: Execution, image: &str) -> Result<(), CoreMiriError> {
     let capture = CapturedCoreMiri::read(&std::env::current_dir()?)?;

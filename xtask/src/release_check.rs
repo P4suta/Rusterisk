@@ -8,6 +8,7 @@ mod cli_inputs;
 #[cfg(test)]
 mod cli_inputs_tests;
 mod inputs;
+mod miri;
 mod native;
 #[cfg(unix)]
 mod native_artifacts;
