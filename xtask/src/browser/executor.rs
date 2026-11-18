@@ -4,6 +4,7 @@ use super::{
 };
 pub use crate::core_proofs::Execution;
 use crate::process::{run, CommandSupervisor, ProcessError};
+use crate::reference::Step;
 use std::{
     io::{self, Read, Write},
     path::{Path, PathBuf},
@@ -466,6 +467,79 @@ fn finish(
     }
 }
 
+fn run_phase(
+    root: &Path,
+    state: &Path,
+    label: &str,
+    step: Step,
+    cleanup: Step,
+    perform: &mut impl FnMut(&mut Command, Duration, BrowserCommand) -> Result<(), ProcessError>,
+) -> Result<Vec<u8>, RunError> {
+    let path = state.join(format!("{label}.txt"));
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    let mut command = Command::new("docker");
+    command
+        .args(&step.arguments)
+        .current_dir(root)
+        .stdout(output.try_clone()?)
+        .stderr(output);
+    let started = std::time::Instant::now();
+    let result = perform(&mut command, step.budget, BrowserCommand::Run);
+    println!(
+        "browser phase={label} elapsed={:.3}s",
+        started.elapsed().as_secs_f64()
+    );
+    if let Err(primary) = result {
+        if matches!(
+            &primary,
+            ProcessError::Io(_)
+                | ProcessError::Timeout
+                | ProcessError::Interrupted
+                | ProcessError::Cleanup { .. }
+        ) {
+            let capture = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(state.join(format!("{label}-cleanup.txt")))
+                .and_then(|stderr| stderr.try_clone().map(|stdout| (stdout, stderr)));
+            let mut command = Command::new("docker");
+            command.args(&cleanup.arguments).current_dir(root);
+            let capture_error = match capture {
+                Ok((stdout, stderr)) => {
+                    command.stdout(stdout).stderr(stderr);
+                    None
+                }
+                Err(error) => {
+                    command.stdout(Stdio::null()).stderr(Stdio::null());
+                    Some(error)
+                }
+            };
+            let cleaned = match (
+                perform(&mut command, cleanup.budget, BrowserCommand::Cleanup),
+                capture_error,
+            ) {
+                (result, None) => result,
+                (Ok(()), Some(error)) => Err(ProcessError::Io(error)),
+                (Err(cleanup), Some(operation)) => Err(ProcessError::Cleanup {
+                    operation: operation.to_string(),
+                    cleanup: cleanup.to_string(),
+                }),
+            };
+            if let Err(cleanup) = cleaned {
+                return Err(RunError::ContainerCleanup {
+                    operation: primary.to_string(),
+                    cleanup,
+                });
+            }
+        }
+        return Err(RunError::Process(primary));
+    }
+    read(&path).map_err(RunError::Io)
+}
+
 fn run_prepared_with(
     prepared: PreparedBrowserRun,
     mut perform: impl FnMut(&mut Command, Duration, BrowserCommand) -> Result<(), ProcessError>,
@@ -492,72 +566,14 @@ fn run_prepared_with(
             if phase == Phase::Run {
                 std::fs::remove_file(&report)?;
             }
-            let path = state.join(format!("{}.txt", phase.label()));
-            let output = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)?;
-            let step = plan.step(phase);
-            let mut command = Command::new("docker");
-            command
-                .args(&step.arguments)
-                .current_dir(&root)
-                .stdout(output.try_clone()?)
-                .stderr(output);
-            let started = std::time::Instant::now();
-            let result = perform(&mut command, step.budget, BrowserCommand::Run);
-            println!(
-                "browser phase={} elapsed={:.3}s",
+            let bytes = run_phase(
+                &root,
+                &state,
                 phase.label(),
-                started.elapsed().as_secs_f64()
-            );
-            if let Err(primary) = result {
-                if matches!(
-                    &primary,
-                    ProcessError::Io(_)
-                        | ProcessError::Timeout
-                        | ProcessError::Interrupted
-                        | ProcessError::Cleanup { .. }
-                ) {
-                    let step = plan.cleanup(phase);
-                    let capture = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(state.join(format!("{}-cleanup.txt", phase.label())))
-                        .and_then(|stderr| stderr.try_clone().map(|stdout| (stdout, stderr)));
-                    let mut cleanup = Command::new("docker");
-                    cleanup.args(&step.arguments).current_dir(&root);
-                    let capture_error = match capture {
-                        Ok((stdout, stderr)) => {
-                            cleanup.stdout(stdout).stderr(stderr);
-                            None
-                        }
-                        Err(error) => {
-                            cleanup.stdout(Stdio::null()).stderr(Stdio::null());
-                            Some(error)
-                        }
-                    };
-                    let cleanup = match (
-                        perform(&mut cleanup, step.budget, BrowserCommand::Cleanup),
-                        capture_error,
-                    ) {
-                        (result, None) => result,
-                        (Ok(()), Some(error)) => Err(ProcessError::Io(error)),
-                        (Err(cleanup), Some(operation)) => Err(ProcessError::Cleanup {
-                            operation: operation.to_string(),
-                            cleanup: cleanup.to_string(),
-                        }),
-                    };
-                    if let Err(cleanup) = cleanup {
-                        return Err(RunError::ContainerCleanup {
-                            operation: primary.to_string(),
-                            cleanup,
-                        });
-                    }
-                }
-                return Err(RunError::Process(primary));
-            }
-            let bytes = read(&path)?;
+                plan.step(phase),
+                plan.cleanup(phase),
+                &mut perform,
+            )?;
             match phase {
                 Phase::RustVersion
                 | Phase::CargoVersion
