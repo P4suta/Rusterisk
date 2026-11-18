@@ -23,6 +23,7 @@ fn linux_builds_bound_resources_and_separate_fetch_from_offline_compilation() ->
                 "--rm",
                 "--cpus=2",
                 "--memory=2g",
+                "--memory-swap=2g",
                 "--pids-limit=256",
                 "--cap-drop=ALL",
                 "--security-opt=no-new-privileges",
