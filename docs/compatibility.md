@@ -133,7 +133,7 @@ Waiting connections and queue admission have explicit limits.
 An owned storage worker writes call history and recording files.
 Restart recovery marks previous active calls interrupted and repairs incomplete recording files.
 Recording replacement, append, and copying preserve existing completed files until publication.
-Forced process termination and storage fault campaigns still require integration verification.
+A process test verifies recovered audio and interrupted call history after forcibly stopping and restarting the server.
 
 ## Verification status
 
