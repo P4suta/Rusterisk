@@ -13,6 +13,9 @@ use std::{
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 const MAX_PATH_BYTES: usize = 4096;
 
+#[cfg(all(test, windows))]
+mod windows_path_tests;
+
 #[derive(Debug)]
 pub enum ReleaseInputError {
     Arguments,
@@ -224,8 +227,25 @@ struct Document {
 }
 
 fn resolve(path: &mut PathBuf, base: &Path) -> Result<(), ReleaseInputError> {
-    path_value(path.to_str().ok_or(ReleaseInputError::Path)?)?;
+    let value = path.to_str().ok_or(ReleaseInputError::Path)?;
+    path_value(value)?;
+    #[cfg(windows)]
+    if value.strip_prefix(r"\\?\").is_some_and(|suffix| {
+        matches!(suffix.as_bytes(), [drive, b':', rest @ ..]
+            if drive.is_ascii_alphabetic() && !rest.starts_with(b"\\"))
+    }) {
+        return Err(ReleaseInputError::Path);
+    }
     if path.is_relative() {
+        #[cfg(windows)]
+        if path.has_root()
+            || matches!(
+                path.components().next(),
+                Some(std::path::Component::Prefix(_))
+            )
+        {
+            return Err(ReleaseInputError::Path);
+        }
         *path = base.join(&*path);
     }
     Ok(())
