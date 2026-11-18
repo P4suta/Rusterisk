@@ -1,4 +1,5 @@
 use std::process::Command;
+use xtask::{input_fuzz::Target, release_check::SourceInputs};
 
 const IMAGE: &str = "registry.example/verification@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -19,9 +20,16 @@ fn fuzz_dry_runs_bind_real_inputs_without_a_daemon() -> Result<(), std::io::Erro
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     for expected in [
-        "4 targets",
-        "snapshot <= 40 MiB",
-        "project files <= 1024",
+        format!("{} targets", Target::ALL.len()),
+        format!(
+            "snapshot <= {} MiB",
+            SourceInputs::MAX_TOTAL_BYTES / (1024 * 1024)
+        ),
+        format!("project files <= {}", SourceInputs::MAX_FILES - 512),
+    ] {
+        assert!(stdout.contains(&expected), "{expected}");
+    }
+    for expected in [
         "vendor files <= 512",
         "phase=fetch",
         "phase=build-settings",
