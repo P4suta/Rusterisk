@@ -149,7 +149,10 @@ fn run(
             )?;
             projection(&stdout).map_err(ProcessError::Io)
         }
-        (Err(error), Ok(_)) => Err(error),
+        (Err(error), Ok((stdout, stderr))) => {
+            eprintln!("{stdout}{stderr}");
+            Err(error)
+        }
         (Ok(()), Err(error)) => Err(error.into()),
         (Err(operation), Err(cleanup)) => Err(ProcessError::Cleanup {
             operation: operation.to_string(),
@@ -267,7 +270,7 @@ fn projection_worker() -> io::Result<()> {
     let directory = std::env::var_os(DIRECTORY)
         .ok_or_else(|| io::Error::other("Windows projection directory is missing"))?;
     verify(
-        std::env::current_dir()? == Path::new(&directory),
+        fs::canonicalize(std::env::current_dir()?)? == Path::new(&directory),
         "Windows owned working directory changed",
     )?;
     let mut environment: Vec<(Vec<u16>, Vec<u16>)> = std::env::vars_os()
