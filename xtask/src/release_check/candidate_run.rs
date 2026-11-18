@@ -1,25 +1,27 @@
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use super::{CapturedReleaseSource, InputError};
 use crate::process::ProcessError;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::io;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod owned;
 #[cfg(unix)]
-pub(super) use owned::{checksum, copy_checked, Loaded, Paths, Workspace};
+pub(super) use owned::{checksum, copy_checked};
+#[cfg(any(unix, windows))]
+pub(super) use owned::{Loaded, Paths, Workspace};
 
 enum Failure {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Io(String),
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Source(String),
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Inputs(InputError),
     Process(String),
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Consumer(String),
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Contract(&'static str),
 }
 
@@ -30,7 +32,7 @@ pub(super) struct RunError {
 }
 
 impl RunError {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(super) fn io(stage: &'static str, error: io::Error) -> Self {
         Self {
             preceding: None,
@@ -38,7 +40,7 @@ impl RunError {
             failure: Failure::Io(error.to_string()),
         }
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(super) fn source(stage: &'static str, error: impl std::fmt::Display) -> Self {
         Self {
             preceding: None,
@@ -46,7 +48,7 @@ impl RunError {
             failure: Failure::Source(error.to_string()),
         }
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(super) fn inputs(stage: &'static str, error: InputError) -> Self {
         Self {
             preceding: None,
@@ -61,7 +63,7 @@ impl RunError {
             failure: Failure::Process(error.to_string()),
         }
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(super) fn consumer(stage: &'static str, error: impl std::fmt::Display) -> Self {
         Self {
             preceding: None,
@@ -69,7 +71,7 @@ impl RunError {
             failure: Failure::Consumer(error.to_string()),
         }
     }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(super) fn contract(stage: &'static str, reason: &'static str) -> Self {
         Self {
             preceding: None,
@@ -87,13 +89,13 @@ impl std::fmt::Display for RunError {
         write!(formatter, "{}: ", self.stage)?;
         match &self.failure {
             Failure::Process(cause) => formatter.write_str(cause),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Failure::Io(cause) | Failure::Source(cause) | Failure::Consumer(cause) => {
                 formatter.write_str(cause)
             }
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Failure::Inputs(cause) => cause.fmt(formatter),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Failure::Contract(reason) => formatter.write_str(reason),
         }
     }
@@ -106,13 +108,7 @@ impl std::fmt::Debug for RunError {
 }
 impl std::error::Error for RunError {}
 
-#[cfg(unix)]
-enum Preservation<'a> {
-    Server,
-    Oci { checksum: &'a str },
-}
-
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(super) fn conclude(
     operation: Result<(), RunError>,
     loaded: &Loaded,
@@ -120,14 +116,7 @@ pub(super) fn conclude(
     workspace: Workspace,
     finish: impl FnOnce() -> Result<(), ProcessError>,
 ) -> Result<(), RunError> {
-    conclude_with_preservation(
-        operation,
-        loaded,
-        captured,
-        workspace,
-        finish,
-        Preservation::Server,
-    )
+    conclude_with_preservation(operation, loaded, captured, workspace, finish, |_| Ok(()))
 }
 
 #[cfg(unix)]
@@ -145,18 +134,26 @@ pub(super) fn conclude_oci(
         captured,
         workspace,
         finish,
-        Preservation::Oci { checksum },
+        |workspace| {
+            copy_checked(
+                &workspace.archive(),
+                &workspace.artifacts().join("image.oci.tar"),
+                checksum,
+                512 * 1024 * 1024,
+            )
+            .map_err(|error| RunError::io("OCI archive preservation", error))
+        },
     )
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn conclude_with_preservation(
     operation: Result<(), RunError>,
     loaded: &Loaded,
     captured: &CapturedReleaseSource,
     workspace: Workspace,
     finish: impl FnOnce() -> Result<(), ProcessError>,
-    preservation: Preservation<'_>,
+    preserve: impl FnOnce(&Workspace) -> Result<(), RunError>,
 ) -> Result<(), RunError> {
     let operation = combine(
         operation,
@@ -164,26 +161,14 @@ fn conclude_with_preservation(
     );
     let operation = combine(operation, loaded.check(captured, &workspace.source()));
     let operation = combine(operation, loaded.preserve(captured, workspace.artifacts()));
-    let operation = match preservation {
-        Preservation::Server => operation,
-        Preservation::Oci { checksum } => combine(
-            operation,
-            copy_checked(
-                &workspace.archive(),
-                &workspace.artifacts().join("image.oci.tar"),
-                checksum,
-                512 * 1024 * 1024,
-            )
-            .map_err(|error| RunError::io("OCI archive preservation", error)),
-        ),
-    };
+    let operation = combine(operation, preserve(&workspace));
     combine(operation, workspace.close())
 }
 
 #[cfg(all(test, unix))]
 mod finalization_tests;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(super) fn combine<T>(
     operation: Result<T, RunError>,
     follow_up: Result<(), RunError>,

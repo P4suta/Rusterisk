@@ -10,6 +10,7 @@ pub mod input_fuzz;
 pub mod legacy_audit;
 pub mod native_sanitizers;
 pub mod process;
+mod recorded_path;
 pub mod reference;
 pub mod regular_archive;
 pub mod release_check;

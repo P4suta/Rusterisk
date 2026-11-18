@@ -232,7 +232,7 @@ impl CapturedSdk {
         self.source.files()
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     pub(crate) fn write(&self, source: &Path, state: &Path) -> Result<(), SdkCandidateBuildError> {
         self.source.write(source, state).map_err(Into::into)
     }

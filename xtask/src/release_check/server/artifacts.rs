@@ -3,7 +3,8 @@ use super::{
     RunError, ServerExecutionMode, ServerOutcome, ServerRequest, ServerRunError, ServerTarget,
 };
 use crate::{
-    distribution::{check_sdk_http_results, SdkConsumerPlan, SdkPackage},
+    distribution::{check_sdk_http_results_recorded, SdkPackage},
+    recorded_path::{RecordedPath, RecordedPathFormat},
     release_check::native_artifacts::{
         fingerprints, read_regular, FileFingerprint, NativeArtifactPublication,
         PublishedNativeArtifact,
@@ -15,13 +16,15 @@ use std::{
     fs,
     io::{self, Write},
     net::SocketAddr,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 mod tools;
 pub(in crate::release_check) use tools::{
-    capture as capture_tools, check as check_tools, configure as configure_tools,
+    capture as capture_tools, configure_owned as configure_owned_tools,
 };
+#[cfg(unix)]
+pub(in crate::release_check) use tools::{check as check_tools, configure as configure_tools};
 
 const METADATA: &str = "native-check.toml";
 const FORMAT: u32 = 1;
@@ -42,52 +45,42 @@ struct Metadata {
 }
 
 struct OriginalPaths {
-    server: PathBuf,
-    consumer: SdkConsumerPlan,
+    server: RecordedPath,
+    consumer: RecordedPath,
 }
 
 fn invalid(reason: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, reason)
 }
 
-fn original_path(path: &Path) -> io::Result<()> {
+fn original_path(format: RecordedPathFormat, path: &Path) -> io::Result<RecordedPath> {
     let text = path
         .to_str()
         .ok_or_else(|| invalid("original native path is not UTF-8"))?;
-    if !path.is_absolute()
-        || text.len() > 4096
-        || text
-            .chars()
-            .any(|character| character.is_control() || character == '\\')
-        || text.split('/').any(|part| matches!(part, "." | ".."))
-        || path
-            .components()
-            .any(|part| matches!(part, Component::CurDir | Component::ParentDir))
+    if matches!(format, RecordedPathFormat::Unix)
+        && (text.contains('\\') || text.split('/').any(|part| part == "."))
     {
         return Err(invalid(
             "original native paths require bounded absolute components",
         ));
     }
-    Ok(())
+    format.parse(path, 4096)
 }
 
 impl OriginalPaths {
-    fn new(server: &Path, consumer: &Path) -> io::Result<Self> {
-        original_path(server)?;
-        original_path(consumer)?;
-        if server.file_name().and_then(|name| name.to_str()) != Some("server")
-            || consumer.file_name().and_then(|name| name.to_str()) != Some("consumer")
-            || server.starts_with(consumer)
-            || consumer.starts_with(server)
+    fn new(format: RecordedPathFormat, server: &Path, consumer: &Path) -> io::Result<Self> {
+        let server = original_path(format, server)?;
+        let consumer = original_path(format, consumer)?;
+        if server.file_name() != Some("server")
+            || consumer.file_name() != Some("consumer")
+            || server.starts_with(&consumer)
+            || consumer.starts_with(&server)
         {
             return Err(invalid(
                 "original native paths differ from the owned workspace profile",
             ));
         }
-        Ok(Self {
-            server: server.to_owned(),
-            consumer: SdkConsumerPlan::new(&consumer.join("work"), &consumer.join("state"))?,
-        })
+        Ok(Self { server, consumer })
     }
 }
 
@@ -116,7 +109,7 @@ fn host(metadata: &Metadata, target: ServerTarget, mode: ServerExecutionMode) ->
         &metadata.architecture,
         mode == ServerExecutionMode::Rosetta,
     )?;
-    if selected != mode || !["macos", "linux"].contains(&metadata.os.as_str()) {
+    if selected != mode {
         return Err(invalid(
             "native artifact host does not support the selected execution profile",
         ));
@@ -130,7 +123,12 @@ fn check_outputs(
     loaded: &Loaded,
     metadata: &Metadata,
 ) -> io::Result<()> {
-    let paths = OriginalPaths::new(&metadata.server_root, &metadata.consumer_root)?;
+    let format = match metadata.os.as_str() {
+        "macos" | "linux" => RecordedPathFormat::Unix,
+        "windows" => RecordedPathFormat::Windows,
+        _ => return Err(invalid("unsupported recorded server host")),
+    };
+    let paths = OriginalPaths::new(format, &metadata.server_root, &metadata.consumer_root)?;
     tools::check(
         captured,
         &root.join("tools"),
@@ -138,21 +136,35 @@ fn check_outputs(
         &metadata.architecture,
     )?;
     let server_outputs = root.join("native/server");
-    check_native_server_outputs(&loaded.server, &server_outputs, &metadata.os, metadata.http)?;
+    let binary = loaded.server.name().target().binary_path();
+    check_native_server_outputs(
+        &loaded.server,
+        &server_outputs,
+        &metadata.os,
+        metadata.http,
+        &paths.server.join(binary),
+    )?;
     if metadata.os == "macos" {
         let output = read_regular(&server_outputs.join("dependencies.stdout.txt"), 65_536)?;
         let text = std::str::from_utf8(&output).map_err(io::Error::other)?;
-        let executable = paths
-            .server
-            .join(loaded.server.name().target().binary_path());
-        if text.lines().next() != Some(format!("{}:", executable.display()).as_str()) {
+        let original = metadata
+            .server_root
+            .to_str()
+            .ok_or_else(|| invalid("missing original executable path"))?;
+        let executable = format!("{}/{binary}:", original.trim_end_matches('/'));
+        if text.lines().next() != Some(executable.as_str()) {
             return Err(invalid(
                 "native dependency output belongs to another original executable",
             ));
         }
     }
-    check_sdk_http_results(&loaded.sdk, &root.join("native/consumer"), &paths.consumer)
-        .map_err(io::Error::other)
+    check_sdk_http_results_recorded(
+        &loaded.sdk,
+        &root.join("native/consumer"),
+        format,
+        &paths.consumer,
+    )
+    .map_err(io::Error::other)
 }
 
 pub(super) fn record(
@@ -272,12 +284,6 @@ pub(super) fn read<'a>(
     sdk_candidate: &Path,
     mode: ServerExecutionMode,
 ) -> io::Result<ServerOutcome<'a>> {
-    if target == ServerTarget::WindowsX86_64 {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Windows native artifact supervision is unsupported",
-        ));
-    }
     let current = fingerprints(root)?;
     let bytes = read_regular(&root.join(METADATA), 8 * 1024 * 1024)?;
     let metadata: Metadata = toml::from_str(std::str::from_utf8(&bytes).map_err(io::Error::other)?)

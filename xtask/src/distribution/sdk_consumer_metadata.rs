@@ -1,8 +1,9 @@
 use super::{SdkConsumerPlan, SdkConsumerScope, SdkPackage, SdkRuntimeIdentity};
+use crate::recorded_path::{RecordedPath, RecordedPathFormat};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 #[derive(Debug)]
@@ -99,12 +100,56 @@ fn fail(field: &'static str) -> SdkMetadataError {
 fn string(value: &str) -> bool {
     !value.is_empty() && value.len() <= 16384 && !value.chars().any(char::is_control)
 }
-fn path(value: &Path) -> bool {
-    value.is_absolute()
-        && value.to_str().is_some_and(string)
-        && !value
-            .components()
-            .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+fn path(format: RecordedPathFormat, value: &Path) -> Result<RecordedPath, SdkMetadataError> {
+    let value = value.to_str().ok_or_else(|| fail("absolute path"))?;
+    let normalized;
+    let value = match format {
+        RecordedPathFormat::Windows
+            if value
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphabetic)
+                && value.as_bytes().get(1) == Some(&b':') =>
+        {
+            normalized = value.replace('/', "\\");
+            normalized.as_str()
+        }
+        RecordedPathFormat::Unix | RecordedPathFormat::Windows => value,
+    };
+    format
+        .parse(Path::new(value), 16384)
+        .map_err(|_| fail("absolute path"))
+}
+
+struct MetadataPaths {
+    format: RecordedPathFormat,
+    work: RecordedPath,
+    directory: RecordedPath,
+    target: RecordedPath,
+}
+
+impl MetadataPaths {
+    fn live(plan: &SdkConsumerPlan, scope: SdkConsumerScope) -> Result<Self, SdkMetadataError> {
+        #[cfg(windows)]
+        let format = RecordedPathFormat::Windows;
+        #[cfg(not(windows))]
+        let format = RecordedPathFormat::Unix;
+        Ok(Self {
+            format,
+            work: path(format, plan.work())?,
+            directory: path(format, plan.directory(scope))?,
+            target: path(format, plan.target(scope))?,
+        })
+    }
+
+    fn recorded(format: RecordedPathFormat, root: &RecordedPath, scope: SdkConsumerScope) -> Self {
+        Self {
+            format,
+            work: root.join("work"),
+            directory: root.join(&format!("work/consumers/{}", scope.label())),
+            target: root.join(&format!("state/target/{}", scope.label())),
+        }
+    }
 }
 fn registry(source: &str) -> bool {
     string(source)
@@ -140,22 +185,19 @@ fn role(package: &Package, scope: SdkConsumerScope) -> Result<Role, SdkMetadataE
     Ok(Role::Registry)
 }
 
-fn package_path(plan: &SdkConsumerPlan, package: SdkPackage, version: &str) -> PathBuf {
-    plan.work()
-        .join("packages")
-        .join(format!("{}-{version}", package.name()))
+fn package_path(plan: &MetadataPaths, package: SdkPackage, version: &str) -> RecordedPath {
+    plan.work
+        .join(&format!("packages/{}-{version}", package.name()))
 }
 
 fn check_package(
     package: &Package,
     role: Role,
-    plan: &SdkConsumerPlan,
-    scope: SdkConsumerScope,
+    plan: &MetadataPaths,
     version: &str,
 ) -> Result<(), SdkMetadataError> {
     if !string(&package.id)
         || !string(&package.name)
-        || !path(&package.manifest_path)
         || semver::Version::parse(&package.version).is_err()
         || package.dependencies.len() > 256
         || package.targets.is_empty()
@@ -163,12 +205,14 @@ fn check_package(
     {
         return Err(fail("package fields"));
     }
+    let manifest_path =
+        path(plan.format, &package.manifest_path).map_err(|_| fail("package fields"))?;
     let directory = match role {
         Role::Consumer => {
             if package.version != "0.0.0" || package.source.is_some() {
                 return Err(fail("consumer identity"));
             }
-            plan.directory(scope).to_owned()
+            plan.directory.clone()
         }
         Role::Sdk(sdk) => {
             if package.version != version || package.source.is_some() {
@@ -179,18 +223,16 @@ fn check_package(
             }
             package_path(plan, sdk, version)
         }
-        Role::Registry => package
-            .manifest_path
+        Role::Registry => manifest_path
             .parent()
-            .ok_or_else(|| fail("registry manifest path"))?
-            .to_owned(),
+            .ok_or_else(|| fail("registry manifest path"))?,
     };
-    if package.manifest_path != directory.join("Cargo.toml") {
+    if manifest_path != directory.join("Cargo.toml") {
         return Err(fail("extracted manifest path"));
     }
     for target in &package.targets {
-        if !path(&target.src_path)
-            || !target.src_path.starts_with(&directory)
+        let source = path(plan.format, &target.src_path).map_err(|_| fail("target path"))?;
+        if !source.starts_with(&directory)
             || target.kind.is_empty()
             || target.kind.len() > 16
             || target.kind.iter().any(|kind| !string(kind))
@@ -202,14 +244,16 @@ fn check_package(
         Role::Consumer => {
             if package.targets.len() != 1
                 || package.targets[0].kind != ["bin"]
-                || package.targets[0].src_path != directory.join("src/main.rs")
+                || path(plan.format, &package.targets[0].src_path)? != directory.join("src/main.rs")
             {
                 return Err(fail("consumer target"));
             }
         }
         Role::Sdk(_) => {
             if !package.targets.iter().any(|target| {
-                target.kind == ["lib"] && target.src_path == directory.join("src/lib.rs")
+                target.kind == ["lib"]
+                    && path(plan.format, &target.src_path)
+                        .is_ok_and(|source| source == directory.join("src/lib.rs"))
             }) {
                 return Err(fail("SDK library target"));
             }
@@ -271,7 +315,7 @@ fn declared(package: &Package, sdk: SdkPackage, requirement: &semver::VersionReq
 }
 
 fn check(
-    plan: &SdkConsumerPlan,
+    plan: &MetadataPaths,
     scope: SdkConsumerScope,
     version: &str,
     bytes: &[u8],
@@ -291,8 +335,10 @@ fn check(
         return Err(SdkMetadataError::Size);
     }
     if metadata.version != 1
-        || metadata.workspace_root != plan.directory(scope)
-        || metadata.target_directory != plan.target(scope)
+        || path(plan.format, &metadata.workspace_root).map_err(|_| fail("workspace identity"))?
+            != plan.directory
+        || path(plan.format, &metadata.target_directory).map_err(|_| fail("workspace identity"))?
+            != plan.target
     {
         return Err(fail("workspace identity"));
     }
@@ -301,7 +347,7 @@ fn check(
     let mut consumer = None;
     for package in &metadata.packages {
         let role = role(package, scope)?;
-        check_package(package, role, plan, scope, version)?;
+        check_package(package, role, plan, version)?;
         if packages.insert(package.id.as_str(), package).is_some() {
             return Err(fail("duplicate package ID"));
         }
@@ -462,7 +508,13 @@ pub fn check_sdk_consumer_metadata(
     version: &str,
     bytes: &[u8],
 ) -> Result<(), SdkMetadataError> {
-    check(plan, scope, version, bytes, None)
+    check(
+        &MetadataPaths::live(plan, scope)?,
+        scope,
+        version,
+        bytes,
+        None,
+    )
 }
 
 pub fn check_sdk_http_metadata(
@@ -471,5 +523,28 @@ pub fn check_sdk_http_metadata(
     runtime: &SdkRuntimeIdentity,
     bytes: &[u8],
 ) -> Result<(), SdkMetadataError> {
-    check(plan, SdkConsumerScope::Sdk, version, bytes, Some(runtime))
+    check(
+        &MetadataPaths::live(plan, SdkConsumerScope::Sdk)?,
+        SdkConsumerScope::Sdk,
+        version,
+        bytes,
+        Some(runtime),
+    )
+}
+
+pub(super) fn check_recorded(
+    format: RecordedPathFormat,
+    consumer_root: &RecordedPath,
+    scope: SdkConsumerScope,
+    version: &str,
+    bytes: &[u8],
+    runtime: Option<&SdkRuntimeIdentity>,
+) -> Result<(), SdkMetadataError> {
+    check(
+        &MetadataPaths::recorded(format, consumer_root, scope),
+        scope,
+        version,
+        bytes,
+        runtime,
+    )
 }

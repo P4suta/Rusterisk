@@ -1,13 +1,10 @@
 use crate::{
-    process::CommandSupervisor,
+    process::{CommandStream, CommandSupervisor, SupervisedCommand},
     release_check::{native_artifacts::read_regular, CapturedReleaseSource},
 };
-use std::{
-    fs, io,
-    path::Path,
-    process::{Command, Stdio},
-    time::Duration,
-};
+#[cfg(unix)]
+use std::process::Command;
+use std::{fs, io, path::Path, time::Duration};
 
 fn invalid() -> io::Error {
     io::Error::other("native tool outputs differ from the captured toolchain and host profile")
@@ -39,11 +36,22 @@ fn channel(captured: &CapturedReleaseSource) -> io::Result<String> {
     Ok(channel.to_owned())
 }
 
+#[cfg(unix)]
 pub(in crate::release_check) fn configure(
     captured: &CapturedReleaseSource,
     command: &mut Command,
 ) -> io::Result<()> {
     command.env("RUSTUP_TOOLCHAIN", channel(captured)?);
+    Ok(())
+}
+
+pub(in crate::release_check) fn configure_owned(
+    captured: &CapturedReleaseSource,
+    command: &mut SupervisedCommand,
+) -> io::Result<()> {
+    command
+        .env("RUSTUP_TOOLCHAIN", channel(captured)?)
+        .map_err(io::Error::other)?;
     Ok(())
 }
 
@@ -59,6 +67,7 @@ pub(in crate::release_check) fn check(
         ("macos", "x86_64") => "x86_64-apple-darwin",
         ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
         ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
         _ => return Err(invalid()),
     };
     for program in ["rustc", "cargo"] {
@@ -98,16 +107,17 @@ pub(in crate::release_check) fn capture(
             .write(true)
             .create_new(true)
             .open(directory.join(format!("{program}.stderr.txt")))?;
-        let mut command = Command::new(program);
-        configure(captured, &mut command)?;
+        let mut command = SupervisedCommand::new(program).map_err(io::Error::other)?;
+        configure_owned(captured, &mut command)?;
         command
             .arg("--version")
+            .map_err(io::Error::other)?
             .arg("--verbose")
-            .stdin(Stdio::null())
-            .stdout(stdout)
-            .stderr(stderr);
+            .map_err(io::Error::other)?
+            .stdout(CommandStream::File(stdout))
+            .stderr(CommandStream::File(stderr));
         supervisor
-            .run(&mut command, Duration::from_secs(15))
+            .run_owned(command, Duration::from_secs(15))
             .map_err(io::Error::other)?;
     }
     check(

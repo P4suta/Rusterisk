@@ -17,7 +17,7 @@ mod inputs;
 mod miri;
 mod mutation;
 mod native;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod native_artifacts;
 #[cfg(all(test, unix))]
 mod native_artifacts_tests;

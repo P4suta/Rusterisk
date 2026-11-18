@@ -1,11 +1,14 @@
+#[cfg(unix)]
+use super::SdkConsumerPlan;
 use super::{
     check_sdk_consumer_lock, check_sdk_http_metadata, sdk_consumer_run as io, SdkConsumerAction,
     SdkConsumerPhase, SdkConsumerRunError, SdkConsumerScope, SdkConsumerWorkspace, SdkContents,
-    SdkHttpTarget,
+    SdkHttpTarget, SdkMetadataError, SdkPackage, SdkRuntimeIdentity,
 };
-#[cfg(unix)]
-use super::{SdkConsumerPlan, SdkPackage, SdkRuntimeIdentity};
-use crate::process::{ProcessError, SupervisedCommand};
+use crate::{
+    process::{ProcessError, SupervisedCommand},
+    recorded_path::{RecordedPath, RecordedPathFormat},
+};
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -36,6 +39,36 @@ pub(crate) fn check_sdk_http_results(
     contents: &SdkContents,
     artifacts: &Path,
     plan: &SdkConsumerPlan,
+) -> Result<(), SdkConsumerRunError> {
+    check_results(contents, artifacts, |runtime, output| {
+        check_sdk_http_metadata(plan, contents.version(), runtime, output)
+    })
+}
+
+#[cfg(any(unix, windows))]
+pub(crate) fn check_sdk_http_results_recorded(
+    contents: &SdkContents,
+    artifacts: &Path,
+    format: RecordedPathFormat,
+    consumer_root: &RecordedPath,
+) -> Result<(), SdkConsumerRunError> {
+    check_results(contents, artifacts, |runtime, output| {
+        super::sdk_consumer_metadata::check_recorded(
+            format,
+            consumer_root,
+            SdkConsumerScope::Sdk,
+            contents.version(),
+            output,
+            Some(runtime),
+        )
+    })
+}
+
+#[cfg(any(unix, windows))]
+fn check_results(
+    contents: &SdkContents,
+    artifacts: &Path,
+    mut check_metadata: impl FnMut(&SdkRuntimeIdentity, &[u8]) -> Result<(), SdkMetadataError>,
 ) -> Result<(), SdkConsumerRunError> {
     if io::read(&artifacts.join("SOURCE.sha256"), 65)?
         != format!("{}\n", contents.source_digest()).as_bytes()
@@ -81,8 +114,7 @@ pub(crate) fn check_sdk_http_results(
             action,
             SdkConsumerAction::Resolve | SdkConsumerAction::Metadata
         ) {
-            check_sdk_http_metadata(plan, contents.version(), &runtime, &output)
-                .map_err(SdkConsumerRunError::Metadata)?;
+            check_metadata(&runtime, &output).map_err(SdkConsumerRunError::Metadata)?;
         }
     }
     check_run_output(artifacts)

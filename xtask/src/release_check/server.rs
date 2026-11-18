@@ -1,31 +1,30 @@
 use super::{candidate_run::RunError, CapturedReleaseSource, InputKey};
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 use crate::process::ProcessError;
 use crate::{
     distribution::SdkPackage,
     server_distribution::{ServerExecutionMode, ServerTarget},
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::net::SocketAddr;
 use std::path::Path;
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod artifacts;
 #[cfg(unix)]
 pub(super) use artifacts::{capture_tools, check_tools, configure_tools};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use super::candidate_run::{combine, conclude, Loaded, Paths, Workspace};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use crate::{
     distribution::{PreparedSdkHttpConsumer, SdkHttpTarget},
-    process::CommandSupervisor,
+    process::{CommandSupervisor, SupervisedCommand},
     server_distribution::{runtime_commands::RuntimeCommands, verify_loaded_server_configured},
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::{
     io::{self, Write},
-    process::Command,
     time::Duration,
 };
 
@@ -39,7 +38,7 @@ pub struct ServerOutcome<'a> {
     checksum: String,
     source_digest: String,
     sdk_checksums: [String; 3],
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     runtime_address: SocketAddr,
 }
 
@@ -91,7 +90,7 @@ impl std::fmt::Debug for ServerRunError {
 }
 impl std::error::Error for ServerRunError {}
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct ServerRequest<'a> {
     candidate: &'a Path,
     target: ServerTarget,
@@ -102,7 +101,7 @@ struct ServerRequest<'a> {
     artifacts: &'a Path,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn execution(request: &ServerRequest<'_>) -> Result<(), RunError> {
     let mode = ServerExecutionMode::select(
         request.target,
@@ -121,12 +120,12 @@ fn execution(request: &ServerRequest<'_>) -> Result<(), RunError> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn verify_server_with<'a>(
     captured: &'a CapturedReleaseSource,
     request: ServerRequest<'_>,
     supervisor: CommandSupervisor,
-    configure: impl FnMut(&mut Command, Duration) -> io::Result<()>,
+    configure: impl FnMut(&mut SupervisedCommand, Duration) -> io::Result<()>,
 ) -> Result<ServerOutcome<'a>, ServerRunError> {
     verify_server_recorded(
         captured,
@@ -137,18 +136,18 @@ fn verify_server_with<'a>(
     )
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 enum Retention<'a> {
     Diagnostic,
     Reusable(&'a Path),
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn verify_server_recorded<'a>(
     captured: &'a CapturedReleaseSource,
     request: ServerRequest<'_>,
     mut supervisor: CommandSupervisor,
-    mut configure: impl FnMut(&mut Command, Duration) -> io::Result<()>,
+    mut configure: impl FnMut(&mut SupervisedCommand, Duration) -> io::Result<()>,
     retention: Retention<'_>,
 ) -> Result<ServerOutcome<'a>, ServerRunError> {
     let operation = (|| {
@@ -214,9 +213,9 @@ fn verify_server_recorded<'a>(
             artifacts::capture_tools(captured, root, &mut supervisor)
                 .map_err(|error| RunError::io("native tool capture", error))?;
         }
-        let mut configure_bound = |command: &mut Command, budget: Duration| {
+        let mut configure_bound = |command: &mut SupervisedCommand, budget: Duration| {
             if let Retention::Reusable(_) = retention {
-                artifacts::configure_tools(captured, command)?;
+                artifacts::configure_owned_tools(captured, command)?;
             }
             configure(command, budget)
         };
@@ -226,7 +225,7 @@ fn verify_server_recorded<'a>(
                 &loaded.sdk,
                 &workspace.consumer(),
                 &request.artifacts.join("consumer"),
-                |command, budget| commands.run(&mut command.into_std(), budget),
+                |command, budget| commands.run_owned(command, budget),
             )
             .map_err(|error| RunError::consumer("server SDK preparation", error))?,
         );
@@ -251,7 +250,7 @@ fn verify_server_recorded<'a>(
                         io::Error::other("prepared server SDK consumer ownership ended")
                     })?
                     .run_with(&target, |command, budget| {
-                        service.run(&mut command.into_std(), budget)
+                        service.run_owned(command, budget)
                     })
                     .map(|_| ())
                     .map_err(io::Error::other)
@@ -305,11 +304,11 @@ impl CapturedReleaseSource {
         mode: ServerExecutionMode,
         published: &Path,
     ) -> Result<ServerOutcome<'_>, ServerRunError> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             artifacts::produce(self, candidate, target, sdk_candidate, mode, published)
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (candidate, target, sdk_candidate, mode, published);
             Err(ServerRunError(RunError::process(
@@ -327,12 +326,12 @@ impl CapturedReleaseSource {
         sdk_candidate: &Path,
         mode: ServerExecutionMode,
     ) -> Result<ServerOutcome<'_>, ServerRunError> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             artifacts::read(self, artifact, candidate, target, sdk_candidate, mode)
                 .map_err(|error| ServerRunError(RunError::io("native artifact validation", error)))
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (artifact, candidate, target, sdk_candidate, mode);
             Err(ServerRunError(RunError::process(
@@ -366,7 +365,7 @@ impl CapturedReleaseSource {
         sdk_candidate: &Path,
         mode: ServerExecutionMode,
     ) -> Result<ServerOutcome<'_>, ServerRunError> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let paths = Paths::new(candidate, "server").map_err(ServerRunError)?;
             let supervisor = CommandSupervisor::new()
@@ -386,7 +385,7 @@ impl CapturedReleaseSource {
                 |_, _| Ok(()),
             )
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = (candidate, target, sdk_candidate, mode);
             Err(ServerRunError(RunError::process(

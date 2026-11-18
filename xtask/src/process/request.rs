@@ -148,6 +148,23 @@ fn encoded_len(value: &OsStr, field: CommandField) -> Result<usize, CommandReque
 }
 
 impl SupervisedCommand {
+    #[cfg(all(test, unix))]
+    pub(crate) fn get_program(&self) -> &OsStr {
+        &self.program
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn get_current_dir(&self) -> Option<&Path> {
+        self.directory.as_deref()
+    }
+
+    #[cfg(all(test, unix))]
+    pub(crate) fn get_envs(&self) -> impl Iterator<Item = (&OsStr, Option<&OsStr>)> {
+        self.environment
+            .iter()
+            .map(|(name, value)| (name.as_os_str(), value.as_deref()))
+    }
+
     pub const MAX_ARGUMENTS: usize = 128;
     pub const MAX_ENVIRONMENT: usize = 64;
     pub const MAX_FIELD_BYTES: usize = 4096;

@@ -465,7 +465,7 @@ fn distribution_sdk_verify(candidate: &Path) -> Result<(), TaskError> {
 }
 
 fn distribution_server_sdk(candidate: &Path, sdk: &Path) -> Result<(), TaskError> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let mut supervisor =
             xtask::process::CommandSupervisor::new().map_err(TaskError::Process)?;
@@ -485,7 +485,7 @@ fn distribution_server_sdk(candidate: &Path, sdk: &Path) -> Result<(), TaskError
             ))),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (candidate, sdk);
         Err(TaskError::Process(
@@ -542,7 +542,7 @@ fn distribution_server_startup_target(
     target: Option<&str>,
     translation: bool,
 ) -> Result<(), TaskError> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         let mut supervisor =
             xtask::process::CommandSupervisor::new().map_err(TaskError::Process)?;
@@ -575,7 +575,7 @@ fn distribution_server_startup_target(
             ))),
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (candidate, target, translation);
         Err(TaskError::Process(

@@ -211,13 +211,12 @@ impl Inventory {
     }
 
     fn walk(&mut self, root: &Path, prefix: &str) -> io::Result<()> {
-        let directory = root.join(prefix);
-        if !fs::symlink_metadata(&directory)?.is_dir() {
+        if !fs::symlink_metadata(root)?.is_dir() {
             return Err(invalid(
                 "native artifact inventory contains a directory link",
             ));
         }
-        for entry in fs::read_dir(directory)? {
+        for entry in fs::read_dir(root)? {
             let entry = entry?;
             self.entries = self
                 .entries
@@ -239,10 +238,10 @@ impl Inventory {
                     "native artifact inventory has duplicate destinations",
                 ));
             }
-            let path = root.join(&name);
+            let path = entry.path();
             let metadata = fs::symlink_metadata(&path)?;
             if metadata.is_dir() {
-                self.walk(root, &name)?;
+                self.walk(&path, &name)?;
             } else if metadata.is_file() {
                 self.file(&path, name, &metadata)?;
             } else {

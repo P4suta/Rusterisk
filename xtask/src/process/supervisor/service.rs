@@ -40,6 +40,15 @@ impl<'a> RunningCommand<'a> {
             .poll_service(service)
     }
 
+    #[cfg(windows)]
+    pub(crate) fn process_id(&mut self) -> Result<u32, ProcessError> {
+        self.poll()?;
+        self.running
+            .as_ref()
+            .map(native::Service::process_id)
+            .ok_or(ProcessError::InvalidOutput)
+    }
+
     fn run_checked(
         &mut self,
         budget: Duration,

@@ -3,12 +3,11 @@ use super::{
     runtime_commands::{RuntimeCommands, RuntimeService},
     ServerCandidate, ServerRuntimeConfig, ServerTarget,
 };
-use crate::process::{CommandSupervisor, RunningCommand};
+use crate::process::{CommandStream, CommandSupervisor, RunningCommand, SupervisedCommand};
 use std::{
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, UdpSocket},
     path::Path,
-    process::{Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -18,6 +17,7 @@ pub(super) fn native_target() -> io::Result<ServerTarget> {
         ("macos", "x86_64") => Ok(ServerTarget::MacOsX86_64),
         ("linux", "aarch64") => Ok(ServerTarget::LinuxArm64),
         ("linux", "x86_64") => Ok(ServerTarget::LinuxX86_64),
+        ("windows", "x86_64") => Ok(ServerTarget::WindowsX86_64),
         _ => Err(io::Error::other(
             "server startup requires a supported native host",
         )),
@@ -72,19 +72,21 @@ pub(super) fn combine<T>(
 
 pub(super) fn check_command<F>(
     supervisor: &mut RuntimeCommands<'_, F>,
-    command: &mut Command,
+    mut command: SupervisedCommand,
     artifacts: &Path,
     label: &str,
     expected: &[u8],
 ) -> io::Result<()>
 where
-    F: FnMut(&mut Command, Duration) -> io::Result<()>,
+    F: FnMut(&mut SupervisedCommand, Duration) -> io::Result<()>,
 {
     let stdout = artifacts.join(format!("{label}.stdout.txt"));
     let stderr = artifacts.join(format!("{label}.stderr.txt"));
-    command.stdout(output(&stdout)?).stderr(output(&stderr)?);
+    command
+        .stdout(CommandStream::File(output(&stdout)?))
+        .stderr(CommandStream::File(output(&stderr)?));
     supervisor
-        .run(command, Duration::from_secs(15))
+        .run_owned(command, Duration::from_secs(15))
         .map_err(io::Error::other)?;
     check_command_output(artifacts, label, expected)
 }
@@ -100,21 +102,22 @@ fn check_command_output(artifacts: &Path, label: &str, expected: &[u8]) -> io::R
     Ok(())
 }
 
+#[cfg(unix)]
 fn dependencies<F>(
     supervisor: &mut RuntimeCommands<'_, F>,
     executable: &Path,
     artifacts: &Path,
 ) -> io::Result<()>
 where
-    F: FnMut(&mut Command, Duration) -> io::Result<()>,
+    F: FnMut(&mut SupervisedCommand, Duration) -> io::Result<()>,
 {
     let mut command = match std::env::consts::OS {
         "macos" => {
-            let mut command = Command::new("otool");
-            command.arg("-L");
+            let mut command = SupervisedCommand::new("otool").map_err(io::Error::other)?;
+            command.arg("-L").map_err(io::Error::other)?;
             command
         }
-        "linux" => Command::new("ldd"),
+        "linux" => SupervisedCommand::new("ldd").map_err(io::Error::other)?,
         _ => {
             return Err(io::Error::other(
                 "native dependency inspection is unsupported",
@@ -125,10 +128,11 @@ where
     let stderr = artifacts.join("dependencies.stderr.txt");
     command
         .arg(executable)
-        .stdout(output(&stdout)?)
-        .stderr(output(&stderr)?);
+        .map_err(io::Error::other)?
+        .stdout(CommandStream::File(output(&stdout)?))
+        .stderr(CommandStream::File(output(&stderr)?));
     supervisor
-        .run(&mut command, Duration::from_secs(15))
+        .run_owned(command, Duration::from_secs(15))
         .map_err(io::Error::other)?;
     let bytes = read(&stdout, 65_536)?;
     check_dependencies_output(&bytes, &read(&stderr, 4096)?, std::env::consts::OS)
@@ -180,17 +184,20 @@ pub(crate) fn check_native_server_outputs(
     artifacts: &Path,
     os: &str,
     http: SocketAddr,
+    executable: &crate::recorded_path::RecordedPath,
 ) -> io::Result<()> {
     if read(&artifacts.join("SOURCE.sha256"), 65)?
         != format!("{}\n", candidate.source_digest()).as_bytes()
     {
         return Err(io::Error::other("native server output source differs"));
     }
-    check_dependencies_output(
-        &read(&artifacts.join("dependencies.stdout.txt"), 65_536)?,
-        &read(&artifacts.join("dependencies.stderr.txt"), 4096)?,
-        os,
-    )?;
+    let stdout = read(&artifacts.join("dependencies.stdout.txt"), 65_536)?;
+    let stderr = read(&artifacts.join("dependencies.stderr.txt"), 4096)?;
+    if os == "windows" {
+        super::windows_dependencies::check_output_for_path(&stdout, &stderr, executable)?;
+    } else {
+        check_dependencies_output(&stdout, &stderr, os)?;
+    }
     check_command_output(
         artifacts,
         "version",
@@ -210,6 +217,35 @@ pub(crate) fn check_native_server_outputs(
     Ok(())
 }
 
+#[cfg(windows)]
+fn observe_windows_dependencies<F>(
+    service: &mut RuntimeService<'_, F>,
+    executable: &Path,
+    artifacts: &Path,
+) -> io::Result<()>
+where
+    F: FnMut(&mut SupervisedCommand, Duration) -> io::Result<()>,
+{
+    let executable = executable
+        .to_str()
+        .ok_or_else(|| io::Error::other("server executable path is not UTF-8"))?;
+    let pid = service.process_id().map_err(io::Error::other)?;
+    let mut command = super::windows_dependencies::command(pid)?;
+    let stdout = artifacts.join("dependencies.stdout.txt");
+    let stderr = artifacts.join("dependencies.stderr.txt");
+    command
+        .stdout(CommandStream::File(output(&stdout)?))
+        .stderr(CommandStream::File(output(&stderr)?));
+    service
+        .run_owned(command, Duration::from_secs(15))
+        .map_err(io::Error::other)?;
+    super::windows_dependencies::check_output(
+        &read(&stdout, 65_536)?,
+        &read(&stderr, 4096)?,
+        executable,
+    )
+}
+
 fn startup<F>(
     candidate: &ServerCandidate,
     execution: &Path,
@@ -218,23 +254,31 @@ fn startup<F>(
     client: impl FnOnce(&mut RuntimeService<'_, F>, SocketAddr) -> io::Result<()>,
 ) -> io::Result<()>
 where
-    F: FnMut(&mut Command, Duration) -> io::Result<()>,
+    F: FnMut(&mut SupervisedCommand, Duration) -> io::Result<()>,
 {
     let executable = execution.join(candidate.name().target().binary_path());
+    #[cfg(unix)]
     dependencies(supervisor, &executable, artifacts)?;
+    let mut version = SupervisedCommand::new(&executable).map_err(io::Error::other)?;
+    version.arg("--version").map_err(io::Error::other)?;
     check_command(
         supervisor,
-        Command::new(&executable).arg("--version"),
+        version,
         artifacts,
         "version",
         format!("rusterisk {}\n", candidate.name().version()).as_bytes(),
     )?;
+    let mut packaged = SupervisedCommand::new(&executable).map_err(io::Error::other)?;
+    packaged
+        .arg("--check-config")
+        .map_err(io::Error::other)?
+        .arg("--config-dir")
+        .map_err(io::Error::other)?
+        .arg(execution.join("config"))
+        .map_err(io::Error::other)?;
     check_command(
         supervisor,
-        Command::new(&executable)
-            .arg("--check-config")
-            .arg("--config-dir")
-            .arg(execution.join("config")),
+        packaged,
         artifacts,
         "packaged-config",
         b"Configuration valid.\n",
@@ -256,32 +300,41 @@ where
     for (path, bytes) in configuration.files() {
         write(&runtime.join(path), bytes)?;
     }
+    let mut configured = SupervisedCommand::new(&executable).map_err(io::Error::other)?;
+    configured
+        .arg("--check-config")
+        .map_err(io::Error::other)?
+        .arg("--config-dir")
+        .map_err(io::Error::other)?
+        .arg(runtime.join("config"))
+        .map_err(io::Error::other)?;
     check_command(
         supervisor,
-        Command::new(&executable)
-            .arg("--check-config")
-            .arg("--config-dir")
-            .arg(runtime.join("config")),
+        configured,
         artifacts,
         "runtime-config",
         b"Configuration valid.\n",
     )?;
     let log = artifacts.join("server.stdout.txt");
     let diagnostic = artifacts.join("server.stderr.txt");
-    let mut command = Command::new(executable);
+    let mut command = SupervisedCommand::new(&executable).map_err(io::Error::other)?;
     command
         .arg("--config-dir")
+        .map_err(io::Error::other)?
         .arg(runtime.join("config"))
+        .map_err(io::Error::other)?
         .arg("--data-dir")
+        .map_err(io::Error::other)?
         .arg(runtime.join("data"))
+        .map_err(io::Error::other)?
         .current_dir(&runtime)
-        .stdin(Stdio::null())
-        .stdout(output(&log)?)
-        .stderr(output(&diagnostic)?);
+        .map_err(io::Error::other)?
+        .stdout(CommandStream::File(output(&log)?))
+        .stderr(CommandStream::File(output(&diagnostic)?));
     drop(http_reservation);
     drop(sip_reservation);
     let mut service = supervisor
-        .start_service(&mut command, Duration::from_secs(90))
+        .start_service_owned(command, Duration::from_secs(90))
         .map_err(io::Error::other)?;
     let operation = (|| {
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -300,7 +353,10 @@ where
             result,
             service.poll().map_err(io::Error::other),
             "server lifetime",
-        )
+        )?;
+        #[cfg(windows)]
+        observe_windows_dependencies(&mut service, &executable, artifacts)?;
+        Ok(())
     })();
     let operation = combine(
         operation,
@@ -341,7 +397,7 @@ pub(super) fn verify_loaded_server_with(
     supervisor: &mut CommandSupervisor,
     client: impl FnOnce(&mut RunningCommand<'_>, SocketAddr) -> io::Result<()>,
 ) -> io::Result<()> {
-    let mut configure = |_: &mut Command, _: Duration| Ok(());
+    let mut configure = |_: &mut SupervisedCommand, _: Duration| Ok(());
     let mut commands = RuntimeCommands::new(supervisor, &mut configure);
     verify_loaded_server_configured(
         candidate,
@@ -360,7 +416,7 @@ pub(crate) fn verify_loaded_server_configured<F>(
     client: impl FnOnce(&mut RuntimeService<'_, F>, SocketAddr) -> io::Result<()>,
 ) -> io::Result<()>
 where
-    F: FnMut(&mut Command, Duration) -> io::Result<()>,
+    F: FnMut(&mut SupervisedCommand, Duration) -> io::Result<()>,
 {
     if !execution.is_absolute()
         || !artifacts.is_absolute()

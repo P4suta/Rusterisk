@@ -29,21 +29,21 @@ mod runtime_config;
 pub use runtime_config::ServerRuntimeConfig;
 mod ready;
 pub use ready::check_server_ready_log;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod native;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub(crate) mod runtime_commands;
-#[cfg(unix)]
-pub(crate) use native::check_native_server_outputs;
-#[cfg(unix)]
-pub(crate) use native::verify_loaded_server_configured;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
+mod windows_dependencies;
+#[cfg(any(unix, windows))]
+pub(crate) use native::{check_native_server_outputs, verify_loaded_server_configured};
+#[cfg(any(unix, windows))]
 pub use native::{
     check_server_startup_for_target_with, check_server_startup_with, verify_server_native_with,
 };
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 mod sdk_interop;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub use sdk_interop::verify_server_sdk_with;
 mod oci_profile;
 pub use oci_profile::{ServerOciProfile, OCI_RUNTIME};

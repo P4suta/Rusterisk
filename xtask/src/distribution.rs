@@ -47,4 +47,6 @@ pub use sdk_runtime::SdkRuntimeIdentity;
 mod sdk_http_run;
 #[cfg(unix)]
 pub(crate) use sdk_http_run::check_sdk_http_results;
+#[cfg(any(unix, windows))]
+pub(crate) use sdk_http_run::check_sdk_http_results_recorded;
 pub use sdk_http_run::PreparedSdkHttpConsumer;

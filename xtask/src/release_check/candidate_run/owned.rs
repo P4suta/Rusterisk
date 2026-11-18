@@ -344,6 +344,7 @@ impl Workspace {
     pub(in crate::release_check) fn consumer(&self) -> PathBuf {
         self.consumer.join("consumer")
     }
+    #[cfg(unix)]
     pub(in crate::release_check) fn archive(&self) -> PathBuf {
         self.execution.join("image.oci.tar")
     }

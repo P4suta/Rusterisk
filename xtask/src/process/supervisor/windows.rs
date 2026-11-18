@@ -49,6 +49,12 @@ pub(super) struct Service {
     pub(super) deadline: Instant,
 }
 
+impl Service {
+    pub(super) fn process_id(&self) -> u32 {
+        self.tree.child.id()
+    }
+}
+
 struct CommandTree {
     job: Job,
     child: Child,

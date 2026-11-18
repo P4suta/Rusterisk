@@ -2,11 +2,11 @@
 
 use super::{verify_server_with, ServerRequest};
 use crate::{
-    process::CommandSupervisor,
+    process::{CommandSupervisor, SupervisedCommand},
     release_check::candidate_fixtures::{native_target, require, using},
     server_distribution::{ServerExecutionMode, ServerTarget},
 };
-use std::{io, process::Command, time::Duration};
+use std::{io, time::Duration};
 
 #[path = "server_execution_tests.rs"]
 mod execution;
@@ -33,7 +33,7 @@ fn server_source_changes_cannot_start_native_or_sdk_commands() -> io::Result<()>
                 artifacts: &paths.artifacts,
             },
             supervisor,
-            |_: &mut Command, _: Duration| {
+            |_: &mut SupervisedCommand, _: Duration| {
                 commands += 1;
                 Err(io::Error::other(
                     "unbound server inputs reached command construction",
@@ -75,7 +75,7 @@ fn same_version_sdk_source_changes_cannot_start_server_verification() -> io::Res
                 artifacts: &paths.artifacts,
             },
             supervisor,
-            |_: &mut Command, _: Duration| {
+            |_: &mut SupervisedCommand, _: Duration| {
                 commands += 1;
                 Err(io::Error::other(
                     "unbound SDK inputs reached server command construction",
@@ -129,7 +129,7 @@ fn a_foreign_native_target_cannot_start_sdk_preparation() -> io::Result<()> {
                     artifacts: &paths.artifacts,
                 },
                 supervisor,
-                |_: &mut Command, _: Duration| {
+                |_: &mut SupervisedCommand, _: Duration| {
                     commands += 1;
                     Err(io::Error::other(
                         "foreign target reached command construction",
@@ -168,7 +168,7 @@ fn a_real_sdk_preparation_spawn_failure_cannot_return_a_server_outcome() -> io::
                 artifacts: &paths.artifacts,
             },
             supervisor,
-            |command: &mut Command, budget: Duration| {
+            |command: &mut SupervisedCommand, budget: Duration| {
                 commands += 1;
                 require(
                     command.get_program() == "cargo",
@@ -178,7 +178,7 @@ fn a_real_sdk_preparation_spawn_failure_cannot_return_a_server_outcome() -> io::
                     budget == Duration::from_secs(180),
                     "SDK preparation changed its bounded resolution budget",
                 )?;
-                *command = Command::new(&missing);
+                *command = SupervisedCommand::new(&missing).map_err(io::Error::other)?;
                 Ok(())
             },
         );

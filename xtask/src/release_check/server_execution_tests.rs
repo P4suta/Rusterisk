@@ -1,9 +1,10 @@
 use super::{verify_server_with, CommandSupervisor, ServerRequest};
+use crate::process::SupervisedCommand;
 use crate::{
     release_check::candidate_fixtures::{native_target, require, using},
     server_distribution::{ServerExecutionMode, ServerTarget},
 };
-use std::{io, process::Command, time::Duration};
+use std::{io, time::Duration};
 
 fn fails_before_runtime(
     target: ServerTarget,
@@ -25,7 +26,7 @@ fn fails_before_runtime(
                 artifacts: &paths.artifacts,
             },
             supervisor,
-            |command: &mut Command, budget: Duration| {
+            |command: &mut SupervisedCommand, budget: Duration| {
                 commands += 1;
                 require(
                     command.get_program() == "cargo" && budget == Duration::from_secs(180),
