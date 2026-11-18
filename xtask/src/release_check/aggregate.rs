@@ -153,6 +153,11 @@ impl<'run, 'source: 'run> CandidateChecks<'run, 'source> {
         if outcome.image() != self.profile.image(gate) {
             return Err(CandidateCheckError::Profile(gate));
         }
+        if matches!(outcome, RunnerOutcome::Browser(browser)
+            if browser.reference_image() != self.profile.image(RequiredGate::Reference))
+        {
+            return Err(CandidateCheckError::Profile(gate));
+        }
         if let RunnerOutcome::InputFuzz(outcome) = outcome {
             if outcome.architecture() != self.profile.fuzz_architecture() {
                 return Err(CandidateCheckError::Profile(gate));

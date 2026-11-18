@@ -89,8 +89,11 @@ impl<'source> NativeVerification<'source> {
             RequiredGate::Browser => {
                 self.browser = Some(gate_value(
                     gate,
-                    self.captured
-                        .read_browser_artifact(directory, image(self.inputs, gate)?),
+                    self.captured.read_browser_comparison_artifact(
+                        directory,
+                        image(self.inputs, gate)?,
+                        image(self.inputs, RequiredGate::Reference)?,
+                    ),
                 )?)
             }
             RequiredGate::CoreProofs => {

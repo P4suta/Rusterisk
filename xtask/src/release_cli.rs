@@ -201,7 +201,11 @@ fn run(inputs: &ReleaseInputs, gate: RequiredGate) -> Result<(), CliError> {
         )?,
         GateCapability::Retained(RetainedGate::Browser) => gate_result(
             gate,
-            captured.verify_browser_artifact(image(inputs, gate)?, artifact(inputs, gate)?),
+            captured.verify_browser_comparison_artifact(
+                image(inputs, gate)?,
+                image(inputs, RequiredGate::Reference)?,
+                artifact(inputs, gate)?,
+            ),
         )?,
         GateCapability::Retained(RetainedGate::CoreProofs) => gate_result(
             gate,
