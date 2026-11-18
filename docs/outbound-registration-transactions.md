@@ -14,7 +14,7 @@ The request has an empty body and advertises its concrete local signaling addres
 
 Cancellation makes further polling silent and retains `identity` and `expires_at`.
 A manager must keep the original settlement boundary for a sent request before starting a replacement transaction at the same registrar.
-The [generation decision](adr/own-outbound-registrations-by-configuration-generation.md) defines the pending manager and adapter ownership.
+The [generation decision](adr/own-outbound-registrations-by-configuration-generation.md) defines manager and adapter ownership.
 
 Responses match the peer, top Via branch, `sent-by`, transport, Call-ID, and request sequence and method.
 Provisional responses preserve the original timeout and select four-second UDP retry intervals.
@@ -30,4 +30,4 @@ Absent and zero values return `None`.
 Successful grants require `refresh`, and 423 responses require `minimum_expiration_retry`.
 The caller assigns the request identity when dispatching, preserving ordering across waiting registrations.
 Native authentication, grants, refresh, and 423 correction use the [startup driver](outbound-registration-startup.md).
-Delayed failure scheduling and configuration replacement remain pending.
+Runtime [configuration reload](configuration-reload.md) publishes replacement registration settings.

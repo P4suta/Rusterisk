@@ -13,4 +13,4 @@ Refresh uses the ten-second buffer from [Asterisk 22.9.0](https://github.com/ast
 
 A removal request succeeds only when its Contact is absent or has a zero lifetime.
 `RegistrationGrant::Removed` distinguishes removal from an active binding.
-Native registration, refresh transmission, retry scheduling, and configuration replacement remain pending.
+Runtime [configuration reload](configuration-reload.md) publishes replacement registration settings.

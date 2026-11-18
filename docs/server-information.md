@@ -12,7 +12,8 @@ Controller clones share the identifier and startup timestamp.
 The configured channel limit matches the control task's bounded capacity.
 File and load limits are absent because the server doesn't configure those limits.
 The default language is `en`, and configured execution user and group remain empty.
-The last reload time equals startup time until the server supports runtime configuration reload.
+The last reload time initially equals startup time.
+Completed settings publication updates the last reload time.
 
 The Rust client uses `Client::server_info` with typed `InfoSection` values.
 An empty selection requests all sections.

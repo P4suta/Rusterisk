@@ -76,7 +76,7 @@ Endpoint availability changes when its first binding appears or last binding dis
 Calls select live bindings by configured address order, then Contact preference.
 Bindings keep Contact URIs separate from physical routing peers and route browser placeholder hosts through the registered connection.
 Outbound `REGISTER` clients support authenticated startup, Contact grants, refresh, `Min-Expires` corrections, and bounded retries.
-The [startup profile](outbound-registration-startup.md) describes connection reuse and remaining alternate-server and configuration replacement work.
+The [startup profile](outbound-registration-startup.md) describes connection reuse, retries, and settings publication.
 Complete URI header matching remains pending.
 Authenticated endpoint identity determines the context independently of displayed caller identification.
 Telephone digits use `RFC 4733` packets or `SIP INFO` according to the endpoint's configuration.
@@ -125,8 +125,9 @@ Dialplan execution covers `NoOp`, `Set`, `Answer`, `Dial`, `Stasis`, `Playback`,
 Durations use integer milliseconds and discard fractional milliseconds.
 Values greater than 2,147,483,647 milliseconds fail configuration validation.
 Parallel `PJSIP` destinations use a bounded set of branches and select the first answered peer.
-Reload comparison validates replacement settings.
-The running server doesn't apply replacement settings.
+Runtime [configuration reload](configuration-reload.md) validates complete replacement settings before publication.
+Existing calls keep their starting settings, and new calls use published settings.
+Listener changes require a restart.
 Waiting connections and queue admission have explicit limits.
 
 An owned storage worker writes call history and recording files.

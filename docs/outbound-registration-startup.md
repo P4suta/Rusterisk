@@ -60,5 +60,6 @@ Cancellation drops pending retries without closing a shared flow.
 Retries from failed responses renew existing authorization on an open TCP or TLS connection.
 A closed flow preserves the retry deadline and resolves again when due.
 Old connection generations can't stop the replacement registration.
-Alternate servers, shared 503 suppression, and configuration replacement remain pending.
+Alternate servers and shared 503 suppression remain pending.
+[Configuration reload](configuration-reload.md) publishes prepared registration settings and retires the previous generation.
 The [pure transaction APIs](outbound-registration-transactions.md) and [generation decision](adr/own-outbound-registrations-by-configuration-generation.md) define the remaining integration boundaries.

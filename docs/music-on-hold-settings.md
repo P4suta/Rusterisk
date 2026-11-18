@@ -64,4 +64,4 @@ Server startup prepares every configured class before binding listeners.
 An invalid class prevents startup even when no channel has selected the class.
 An empty catalog requires no music directory.
 The [catalog decision](adr/prepare-bounded-music-catalogs-before-publication.md) records the bounds and metadata checks.
-Applying replacement settings to a running server remains pending.
+Runtime [configuration reload](configuration-reload.md) prepares every replacement class before publication.

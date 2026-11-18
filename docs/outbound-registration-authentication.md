@@ -25,5 +25,5 @@ Each attempt chain permits at most four authentication retries.
 
 Matched successful receipts support [Contact grant interpretation](outbound-registration-grants.md).
 Native registration authentication and refresh use the [startup driver](outbound-registration-startup.md).
-Delayed failure scheduling and configuration replacement remain pending.
+Runtime [configuration reload](configuration-reload.md) publishes replacement registration settings.
 The [generation decision](adr/own-outbound-registrations-by-configuration-generation.md) describes their required ownership.
