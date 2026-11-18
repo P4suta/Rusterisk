@@ -167,6 +167,8 @@ fn conclude_with_preservation(
 
 #[cfg(all(test, unix))]
 mod finalization_tests;
+#[cfg(all(test, windows))]
+mod windows_workspace_tests;
 
 #[cfg(any(unix, windows))]
 pub(super) fn combine<T>(

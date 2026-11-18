@@ -1,4 +1,4 @@
-use crate::metadata_fixture::{self as fixture, Dependency, Edge, Kind, Node};
+use super::metadata_fixture::{self as fixture, Dependency, Edge, Kind, Node};
 use xtask::distribution::{SdkConsumerPlan, SdkConsumerScope, SdkRuntimeIdentity};
 
 pub fn runtime() -> Result<SdkRuntimeIdentity, std::io::Error> {

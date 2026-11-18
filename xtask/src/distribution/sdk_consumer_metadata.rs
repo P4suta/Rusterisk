@@ -548,3 +548,257 @@ pub(super) fn check_recorded(
         runtime,
     )
 }
+
+#[cfg(test)]
+mod recorded_tests {
+    use super::{SdkConsumerPlan, SdkConsumerScope};
+    use crate::recorded_path::{
+        RecordedPath,
+        RecordedPathFormat::{self, Unix, Windows},
+    };
+    use http_fixture::runtime;
+    use serde_json::{json, Value};
+    use std::{
+        io,
+        path::{Path, PathBuf},
+    };
+
+    mod metadata_fixture {
+        use crate as xtask;
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/sdk_consumer_metadata/fixture.rs"
+        ));
+    }
+
+    mod http_fixture {
+        use crate as xtask;
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/sdk_http_metadata/fixture.rs"
+        ));
+    }
+
+    fn array(values: impl IntoIterator<Item = Value>) -> Value {
+        Value::Array(values.into_iter().collect())
+    }
+
+    fn path(root: &str, relative: &str) -> String {
+        if root.starts_with('/') {
+            format!("{root}/{relative}")
+        } else {
+            format!("{root}\\{}", relative.replace('/', "\\"))
+        }
+    }
+
+    fn projected_path(plan: &SdkConsumerPlan, root: &str, value: &Path) -> io::Result<PathBuf> {
+        let (prefix, relative) = if let Ok(relative) = value.strip_prefix(plan.work()) {
+            ("work", relative)
+        } else if let Ok(relative) = value.strip_prefix(plan.state()) {
+            ("state", relative)
+        } else {
+            let relative = value
+                .strip_prefix(metadata_fixture::checkout(plan))
+                .map_err(io::Error::other)?;
+            ("checkout", relative)
+        };
+        let relative = relative
+            .to_str()
+            .ok_or_else(|| io::Error::other("fixture path is not UTF-8"))?;
+        Ok(PathBuf::from(path(
+            root,
+            &format!("{prefix}/{}", relative.replace('\\', "/")),
+        )))
+    }
+
+    fn projected_metadata(
+        plan: &SdkConsumerPlan,
+        root: &str,
+        mut data: metadata_fixture::Metadata,
+        with_runtime: bool,
+    ) -> io::Result<Value> {
+        data.workspace_root = projected_path(plan, root, &data.workspace_root)?;
+        data.target_directory = projected_path(plan, root, &data.target_directory)?;
+        for package in &mut data.packages {
+            package.manifest_path = projected_path(plan, root, &package.manifest_path)?;
+            for target in &mut package.targets {
+                target.src_path = projected_path(plan, root, &target.src_path)?;
+            }
+        }
+        let bytes = if with_runtime {
+            http_fixture::bytes(&data, 0)?
+        } else {
+            data.bytes()?
+        };
+        serde_json::from_slice(&bytes).map_err(io::Error::other)
+    }
+
+    fn metadata(root: &str, scope: SdkConsumerScope, with_runtime: bool) -> io::Result<Value> {
+        let plan = metadata_fixture::plan()?;
+        let data = if with_runtime {
+            http_fixture::data(&plan)?
+        } else {
+            metadata_fixture::metadata(&plan, scope)
+        };
+        projected_metadata(&plan, root, data, with_runtime)
+    }
+
+    fn bytes(value: &Value) -> io::Result<Vec<u8>> {
+        serde_json::to_vec(value).map_err(io::Error::other)
+    }
+
+    fn check(
+        format: RecordedPathFormat,
+        root: &RecordedPath,
+        scope: SdkConsumerScope,
+        data: &Value,
+        with_runtime: bool,
+    ) -> io::Result<()> {
+        let runtime = if with_runtime { Some(runtime()?) } else { None };
+        super::check_recorded(
+            format,
+            root,
+            scope,
+            "0.1.0",
+            &bytes(data)?,
+            runtime.as_ref(),
+        )
+        .map_err(io::Error::other)
+    }
+
+    #[test]
+    fn windows_recorded_metadata_accepts_the_owned_candidate_graph() -> io::Result<()> {
+        let root = Windows.parse(Path::new(r"\\?\D:\Run\Consumer"), 4096)?;
+        for scope in SdkConsumerScope::ALL {
+            for source in [r"d:\RUN\CONSUMER", r"\\?\D:\Run\Consumer"] {
+                let data = metadata(source, scope, false)?;
+                check(Windows, &root, scope, &data, false)?;
+            }
+        }
+        let mut data = metadata(r"d:\run\consumer", SdkConsumerScope::Sdk, true)?;
+        data["packages"][0]["targets"][0]["src_path"] =
+            json!(r"d:\run\consumer\work\packages\rusterisk-core-0.1.0\src/lib.rs");
+        data["workspace_root"] = json!("d:/run/consumer/work/consumers/sdk");
+        check(Windows, &root, SdkConsumerScope::Sdk, &data, true)
+    }
+
+    #[test]
+    fn windows_recorded_metadata_rejects_escaped_or_ambiguous_paths() -> io::Result<()> {
+        let root = Windows.parse(Path::new(r"D:\Run\Consumer"), 4096)?;
+        for source in [
+            r"D:\Run\Consumer\work-copy\packages\rusterisk-core-0.1.0\src\lib.rs",
+            r"C:\Run\Consumer\work\packages\rusterisk-core-0.1.0\src\lib.rs",
+            r"D:\Run\Consumer\work\packages\rusterisk-core-0.1.0\..\rusterisk-core-0.1.0\src\lib.rs",
+            r"D:\Run\Consumer\work\packages\rusterisk-core-0.1.0\src\lib.rs:stream",
+            r"D:\Run\Consumer\work\packages\rusterisk-core-0.1.0\src\lib.rs.",
+            r"\\host\share\work\packages\rusterisk-core-0.1.0\src\lib.rs",
+            r"\\?\D:\Run\Consumer\work\packages\rusterisk-core-0.1.0\src/lib.rs",
+        ] {
+            let mut data = metadata(r"D:\Run\Consumer", SdkConsumerScope::Sdk, true)?;
+            data["packages"][0]["targets"][0]["src_path"] = json!(source);
+            assert!(
+                check(Windows, &root, SdkConsumerScope::Sdk, &data, true).is_err(),
+                "{source}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_metadata_preserves_candidate_source_version_and_graph_checks() -> io::Result<()> {
+        let root = Windows.parse(Path::new(r"D:\Run\Consumer"), 4096)?;
+        for (pointer, replacement) in [
+            ("/packages/0/version", json!("0.2.0")),
+            ("/packages/0/source", json!("registry+opaque-source")),
+            (
+                "/packages/2/dependencies/0/path",
+                json!(r"D:\Checkout\crates\core"),
+            ),
+            ("/resolve/nodes/3/deps/0/dep_kinds/0/kind", json!("dev")),
+            ("/packages/4/version", json!("1.54.0")),
+            ("/packages/4/source", json!("registry+another-source")),
+            (
+                "/packages/3/dependencies/3/uses_default_features",
+                json!(true),
+            ),
+            ("/resolve/nodes/4/features", array([json!("rt")])),
+        ] {
+            let mut data = metadata(r"D:\Run\Consumer", SdkConsumerScope::Sdk, true)?;
+            *data
+                .pointer_mut(pointer)
+                .ok_or_else(|| io::Error::other("fixture field missing"))? = replacement;
+            assert!(
+                check(Windows, &root, SdkConsumerScope::Sdk, &data, true).is_err(),
+                "{pointer}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unix_recorded_metadata_keeps_case_sensitive_workspace_paths() -> io::Result<()> {
+        let root = Unix.parse(Path::new("/Run/Consumer"), 4096)?;
+        let mut data = metadata("/Run/Consumer", SdkConsumerScope::Sdk, true)?;
+        check(Unix, &root, SdkConsumerScope::Sdk, &data, true)?;
+        data["workspace_root"] = json!("/run/consumer/work/consumers/sdk");
+        assert!(check(Unix, &root, SdkConsumerScope::Sdk, &data, true).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn recorded_metadata_rejects_checkout_manifests_and_backend_packages() -> io::Result<()> {
+        let root = Windows.parse(Path::new(r"D:\Run\Consumer"), 4096)?;
+        let plan = metadata_fixture::plan()?;
+        for backend in [false, true] {
+            let mut data = metadata_fixture::metadata(&plan, SdkConsumerScope::Sdk);
+            if backend {
+                data.add_external(&plan, 0)?;
+                data.package("registry-package-0")?.name = "rusterisk-server".to_owned();
+            } else {
+                data.package("rusterisk-core")?.manifest_path =
+                    metadata_fixture::checkout(&plan).join("crates/core/Cargo.toml");
+            }
+            let data = projected_metadata(&plan, r"D:\Run\Consumer", data, false)?;
+            assert!(
+                check(Windows, &root, SdkConsumerScope::Sdk, &data, false).is_err(),
+                "backend {backend}"
+            );
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_windows_metadata_uses_the_native_pathbuf_join_rules() -> io::Result<()> {
+        for (root, expected) in [
+            (
+                r"D:\Run\Consumer",
+                r"D:\Run\Consumer\work\packages\rusterisk-core-0.1.0\src/lib.rs",
+            ),
+            (
+                r"\\?\D:\Run\Consumer",
+                r"\\?\D:\Run\Consumer\work\packages\rusterisk-core-0.1.0\src\lib.rs",
+            ),
+        ] {
+            let execution = Path::new(root);
+            let plan =
+                super::SdkConsumerPlan::new(&execution.join("work"), &execution.join("state"))?;
+            let source = plan
+                .work()
+                .join("packages")
+                .join("rusterisk-core-0.1.0")
+                .join("src/lib.rs");
+            assert_eq!(source.to_str(), Some(expected));
+            let mut data = metadata(root, SdkConsumerScope::Sdk, false)?;
+            data["packages"][0]["targets"][0]["src_path"] = json!(source);
+            super::check_sdk_consumer_metadata(
+                &plan,
+                SdkConsumerScope::Sdk,
+                "0.1.0",
+                &bytes(&data)?,
+            )
+            .map_err(io::Error::other)?;
+        }
+        Ok(())
+    }
+}
