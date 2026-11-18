@@ -12,7 +12,7 @@ use std::path::Path;
 #[cfg(unix)]
 mod artifacts;
 #[cfg(unix)]
-pub(super) use artifacts::{capture_tools, check_tools};
+pub(super) use artifacts::{capture_tools, check_tools, configure_tools};
 
 #[cfg(unix)]
 use super::candidate_run::{combine, conclude, Loaded, Paths, Workspace};

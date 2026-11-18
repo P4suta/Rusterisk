@@ -64,7 +64,10 @@ pub use oci_archive::{
 #[cfg(unix)]
 pub use oci_sdk::verify_server_oci_sdk_with;
 #[cfg(unix)]
-pub(crate) use oci_sdk::{copy_archive, verify_loaded_oci_sdk_configured, OciSdkExecution};
+pub(crate) use oci_sdk::{
+    check_oci_runtime_outputs, copy_archive, verify_loaded_oci_sdk_configured, OciEngineProfile,
+    OciNativeContext, OciRuntimeInputs, OciSdkExecution,
+};
 mod container_build;
 pub use container_build::{ServerBuildCommandMode, ServerContainerBuildPlan};
 

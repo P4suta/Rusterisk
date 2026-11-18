@@ -5,6 +5,13 @@ use crate::process::ProcessError;
 use std::path::Path;
 
 #[cfg(unix)]
+mod artifacts;
+
+#[cfg(any(test, doctest))]
+#[path = "oci_artifact_contracts.rs"]
+mod artifact_contracts;
+
+#[cfg(unix)]
 use super::candidate_run::{checksum, combine, conclude_oci, Loaded, Paths, Workspace};
 #[cfg(unix)]
 use crate::{
@@ -117,8 +124,31 @@ fn graph_matches(first: &ServerOciContents, second: &ServerOciContents) -> bool 
 fn verify_oci_with<'a>(
     captured: &'a CapturedReleaseSource,
     request: OciRequest<'_>,
+    supervisor: CommandSupervisor,
+    configure: impl FnMut(&mut Command, Duration) -> io::Result<()>,
+) -> Result<OciOutcome<'a>, OciRunError> {
+    verify_oci_recorded(
+        captured,
+        request,
+        supervisor,
+        configure,
+        Retention::Diagnostic,
+    )
+}
+
+#[cfg(unix)]
+enum Retention<'a> {
+    Diagnostic,
+    Reusable(&'a Path),
+}
+
+#[cfg(unix)]
+fn verify_oci_recorded<'a>(
+    captured: &'a CapturedReleaseSource,
+    request: OciRequest<'_>,
     mut supervisor: CommandSupervisor,
     mut configure: impl FnMut(&mut Command, Duration) -> io::Result<()>,
+    retention: Retention<'_>,
 ) -> Result<OciOutcome<'a>, OciRunError> {
     let preflight = (|| {
         let loaded = Loaded::read(
@@ -196,7 +226,17 @@ fn verify_oci_with<'a>(
         output
             .flush()
             .map_err(|error| RunError::io("OCI artifact output", error))?;
-        let mut commands = RuntimeCommands::new(&mut supervisor, &mut configure);
+        if let Retention::Reusable(root) = retention {
+            artifacts::capture_tools(captured, root, &mut supervisor)
+                .map_err(|error| RunError::io("OCI native tool capture", error))?;
+        }
+        let mut scoped = |command: &mut Command, budget| {
+            if matches!(retention, Retention::Reusable(_)) {
+                super::server::configure_tools(captured, command)?;
+            }
+            configure(command, budget)
+        };
+        let mut commands = RuntimeCommands::new(&mut supervisor, &mut scoped);
         verify_loaded_oci_sdk_configured(
             &loaded.server,
             &loaded.sdk,
@@ -212,10 +252,35 @@ fn verify_oci_with<'a>(
         )
         .map_err(|error| RunError::io("OCI server and SDK runtime", error))
     })();
+    let context = operation.as_ref().ok();
+    let preserved = match (context, &retention) {
+        (Some(context), Retention::Reusable(_)) => artifacts::preserve_context(&request, context)
+            .map_err(|error| RunError::io("OCI runtime input preservation", error)),
+        (Some(_), Retention::Diagnostic)
+        | (None, Retention::Diagnostic | Retention::Reusable(_)) => Ok(()),
+    };
+    let operation = combine(operation, preserved);
+    let (operation, context) = match operation {
+        Ok(context) => (Ok(()), Some(context)),
+        Err(error) => (Err(error), None),
+    };
     conclude_oci(operation, &loaded, captured, workspace, &digest, || {
         supervisor.finish()
     })
     .map_err(OciRunError)?;
+    if let Retention::Reusable(root) = retention {
+        loaded
+            .preserve_paired(request.artifacts)
+            .map_err(|error| OciRunError(RunError::io("OCI paired input preservation", error)))?;
+        let context = context.ok_or_else(|| {
+            OciRunError(RunError::contract(
+                "OCI native context",
+                "runtime context is missing",
+            ))
+        })?;
+        artifacts::record(captured, &loaded, &request, &context, root)
+            .map_err(|error| OciRunError(RunError::io("OCI native artifact validation", error)))?;
+    }
     Ok(OciOutcome {
         captured,
         projection: loaded.server_projection,
@@ -267,6 +332,53 @@ impl CapturedReleaseSource {
             let _ = (candidate, target, archive, sdk_candidate);
             Err(OciRunError(RunError::process(
                 "OCI supervisor",
+                ProcessError::UnsupportedSupervision,
+            )))
+        }
+    }
+
+    /// Publishes source-bound OCI native results after complete owned cleanup.
+    pub fn verify_oci_artifact(
+        &self,
+        candidate: &Path,
+        target: LinuxOciTarget,
+        archive: &Path,
+        sdk_candidate: &Path,
+        published: &Path,
+    ) -> Result<OciOutcome<'_>, OciRunError> {
+        #[cfg(unix)]
+        {
+            artifacts::produce(self, candidate, target, archive, sdk_candidate, published)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (candidate, target, archive, sdk_candidate, published);
+            Err(OciRunError(RunError::process(
+                "OCI artifact supervisor",
+                ProcessError::UnsupportedSupervision,
+            )))
+        }
+    }
+
+    /// Revalidates retained OCI native results with the selected candidate bytes.
+    pub fn read_oci_artifact(
+        &self,
+        artifact: &Path,
+        candidate: &Path,
+        target: LinuxOciTarget,
+        archive: &Path,
+        sdk_candidate: &Path,
+    ) -> Result<OciOutcome<'_>, OciRunError> {
+        #[cfg(unix)]
+        {
+            artifacts::read(self, artifact, candidate, target, archive, sdk_candidate)
+                .map_err(|error| OciRunError(RunError::io("OCI artifact reader", error)))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (artifact, candidate, target, archive, sdk_candidate);
+            Err(OciRunError(RunError::process(
+                "OCI artifact reader",
                 ProcessError::UnsupportedSupervision,
             )))
         }

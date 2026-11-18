@@ -2,6 +2,13 @@ use crate::server_distribution::ServerTarget;
 use serde::Deserialize;
 use std::io;
 
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum OciEngineProfile {
+    Configuration,
+    ApplicationManifest,
+}
+
 pub(super) const INSPECT: &str = "{\"id\":{{json .Id}},\"os\":{{json .Os}},\"architecture\":{{json .Architecture}},\"descriptor\":{{with index . \"Descriptor\"}}{\"digest\":{{json .digest}},\"media_type\":{{json .mediaType}},\"size\":{{json .size}}}{{else}}null{{end}}}";
 
 #[derive(Clone, Copy)]
@@ -35,6 +42,13 @@ pub(super) struct Descriptor {
 }
 
 impl<'a> EngineImage<'a> {
+    pub fn profile(&self) -> OciEngineProfile {
+        match self {
+            Self::Configuration(_) => OciEngineProfile::Configuration,
+            Self::ApplicationManifest(_) => OciEngineProfile::ApplicationManifest,
+        }
+    }
+
     pub fn loaded(bytes: &[u8], expected: ExpectedImage<'a>) -> io::Result<Self> {
         if bytes == format!("Loaded image ID: {}\n", expected.configuration).as_bytes() {
             Ok(Self::Configuration(expected))

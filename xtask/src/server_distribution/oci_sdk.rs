@@ -15,10 +15,13 @@ use std::{
 
 mod docker;
 mod identity;
+mod results;
 mod runtime;
 use super::{ServerOciRunPhase, ServerOciRuntimePlan};
 use crate::process::CommandSupervisor;
 use identity::ExpectedImage;
+pub(crate) use identity::OciEngineProfile;
+pub(crate) use results::{check_oci_runtime_outputs, OciRuntimeInputs};
 use runtime::{runtime_configured_using, runtime_using, Runtime};
 
 pub(crate) fn copy_archive(source: &Path, destination: &Path, maximum: u64) -> io::Result<()> {
@@ -199,12 +202,34 @@ pub(crate) struct OciSdkExecution<'a> {
     pub(crate) checked: &'a ServerOciContents,
 }
 
+pub(crate) struct OciNativeContext {
+    identity: String,
+    http: std::net::SocketAddr,
+    sip: std::net::SocketAddr,
+    profile: OciEngineProfile,
+}
+
+impl OciNativeContext {
+    pub(crate) fn identity(&self) -> &str {
+        &self.identity
+    }
+    pub(crate) const fn http(&self) -> std::net::SocketAddr {
+        self.http
+    }
+    pub(crate) const fn sip(&self) -> std::net::SocketAddr {
+        self.sip
+    }
+    pub(crate) const fn profile(&self) -> OciEngineProfile {
+        self.profile
+    }
+}
+
 pub(crate) fn verify_loaded_oci_sdk_configured<F>(
     server: &ServerCandidate,
     contents: &SdkContents,
     scope: OciSdkExecution<'_>,
     commands: &mut RuntimeCommands<'_, F>,
-) -> io::Result<()>
+) -> io::Result<OciNativeContext>
 where
     F: FnMut(&mut Command, Duration) -> io::Result<()>,
 {
@@ -307,6 +332,12 @@ where
         consumer_cleanup,
         "prepared OCI SDK consumer cleanup",
     )
+    .map(|observed| OciNativeContext {
+        identity: scope.identity.to_owned(),
+        http: observed.http,
+        sip: observed.sip,
+        profile: observed.profile,
+    })
 }
 
 #[cfg(test)]

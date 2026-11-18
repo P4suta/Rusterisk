@@ -7,6 +7,9 @@ use crate::{
 };
 use std::{fs, io, process::Command, time::Duration};
 
+#[path = "oci_tests/reusable_artifacts.rs"]
+mod reusable_artifacts;
+
 #[test]
 fn changed_server_inputs_cannot_load_a_matching_oci_archive() -> io::Result<()> {
     let target = linux_target()?;

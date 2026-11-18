@@ -20,6 +20,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub(super) struct RuntimeObservation {
+    pub http: SocketAddr,
+    pub sip: SocketAddr,
+    pub profile: super::identity::OciEngineProfile,
+}
+
 pub(super) struct Runtime<'a> {
     pub identity: &'a str,
     pub configuration: &'a Path,
@@ -69,15 +75,19 @@ where
         "containers",
         cleanup,
     )?;
-    if !observed.stderr.is_empty() {
+    container_present(&observed.stdout, &observed.stderr, name)
+}
+
+pub(super) fn container_present(stdout: &[u8], stderr: &[u8], name: &str) -> io::Result<bool> {
+    if !stderr.is_empty() {
         return Err(io::Error::other(
             "OCI container inspection produced diagnostics",
         ));
     }
-    if observed.stdout.is_empty() {
+    if stdout.is_empty() {
         return Ok(false);
     }
-    if observed.stdout != format!("{name}\n").as_bytes() {
+    if stdout != format!("{name}\n").as_bytes() {
         return Err(io::Error::other(
             "OCI container name selection is ambiguous",
         ));
@@ -94,12 +104,29 @@ struct Ownership {
     manifest: Option<Descriptor>,
 }
 
+pub(super) fn ownership(bytes: &[u8], image: &EngineImage<'_>, name: &str) -> io::Result<String> {
+    let ownership: Ownership = serde_json::from_slice(bytes).map_err(io::Error::other)?;
+    if ownership.id.len() != 64
+        || !ownership
+            .id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        || !image.container_matches(&ownership.image, ownership.manifest.as_ref())
+        || ownership.owner != name
+    {
+        return Err(io::Error::other(
+            "OCI container ownership differs; control refused",
+        ));
+    }
+    Ok(ownership.id)
+}
+
 fn inspect<F>(
     docker: &mut Docker<'_, F>,
     runtime: &ActiveRuntime<'_>,
     name: &str,
     perform: impl FnOnce(&mut Command, Duration) -> Result<(), ProcessError>,
-) -> io::Result<Ownership>
+) -> io::Result<String>
 where
     F: FnMut(&[String], &Path, &Path) -> io::Result<Command>,
 {
@@ -115,23 +142,7 @@ where
             "OCI ownership inspection produced diagnostics",
         ));
     }
-    let ownership: Ownership =
-        serde_json::from_slice(&observed.stdout).map_err(io::Error::other)?;
-    if ownership.id.len() != 64
-        || !ownership
-            .id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-        || !runtime
-            .image
-            .container_matches(&ownership.image, ownership.manifest.as_ref())
-        || ownership.owner != name
-    {
-        return Err(io::Error::other(
-            "OCI container ownership differs; control refused",
-        ));
-    }
-    Ok(ownership)
+    ownership(&observed.stdout, &runtime.image, name)
 }
 
 fn cleanup<F, G>(
@@ -154,7 +165,7 @@ where
     let step = runtime.plan.cleanup(phase);
     docker.run(
         supervisor,
-        &arguments(["rm", "--force", &ownership.id]),
+        &arguments(["rm", "--force", &ownership]),
         step.budget,
         "remove",
         true,
@@ -221,7 +232,7 @@ where
     }
     let step = runtime.plan.stop();
     let stopped = match ownership {
-        Some(owned) => match docker.command(&arguments(["stop", "--time=5", &owned.id]), "stop") {
+        Some(owned) => match docker.command(&arguments(["stop", "--time=5", &owned]), "stop") {
             Ok(mut request) => {
                 let result = service
                     .stop_with(&mut request.command, step.budget)
@@ -265,6 +276,7 @@ where
     runtime_configured_using(runtime, &mut commands, factory, |service, address| {
         client(service.running(), address)
     })
+    .map(|_| ())
 }
 
 pub(super) fn runtime_configured_using<F, G>(
@@ -272,7 +284,7 @@ pub(super) fn runtime_configured_using<F, G>(
     supervisor: &mut RuntimeCommands<'_, G>,
     factory: F,
     client: impl FnOnce(&mut RuntimeService<'_, G>, SocketAddr) -> io::Result<()>,
-) -> io::Result<()>
+) -> io::Result<RuntimeObservation>
 where
     F: FnMut(&[String], &Path, &Path) -> io::Result<Command>,
     G: FnMut(&mut Command, Duration) -> io::Result<()>,
@@ -332,7 +344,7 @@ fn run_loaded<F, G>(
     supervisor: &mut RuntimeCommands<'_, G>,
     docker: &mut Docker<'_, F>,
     client: impl FnOnce(&mut RuntimeService<'_, G>, SocketAddr) -> io::Result<()>,
-) -> io::Result<()>
+) -> io::Result<RuntimeObservation>
 where
     F: FnMut(&[String], &Path, &Path) -> io::Result<Command>,
     G: FnMut(&mut Command, Duration) -> io::Result<()>,
@@ -385,7 +397,11 @@ where
         serve(docker, supervisor, &runtime, http, |_, _| Ok(()))?;
         let _http = TcpListener::bind(http)?;
         let _sip = UdpSocket::bind(sip)?;
-        Ok(())
+        Ok(RuntimeObservation {
+            http,
+            sip,
+            profile: runtime.image.profile(),
+        })
     })();
     let mut removed = Ok(());
     for phase in attempted.into_iter().rev() {
