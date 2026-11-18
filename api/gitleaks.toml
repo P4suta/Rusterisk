@@ -16,3 +16,15 @@ targetRules = ["generic-api-key"]
 condition = "AND"
 paths = ['''(^|/)vendor/str0m-source\.toml$''']
 regexes = ['''^[a-f0-9]{64}$''']
+
+[[allowlists]]
+description = "RFC 6455 section 1.3 publishes the sample WebSocket nonce used by SIPp 3.8.0."
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''(^|/)\.cache/interop-inputs/sipp-source/sipp-3\.8\.0/regress/github-#0124-close/peer\.py$''',
+  '''(^|/)\.cache/interop-inputs/sipp-source/sipp-3\.8\.0/regress/github-#0124-python/ws\.py$''',
+  '''(^|/)\.cache/interop-inputs/sipp-source/sipp-3\.8\.0/src/websocket\.cpp$''',
+  '''(^|/)\.cache/interop-inputs/sipp-source/sipp-3\.8\.0/rust/src/websocket\.rs$''',
+]
+regexes = ['''^dGhlIHNhbXBsZSBub25jZQ==$''']
