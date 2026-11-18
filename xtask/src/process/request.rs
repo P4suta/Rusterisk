@@ -87,6 +87,15 @@ impl CommandStream {
             Self::File(file) => Stdio::from(file),
         }
     }
+
+    #[cfg(windows)]
+    fn into_windows_stdio(self) -> windows_spawn::Stdio {
+        match self {
+            Self::Null => windows_spawn::Stdio::null(),
+            Self::Inherit => windows_spawn::Stdio::inherit(),
+            Self::File(file) => windows_spawn::Stdio::from(file),
+        }
+    }
 }
 
 enum EnvironmentBase {
@@ -325,6 +334,29 @@ impl SupervisedCommand {
             .stdin(Stdio::null())
             .stdout(self.stdout.into_stdio())
             .stderr(self.stderr.into_stdio());
+        command
+    }
+
+    #[cfg(windows)]
+    pub(super) fn into_windows(self) -> windows_spawn::Command {
+        let mut command = windows_spawn::Command::new(self.program);
+        command.args(self.arguments);
+        if matches!(self.environment_base, EnvironmentBase::Clear) {
+            command.env_clear();
+        }
+        for (name, value) in self.environment {
+            match value {
+                Some(value) => command.env(name, value),
+                None => command.env_remove(name),
+            };
+        }
+        if let Some(directory) = self.directory {
+            command.current_dir(directory);
+        }
+        command
+            .stdin(windows_spawn::Stdio::null())
+            .stdout(self.stdout.into_windows_stdio())
+            .stderr(self.stderr.into_windows_stdio());
         command
     }
 }

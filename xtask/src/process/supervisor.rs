@@ -8,12 +8,59 @@ use std::{
 mod service;
 #[cfg(unix)]
 mod unix;
+#[cfg(windows)]
+mod windows;
 #[cfg(unix)]
 pub use service::RunningCommand;
+#[cfg(unix)]
+use unix as native;
+#[cfg(windows)]
+use windows as native;
+
+fn deadline(budget: Duration) -> Result<Instant, ProcessError> {
+    Instant::now()
+        .checked_add(budget)
+        .filter(|_| !budget.is_zero())
+        .ok_or(ProcessError::InvalidBudget)
+}
+
+#[cfg(any(unix, windows))]
+enum Interruption {
+    Quiet,
+    Pending,
+    Reported,
+}
+
+#[cfg(any(unix, windows))]
+impl Interruption {
+    fn observe(&mut self) {
+        match self {
+            Self::Quiet => *self = Self::Pending,
+            Self::Pending | Self::Reported => {}
+        }
+    }
+
+    fn report(&mut self) -> Result<(), ProcessError> {
+        match self {
+            Self::Quiet => Ok(()),
+            Self::Pending | Self::Reported => {
+                *self = Self::Reported;
+                Err(ProcessError::Interrupted)
+            }
+        }
+    }
+
+    fn finish(&self) -> Result<(), ProcessError> {
+        match self {
+            Self::Quiet | Self::Reported => Ok(()),
+            Self::Pending => Err(ProcessError::Interrupted),
+        }
+    }
+}
 
 pub struct CommandSupervisor {
-    #[cfg(unix)]
-    state: Option<unix::Supervisor>,
+    #[cfg(any(unix, windows))]
+    state: Option<native::Supervisor>,
 }
 
 impl CommandSupervisor {
@@ -23,10 +70,7 @@ impl CommandSupervisor {
         command: &mut Command,
         budget: Duration,
     ) -> Result<RunningCommand<'_>, ProcessError> {
-        let deadline = Instant::now()
-            .checked_add(budget)
-            .filter(|_| !budget.is_zero())
-            .ok_or(ProcessError::InvalidBudget)?;
+        let deadline = deadline(budget)?;
         let running = self
             .state
             .as_mut()
@@ -35,13 +79,13 @@ impl CommandSupervisor {
         Ok(RunningCommand::new(self, running))
     }
     pub fn new() -> Result<Self, ProcessError> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             Ok(Self {
-                state: Some(unix::Supervisor::new()?),
+                state: Some(native::Supervisor::new()?),
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             Err(ProcessError::UnsupportedSupervision)
         }
@@ -52,14 +96,22 @@ impl CommandSupervisor {
         command: SupervisedCommand,
         budget: Duration,
     ) -> Result<(), ProcessError> {
-        self.run(&mut command.into_std(), budget)
+        #[cfg(windows)]
+        {
+            self.state.as_mut().ok_or(ProcessError::InvalidOutput)?.run(
+                command,
+                deadline(budget)?,
+                windows::Purpose::Command,
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            self.run(&mut command.into_std(), budget)
+        }
     }
 
     pub fn run(&mut self, command: &mut Command, budget: Duration) -> Result<(), ProcessError> {
-        let deadline = Instant::now()
-            .checked_add(budget)
-            .filter(|_| !budget.is_zero())
-            .ok_or(ProcessError::InvalidBudget)?;
+        let deadline = deadline(budget)?;
         #[cfg(unix)]
         {
             self.state
@@ -79,7 +131,18 @@ impl CommandSupervisor {
         command: SupervisedCommand,
         budget: Duration,
     ) -> Result<(), ProcessError> {
-        self.run_cleanup(&mut command.into_std(), budget)
+        #[cfg(windows)]
+        {
+            self.state.as_mut().ok_or(ProcessError::InvalidOutput)?.run(
+                command,
+                deadline(budget)?,
+                windows::Purpose::Cleanup,
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            self.run_cleanup(&mut command.into_std(), budget)
+        }
     }
 
     pub fn run_cleanup(
@@ -87,10 +150,7 @@ impl CommandSupervisor {
         command: &mut Command,
         budget: Duration,
     ) -> Result<(), ProcessError> {
-        let deadline = Instant::now()
-            .checked_add(budget)
-            .filter(|_| !budget.is_zero())
-            .ok_or(ProcessError::InvalidBudget)?;
+        let deadline = deadline(budget)?;
         #[cfg(unix)]
         {
             self.state
@@ -106,7 +166,7 @@ impl CommandSupervisor {
     }
 
     pub fn finish(self) -> Result<(), ProcessError> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let mut owned = self;
             owned
@@ -115,7 +175,7 @@ impl CommandSupervisor {
                 .ok_or(ProcessError::InvalidOutput)?
                 .finish()
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             Err(ProcessError::UnsupportedSupervision)
         }
@@ -124,7 +184,7 @@ impl CommandSupervisor {
 
 impl Drop for CommandSupervisor {
     fn drop(&mut self) {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         if let Some(state) = self.state.take() {
             if let Err(error) = state.finish() {
                 eprintln!("process supervisor cleanup failed: {error}");

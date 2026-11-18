@@ -26,7 +26,7 @@ fn process_fixture() -> Result<(), String> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 #[test]
 fn unsupported_process_supervision_is_explicit() {
     assert!(matches!(

@@ -1,3 +1,4 @@
+use super::Interruption;
 use crate::process::ProcessError;
 use rustix::process::{
     kill_process, kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions,
@@ -18,38 +19,6 @@ pub(super) struct Supervisor {
     reader: UnixStream,
     registrations: [SigId; 2],
     interruption: Interruption,
-}
-
-enum Interruption {
-    Quiet,
-    Pending,
-    Reported,
-}
-
-impl Interruption {
-    fn observe(&mut self) {
-        match self {
-            Self::Quiet => *self = Self::Pending,
-            Self::Pending | Self::Reported => {}
-        }
-    }
-
-    fn report(&mut self) -> Result<(), ProcessError> {
-        match self {
-            Self::Quiet => Ok(()),
-            Self::Pending | Self::Reported => {
-                *self = Self::Reported;
-                Err(ProcessError::Interrupted)
-            }
-        }
-    }
-
-    fn finish(&self) -> Result<(), ProcessError> {
-        match self {
-            Self::Quiet | Self::Reported => Ok(()),
-            Self::Pending => Err(ProcessError::Interrupted),
-        }
-    }
 }
 
 pub(super) struct Service {
