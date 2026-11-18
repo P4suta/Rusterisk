@@ -40,8 +40,10 @@ mise x -- just distribution-server-check-content <candidate-directory> aarch64-a
 mise x -- just distribution-server-check-startup <candidate-directory>
 ```
 
-The startup check selects the current Linux or macOS processor.
-It checks system library resolution, version output, and the packaged configuration before starting an extracted executable.
+The startup check selects the host operating system and processor.
+It checks version output and the packaged configuration before starting an extracted executable.
+On Linux and macOS, it also checks system library resolution before startup.
+On Windows, it checks loaded DLL paths while the extracted executable runs.
 A separate configuration copy changes only the sample HTTP and SIP listener ports.
 The runner retains bounded command logs under `.cache/distributions/server-startup`.
 It requires a complete readiness record, graceful shutdown, and both listener ports to become available.
@@ -59,3 +61,12 @@ mise x -- just distribution-server-check-startup-rosetta <candidate-directory>
 The runner reports `execution=rosetta` and rejects unsupported host combinations.
 Translated startup doesn't establish native Intel performance.
 Use `distribution-server-check-startup-target <candidate-directory> <target>` to select another native target explicitly.
+
+The native plan and build commands accept a Cargo job count and a build timeout in seconds.
+The defaults are two Cargo jobs and a 900-second build timeout.
+The following commands use one Cargo job and a build timeout of 1,800 seconds.
+
+```powershell
+mise x -- just distribution-server-plan x86_64-pc-windows-msvc 1 1800
+mise x -- just distribution-server-build x86_64-pc-windows-msvc 1 1800
+```
