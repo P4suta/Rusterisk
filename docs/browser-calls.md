@@ -49,6 +49,14 @@ The Rust bridge example has separate HTTP and event lifecycle tests.
 The campaign also checks permission recovery, cancellation, keyboard focus, targets, narrow layouts, enlarged text, and spacing.
 Failure reports include bounded process and resource diagnostics.
 
+Use the browser image and local Asterisk image ID to run the same scenarios on both servers.
+The reference run requires a Unix host with Docker Engine that supports isolated bridge mode.
+Use `--dry-run` to inspect the selected images and limits.
+
+```sh
+mise x -- just interop browser --run --image "$browser_image" --reference-image "$asterisk_image"
+```
+
 The Linux ARM64 campaign passed on loopback with Playwright `1.65.1`, Chromium `159.0.8154.6`, and the configured `ulaw` codec.
 The campaign matched 660 Hz at Alice, 440 Hz at Bob, and both test signals in the stored recording.
 VoiceOver, network address translation (NAT) traversal, [Traversal Using Relays around NAT](https://www.rfc-editor.org/rfc/rfc8656.html) media relays, and browser calls with Asterisk `22.9.0` remain unverified by the campaign.
