@@ -11,6 +11,8 @@ pub use crate::core_proofs::Execution;
 pub use capture::CapturedInputFuzz;
 pub use manifest::{normalize_manifest, validate_locks};
 pub use native::{validate_inventory, validate_run};
+#[cfg(unix)]
+pub(crate) use runner::FuzzExecution;
 pub use runner::{execute, InputFuzzOutcome, InputFuzzTargetOutcome, Scope, TargetCompletion};
 pub use targets::{Target, MAX_INPUT};
 

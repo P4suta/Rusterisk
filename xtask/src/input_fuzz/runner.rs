@@ -14,6 +14,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(unix)]
+mod retained;
+#[cfg(unix)]
+pub(crate) use retained::FuzzExecution;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     All,
@@ -60,7 +65,7 @@ struct FuzzIdentity {
     architecture: LinuxTarget,
 }
 
-/// Single-target validation cannot complete all-target validation.
+/// Single-target validation can't complete all-target validation.
 ///
 /// ```compile_fail
 /// use xtask::input_fuzz::{InputFuzzOutcome, InputFuzzTargetOutcome};
@@ -153,6 +158,10 @@ fn finish_all(
         cleanup.map_err(FuzzError::Process),
         "input fuzz supervisor cleanup failed",
     )?;
+    complete_all(checked)
+}
+
+fn complete_all(checked: CheckedFuzz) -> Result<InputFuzzOutcome, FuzzError> {
     if checked.scope != Scope::All
         || checked.runs.len() != Target::ALL.len()
         || checked
@@ -497,19 +506,85 @@ fn verify_with_diagnostics(
     mut perform: impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
     diagnostics: &mut impl io::Write,
 ) -> Result<CheckedFuzz, FuzzError> {
-    let image = ImageIdentity::parse(image).ok_or(FuzzError::Plan)?;
-    let phases = phases(scope)?;
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| FuzzError::Plan)?
-        .as_nanos();
-    let (identity, directory) = reserve(
-        &std::env::temp_dir(),
-        &format!("fuzz-{}-{stamp}", std::process::id()),
-    )?;
-    let source = directory.join("source");
-    let state = directory.join("state");
-    let operation = (|| {
+    let work = WorkingFuzz::new(capture, scope, image, architecture)?;
+    let operation = work.execute(&mut perform, diagnostics);
+    work.close(operation)
+}
+
+struct WorkingFuzz {
+    capture: CapturedInputFuzz,
+    scope: Scope,
+    image: ImageIdentity,
+    architecture: LinuxTarget,
+    identity: String,
+    directory: PathBuf,
+    phases: Vec<Phase>,
+}
+
+impl WorkingFuzz {
+    fn new(
+        capture: CapturedInputFuzz,
+        scope: Scope,
+        image: &str,
+        architecture: LinuxTarget,
+    ) -> Result<Self, FuzzError> {
+        let image = ImageIdentity::parse(image).ok_or(FuzzError::Plan)?;
+        let phases = phases(scope)?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| FuzzError::Plan)?
+            .as_nanos();
+        let parent = fs::canonicalize(std::env::temp_dir())?;
+        let (identity, directory) =
+            reserve(&parent, &format!("fuzz-{}-{stamp}", std::process::id()))?;
+        Ok(Self {
+            capture,
+            scope,
+            image,
+            architecture,
+            identity,
+            directory,
+            phases,
+        })
+    }
+
+    fn check(&self) -> Result<(), FuzzError> {
+        follow(
+            self.capture.check_source(&self.directory.join("source")),
+            self.capture.check_harness(&self.directory.join("state")),
+            "final input fuzz harness check failed",
+        )
+    }
+
+    fn close(
+        self,
+        operation: Result<Vec<TargetCompletion>, FuzzError>,
+    ) -> Result<CheckedFuzz, FuzzError> {
+        follow(
+            operation,
+            fs::remove_dir_all(&self.directory).map_err(FuzzError::Io),
+            "input fuzz temporary cleanup failed",
+        )
+        .map(|runs| CheckedFuzz {
+            identity: FuzzIdentity {
+                capture: self.capture,
+                image: self.image,
+                architecture: self.architecture,
+            },
+            scope: self.scope,
+            runs,
+        })
+    }
+
+    fn execute(
+        &self,
+        perform: &mut impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
+        diagnostics: &mut impl io::Write,
+    ) -> Result<Vec<TargetCompletion>, FuzzError> {
+        let source = self.directory.join("source");
+        let state = self.directory.join("state");
+        let capture = &self.capture;
+        let scope = self.scope;
         for name in ["cargo", "tmp", "target", "artifacts", "corpus"] {
             fs::create_dir_all(state.join(name))?;
         }
@@ -523,12 +598,17 @@ fn verify_with_diagnostics(
                 )?;
             }
         }
-        let plan = plan(&identity, &directory, image.as_str(), architecture)?;
-        print(&capture, scope, &plan, &phases);
+        let plan = plan(
+            &self.identity,
+            &self.directory,
+            self.image.as_str(),
+            self.architecture,
+        )?;
+        print(capture, scope, &plan, &self.phases);
         let mut runs = Vec::new();
-        for phase in phases {
+        for phase in self.phases.iter().copied() {
             let checked = follow(
-                run_phase(&plan, phase, &state, &mut perform),
+                run_phase(&plan, phase, &state, perform),
                 capture.check_source(&source),
                 "input fuzz source check failed",
             );
@@ -538,43 +618,22 @@ fn verify_with_diagnostics(
                 "input fuzz harness check failed",
             );
             let operation = (|| {
-                let bytes = read_output(checked, &directory, phase, diagnostics)?;
+                let bytes = read_output(checked, &self.directory, phase, diagnostics)?;
                 let validation = (|| {
-                    match phase {
-                        Phase::RustVersion => {
-                            let text =
-                                std::str::from_utf8(&bytes).map_err(|_| FuzzError::Results)?;
-                            if !text.lines().any(|line| {
-                                line == "commit-hash: 8925ea358a0f265ca61026aadc7ecc506c545cbe"
-                            }) || !text
-                                .lines()
-                                .any(|line| line == format!("host: {}", architecture.triple()))
-                            {
-                                return Err(FuzzError::Results);
-                            }
+                    if let Some(run) = validate_phase(phase, &bytes, self.architecture)? {
+                        if read_directory(&self.directory, &artifact_path(run.target))?
+                            .next()
+                            .transpose()?
+                            .is_some()
+                        {
+                            return Err(FuzzError::Results);
                         }
-                        Phase::Version => {
-                            if bytes.strip_suffix(b"\n").unwrap_or(&bytes) != b"cargo-fuzz 0.13.2" {
-                                return Err(FuzzError::Results);
-                            }
-                        }
-                        Phase::Inventory => validate_inventory(&bytes)?,
-                        Phase::Fetch | Phase::Build(_) => {}
-                        Phase::Run(target) => {
-                            let executions = validate_run(&bytes, target.seeds().len())?;
-                            if read_directory(&directory, &artifact_path(target))?
-                                .next()
-                                .transpose()?
-                                .is_some()
-                            {
-                                return Err(FuzzError::Results);
-                            }
-                            runs.push(TargetCompletion { target, executions });
-                            println!(
-                                "input fuzz: {} completed {executions} executions",
-                                target.name()
-                            );
-                        }
+                        println!(
+                            "input fuzz: {} completed {executions} executions",
+                            run.target.name(),
+                            executions = run.executions
+                        );
+                        runs.push(run);
                     }
                     Ok(())
                 })();
@@ -587,7 +646,7 @@ fn verify_with_diagnostics(
                 return if let Phase::Run(target) = phase {
                     follow(
                         Err(error),
-                        preserve(capture.root(), &directory, &identity, target),
+                        preserve(capture.root(), &self.directory, &self.identity, target),
                         "input fuzz failing input preservation failed",
                     )
                 } else {
@@ -595,27 +654,44 @@ fn verify_with_diagnostics(
                 };
             }
         }
-        follow(
-            capture.check_source(&source),
-            capture.check_harness(&state),
-            "final input fuzz harness check failed",
-        )?;
+        self.check()?;
         Ok(runs)
-    })();
-    follow(
-        operation,
-        fs::remove_dir_all(directory).map_err(FuzzError::Io),
-        "input fuzz temporary cleanup failed",
-    )
-    .map(|runs| CheckedFuzz {
-        identity: FuzzIdentity {
-            capture,
-            image,
-            architecture,
-        },
-        scope,
-        runs,
-    })
+    }
+}
+
+fn validate_phase(
+    phase: Phase,
+    bytes: &[u8],
+    architecture: LinuxTarget,
+) -> Result<Option<TargetCompletion>, FuzzError> {
+    match phase {
+        Phase::RustVersion => {
+            let text = std::str::from_utf8(bytes).map_err(|_| FuzzError::Results)?;
+            if !text
+                .lines()
+                .any(|line| line == "commit-hash: 8925ea358a0f265ca61026aadc7ecc506c545cbe")
+                || !text
+                    .lines()
+                    .any(|line| line == format!("host: {}", architecture.triple()))
+            {
+                return Err(FuzzError::Results);
+            }
+        }
+        Phase::Version => {
+            if bytes.strip_suffix(b"\n").unwrap_or(bytes) != b"cargo-fuzz 0.13.2" {
+                return Err(FuzzError::Results);
+            }
+        }
+        Phase::Inventory => validate_inventory(bytes)?,
+        Phase::Fetch | Phase::Build(_) => {}
+        Phase::Run(target) => {
+            return Ok(Some(TargetCompletion {
+                target,
+                executions: validate_run(bytes, target.seeds().len())?,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 /// Planning doesn't produce a completed fuzz outcome.

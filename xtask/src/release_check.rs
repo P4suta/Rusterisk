@@ -7,6 +7,7 @@ mod candidate_run;
 mod cli_inputs;
 #[cfg(test)]
 mod cli_inputs_tests;
+mod input_fuzz;
 mod inputs;
 mod miri;
 mod native;

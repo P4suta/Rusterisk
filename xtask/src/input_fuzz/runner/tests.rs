@@ -5,8 +5,9 @@ use crate::{
     release_check::SourceInputs,
 };
 use std::io;
+mod artifacts;
 #[path = "tests/fixture.rs"]
-mod fixture;
+pub(super) mod fixture;
 use fixture::{using_fixture, Fault, IMAGE};
 
 const ARCH: LinuxTarget = LinuxTarget::Arm64;
