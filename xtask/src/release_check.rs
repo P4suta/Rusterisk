@@ -19,6 +19,7 @@ mod native_artifacts;
 #[cfg(all(test, unix))]
 mod native_artifacts_tests;
 mod oci;
+mod proofs;
 mod reference;
 mod sanitizers;
 mod sdk;

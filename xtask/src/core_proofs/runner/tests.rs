@@ -5,7 +5,8 @@ use crate::{
     release_check::SourceInputs,
 };
 use std::io;
-mod fixture;
+mod artifacts;
+pub(crate) mod fixture;
 use fixture::{using_fixture, Fault, IMAGE};
 
 #[test]

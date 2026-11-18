@@ -14,7 +14,7 @@ pub enum Execution {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum CommandMode {
+pub(crate) enum CommandMode {
     Work,
     Cleanup,
 }
@@ -134,7 +134,7 @@ fn print(plan: &CoreProofPlan) {
     );
 }
 
-fn native(path: &Path) -> Result<(), ProofError> {
+fn native_bytes(path: &Path) -> Result<Vec<u8>, ProofError> {
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_file() || metadata.len() > 4 * 1024 * 1024 {
         return Err(ProofError::Results);
@@ -143,7 +143,168 @@ fn native(path: &Path) -> Result<(), ProofError> {
     std::fs::File::open(path)?
         .take(4 * 1024 * 1024 + 1)
         .read_to_end(&mut bytes)?;
-    validate_results(&bytes)
+    validate_results(&bytes)?;
+    Ok(bytes)
+}
+
+fn native(path: &Path) -> Result<(), ProofError> {
+    native_bytes(path).map(|_| ())
+}
+
+fn perform_plan(
+    plan: &CoreProofPlan,
+    perform: &mut impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
+) -> Result<(), ProofError> {
+    let step = plan.run();
+    let result = perform(
+        Command::new("docker").args(&step.arguments),
+        step.budget,
+        CommandMode::Work,
+    );
+    let cleanup = match &result {
+        Ok(()) | Err(ProcessError::Status(_)) => Ok(()),
+        Err(
+            ProcessError::Io(_)
+            | ProcessError::Timeout
+            | ProcessError::InvalidBudget
+            | ProcessError::InvalidOutput
+            | ProcessError::Interrupted
+            | ProcessError::UnsupportedSupervision
+            | ProcessError::Cleanup { .. },
+        ) => {
+            let step = plan.cleanup();
+            perform(
+                Command::new("docker").args(&step.arguments),
+                step.budget,
+                CommandMode::Cleanup,
+            )
+        }
+    };
+    combine(result.map_err(ProofError::Process), cleanup)
+}
+
+fn follow<T>(
+    operation: Result<T, ProofError>,
+    follow_up: Result<(), ProofError>,
+    context: &'static str,
+) -> Result<T, ProofError> {
+    match (operation, follow_up) {
+        (operation, Ok(())) => operation,
+        (Ok(_), Err(error)) => Err(error),
+        (Err(operation), Err(error)) => Err(ProofError::FollowUp {
+            operation: operation.to_string(),
+            context,
+            follow_up: error.to_string(),
+        }),
+    }
+}
+
+#[cfg(unix)]
+pub(crate) struct RetainedProof {
+    checked: CheckedProof,
+    source: PathBuf,
+    results: PathBuf,
+}
+
+#[cfg(unix)]
+impl RetainedProof {
+    pub(crate) fn source_root(&self) -> &Path {
+        Path::new(&self.checked.plan.source)
+    }
+
+    pub(crate) fn results_root(&self) -> &Path {
+        &self.results
+    }
+
+    pub(crate) fn check(&self) -> Result<(), ProofError> {
+        follow(
+            self.checked.captured.check(&self.source),
+            native(&self.results.join("kani.json")),
+            "retained proof output check failed",
+        )
+    }
+
+    pub(crate) fn preserve(&self, directory: &Path) -> Result<(), ProofError> {
+        use std::io::Write;
+        self.checked
+            .captured
+            .write(&directory.join("core-source"))?;
+        let results = directory.join("results");
+        std::fs::create_dir(&results)?;
+        let bytes = native_bytes(&self.results.join("kani.json"))?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(results.join("kani.json"))?;
+        file.write_all(&bytes)?;
+        file.flush()?;
+        Ok(())
+    }
+
+    pub(crate) fn into_outcome(self) -> CoreProofOutcome {
+        CoreProofOutcome {
+            captured: self.checked.captured,
+            plan: self.checked.plan,
+        }
+    }
+
+    pub(crate) fn check_preserved(&self, directory: &Path) -> Result<(), ProofError> {
+        follow(
+            self.checked.captured.check(&directory.join("core-source")),
+            native(&directory.join("results/kani.json")),
+            "preserved proof output check failed",
+        )
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn verify_retained(
+    captured: CapturedCoreProofs,
+    image: &str,
+    identity: &str,
+    directory: &Path,
+    mut perform: impl FnMut(&mut Command, Duration, CommandMode) -> Result<(), ProcessError>,
+) -> Result<RetainedProof, ProofError> {
+    let source = directory.join("source");
+    let results = directory.join("results");
+    let plan = CoreProofPlan::new(
+        identity,
+        source
+            .join("crates/core")
+            .to_str()
+            .ok_or(ProofError::Plan)?,
+        results.to_str().ok_or(ProofError::Plan)?,
+        image,
+    )?;
+    captured.write(&source)?;
+    std::fs::create_dir(&results)?;
+    print(&plan);
+    follow(
+        perform_plan(&plan, &mut perform),
+        captured.check(&source),
+        "captured proof source check failed",
+    )?;
+    native(&results.join("kani.json"))?;
+    Ok(RetainedProof {
+        checked: CheckedProof { captured, plan },
+        source,
+        results,
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn read_retained(
+    captured: CapturedCoreProofs,
+    source: &Path,
+    results: &Path,
+    plan: CoreProofPlan,
+) -> Result<CoreProofOutcome, ProofError> {
+    follow(
+        captured.check(source),
+        native(&results.join("kani.json")),
+        "retained proof output check failed",
+    )?;
+    Ok(CoreProofOutcome { captured, plan })
 }
 
 fn verify_with(
@@ -174,43 +335,11 @@ fn verify_with(
             image,
         )?;
         print(&plan);
-        let step = plan.run();
-        let result = perform(
-            Command::new("docker").args(&step.arguments),
-            step.budget,
-            CommandMode::Work,
-        );
-        let cleanup = match &result {
-            Ok(()) | Err(ProcessError::Status(_)) => Ok(()),
-            Err(
-                ProcessError::Io(_)
-                | ProcessError::Timeout
-                | ProcessError::InvalidBudget
-                | ProcessError::InvalidOutput
-                | ProcessError::Interrupted
-                | ProcessError::UnsupportedSupervision
-                | ProcessError::Cleanup { .. },
-            ) => {
-                let step = plan.cleanup();
-                perform(
-                    Command::new("docker").args(&step.arguments),
-                    step.budget,
-                    CommandMode::Cleanup,
-                )
-            }
-        };
-        let operation = combine(result.map_err(ProofError::Process), cleanup);
-        match (operation, captured.check(&source)) {
-            (Ok(()), Ok(())) => {}
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(error),
-            (Err(operation), Err(error)) => {
-                return Err(ProofError::FollowUp {
-                    operation: operation.to_string(),
-                    context: "captured proof source check failed",
-                    follow_up: error.to_string(),
-                })
-            }
-        }
+        follow(
+            perform_plan(&plan, &mut perform),
+            captured.check(&source),
+            "captured proof source check failed",
+        )?;
         native(&results.join("kani.json"))?;
         Ok(plan)
     })();
@@ -241,3 +370,6 @@ pub fn execute(execution: Execution, image: &str) -> Result<(), ProofError> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, unix))]
+pub(crate) use tests::fixture as artifact_fixture;

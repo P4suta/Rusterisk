@@ -4,7 +4,11 @@ use std::time::Duration;
 mod capture;
 mod runner;
 pub use capture::CapturedCoreProofs;
+#[cfg(all(test, unix))]
+pub(crate) use runner::artifact_fixture;
 pub use runner::{execute, plan, CoreProofOutcome, Execution};
+#[cfg(unix)]
+pub(crate) use runner::{read_retained, verify_retained, CommandMode};
 
 pub const HARNESSES: [&str; 18] = [
     "proofs::terminal_release_is_absorbing",

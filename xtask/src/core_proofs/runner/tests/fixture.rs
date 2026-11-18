@@ -54,7 +54,7 @@ impl Fixture {
             .as_deref()
             .ok_or_else(|| io::Error::other("proof working directory missing"))
     }
-    pub fn perform(
+    pub(in crate::core_proofs::runner) fn perform(
         &mut self,
         command: &mut Command,
         budget: Duration,
@@ -156,6 +156,24 @@ impl Fixture {
             Fault::LinkedResult | Fault::BlockedCleanup => Ok(()),
         }
     }
+    #[cfg(unix)]
+    pub fn perform_work(
+        &mut self,
+        command: &mut Command,
+        budget: Duration,
+    ) -> Result<(), ProcessError> {
+        self.perform(command, budget, CommandMode::Work)
+    }
+
+    #[cfg(unix)]
+    pub fn perform_cleanup(
+        &mut self,
+        command: &mut Command,
+        budget: Duration,
+    ) -> Result<(), ProcessError> {
+        self.perform(command, budget, CommandMode::Cleanup)
+    }
+
     fn close(self) -> io::Result<()> {
         if let Some(path) = self.temporary {
             if path.exists() {
@@ -179,7 +197,7 @@ pub fn using_fixture(test: impl FnOnce(&mut Fixture) -> io::Result<()>) -> io::R
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
+    let root = std::fs::canonicalize(std::env::temp_dir())?.join(format!(
         "rusterisk-proof-fixture-{}-{stamp}-{}",
         std::process::id(),
         std::panic::Location::caller().line()
