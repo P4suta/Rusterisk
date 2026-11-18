@@ -68,9 +68,14 @@ struct File {
     bytes: Vec<u8>,
 }
 
-struct Remaining {
+#[cfg(test)]
+#[path = "source_tests.rs"]
+mod tests;
+
+struct Remaining<'a> {
     files: usize,
     bytes: usize,
+    distribution: &'a SourceSnapshot,
 }
 
 fn directory(path: &Path) -> Result<(), ReleaseSourceError> {
@@ -98,9 +103,13 @@ fn add(
     root: &Path,
     relative: &Path,
     files: &mut Vec<File>,
-    remaining: &mut Remaining,
+    remaining: &mut Remaining<'_>,
 ) -> Result<(), ReleaseSourceError> {
-    if remaining.files == 0 {
+    let shared = remaining
+        .distribution
+        .files()
+        .find_map(|(path, bytes)| (path == relative).then_some(bytes));
+    if shared.is_none() && remaining.files == 0 {
         return Err(InputError::Limit.into());
     }
     parents(root, relative)?;
@@ -108,13 +117,24 @@ fn add(
     if !fs::symlink_metadata(&path)?.is_file() {
         return Err(ReleaseSourceError::Invalid);
     }
-    let limit = remaining.bytes.min(1024 * 1024);
+    let limit = if shared.is_some() {
+        1024 * 1024
+    } else {
+        remaining.bytes.min(1024 * 1024)
+    };
     let mut bytes = Vec::new();
     fs::File::open(path)?
         .take(limit as u64 + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() > limit {
         return Err(InputError::Limit.into());
+    }
+    if let Some(expected) = shared {
+        return if bytes == expected {
+            Ok(())
+        } else {
+            Err(ReleaseSourceError::Changed)
+        };
     }
     remaining.files -= 1;
     remaining.bytes -= bytes.len();
@@ -129,7 +149,7 @@ fn walk(
     root: &Path,
     relative: &Path,
     files: &mut Vec<File>,
-    remaining: &mut Remaining,
+    remaining: &mut Remaining<'_>,
     depth: u8,
 ) -> Result<(), ReleaseSourceError> {
     if depth > 8 {
@@ -168,6 +188,7 @@ impl CapturedReleaseSource {
             total.checked_add(bytes.len()).ok_or(InputError::Limit)
         })?;
         let mut remaining = Remaining {
+            distribution: &distribution,
             files: SourceInputs::MAX_FILES
                 .checked_sub(distribution.files().count())
                 .ok_or(InputError::Limit)?,

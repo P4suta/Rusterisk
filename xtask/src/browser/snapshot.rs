@@ -5,6 +5,8 @@ use std::{
 };
 
 const MAX_SOURCE_FILES: usize = 2048;
+const SHARED_ADAPTER: &str = "tests/interop/node-ari-client/project-service-only";
+const SHARED_ADAPTER_FILES: [&str; 3] = ["package.json", "index.mjs", "index.ts"];
 
 const BROWSER_FILES: [&str; 13] = [
     "package.json",
@@ -255,6 +257,30 @@ fn browser(path: &Path, files: &mut Vec<File>) -> Result<(), SourceError> {
     Ok(())
 }
 
+fn shared_adapter(root: &Path, files: &mut Vec<File>) -> Result<(), SourceError> {
+    let relative = Path::new(SHARED_ADAPTER);
+    parents(root, relative)?;
+    let path = root.join(relative);
+    directory(&path)?;
+    for entry in std::fs::read_dir(&path)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !name
+            .to_str()
+            .is_some_and(|name| SHARED_ADAPTER_FILES.contains(&name))
+            || !entry.file_type()?.is_file()
+        {
+            return Err(SourceError::Invalid);
+        }
+    }
+    for name in SHARED_ADAPTER_FILES {
+        let relative = relative.join(name);
+        parents(root, &relative)?;
+        add(&root.join(&relative), &relative, files)?;
+    }
+    Ok(())
+}
+
 impl SourceSnapshot {
     pub const MAX_FILES: usize = MAX_SOURCE_FILES;
 
@@ -322,6 +348,7 @@ impl SourceSnapshot {
         }
         parents(root, Path::new("examples/browser"))?;
         browser(&root.join("examples/browser"), &mut files)?;
+        shared_adapter(root, &mut files)?;
         vendor(root, &manifest, &mut files)?;
         files.sort_by(|left, right| left.path.cmp(&right.path));
         if files.windows(2).any(|pair| pair[0].path == pair[1].path) {

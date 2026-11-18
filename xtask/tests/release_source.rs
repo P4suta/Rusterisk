@@ -47,7 +47,6 @@ fn captured_sources_keep_required_empty_directories_through_copy_and_check() -> 
             "api",
             "containers",
             ".github/workflows",
-            "tests/interop/node-ari-client",
             "tests/interop/sipp",
             "docs/adr",
         ];

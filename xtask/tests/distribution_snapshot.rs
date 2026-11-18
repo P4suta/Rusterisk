@@ -44,6 +44,13 @@ fn project(root: &Path) -> Result<(), std::io::Error> {
     ] {
         write(root, &format!("examples/browser/{path}"), b"fixture")?;
     }
+    for file in ["package.json", "index.mjs", "index.ts"] {
+        write(
+            root,
+            &format!("tests/interop/node-ari-client/project-service-only/{file}"),
+            b"fixture",
+        )?;
+    }
     for path in [
         "LICENSE-MIT",
         "LICENSE-APACHE",

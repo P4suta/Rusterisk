@@ -98,6 +98,13 @@ repository = "https://github.com/P4suta/Rusterisk"
     ] {
         write(root, &format!("examples/browser/{path}"), b"fixture")?;
     }
+    for file in ["package.json", "index.mjs", "index.ts"] {
+        write(
+            root,
+            &format!("tests/interop/node-ari-client/project-service-only/{file}"),
+            b"fixture",
+        )?;
+    }
     for package in ["core", "api", "client"] {
         for file in ["LICENSE-MIT", "LICENSE-APACHE"] {
             write(root, &format!("crates/{package}/{file}"), b"fixture")?;

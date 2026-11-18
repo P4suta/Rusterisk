@@ -4,6 +4,8 @@ use std::{
 };
 use xtask::browser::SourceSnapshot;
 
+#[path = "browser_snapshot/shared_adapter.rs"]
+mod shared_adapter;
 #[path = "browser_snapshot/vendor.rs"]
 mod vendor;
 
@@ -48,6 +50,13 @@ fn project(root: &Path) -> Result<(), std::io::Error> {
         "config/extensions.conf",
     ] {
         write(root, &format!("examples/browser/{path}"), b"fixture")?;
+    }
+    for file in ["package.json", "index.mjs", "index.ts"] {
+        write(
+            root,
+            &format!("tests/interop/node-ari-client/project-service-only/{file}"),
+            b"fixture",
+        )?;
     }
     Ok(())
 }

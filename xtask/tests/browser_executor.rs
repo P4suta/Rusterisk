@@ -61,6 +61,13 @@ fn browser_executor_stops_after_a_deadline_cleans_only_the_owned_container_and_r
         ] {
             write(&root, &format!("examples/browser/{path}"), b"fixture")?;
         }
+        for file in ["package.json", "index.mjs", "index.ts"] {
+            write(
+                &root,
+                &format!("tests/interop/node-ari-client/project-service-only/{file}"),
+                b"fixture",
+            )?;
+        }
         let mut invocations = Vec::new();
         let mut temporary: Option<PathBuf> = None;
         let outcome = execute_with(
