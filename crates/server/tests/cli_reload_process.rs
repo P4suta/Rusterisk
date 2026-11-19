@@ -224,10 +224,10 @@ impl HttpFixture {
 
     async fn finish(self, primary: io::Result<Output>) -> io::Result<Output> {
         let Self {
-            address,
             lifetime,
             mut server,
             mut observations,
+            ..
         } = self;
         drop(lifetime);
         let joined = match tokio::time::timeout(Duration::from_secs(2), &mut server).await {
@@ -269,8 +269,7 @@ impl HttpFixture {
                 "Reload issued more than one management request",
             )
         })();
-        let primary = combine(combine(primary, joined), checked);
-        combine(primary, TcpListener::bind(address).map(drop))
+        combine(combine(primary, joined), checked)
     }
 }
 
@@ -419,9 +418,7 @@ async fn rejected_input(input: &[u8], secret: &[u8]) -> io::Result<()> {
                 ))
             }
         };
-        drop(listener);
-        let primary = combine(primary, unconnected);
-        combine(primary, TcpListener::bind(address).map(drop))
+        combine(primary, unconnected)
     }
     .await;
     let primary = combine(primary, unchanged(directory.path()));
