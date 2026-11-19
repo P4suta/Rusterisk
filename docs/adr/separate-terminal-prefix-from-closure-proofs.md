@@ -8,7 +8,7 @@ status: proposed
 ## Context
 
 The terminal cleanup harness expanded independent four-operation prefixes and suffixes as one product.
-The isolated harness needed 102 seconds, and the complete two-GiB campaign exhausted memory.
+The isolated harness needed 102 seconds, the complete campaign exhausted two GiB, and successful JSON occupied 5,356,510 bytes.
 The terminal transition and post-terminal closure are independent properties.
 Kani 0.68 evaluates proof definitions in reverse source order.
 
@@ -20,6 +20,7 @@ The closure mode starts from a canonical ended call and applies every four-opera
 Assert the same complete call value after each suffix operation.
 Keep the existing limits, assertions, and cover goals without assumptions or stubs.
 Define the terminal harness after every other harness.
+Retained JSON is capped at eight MiB.
 
 ## Alternatives
 

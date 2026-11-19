@@ -33,6 +33,7 @@ pub const HARNESSES: [&str; 18] = [
 
 pub(crate) const SOLVER: &str = "kissat";
 pub(crate) const SCRATCH_MOUNT: &str = "type=volume,target=/tmp,volume-nocopy";
+pub(crate) const RESULTS_BYTE_LIMIT: usize = 8 * 1024 * 1024;
 
 #[derive(Deserialize)]
 struct Manifest {
@@ -299,7 +300,7 @@ enum CheckStatus {
 }
 
 pub fn validate_results(bytes: &[u8]) -> Result<(), ProofError> {
-    if bytes.len() > 4 * 1024 * 1024 {
+    if bytes.len() > RESULTS_BYTE_LIMIT {
         return Err(ProofError::Results);
     }
     let export: Export = serde_json::from_slice(bytes).map_err(ProofError::Json)?;

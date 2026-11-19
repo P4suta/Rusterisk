@@ -1,5 +1,8 @@
 use super::{CapturedCoreProofs, CommandMode};
-use crate::{core_proofs::HARNESSES, process::ProcessError};
+use crate::{
+    core_proofs::{HARNESSES, RESULTS_BYTE_LIMIT},
+    process::ProcessError,
+};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -107,7 +110,7 @@ impl Fixture {
             Fault::None | Fault::Interrupted | Fault::TimedOut => std::fs::write(&result, text)?,
             Fault::FullResult => {
                 let mut bytes = text.into_bytes();
-                bytes.resize(4 * 1024 * 1024, b' ');
+                bytes.resize(RESULTS_BYTE_LIMIT, b' ');
                 std::fs::write(&result, bytes)?;
             }
             Fault::Missing => {}
@@ -127,7 +130,9 @@ impl Fixture {
                 )?;
             }
             Fault::Uncovered => std::fs::write(&result, text.replace("Satisfied", "Uncovered"))?,
-            Fault::Oversized => std::fs::File::create(&result)?.set_len(4 * 1024 * 1024 + 1)?,
+            Fault::Oversized => {
+                std::fs::File::create(&result)?.set_len(RESULTS_BYTE_LIMIT as u64 + 1)?;
+            }
             Fault::ChangedSource => {
                 std::fs::write(&result, text)?;
                 std::fs::write(source.join("src/lib.rs"), b"changed captured source")?;
