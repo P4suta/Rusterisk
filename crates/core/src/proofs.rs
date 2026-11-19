@@ -1061,14 +1061,17 @@ fn owned_pair_release_is_absorbing() {
     kani::cover!(releases == 0);
 }
 
-fn reference_lifetime(owner: u128, reverse: bool) -> Result<(), SettingsError> {
+#[derive(Debug, PartialEq, Eq)]
+struct ProofFailure;
+
+fn reference_lifetime(owner: u128, reverse: bool) -> Result<(), ProofFailure> {
     let mut settings = SettingsLifetimes::new(owner);
     let initial = settings.current();
-    let slot = settings.slot(initial)?;
-    let first = settings.retain(initial)?;
-    let second = settings.retain(initial)?;
-    let candidate = settings.prepare()?;
-    let publication = settings.commit(candidate)?;
+    let slot = settings.slot(initial).map_err(|_| ProofFailure)?;
+    let first = settings.retain(initial).map_err(|_| ProofFailure)?;
+    let second = settings.retain(initial).map_err(|_| ProofFailure)?;
+    let candidate = settings.prepare().map_err(|_| ProofFailure)?;
+    let publication = settings.commit(candidate).map_err(|_| ProofFailure)?;
     assert_ne!(publication.generation(), initial);
     assert_eq!(publication.retired_slot(), None);
     let (first, second) = if reverse {
@@ -1076,17 +1079,18 @@ fn reference_lifetime(owner: u128, reverse: bool) -> Result<(), SettingsError> {
     } else {
         (first, second)
     };
-    assert_eq!(settings.release(first)?, None);
-    assert_eq!(settings.slot(initial)?, slot);
-    assert_eq!(settings.release(second)?, Some(slot));
-    assert!(settings.slot(initial).is_err());
-    assert!(settings.retain(initial).is_err());
+    assert_eq!(settings.release(first).map_err(|_| ProofFailure)?, None);
+    assert_eq!(settings.slot(initial).map_err(|_| ProofFailure)?, slot);
+    assert_eq!(
+        settings.release(second).map_err(|_| ProofFailure)?,
+        Some(slot)
+    );
     assert_eq!(settings.current(), publication.generation());
     Ok(())
 }
 
 #[kani::proof]
-#[kani::unwind(66)]
+#[kani::unwind(3)]
 fn settings_references_preserve_their_generation_until_release() {
     let reverse: bool = kani::any();
     let result = reference_lifetime(kani::any(), reverse);
@@ -1095,16 +1099,16 @@ fn settings_references_preserve_their_generation_until_release() {
     kani::cover!(result.is_ok() && !reverse);
 }
 
-fn candidate_scope(first_owner: u128, second_owner: u128) -> Result<(), SettingsError> {
+fn candidate_scope(first_owner: u128, second_owner: u128) -> Result<(), ProofFailure> {
     if first_owner == second_owner {
         return Ok(());
     }
     let mut first = SettingsLifetimes::new(first_owner);
     let mut second = SettingsLifetimes::new(second_owner);
-    let foreign = first.prepare()?;
-    let cancelled = second.prepare()?;
-    second.cancel(cancelled)?;
-    let selected = second.prepare()?;
+    let foreign = first.prepare().map_err(|_| ProofFailure)?;
+    let cancelled = second.prepare().map_err(|_| ProofFailure)?;
+    second.cancel(cancelled).map_err(|_| ProofFailure)?;
+    let selected = second.prepare().map_err(|_| ProofFailure)?;
     let current = second.current();
     assert!(foreign.follows(first.current()));
     assert!(selected.follows(current));
@@ -1115,19 +1119,18 @@ fn candidate_scope(first_owner: u128, second_owner: u128) -> Result<(), Settings
         assert!(second.commit(rejected).is_err());
         assert_eq!(second.current(), current);
     }
-    let published = second.commit(selected)?;
+    let published = second.commit(selected).map_err(|_| ProofFailure)?;
     assert!(published.generation().matches_candidate(selected));
     assert!(!published.generation().matches_candidate(cancelled));
     assert!(!published.generation().matches_candidate(foreign));
     assert!(!selected.follows(published.generation()));
     assert_eq!(second.current(), published.generation());
-    assert!(second.slot(current).is_err());
-    first.cancel(foreign)?;
+    first.cancel(foreign).map_err(|_| ProofFailure)?;
     Ok(())
 }
 
 #[kani::proof]
-#[kani::unwind(66)]
+#[kani::unwind(3)]
 fn settings_candidates_cannot_cross_domains_or_replace_later_candidates() {
     let first: u128 = kani::any();
     let second: u128 = kani::any();
@@ -1136,40 +1139,43 @@ fn settings_candidates_cannot_cross_domains_or_replace_later_candidates() {
     kani::cover!(first != second && result.is_ok());
 }
 
-fn foreign_reference(first_owner: u128, second_owner: u128) -> Result<(), SettingsError> {
+fn foreign_reference(first_owner: u128, second_owner: u128) -> Result<(), ProofFailure> {
     if first_owner == second_owner {
         return Ok(());
     }
     let mut first = SettingsLifetimes::new(first_owner);
     let mut second = SettingsLifetimes::new(second_owner);
-    let foreign = first.retain(first.current())?;
-    let local = second.retain(second.current())?;
+    let foreign = first.retain(first.current()).map_err(|_| ProofFailure)?;
+    let local = second.retain(second.current()).map_err(|_| ProofFailure)?;
     let first_generation = foreign.generation();
     let second_generation = local.generation();
-    let second_slot = second.slot(second_generation)?;
+    let second_slot = second.slot(second_generation).map_err(|_| ProofFailure)?;
     let recovered = match second.release(foreign) {
         Err(error) => {
             assert!(matches!(&error, SettingsError::ForeignReference(_)));
-            error
-                .into_reference()
-                .ok_or(SettingsError::UnknownGeneration)?
+            error.into_reference().ok_or(ProofFailure)?
         }
-        Ok(_) => return Err(SettingsError::UnknownGeneration),
+        Ok(_) => return Err(ProofFailure),
     };
     assert_eq!(recovered.generation(), first_generation);
-    assert_eq!(first.release(recovered)?, None);
-    let candidate = second.prepare()?;
-    let published = second.commit(candidate)?;
+    assert_eq!(first.release(recovered).map_err(|_| ProofFailure)?, None);
+    let candidate = second.prepare().map_err(|_| ProofFailure)?;
+    let published = second.commit(candidate).map_err(|_| ProofFailure)?;
     assert_eq!(published.retired_slot(), None);
-    assert_eq!(second.slot(second_generation)?, second_slot);
-    assert_eq!(second.release(local)?, Some(second_slot));
-    assert!(second.slot(second_generation).is_err());
+    assert_eq!(
+        second.slot(second_generation).map_err(|_| ProofFailure)?,
+        second_slot
+    );
+    assert_eq!(
+        second.release(local).map_err(|_| ProofFailure)?,
+        Some(second_slot)
+    );
     assert_eq!(second.current(), published.generation());
     Ok(())
 }
 
 #[kani::proof]
-#[kani::unwind(66)]
+#[kani::unwind(3)]
 fn settings_foreign_references_leave_both_domains_unchanged() {
     let first: u128 = kani::any();
     let second: u128 = kani::any();

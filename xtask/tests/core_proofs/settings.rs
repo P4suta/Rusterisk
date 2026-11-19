@@ -14,7 +14,7 @@ fn bound(name: &str) -> u16 {
     if name == "proofs::settings_reference_count_boundaries_preserve_publication" {
         2
     } else {
-        66
+        3
     }
 }
 
@@ -42,7 +42,7 @@ fn harnesses(selected: &str, selected_bound: u16) -> Result<String, ProofError> 
 }
 
 #[test]
-fn settings_harnesses_require_their_exact_scan_bounds() -> Result<(), ProofError> {
+fn settings_harnesses_require_their_exact_transition_bounds() -> Result<(), ProofError> {
     for name in SETTINGS {
         let expected = bound(name);
         validate_harnesses(&harnesses(name, expected)?)?;

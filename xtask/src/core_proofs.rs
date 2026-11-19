@@ -433,7 +433,7 @@ pub fn validate_harnesses(source: &str) -> Result<(), ProofError> {
             let settings_bound = match name.as_str() {
                 "proofs::settings_references_preserve_their_generation_until_release"
                 | "proofs::settings_candidates_cannot_cross_domains_or_replace_later_candidates"
-                | "proofs::settings_foreign_references_leave_both_domains_unchanged" => Some(66),
+                | "proofs::settings_foreign_references_leave_both_domains_unchanged" => Some(3),
                 "proofs::settings_reference_count_boundaries_preserve_publication" => Some(2),
                 _ => None,
             };

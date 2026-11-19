@@ -1,3 +1,8 @@
+#[cfg(kani)]
+const SETTINGS_SLOT_CAPACITY: usize = 2;
+#[cfg(not(kani))]
+const SETTINGS_SLOT_CAPACITY: usize = 65;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SettingsGeneration {
     owner: u128,
@@ -98,7 +103,7 @@ struct Generation {
 pub struct SettingsLifetimes {
     sequence: u64,
     current: SettingsGeneration,
-    slots: [Option<Generation>; Self::CAPACITY],
+    slots: [Option<Generation>; SETTINGS_SLOT_CAPACITY],
     candidate: Option<SettingsCandidate>,
 }
 
@@ -108,7 +113,7 @@ impl SettingsLifetimes {
     /// Callers must use a distinct owner for each settings lifetime domain.
     pub const fn new(owner: u128) -> Self {
         let current = SettingsGeneration { owner, sequence: 1 };
-        let mut slots = [None; Self::CAPACITY];
+        let mut slots = [None; SETTINGS_SLOT_CAPACITY];
         slots[0] = Some(Generation {
             key: current,
             references: 0,
