@@ -83,6 +83,9 @@ The attended case changes both surviving signals after confirming retirement of 
 The [transfer profile](blind-transfer.md) records received-audio requirements and remaining wire differences.
 
 The runner compares authenticated registration and removal on both servers with [the same SIPp scenario](../tests/interop/sipp/registration.xml).
+Between registration and removal, SIPp sends a `BYE` for an unknown dialog.
+The comparison requires the `481` response recommended by [RFC 3261 section 15.1.2](https://www.rfc-editor.org/rfc/rfc3261.html#section-15.1.2).
+SIPp matches the response to the `BYE` transaction by its Via branch.
 The runner requires complete native SIPp call statistics before proceeding to the remaining server cases.
 The paired browser campaign verifies received tones and completed recordings on both servers with [the same browser app](browser-calls.md).
 Broader signaling coverage remains unverified.
