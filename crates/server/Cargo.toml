@@ -58,7 +58,7 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = [
 rustls-native-certs = "0.8.5"
 x509-parser = { version = "=0.18.1", default-features = false }
 rsipstack = { version = "=0.8.6", default-features = false, features = ["std"] }
-tower-http = { version = "0.6.8", default-features = false, features = [
+tower-http = { version = "0.7.1", default-features = false, features = [
   "timeout",
 ] }
 
