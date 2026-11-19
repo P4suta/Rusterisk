@@ -8,7 +8,7 @@ status: proposed
 ## Context
 
 The comparison fixture and browser example use `projectService: true`.
-[The pinned parser bypasses glob project resolution](https://github.com/typescript-eslint/typescript-eslint/blob/v8.72.2/packages/typescript-estree/src/parseSettings/createParseSettings.ts#L210-L218).
+[The pinned parser bypasses glob project resolution](https://github.com/typescript-eslint/typescript-eslint/blob/v8.73.0/packages/typescript-estree/src/parseSettings/createParseSettings.ts#L228-L237).
 Its glob resolver brings [unpatched picomatch repetition](https://github.com/advisories/GHSA-fc5q-39xc-vjpf).
 
 ## Decision

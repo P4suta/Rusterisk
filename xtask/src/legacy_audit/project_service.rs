@@ -210,12 +210,12 @@ pub(super) fn verify(
         .get(RESOLVER)
         .ok_or(AuditError::Boundary)?;
     if manifest.overrides.len() != 1
-        || resolver.minimatch != "11.0.1"
+        || resolver.minimatch != "11.0.9"
         || resolver.tinyglobby != role.override_path()
         || lock
             .packages
             .get("node_modules/@typescript-eslint/typescript-estree")
-            .is_none_or(|package| package.version.as_deref() != Some("8.72.2"))
+            .is_none_or(|package| package.version.as_deref() != Some("8.73.0"))
         || !lock.packages.get(role.entry()).is_some_and(local_package)
         || !lock
             .packages
