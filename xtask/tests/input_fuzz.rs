@@ -37,6 +37,12 @@ fn fuzz_phases_separate_fetch_build_and_native_execution_with_owned_limits() -> 
             );
         }
         assert!(step.budget.as_secs() <= 900);
+        let file_limit = if matches!(phase, Phase::Build(_)) {
+            "fsize=536870912:536870912"
+        } else {
+            "fsize=134217728:134217728"
+        };
+        assert!(step.arguments.iter().any(|argument| argument == file_limit));
         assert!(plan
             .cleanup(phase)
             .arguments
