@@ -65,6 +65,15 @@ The [audio bridge decision](adr/report-bridge-video-mode-within-supported-media.
 External channel comparisons check bound transport variables and Stasis participation.
 Audio comparisons connect two external channels to a bridge on each server.
 Both directions send distinct known samples and check received sample values for `PCMU` and `PCMA`.
+
+The hold music comparison checks looping, `channels.mute`, playback interruption, and resource release.
+Asterisk suppresses outgoing voice packets while the other channel continues receiving audio.
+Rusterisk sends silence on the muted channel.
+After channel playback interrupts hold music, the [channel contract](https://docs.asterisk.org/Asterisk_22_Documentation/API_Documentation/Asterisk_REST_Interface/Channels_REST_API/#startmoh) requires an explicit start.
+The comparison receives silence from Rusterisk until an explicit start.
+On a bridged external media channel, Asterisk 22.9.0 resumes hold music when channel playback ends.
+The comparison checks the resumed audio and then stops it explicitly.
+
 Recording comparisons use the Rust client to start channel and bridge recordings on each server.
 The client waits for `RecordingFinished` before downloading the completed audio.
 At least 80 milliseconds of consecutive samples must match the received channel input or bridge mix.

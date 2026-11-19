@@ -310,14 +310,14 @@ async fn pump(peers: &[Peer; 2], mut stopped: watch::Receiver<bool>) -> Result<(
 }
 
 #[derive(Clone, Copy)]
-pub enum RtpClock {
-    FirstSample,
+pub enum ComparisonServer {
+    Rusterisk,
     Asterisk,
 }
 
 struct AudioWindow {
     expected: i32,
-    clock: RtpClock,
+    server: ComparisonServer,
     last: Option<(u32, u16, u32, u32)>,
     first: Option<Instant>,
     samples: u32,
@@ -325,10 +325,10 @@ struct AudioWindow {
 }
 
 impl AudioWindow {
-    fn new(expected: i32, clock: RtpClock) -> Self {
+    fn new(expected: i32, server: ComparisonServer) -> Self {
         Self {
             expected,
-            clock,
+            server,
             last: None,
             first: None,
             samples: 0,
@@ -360,9 +360,9 @@ impl AudioWindow {
         let mut restart = false;
         if let Some((ssrc, sequence, timestamp, previous_samples)) = self.last {
             let expected_sequence = sequence.wrapping_add(1);
-            let step = match self.clock {
-                RtpClock::FirstSample => previous_samples,
-                RtpClock::Asterisk => samples,
+            let step = match self.server {
+                ComparisonServer::Rusterisk => previous_samples,
+                ComparisonServer::Asterisk => samples,
             };
             let consecutive = ssrc == packet.ssrc() && expected_sequence == packet.sequence();
             let elapsed_samples = packet.timestamp().wrapping_sub(timestamp);
@@ -431,7 +431,7 @@ fn repeat_complete(
 async fn audio(
     client: &Client,
     peers: &[Peer; 2],
-    clock: RtpClock,
+    server: ComparisonServer,
     sample: i32,
     frames: u16,
     repeat: Option<&str>,
@@ -440,7 +440,7 @@ async fn audio(
     let [left, right] = peers;
     left.drain()?;
     right.drain()?;
-    let mut window = AudioWindow::new(sample, clock);
+    let mut window = AudioWindow::new(sample, server);
     let mut repeated = repeat.is_none();
     let mut post_repeat = None;
     let request = async {
@@ -494,7 +494,7 @@ async fn observe_reference_mute(peers: &[Peer; 2]) -> Result<(), Error> {
     let [muted, audible] = peers;
     muted.drain()?;
     audible.drain()?;
-    let mut window = AudioWindow::new(0, RtpClock::Asterisk);
+    let mut window = AudioWindow::new(0, ComparisonServer::Asterisk);
     let mut muted_bytes = [0; 2049];
     let mut audible_bytes = [0; 2049];
     let result = bounded(async {
@@ -504,7 +504,7 @@ async fn observe_reference_mute(peers: &[Peer; 2]) -> Result<(), Error> {
                 result = muted.socket.data().recv_from(&mut muted_bytes) => {
                     let (_, source) = result?;
                     muted.check_source(source)?;
-                    window = AudioWindow::new(0, RtpClock::Asterisk);
+                    window = AudioWindow::new(0, ComparisonServer::Asterisk);
                 }
                 result = audible.socket.data().recv_from(&mut audible_bytes) => {
                     let (size, source) = result?;
@@ -534,13 +534,13 @@ async fn exercise(
     client: &Client,
     session: &mut Session,
     peers: &[Peer; 2],
-    clock: RtpClock,
+    server: ComparisonServer,
     playback_id: &ChannelId,
     playback_lifetime: &mut Lifetime,
 ) -> Result<(), Error> {
     let id = peers[0].id.clone();
     let receive =
-        |sample, frames, repeat, phase| audio(client, peers, clock, sample, frames, repeat, phase);
+        |sample, frames, repeat, phase| audio(client, peers, server, sample, frames, repeat, phase);
     super::external_audio::received(&peers[0].socket, StaticRtpCodec::Pcmu, 0).await?;
     receive(0, 12, None, "initial received silence").await?;
     bounded(client.start_music_on_hold(&id, None)).await?;
@@ -558,9 +558,9 @@ async fn exercise(
     bounded(client.start_music_on_hold(&id, Some("missing-music-class"))).await?;
     receive(1200, 12, None, "unknown class fallback").await?;
     bounded(client.mute(&id, MuteDirection::Outgoing)).await?;
-    match clock {
-        RtpClock::FirstSample => receive(0, 12, None, "muted MOH").await?,
-        RtpClock::Asterisk => observe_reference_mute(peers).await?,
+    match server {
+        ComparisonServer::Rusterisk => receive(0, 12, None, "muted MOH").await?,
+        ComparisonServer::Asterisk => observe_reference_mute(peers).await?,
     }
     bounded(client.unmute(&id, MuteDirection::Outgoing)).await?;
     receive(1200, 12, None, "unmuted MOH").await?;
@@ -582,13 +582,22 @@ async fn exercise(
     observed(session, Wanted::Finished(playback_id)).await?;
     missing(bounded(client.playback(playback_id)).await)?;
     *playback_lifetime = Lifetime::Released;
-    receive(
-        0,
-        12,
-        None,
-        "natural playback completion does not resume music",
-    )
-    .await?;
+    match server {
+        ComparisonServer::Rusterisk => {
+            receive(0, 12, None, "silence after playback completes").await?;
+        }
+        ComparisonServer::Asterisk => {
+            receive(
+                1200,
+                12,
+                None,
+                "reference resumes music after bridged playback",
+            )
+            .await?;
+            bounded(client.stop_music_on_hold(&id)).await?;
+            receive(0, 12, None, "silence after stopping resumed music").await?;
+        }
+    }
     bounded(client.start_music_on_hold(&id, Some("Main"))).await?;
     receive(2400, 12, None, "active music before terminal cleanup").await
 }
@@ -598,7 +607,7 @@ pub async fn compare(
     session: &mut Session,
     application: &str,
     server_ip: Ipv4Addr,
-    clock: RtpClock,
+    server: ComparisonServer,
 ) -> Result<(), Error> {
     let local_ip = super::external_audio::local_media_ip(server_ip)?;
     let mut resources = Resources::new(local_ip)?;
@@ -624,7 +633,7 @@ pub async fn compare(
             let sequence = async {
                 let result = tokio::time::timeout(
                     Duration::from_secs(45),
-                    exercise(client, session, peers, clock, playback, playback_lifetime),
+                    exercise(client, session, peers, server, playback, playback_lifetime),
                 )
                 .await
                 .map_err(|_| Error::Timeout)
@@ -681,7 +690,7 @@ fn received_silence_cannot_hide_later_music_or_count_duplicate_rtp_as_a_loop() -
             &[rusterisk_media::mulaw_encode(0); 160],
         ),
     ] {
-        let mut window = AudioWindow::new(0, RtpClock::FirstSample);
+        let mut window = AudioWindow::new(0, ComparisonServer::Rusterisk);
         require(
             !window.complete(12, Instant::now()),
             "Missing RTP became received silence",
@@ -712,9 +721,9 @@ fn known_packet(sequence: u16, timestamp: u32) -> Result<RtpPacket, Error> {
 #[test]
 fn short_pcmu_payloads_contribute_only_their_received_samples() -> Result<(), Error> {
     let start = Instant::now();
-    for (clock, short_at, other_clock) in [
-        (RtpClock::FirstSample, 160, RtpClock::Asterisk),
-        (RtpClock::Asterisk, 138, RtpClock::FirstSample),
+    for (server, short_at, other_server) in [
+        (ComparisonServer::Rusterisk, 160, ComparisonServer::Asterisk),
+        (ComparisonServer::Asterisk, 138, ComparisonServer::Rusterisk),
     ] {
         let short = RtpPacket::new(
             0,
@@ -724,7 +733,7 @@ fn short_pcmu_payloads_contribute_only_their_received_samples() -> Result<(), Er
             &[rusterisk_media::mulaw_encode(1200); 138],
         )
         .map_err(invalid)?;
-        let mut window = AudioWindow::new(1200, clock);
+        let mut window = AudioWindow::new(1200, server);
         window.observe(&known_packet(0, 0)?, start)?;
         window.observe(&short, start + Duration::from_millis(20))?;
         require(
@@ -736,7 +745,7 @@ fn short_pcmu_payloads_contribute_only_their_received_samples() -> Result<(), Er
             window.complete(2, start + Duration::from_millis(38)),
             "Continuous PCMU with varied payload durations did not accumulate received audio",
         )?;
-        let mut other = AudioWindow::new(1200, other_clock);
+        let mut other = AudioWindow::new(1200, other_server);
         other.observe(&known_packet(0, 0)?, start)?;
         require(
             matches!(other.observe(&short, start), Err(Error::Invalid(_))),
@@ -754,7 +763,7 @@ fn legal_presentation_gaps_require_a_fresh_continuous_audio_window() -> Result<(
             (u16::MAX.wrapping_sub(58), u32::MAX.wrapping_sub(9360)),
         ] {
             let started = Instant::now();
-            let mut window = AudioWindow::new(1200, RtpClock::FirstSample);
+            let mut window = AudioWindow::new(1200, ComparisonServer::Rusterisk);
             for index in 0..59_u16 {
                 let packet = known_packet(
                     sequence.wrapping_add(index),

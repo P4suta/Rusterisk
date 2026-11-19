@@ -509,7 +509,7 @@ async fn compare_resources(
             &mut actual_session,
             app.as_str(),
             Ipv4Addr::LOCALHOST,
-            music_on_hold::RtpClock::FirstSample,
+            music_on_hold::ComparisonServer::Rusterisk,
         )
         .await?;
         playback_position::compare(
@@ -549,7 +549,7 @@ async fn compare_resources(
             &mut reference_session,
             app.as_str(),
             reference_media_ip,
-            music_on_hold::RtpClock::Asterisk,
+            music_on_hold::ComparisonServer::Asterisk,
         )
         .await?;
         playback_position::compare(

@@ -211,7 +211,7 @@ async fn native_music(client: &Client) -> Result<(), Error> {
         &mut session,
         app.as_str(),
         Ipv4Addr::LOCALHOST,
-        music_on_hold::RtpClock::FirstSample,
+        music_on_hold::ComparisonServer::Rusterisk,
     )
     .await;
     merged(primary, bounded(session.shutdown()).await)
