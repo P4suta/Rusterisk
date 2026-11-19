@@ -318,6 +318,9 @@ impl SettingsLifetimes {
         &mut self,
         reference: SettingsReference,
     ) -> Result<Option<SettingsSlot>, SettingsError> {
+        if reference.generation.owner != self.current.owner {
+            return Err(SettingsError::ForeignReference(reference));
+        }
         let Some((index, retained)) =
             self.slots.iter_mut().enumerate().find_map(|(index, slot)| {
                 slot.as_mut()
