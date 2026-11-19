@@ -95,8 +95,9 @@ impl NativePort for Port<'_> {
         }
         require(
             environment("MISE_TRUSTED_CONFIG_PATHS") == Some(Some(source.as_os_str()))
-                && environment("MISE_CEILING_PATHS") == Some(Some(source.as_os_str())),
-            "Native gate did not scope mise trust and config discovery to captured source",
+                && environment("MISE_CEILING_PATHS").flatten()
+                    == source.parent().map(Path::as_os_str),
+            "Native gate must allow its captured mise config and exclude ancestors",
         )?;
         require(
             environment("MISE_CONFIG_FILE") == Some(None) && environment("MISE_ENV") == Some(None),

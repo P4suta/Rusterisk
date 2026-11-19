@@ -1,5 +1,5 @@
 use super::Step;
-use crate::process::ProcessError;
+use crate::process::{scope_captured_tools, ProcessError};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
@@ -111,18 +111,8 @@ impl<'a> Commands<'a> {
             phase: CommandPhase::Operation,
         })
     }
-    pub(super) fn scope(&self, command: &mut Command) {
-        command
-            .current_dir(&self.source)
-            .env("MISE_TRUSTED_CONFIG_PATHS", &self.source)
-            .env("MISE_CEILING_PATHS", &self.source)
-            .env("MISE_GLOBAL_CONFIG_FILE", &self.profile)
-            .env("MISE_SYSTEM_CONFIG_FILE", &self.profile)
-            .env_remove("MISE_CONFIG_FILE")
-            .env_remove("MISE_ENV")
-            .env_remove("CARGO_TARGET_DIR")
-            .env("CARGO_BUILD_JOBS", "1")
-            .env("RUST_TEST_THREADS", "1");
+    pub(super) fn scope(&self, command: &mut Command) -> io::Result<()> {
+        scope_captured_tools(command, &self.source, &self.profile)
     }
     pub(super) fn run(
         &mut self,
@@ -141,7 +131,7 @@ impl<'a> Commands<'a> {
             .ok_or_else(|| io::Error::other("comparison command capacity exhausted"))?;
         let stdout = self.directory.join(format!("{:03}.stdout", self.sequence));
         let stderr = self.directory.join(format!("{:03}.stderr", self.sequence));
-        self.scope(&mut command);
+        self.scope(&mut command)?;
         command
             .stdin(Stdio::null())
             .stdout(create(&stdout)?)

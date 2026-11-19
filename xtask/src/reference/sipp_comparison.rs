@@ -176,7 +176,7 @@ fn native_scenario(
         .stderr(create(&diagnostic)?);
     drop(http_reservation);
     drop(sip_reservation);
-    commands.scope(&mut command);
+    commands.scope(&mut command)?;
     let mut service = supervisor
         .start_service(&mut command, Duration::from_secs(90))
         .map_err(io::Error::other)?;

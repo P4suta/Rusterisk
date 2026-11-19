@@ -212,18 +212,9 @@ impl Workspace {
             .open(&config)
             .map_err(|error| NativeGateError::new("native mise profile", Failure::Io(error)))?;
         let mut command = Command::new("mise");
-        command
-            .current_dir(&source)
-            .args(["x", "--", "just", plan.gate.entry()])
-            .env("MISE_TRUSTED_CONFIG_PATHS", &source)
-            .env("MISE_CEILING_PATHS", &source)
-            .env("MISE_GLOBAL_CONFIG_FILE", &config)
-            .env("MISE_SYSTEM_CONFIG_FILE", &config)
-            .env_remove("MISE_CONFIG_FILE")
-            .env_remove("MISE_ENV")
-            .env_remove("CARGO_TARGET_DIR")
-            .env("CARGO_BUILD_JOBS", "1")
-            .env("RUST_TEST_THREADS", "1");
+        command.args(["x", "--", "just", plan.gate.entry()]);
+        crate::process::scope_captured_tools(&mut command, &source, &config)
+            .map_err(|error| NativeGateError::new("native tool scope", Failure::Io(error)))?;
         match plan.gate {
             NativeGate::Fast => {}
             NativeGate::Security => {

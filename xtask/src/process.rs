@@ -1,8 +1,33 @@
+use std::io;
+use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 mod request;
 pub use request::{CommandField, CommandRequestError, CommandStream, SupervisedCommand};
+
+pub(crate) fn scope_captured_tools(
+    command: &mut Command,
+    source: &Path,
+    profile: &Path,
+) -> io::Result<()> {
+    let ceiling = source
+        .parent()
+        .ok_or_else(|| io::Error::other("captured source needs a parent directory"))?;
+    let ceiling = std::env::join_paths([ceiling]).map_err(io::Error::other)?;
+    command
+        .current_dir(source)
+        .env("MISE_TRUSTED_CONFIG_PATHS", source)
+        .env("MISE_CEILING_PATHS", ceiling)
+        .env("MISE_GLOBAL_CONFIG_FILE", profile)
+        .env("MISE_SYSTEM_CONFIG_FILE", profile)
+        .env_remove("MISE_CONFIG_FILE")
+        .env_remove("MISE_ENV")
+        .env_remove("CARGO_TARGET_DIR")
+        .env("CARGO_BUILD_JOBS", "1")
+        .env("RUST_TEST_THREADS", "1");
+    Ok(())
+}
 
 #[derive(Debug)]
 pub enum ProcessError {
