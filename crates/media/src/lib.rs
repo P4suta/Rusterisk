@@ -1,5 +1,6 @@
-use bytes::Bytes;
-use webrtc_util::marshal::{Marshal, Unmarshal};
+use bytes::{Bytes, BytesMut};
+use rtc_crypto::providers::RingCrypto;
+use rtc_shared::marshal::{Marshal, Unmarshal};
 mod audiosocket_stream;
 mod mixing;
 mod pcm_framing;
@@ -229,7 +230,7 @@ impl OpusCodec {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RtpPacket(rtp::packet::Packet);
+pub struct RtpPacket(rtc_rtp::packet::Packet);
 
 impl RtpPacket {
     pub fn new(
@@ -242,8 +243,8 @@ impl RtpPacket {
         if payload.len() > MAX_PACKET - 12 || payload_type > 127 {
             return Err(MediaError::Capacity);
         }
-        Ok(Self(rtp::packet::Packet {
-            header: rtp::header::Header {
+        Ok(Self(rtc_rtp::packet::Packet {
+            header: rtc_rtp::header::Header {
                 version: 2,
                 payload_type,
                 sequence_number: sequence,
@@ -262,7 +263,7 @@ impl RtpPacket {
         if bytes[0] & 0x20 != 0 && bytes.last() == Some(&0) {
             return Err(MediaError::InvalidPacket);
         }
-        let packet = rtp::packet::Packet::unmarshal(&mut &bytes[..])
+        let packet = rtc_rtp::packet::Packet::unmarshal(&mut &bytes[..])
             .map_err(|error| MediaError::Transport(error.to_string()))?;
         if packet.header.version != 2 || packet.payload.is_empty() {
             return Err(MediaError::InvalidPacket);
@@ -273,6 +274,7 @@ impl RtpPacket {
     pub fn encode(&self) -> Result<Bytes, MediaError> {
         self.0
             .marshal()
+            .map(BytesMut::freeze)
             .map_err(|error| MediaError::Transport(error.to_string()))
     }
     pub fn payload(&self) -> &[u8] {
@@ -500,7 +502,7 @@ pub struct Srtp {
 
 struct SecureStream {
     ssrc: u32,
-    context: webrtc_srtp::context::Context,
+    context: rtc_srtp::context::Context,
 }
 
 #[derive(Clone, Copy)]
@@ -518,25 +520,26 @@ impl Srtp {
         })
     }
 
-    fn context(&self) -> Result<webrtc_srtp::context::Context, MediaError> {
-        webrtc_srtp::context::Context::new(
+    fn context(&self) -> Result<rtc_srtp::context::Context, MediaError> {
+        rtc_srtp::context::Context::new(
             &self.key,
             &self.salt,
-            webrtc_srtp::protection_profile::ProtectionProfile::Aes128CmHmacSha1_80,
-            Some(webrtc_srtp::option::srtp_replay_protection(128)),
-            Some(webrtc_srtp::option::srtcp_replay_protection(128)),
+            rtc_srtp::protection_profile::ProtectionProfile::Aes128CmHmacSha1_80,
+            Some(rtc_srtp::option::srtp_replay_protection(128)),
+            Some(rtc_srtp::option::srtcp_replay_protection(128)),
+            &RingCrypto,
         )
         .map_err(|error| MediaError::Transport(error.to_string()))
     }
 
     fn process(&mut self, packet: &[u8], operation: CipherOperation) -> Result<Bytes, MediaError> {
-        let header = rtp::header::Header::unmarshal(&mut &packet[..])
+        let header = rtc_rtp::header::Header::unmarshal(&mut &packet[..])
             .map_err(|error| MediaError::Transport(error.to_string()))?;
         if header.version != 2 {
             return Err(MediaError::InvalidPacket);
         }
         fn transform(
-            context: &mut webrtc_srtp::context::Context,
+            context: &mut rtc_srtp::context::Context,
             packet: &[u8],
             operation: CipherOperation,
         ) -> Result<Bytes, MediaError> {
@@ -544,6 +547,7 @@ impl Srtp {
                 CipherOperation::Encrypt => context.encrypt_rtp(packet),
                 CipherOperation::Decrypt => context.decrypt_rtp(packet),
             }
+            .map(BytesMut::freeze)
             .map_err(|error| MediaError::Transport(error.to_string()))
         }
         for stream in self.streams.iter_mut().flatten() {
