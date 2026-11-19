@@ -8,6 +8,7 @@ use std::{
 };
 
 const KEYS: [&str; 3] = ["TMPDIR", "TMP", "TEMP"];
+const ROOT_RESERVATION_ATTEMPTS: usize = 32;
 const REQUESTS: [&[&str]; 5] = [
     &[
         "deny",
@@ -59,16 +60,30 @@ fn require(valid: bool, reason: &'static str) -> io::Result<()> {
     }
 }
 
+fn reserve_root(parent: &Path, identity: &str) -> io::Result<PathBuf> {
+    for attempt in 0..ROOT_RESERVATION_ATTEMPTS {
+        let root = parent.join(format!("{identity}-{attempt}"));
+        match fs::create_dir(&root) {
+            Ok(()) => return Ok(root),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::other(
+        "security fixture root reservation limit exceeded",
+    ))
+}
+
 fn using_root<T>(test: impl FnOnce(&Path) -> io::Result<T>) -> io::Result<T> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?
         .as_nanos();
-    let root = std::env::temp_dir().join(format!(
+    let identity = format!(
         "rusterisk-security-temporary-{}-{stamp}",
         std::process::id()
-    ));
-    fs::create_dir(&root)?;
+    );
+    let root = reserve_root(&std::env::temp_dir(), &identity)?;
     let operation = test(&root);
     let cleanup = fs::remove_dir_all(&root);
     match (operation, cleanup) {
@@ -78,6 +93,24 @@ fn using_root<T>(test: impl FnOnce(&Path) -> io::Result<T>) -> io::Result<T> {
             "{operation}; security fixture cleanup failed: {cleanup}"
         ))),
     }
+}
+
+#[test]
+fn fixture_root_reservation_preserves_existing_names() -> io::Result<()> {
+    using_root(|root| {
+        let occupied = root.join("parallel-0");
+        fs::create_dir(&occupied)?;
+        let reserved = reserve_root(root, "parallel")?;
+        require(
+            reserved == root.join("parallel-1"),
+            "Security fixture skipped the first available reservation",
+        )?;
+        require(
+            occupied.is_dir(),
+            "Security fixture changed an existing reservation",
+        )?;
+        fs::remove_dir(reserved)
+    })
 }
 
 fn temporary_path(command: &Command) -> io::Result<PathBuf> {
