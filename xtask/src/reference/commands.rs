@@ -54,10 +54,12 @@ pub(super) struct Observed {
 
 impl Observed {
     pub(super) fn diagnostics(&self) -> String {
+        let stdout_start = self.stdout.len().saturating_sub(4096);
+        let stderr_start = self.stderr.len().saturating_sub(4096);
         format!(
             "stdout: {}; stderr: {}",
-            String::from_utf8_lossy(&self.stdout[..self.stdout.len().min(4096)]),
-            String::from_utf8_lossy(&self.stderr[..self.stderr.len().min(4096)]),
+            String::from_utf8_lossy(&self.stdout[stdout_start..]),
+            String::from_utf8_lossy(&self.stderr[stderr_start..]),
         )
     }
 
@@ -174,4 +176,21 @@ pub(super) fn owned_step(mut step: Step, name: &str, id: &str) -> Step {
         }
     }
     step
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Observed;
+
+    #[test]
+    fn failure_diagnostics_keep_the_most_recent_output_from_each_stream() {
+        let mut stdout = b"Old output\n".repeat(512);
+        stdout.extend_from_slice(b"Reference call was rejected\n");
+        let mut stderr = b"Old diagnostic\n".repeat(512);
+        stderr.extend_from_slice(b"Fixture could not close the call\n");
+        let diagnostic = Observed { stdout, stderr }.diagnostics();
+        assert!(diagnostic.contains("Reference call was rejected"));
+        assert!(diagnostic.contains("Fixture could not close the call"));
+        assert!(diagnostic.len() <= 8192 + "stdout: ; stderr: ".len());
+    }
 }
