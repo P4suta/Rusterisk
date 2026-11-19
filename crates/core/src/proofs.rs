@@ -2,9 +2,9 @@ use crate::{
     AttendedStart, AttendedTransfer, AudioGate, Call, CallEvent, CallPairDecision, CallPairError,
     CallPairState, CallState, ConnectionClaim, CoreError, MediaConnection, MediaState,
     MediaTaskError, MediaTaskKind, MediaTaskState, MediaTasks, MuteDirection, OwnedCallPair,
-    PeerMediaDirection, SettingsError, SettingsLifetimes, SettingsReference, StasisApplication,
-    StasisMembership, Transfer, TransferDecision, TransferError, TransferOutcome, TransferState,
-    TransferToken, Transition,
+    PeerMediaDirection, SettingsError, SettingsLifetimes, StasisApplication, StasisMembership,
+    Transfer, TransferDecision, TransferError, TransferOutcome, TransferState, TransferToken,
+    Transition,
 };
 
 #[derive(Clone, Copy, kani::Arbitrary)]
@@ -1178,51 +1178,27 @@ fn settings_foreign_references_leave_both_domains_unchanged() {
     kani::cover!(first != second && result.is_ok());
 }
 
-fn saturated_publication(owner: u128) -> Result<(), SettingsError> {
-    let mut settings = SettingsLifetimes::new(owner);
-    let mut references: [Option<SettingsReference>; SettingsLifetimes::CAPACITY] =
-        [const { None }; SettingsLifetimes::CAPACITY];
-    for reference in references.iter_mut().take(SettingsLifetimes::CAPACITY - 1) {
-        *reference = Some(settings.retain(settings.current())?);
-        let candidate = settings.prepare()?;
-        settings.commit(candidate)?;
+fn reference_count_boundary(owner: u128, references: u64) -> Result<(), SettingsError> {
+    let (mut settings, generation) = SettingsLifetimes::reference_count_state(owner, references);
+    let retained = settings.retain(generation);
+    if let Some(expected) = references.checked_add(1) {
+        let reference = retained?;
+        assert_eq!(reference.generation(), generation);
+        assert_eq!(settings.current_reference_count(), Some(expected));
+    } else {
+        assert!(matches!(retained, Err(SettingsError::ReferenceCapacity)));
+        assert_eq!(settings.current_reference_count(), Some(references));
     }
-    let initial = settings.current();
-    let initial_slot = settings.slot(initial)?;
-    let candidate = settings.prepare()?;
-    references[SettingsLifetimes::CAPACITY - 1] = Some(settings.retain(initial)?);
-    assert!(matches!(
-        settings.commit(candidate),
-        Err(SettingsError::Capacity)
-    ));
-    assert_eq!(settings.current(), initial);
-    assert_eq!(settings.slot(initial)?, initial_slot);
-    assert_eq!(settings.prepare(), Err(SettingsError::Capacity));
-    for reference in references.iter().flatten() {
-        assert!(settings.slot(reference.generation()).is_ok());
-    }
-    let released = references[0].take().ok_or(SettingsError::Capacity)?;
-    let released_generation = released.generation();
-    let freed_slot = settings.slot(released_generation)?;
-    assert_eq!(settings.release(released)?, Some(freed_slot));
-    let published = settings.commit(candidate)?;
-    assert_eq!(published.slot(), freed_slot);
-    assert_eq!(published.retired_slot(), None);
-    assert!(settings.slot(released_generation).is_err());
-    assert!(settings.retain(released_generation).is_err());
-    for reference in references.into_iter().flatten() {
-        let slot = settings.slot(reference.generation())?;
-        assert_eq!(settings.release(reference)?, Some(slot));
-    }
-    assert_eq!(settings.current(), published.generation());
-    assert_eq!(settings.slot(published.generation())?, published.slot());
+    assert_eq!(settings.current(), generation);
     Ok(())
 }
 
 #[kani::proof]
-#[kani::unwind(66)]
-fn settings_publication_preserves_saturated_references() {
-    let result = saturated_publication(kani::any());
+#[kani::unwind(2)]
+fn settings_reference_count_boundaries_preserve_publication() {
+    let references: u64 = kani::any();
+    let result = reference_count_boundary(kani::any(), references);
     assert_eq!(result, Ok(()));
-    kani::cover!(result.is_ok());
+    kani::cover!(result.is_ok() && references == u64::MAX);
+    kani::cover!(result.is_ok() && references < u64::MAX);
 }

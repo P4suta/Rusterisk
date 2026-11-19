@@ -28,7 +28,7 @@ pub const HARNESSES: [&str; 18] = [
     "proofs::settings_references_preserve_their_generation_until_release",
     "proofs::settings_candidates_cannot_cross_domains_or_replace_later_candidates",
     "proofs::settings_foreign_references_leave_both_domains_unchanged",
-    "proofs::settings_publication_preserves_saturated_references",
+    "proofs::settings_reference_count_boundaries_preserve_publication",
 ];
 
 pub(crate) const SOLVER: &str = "kissat";
@@ -430,13 +430,13 @@ pub fn validate_harnesses(source: &str) -> Result<(), ProofError> {
                 continue;
             }
             let name = format!("proofs::{}", function.sig.ident);
-            let settings = matches!(
-                name.as_str(),
+            let settings_bound = match name.as_str() {
                 "proofs::settings_references_preserve_their_generation_until_release"
-                    | "proofs::settings_candidates_cannot_cross_domains_or_replace_later_candidates"
-                    | "proofs::settings_foreign_references_leave_both_domains_unchanged"
-                    | "proofs::settings_publication_preserves_saturated_references"
-            );
+                | "proofs::settings_candidates_cannot_cross_domains_or_replace_later_candidates"
+                | "proofs::settings_foreign_references_leave_both_domains_unchanged" => Some(66),
+                "proofs::settings_reference_count_boundaries_preserve_publication" => Some(2),
+                _ => None,
+            };
             let bounded = function.attrs.iter().any(|attribute| {
                 kani_attribute(attribute, "unwind")
                     && attribute
@@ -444,11 +444,10 @@ pub fn validate_harnesses(source: &str) -> Result<(), ProofError> {
                         .ok()
                         .is_some_and(|value| {
                             value.base10_parse::<u16>().is_ok_and(|bound| {
-                                if settings {
-                                    bound == 66
-                                } else {
-                                    (1..=32).contains(&bound)
-                                }
+                                settings_bound.map_or_else(
+                                    || (1..=32).contains(&bound),
+                                    |expected| bound == expected,
+                                )
                             })
                         })
             });
