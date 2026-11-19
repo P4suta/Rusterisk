@@ -2,11 +2,13 @@ use std::{
     io,
     path::Path,
     process::{Command, Output},
+    sync::atomic::{AtomicUsize, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 use toml::Value;
 
 const MEMBER: &str = "crates/windows-job-accounting";
+static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 const SOURCE: &str = r#"
 #![cfg(windows)]
 
@@ -129,8 +131,9 @@ pub(super) fn using_fixture<T>(operation: impl FnOnce(&Path) -> io::Result<T>) -
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?
         .as_nanos();
+    let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!(
-        "rusterisk-windows-job-accounting-cli-{}-{stamp}",
+        "rusterisk-windows-job-accounting-cli-{}-{stamp}-{sequence}",
         std::process::id()
     ));
     std::fs::create_dir(&root)?;
