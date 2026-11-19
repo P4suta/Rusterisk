@@ -18,13 +18,14 @@ pub(super) use artifacts::{capture_tools, check_tools, configure_tools};
 use super::candidate_run::{combine, conclude, Loaded, Paths, Workspace};
 #[cfg(any(unix, windows))]
 use crate::{
-    distribution::{PreparedSdkHttpConsumer, SdkHttpTarget},
+    distribution::{PreparedSdkHttpConsumer, SdkConsumerPlan, SdkHttpTarget},
     process::{CommandSupervisor, SupervisedCommand},
     server_distribution::{runtime_commands::RuntimeCommands, verify_loaded_server_configured},
 };
 #[cfg(any(unix, windows))]
 use std::{
     io::{self, Write},
+    num::NonZeroUsize,
     time::Duration,
 };
 
@@ -99,6 +100,17 @@ struct ServerRequest<'a> {
     execution: &'a Path,
     consumer_execution: &'a Path,
     artifacts: &'a Path,
+}
+
+#[cfg(any(unix, windows))]
+const fn consumer_jobs(target: ServerTarget) -> NonZeroUsize {
+    match target {
+        ServerTarget::WindowsX86_64 => NonZeroUsize::MIN,
+        ServerTarget::LinuxX86_64
+        | ServerTarget::LinuxArm64
+        | ServerTarget::MacOsArm64
+        | ServerTarget::MacOsX86_64 => SdkConsumerPlan::DEFAULT_JOBS,
+    }
 }
 
 #[cfg(any(unix, windows))]
@@ -221,10 +233,11 @@ fn verify_server_recorded<'a>(
         };
         let mut commands = RuntimeCommands::new(&mut supervisor, &mut configure_bound);
         let mut prepared = Some(
-            PreparedSdkHttpConsumer::prepare_with(
+            PreparedSdkHttpConsumer::prepare_with_jobs(
                 &loaded.sdk,
                 &workspace.consumer(),
                 &request.artifacts.join("consumer"),
+                consumer_jobs(request.target),
                 |command, budget| commands.run_owned(command, budget),
             )
             .map_err(|error| RunError::consumer("server SDK preparation", error))?,

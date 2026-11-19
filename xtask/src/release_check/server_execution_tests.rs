@@ -1,10 +1,20 @@
+use super::super::consumer_jobs;
 use super::{verify_server_with, CommandSupervisor, ServerRequest};
-use crate::process::SupervisedCommand;
+use crate::{distribution::SdkConsumerPlan, process::SupervisedCommand};
 use crate::{
     release_check::candidate_fixtures::{native_target, require, using},
     server_distribution::{ServerExecutionMode, ServerTarget},
 };
 use std::{io, time::Duration};
+
+#[test]
+fn the_windows_server_artifact_builds_the_sdk_consumer_with_one_job() {
+    assert_eq!(consumer_jobs(ServerTarget::WindowsX86_64).get(), 1);
+    assert_eq!(
+        consumer_jobs(ServerTarget::LinuxX86_64),
+        SdkConsumerPlan::DEFAULT_JOBS
+    );
+}
 
 fn fails_before_runtime(
     target: ServerTarget,

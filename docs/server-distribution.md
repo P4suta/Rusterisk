@@ -51,6 +51,7 @@ It removes the owned extraction and runtime data after the check.
 The software development kit (SDK) check connects an independent client to the packaged server.
 Use `--consumer-jobs` to control the Cargo jobs for client preparation.
 The default is two jobs.
+The release gate uses one Cargo job for the SDK consumer on Windows.
 
 ```sh
 mise x -- cargo run --locked --target-dir target/xtask --package xtask -- distribution server verify --candidate "$server_candidate" --sdk-candidate "$sdk_candidate" --consumer-jobs 1
