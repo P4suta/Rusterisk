@@ -1,0 +1,48 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>P4suta/renovate-config"],
+  "ignorePaths": ["vendor/str0m/**"],
+  "packageRules": [
+    {
+      "matchPackageNames": ["*"],
+      "automerge": false
+    },
+    {
+      "description": "SIP.js 0.21.2 declarations fail exact optional property checks with TypeScript 6.0.3.",
+      "matchManagers": ["npm"],
+      "matchFileNames": ["examples/browser/package.json"],
+      "matchPackageNames": ["typescript"],
+      "allowedVersions": "<=6.0.2"
+    },
+    {
+      "matchFileNames": ["containers/asterisk-reference/Dockerfile"],
+      "matchDatasources": ["deb"],
+      "registryUrls": [
+        "https://deb.debian.org/debian?suite=trixie&components=main&binaryArch=arm64",
+        "https://deb.debian.org/debian?suite=trixie-updates&components=main&binaryArch=arm64",
+        "https://deb.debian.org/debian-security?suite=trixie-security&components=main&binaryArch=arm64"
+      ]
+    },
+    {
+      "matchFileNames": ["containers/input-verification/Dockerfile"],
+      "matchDatasources": ["deb"],
+      "registryUrls": [
+        "https://deb.debian.org/debian?suite=bookworm&components=main&binaryArch=arm64",
+        "https://deb.debian.org/debian?suite=bookworm-updates&components=main&binaryArch=arm64",
+        "https://deb.debian.org/debian-security?suite=bookworm-security&components=main&binaryArch=arm64"
+      ]
+    },
+    {
+      "matchFileNames": ["containers/browser-verification/Dockerfile"],
+      "matchDatasources": ["deb"],
+      "registryUrls": [
+        "https://ports.ubuntu.com/ubuntu-ports?suite=noble&components=main&binaryArch=arm64",
+        "https://ports.ubuntu.com/ubuntu-ports?suite=noble-updates&components=main&binaryArch=arm64",
+        "https://ports.ubuntu.com/ubuntu-ports?suite=noble-security&components=main&binaryArch=arm64"
+      ]
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "automerge": false
+  }
+}
