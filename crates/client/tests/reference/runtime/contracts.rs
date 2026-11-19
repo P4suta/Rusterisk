@@ -206,8 +206,14 @@ async fn native_music(client: &Client) -> Result<(), Error> {
     bounded(client.ping()).await?;
     let app = ChannelId::try_from("music-runtime-contract".to_owned())?;
     let mut session = bounded(client.subscribe(&app)).await?;
-    let primary =
-        music_on_hold::compare(client, &mut session, app.as_str(), Ipv4Addr::LOCALHOST).await;
+    let primary = music_on_hold::compare(
+        client,
+        &mut session,
+        app.as_str(),
+        Ipv4Addr::LOCALHOST,
+        music_on_hold::RtpClock::FirstSample,
+    )
+    .await;
     merged(primary, bounded(session.shutdown()).await)
 }
 

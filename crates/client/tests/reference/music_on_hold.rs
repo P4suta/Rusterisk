@@ -309,30 +309,44 @@ async fn pump(peers: &[Peer; 2], mut stopped: watch::Receiver<bool>) -> Result<(
     }
 }
 
+#[derive(Clone, Copy)]
+pub enum RtpClock {
+    FirstSample,
+    Asterisk,
+}
+
 struct AudioWindow {
     expected: i32,
-    last: Option<(u32, u16, u32)>,
+    clock: RtpClock,
+    last: Option<(u32, u16, u32, u32)>,
     first: Option<Instant>,
-    frames: u16,
-    total_frames: u16,
+    samples: u32,
+    total_samples: u32,
 }
 
 impl AudioWindow {
-    fn new(expected: i32) -> Self {
+    fn new(expected: i32, clock: RtpClock) -> Self {
         Self {
             expected,
+            clock,
             last: None,
             first: None,
-            frames: 0,
-            total_frames: 0,
+            samples: 0,
+            total_samples: 0,
         }
     }
 
     fn observe(&mut self, packet: &RtpPacket, now: Instant) -> Result<(), Error> {
-        require(
-            packet.payload_type() == 0 && packet.payload().len() == 160,
-            "MOH audio is not a complete PCMU frame",
-        )?;
+        let samples = u32::try_from(packet.payload().len()).map_err(invalid)?;
+        if packet.payload_type() != 0 || !(1..=1600).contains(&samples) {
+            return Err(invalid(format_args!(
+                "MOH audio has payload type {}, {samples} samples, sequence {}, timestamp {}, previous {:?}",
+                packet.payload_type(),
+                packet.sequence(),
+                packet.timestamp(),
+                self.last
+            )));
+        }
         let known = packet
             .payload()
             .iter()
@@ -344,27 +358,27 @@ impl AudioWindow {
             );
         }
         let mut restart = false;
-        if let Some((ssrc, sequence, timestamp)) = self.last {
+        if let Some((ssrc, sequence, timestamp, previous_samples)) = self.last {
             let expected_sequence = sequence.wrapping_add(1);
-            let expected_timestamp = timestamp.wrapping_add(160);
-            let continuous = ssrc == packet.ssrc()
-                && expected_sequence == packet.sequence()
-                && expected_timestamp == packet.timestamp();
+            let step = match self.clock {
+                RtpClock::FirstSample => previous_samples,
+                RtpClock::Asterisk => samples,
+            };
+            let consecutive = ssrc == packet.ssrc() && expected_sequence == packet.sequence();
             let elapsed_samples = packet.timestamp().wrapping_sub(timestamp);
-            restart = ssrc == packet.ssrc()
-                && expected_sequence == packet.sequence()
-                && (320..(1_u32 << 31)).contains(&elapsed_samples)
-                && elapsed_samples.is_multiple_of(160);
+            let continuous = consecutive && elapsed_samples == step;
+            restart = consecutive
+                && elapsed_samples < (1_u32 << 31)
+                && elapsed_samples
+                    .checked_sub(step)
+                    .is_some_and(|gap| gap != 0 && gap.is_multiple_of(160));
             if !continuous && !restart {
                 eprintln!(
-                    "MOH RTP clock mismatch: frames={}, total_frames={}, previous=(ssrc={ssrc}, sequence={sequence}, timestamp={timestamp}), expected=(ssrc={ssrc}, sequence={expected_sequence}, timestamp={expected_timestamp}), observed=(ssrc={}, sequence={}, timestamp={}), delta=(sequence={}, timestamp={})",
-                    self.frames,
-                    self.total_frames,
+                    "MOH RTP clock mismatch: previous=(ssrc={ssrc}, sequence={sequence}, timestamp={timestamp}, samples={previous_samples}), expected=(ssrc={ssrc}, sequence={expected_sequence}, timestamp={}), observed=(ssrc={}, sequence={}, timestamp={}, samples={samples})",
+                    timestamp.wrapping_add(step),
                     packet.ssrc(),
                     packet.sequence(),
                     packet.timestamp(),
-                    packet.sequence().wrapping_sub(sequence),
-                    packet.timestamp().wrapping_sub(timestamp),
                 );
             }
             require(
@@ -372,25 +386,29 @@ impl AudioWindow {
                 "MOH audio lost its continuous RTP clock",
             )?;
         }
-        let total_frames = self.total_frames.checked_add(1).ok_or(Error::Capacity)?;
-        let frames = if restart {
-            1
-        } else {
-            self.frames.checked_add(1).ok_or(Error::Capacity)?
-        };
-        if restart {
+        let total_samples = self
+            .total_samples
+            .checked_add(samples)
+            .ok_or(Error::Capacity)?;
+        self.samples = if restart {
             self.first = Some(now);
+            samples
         } else {
             self.first.get_or_insert(now);
-        }
-        self.last = Some((packet.ssrc(), packet.sequence(), packet.timestamp()));
-        self.frames = frames;
-        self.total_frames = total_frames;
+            self.samples.checked_add(samples).ok_or(Error::Capacity)?
+        };
+        self.last = Some((
+            packet.ssrc(),
+            packet.sequence(),
+            packet.timestamp(),
+            samples,
+        ));
+        self.total_samples = total_samples;
         Ok(())
     }
 
     fn complete(&self, frames: u16, now: Instant) -> bool {
-        self.frames >= frames
+        self.samples >= u32::from(frames) * 160
             && self.first.is_some_and(|first| {
                 now.duration_since(first)
                     >= Duration::from_millis(u64::from(frames.saturating_sub(1)) * 20)
@@ -399,20 +417,21 @@ impl AudioWindow {
 }
 
 fn repeat_complete(
-    observed: u16,
+    observed: u32,
     repeated: bool,
-    post_repeat: Option<(u16, Instant)>,
+    post_repeat: Option<(u32, Instant)>,
     now: Instant,
 ) -> bool {
     repeated
         && post_repeat.is_none_or(|(count, at)| {
-            observed >= count + 12 && now.duration_since(at) >= Duration::from_millis(220)
+            observed >= count + 12 * 160 && now.duration_since(at) >= Duration::from_millis(220)
         })
 }
 
 async fn audio(
     client: &Client,
     peers: &[Peer; 2],
+    clock: RtpClock,
     sample: i32,
     frames: u16,
     repeat: Option<&str>,
@@ -421,7 +440,7 @@ async fn audio(
     let [left, right] = peers;
     left.drain()?;
     right.drain()?;
-    let mut window = AudioWindow::new(sample);
+    let mut window = AudioWindow::new(sample, clock);
     let mut repeated = repeat.is_none();
     let mut post_repeat = None;
     let request = async {
@@ -436,10 +455,10 @@ async fn audio(
     let result = bounded(async {
         for _ in 0..256 {
             tokio::select! {
-                result = &mut request, if !repeated && window.total_frames >= 20 => {
+                result = &mut request, if !repeated && window.total_samples >= 20 * 160 => {
                     result?;
                     repeated = true;
-                    post_repeat = Some((window.total_frames, Instant::now()));
+                    post_repeat = Some((window.total_samples, Instant::now()));
                 }
                 result = left.socket.data().recv_from(&mut first) => {
                     let (size, source) = result?;
@@ -454,7 +473,7 @@ async fn audio(
             }
             let now = Instant::now();
             if window.complete(frames, now)
-                && repeat_complete(window.total_frames, repeated, post_repeat, now)
+                && repeat_complete(window.total_samples, repeated, post_repeat, now)
             {
                 return Ok(());
             }
@@ -464,8 +483,8 @@ async fn audio(
     .await;
     if let Err(error) = &result {
         eprintln!(
-            "MOH audio comparison failed: phase={phase}, frames={}, total_frames={}, error={error}",
-            window.frames, window.total_frames
+            "MOH audio comparison failed: phase={phase}, samples={}, total_samples={}, error={error}",
+            window.samples, window.total_samples
         );
     }
     result
@@ -475,38 +494,33 @@ async fn exercise(
     client: &Client,
     session: &mut Session,
     peers: &[Peer; 2],
+    clock: RtpClock,
     playback_id: &ChannelId,
     playback_lifetime: &mut Lifetime,
 ) -> Result<(), Error> {
     let id = peers[0].id.clone();
+    let receive =
+        |sample, frames, repeat, phase| audio(client, peers, clock, sample, frames, repeat, phase);
     super::external_audio::received(&peers[0].socket, StaticRtpCodec::Pcmu, 0).await?;
-    audio(client, peers, 0, 12, None, "initial received silence").await?;
+    receive(0, 12, None, "initial received silence").await?;
     bounded(client.start_music_on_hold(&id, None)).await?;
-    audio(client, peers, 1200, 60, None, "default one-second loop").await?;
+    receive(1200, 60, None, "default one-second loop").await?;
     bounded(client.stop_music_on_hold(&id)).await?;
-    audio(client, peers, 0, 12, None, "stopped default").await?;
+    receive(0, 12, None, "stopped default").await?;
     bounded(client.start_music_on_hold(&id, Some("Main"))).await?;
-    audio(
-        client,
-        peers,
-        2400,
-        60,
-        Some("Main"),
-        "Main loop and idempotent start",
-    )
-    .await?;
+    receive(2400, 60, Some("Main"), "Main loop and idempotent start").await?;
     bounded(client.stop_music_on_hold(&id)).await?;
-    audio(client, peers, 0, 12, None, "stopped Main").await?;
+    receive(0, 12, None, "stopped Main").await?;
     bounded(client.start_music_on_hold(&id, Some("mAiN"))).await?;
-    audio(client, peers, 2400, 12, None, "case-insensitive fresh Main").await?;
+    receive(2400, 12, None, "case-insensitive fresh Main").await?;
     bounded(client.stop_music_on_hold(&id)).await?;
-    audio(client, peers, 0, 12, None, "stopped mixed-case Main").await?;
+    receive(0, 12, None, "stopped mixed-case Main").await?;
     bounded(client.start_music_on_hold(&id, Some("missing-music-class"))).await?;
-    audio(client, peers, 1200, 12, None, "unknown class fallback").await?;
+    receive(1200, 12, None, "unknown class fallback").await?;
     bounded(client.mute(&id, MuteDirection::Outgoing)).await?;
-    audio(client, peers, 0, 12, None, "muted MOH").await?;
+    receive(0, 12, None, "muted MOH").await?;
     bounded(client.unmute(&id, MuteDirection::Outgoing)).await?;
-    audio(client, peers, 1200, 12, None, "unmuted MOH").await?;
+    receive(1200, 12, None, "unmuted MOH").await?;
     let media =
         MediaUri::Sound(SoundId::try_from("rusterisk-position".to_owned()).map_err(invalid)?);
     let options = PlaybackOptions {
@@ -521,21 +535,11 @@ async fn exercise(
         playback.id == *playback_id && playback.media_uri == media.to_string(),
         "MOH interrupting playback identity changed",
     )?;
-    audio(
-        client,
-        peers,
-        2000,
-        12,
-        None,
-        "ordinary playback interrupts music",
-    )
-    .await?;
+    receive(2000, 12, None, "ordinary playback interrupts music").await?;
     observed(session, Wanted::Finished(playback_id)).await?;
     missing(bounded(client.playback(playback_id)).await)?;
     *playback_lifetime = Lifetime::Released;
-    audio(
-        client,
-        peers,
+    receive(
         0,
         12,
         None,
@@ -543,15 +547,7 @@ async fn exercise(
     )
     .await?;
     bounded(client.start_music_on_hold(&id, Some("Main"))).await?;
-    audio(
-        client,
-        peers,
-        2400,
-        12,
-        None,
-        "active music before terminal cleanup",
-    )
-    .await
+    receive(2400, 12, None, "active music before terminal cleanup").await
 }
 
 pub async fn compare(
@@ -559,6 +555,7 @@ pub async fn compare(
     session: &mut Session,
     application: &str,
     server_ip: Ipv4Addr,
+    clock: RtpClock,
 ) -> Result<(), Error> {
     let local_ip = super::external_audio::local_media_ip(server_ip)?;
     let mut resources = Resources::new(local_ip)?;
@@ -584,7 +581,7 @@ pub async fn compare(
             let sequence = async {
                 let result = tokio::time::timeout(
                     Duration::from_secs(45),
-                    exercise(client, session, peers, playback, playback_lifetime),
+                    exercise(client, session, peers, clock, playback, playback_lifetime),
                 )
                 .await
                 .map_err(|_| Error::Timeout)
@@ -641,7 +638,7 @@ fn received_silence_cannot_hide_later_music_or_count_duplicate_rtp_as_a_loop() -
             &[rusterisk_media::mulaw_encode(0); 160],
         ),
     ] {
-        let mut window = AudioWindow::new(0);
+        let mut window = AudioWindow::new(0, RtpClock::FirstSample);
         require(
             !window.complete(12, Instant::now()),
             "Missing RTP became received silence",
@@ -670,6 +667,43 @@ fn known_packet(sequence: u16, timestamp: u32) -> Result<RtpPacket, Error> {
 }
 
 #[test]
+fn short_pcmu_payloads_contribute_only_their_received_samples() -> Result<(), Error> {
+    let start = Instant::now();
+    for (clock, short_at, other_clock) in [
+        (RtpClock::FirstSample, 160, RtpClock::Asterisk),
+        (RtpClock::Asterisk, 138, RtpClock::FirstSample),
+    ] {
+        let short = RtpPacket::new(
+            0,
+            1,
+            short_at,
+            77,
+            &[rusterisk_media::mulaw_encode(1200); 138],
+        )
+        .map_err(invalid)?;
+        let mut window = AudioWindow::new(1200, clock);
+        window.observe(&known_packet(0, 0)?, start)?;
+        window.observe(&short, start + Duration::from_millis(20))?;
+        require(
+            !window.complete(2, start + Duration::from_millis(20)),
+            "A short PCMU payload counted as an entire 20 ms of received audio",
+        )?;
+        window.observe(&known_packet(2, 298)?, start + Duration::from_millis(38))?;
+        require(
+            window.complete(2, start + Duration::from_millis(38)),
+            "Continuous PCMU with varied payload durations did not accumulate received audio",
+        )?;
+        let mut other = AudioWindow::new(1200, other_clock);
+        other.observe(&known_packet(0, 0)?, start)?;
+        require(
+            matches!(other.observe(&short, start), Err(Error::Invalid(_))),
+            "A PCMU timestamp was accepted under the wrong clock",
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
 fn legal_presentation_gaps_require_a_fresh_continuous_audio_window() -> Result<(), Error> {
     for gap in [320_u32, 480] {
         for (sequence, timestamp) in [
@@ -677,7 +711,7 @@ fn legal_presentation_gaps_require_a_fresh_continuous_audio_window() -> Result<(
             (u16::MAX.wrapping_sub(58), u32::MAX.wrapping_sub(9360)),
         ] {
             let started = Instant::now();
-            let mut window = AudioWindow::new(1200);
+            let mut window = AudioWindow::new(1200, RtpClock::FirstSample);
             for index in 0..59_u16 {
                 let packet = known_packet(
                     sequence.wrapping_add(index),
@@ -688,7 +722,7 @@ fn legal_presentation_gaps_require_a_fresh_continuous_audio_window() -> Result<(
                     started + Duration::from_millis(u64::from(index) * 20),
                 )?;
             }
-            let post_repeat = Some((window.total_frames, started + Duration::from_millis(1160)));
+            let post_repeat = Some((window.total_samples, started + Duration::from_millis(1160)));
             let gap_at = started + Duration::from_millis(1160 + u64::from(gap / 8));
             let gap_timestamp = timestamp.wrapping_add(58 * 160).wrapping_add(gap);
             window.observe(
@@ -696,7 +730,9 @@ fn legal_presentation_gaps_require_a_fresh_continuous_audio_window() -> Result<(
                 gap_at,
             )?;
             require(
-                window.frames == 1 && window.total_frames == 60 && !window.complete(60, gap_at),
+                window.samples == 160
+                    && window.total_samples == 60 * 160
+                    && !window.complete(60, gap_at),
                 "A presentation gap credited old frames to a fresh audio window",
             )?;
             for index in 1..60_u16 {
@@ -709,7 +745,7 @@ fn legal_presentation_gaps_require_a_fresh_continuous_audio_window() -> Result<(
                 window.observe(&packet, now)?;
                 if index == 11 {
                     require(
-                        repeat_complete(window.total_frames, true, post_repeat, now)
+                        repeat_complete(window.total_samples, true, post_repeat, now)
                             && !window.complete(60, now),
                         "Post-repeat progress credited earlier frames to a fresh loop",
                     )?;
@@ -728,8 +764,12 @@ fn legal_presentation_gaps_require_a_fresh_continuous_audio_window() -> Result<(
 #[test]
 fn repeat_completion_keeps_its_response_frame_and_time_baselines() -> Result<(), Error> {
     let responded = Instant::now();
-    let post_repeat = Some((59, responded));
-    for (observed, elapsed, expected) in [(70, 220, false), (71, 219, false), (71, 220, true)] {
+    let post_repeat = Some((59 * 160, responded));
+    for (observed, elapsed, expected) in [
+        (71 * 160 - 1, 220, false),
+        (71 * 160, 219, false),
+        (71 * 160, 220, true),
+    ] {
         require(
             repeat_complete(
                 observed,
