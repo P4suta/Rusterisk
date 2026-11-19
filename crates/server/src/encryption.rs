@@ -63,7 +63,7 @@ impl TlsContext {
     }
 
     pub async fn accept(&self, stream: TcpStream) -> Result<TlsStream<TcpStream>, ControlError> {
-        let (stream, ()) = self.0.accept(stream, ()).await.map_err(failure)?;
+        let (stream, _service) = self.0.accept(stream, ()).await.map_err(failure)?;
         Ok(stream)
     }
 }
