@@ -1,9 +1,8 @@
-use std::{
-    path::Path,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::path::Path;
 use xtask::browser::SourceSnapshot;
 
+#[path = "fixtures/directory.rs"]
+mod directory;
 #[path = "browser_snapshot/shared_adapter.rs"]
 mod shared_adapter;
 #[path = "browser_snapshot/vendor.rs"]
@@ -66,15 +65,7 @@ fn project(root: &Path) -> Result<(), std::io::Error> {
 #[test]
 fn browser_snapshot_copies_owned_inputs_and_refuses_changed_sources_and_test_additions(
 ) -> Result<(), std::io::Error> {
-    let identity = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(std::io::Error::other)?
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "rusterisk-browser-snapshot-{}-{identity}",
-        std::process::id()
-    ));
-    std::fs::create_dir(&directory)?;
+    let directory = directory::reserve("browser-snapshot")?;
     let result = (|| {
         let root = directory.join("root");
         project(&root)?;

@@ -1,15 +1,9 @@
-use super::{project, write};
-use std::{
-    fs, io,
-    path::Path,
-    sync::atomic::{AtomicUsize, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use super::{directory, project, write};
+use std::{fs, io, path::Path};
 use xtask::browser::SourceSnapshot;
 
 const ADAPTER: &str = "tests/interop/node-ari-client/project-service-only";
 const FILES: [&str; 3] = ["package.json", "index.mjs", "index.ts"];
-static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
 fn require(valid: bool, reason: &'static str) -> io::Result<()> {
     if valid {
@@ -20,16 +14,7 @@ fn require(valid: bool, reason: &'static str) -> io::Result<()> {
 }
 
 fn using(test: impl FnOnce(&Path, &Path, &Path) -> io::Result<()>) -> io::Result<()> {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(io::Error::other)?
-        .as_nanos();
-    let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
-    let parent = std::env::temp_dir().join(format!(
-        "rusterisk-browser-shared-adapter-{}-{stamp}-{sequence}",
-        std::process::id()
-    ));
-    fs::create_dir(&parent)?;
+    let parent = directory::reserve("browser-shared-adapter")?;
     let root = parent.join("root");
     let source = parent.join("source");
     let state = parent.join("state");

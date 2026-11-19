@@ -1,8 +1,5 @@
-use super::{project, write, SourceSnapshot};
-use std::{
-    path::Path,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use super::{directory, project, write, SourceSnapshot};
+use std::path::Path;
 
 const PATCHED: &[u8] =
     b"[workspace]\nmembers=['xtask']\n[patch.crates-io]\nstr0m={path='vendor/str0m'}\n";
@@ -11,15 +8,7 @@ fn fixture(
     name: &str,
     operation: impl FnOnce(&Path, &Path) -> Result<(), std::io::Error>,
 ) -> Result<(), std::io::Error> {
-    let identity = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(std::io::Error::other)?
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "rusterisk-browser-{name}-{}-{identity}",
-        std::process::id()
-    ));
-    std::fs::create_dir(&directory)?;
+    let directory = directory::reserve(&format!("browser-{name}"))?;
     let root = directory.join("root");
     let result = (|| {
         project(&root)?;

@@ -1,12 +1,15 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use xtask::{
     browser::{execute_with, Execution, RunError},
     process::ProcessError,
 };
+
+#[path = "fixtures/directory.rs"]
+mod directory;
 
 fn write(root: &Path, path: &str, bytes: &[u8]) -> Result<(), std::io::Error> {
     let path = root.join(path);
@@ -20,15 +23,7 @@ fn write(root: &Path, path: &str, bytes: &[u8]) -> Result<(), std::io::Error> {
 #[test]
 fn browser_executor_stops_after_a_deadline_cleans_only_the_owned_container_and_removes_temporary_state(
 ) -> Result<(), std::io::Error> {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(std::io::Error::other)?
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "rusterisk-browser-executor-{}-{stamp}",
-        std::process::id()
-    ));
-    std::fs::create_dir(&root)?;
+    let root = directory::reserve("browser-executor")?;
     let result = (|| {
         write(&root, "Cargo.toml", b"[workspace]\nmembers=['xtask']\n")?;
         for path in [

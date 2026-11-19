@@ -1,22 +1,18 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 use xtask::{
     browser::{check_with, BrowserError, Declaration},
     process::ProcessError,
 };
 
+#[path = "fixtures/directory.rs"]
+mod directory;
+
 fn fixture() -> Result<PathBuf, BrowserError> {
-    let identity = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| BrowserError::Package)?
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "rusterisk-browser-check-{}-{identity}",
-        std::process::id()
-    ));
+    let root = directory::reserve("browser-check")?;
     let package = root.join("examples/browser/node_modules/sip.js");
     std::fs::create_dir_all(&package)?;
     std::fs::write(

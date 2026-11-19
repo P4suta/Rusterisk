@@ -1,14 +1,12 @@
+use super::directory;
 use std::{
     io,
     path::Path,
     process::{Command, Output},
-    sync::atomic::{AtomicUsize, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
 };
 use toml::Value;
 
 const MEMBER: &str = "crates/windows-job-accounting";
-static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 const SOURCE: &str = r#"
 #![cfg(windows)]
 
@@ -127,16 +125,7 @@ fn populate(root: &Path) -> io::Result<()> {
 }
 
 pub(super) fn using_fixture<T>(operation: impl FnOnce(&Path) -> io::Result<T>) -> io::Result<T> {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(io::Error::other)?
-        .as_nanos();
-    let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
-    let root = std::env::temp_dir().join(format!(
-        "rusterisk-windows-job-accounting-cli-{}-{stamp}-{sequence}",
-        std::process::id()
-    ));
-    std::fs::create_dir(&root)?;
+    let root = directory::reserve("windows-job-accounting-cli")?;
     let result = populate(&root).and_then(|()| operation(&root));
     match (result, std::fs::remove_dir_all(&root)) {
         (Ok(value), Ok(())) => Ok(value),
