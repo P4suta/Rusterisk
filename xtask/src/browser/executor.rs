@@ -269,7 +269,7 @@ fn version(phase: Phase, bytes: &[u8]) -> Result<(), RunError> {
     let valid = match phase {
         Phase::RustVersion | Phase::CargoVersion => {
             text.lines()
-                .filter(|line| *line == "release: 1.99.0")
+                .filter(|line| *line == "release: 1.100.0")
                 .count()
                 == 1
                 && text

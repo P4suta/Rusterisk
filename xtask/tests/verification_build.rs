@@ -24,7 +24,7 @@ fn verification_builds_own_their_builder_and_never_use_a_private_parent(
     assert!(steps[3]
         .arguments
         .iter()
-        .any(|value| value == "rusterisk-input-verification:rust-1.99.0"));
+        .any(|value| value == "rusterisk-input-verification:rust-1.100.0"));
     assert_eq!(steps[3].budget.as_secs(), 900);
     assert!(plan
         .cleanup()

@@ -1,4 +1,4 @@
-FROM rust:1.99.0-bookworm@sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6 AS rust
+FROM rust:1.100.0-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS rust
 FROM mcr.microsoft.com/playwright:v1.65.1-noble@sha256:1507cbfc550a63a6b7396791ca4f00df17beb56342d2447b3f106c306f525579
 
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
@@ -40,7 +40,7 @@ RUN case "$TARGETARCH" in \
 ENV PATH="/opt/node/bin:/opt/cmake/bin:/usr/local/cargo/bin:${PATH}"
 
 RUN test "$(node --version)" = 'v26.13.1' \
-    && test "$(rustc --version | cut --delimiter=' ' --fields=2)" = '1.99.0' \
+    && test "$(rustc --version | cut --delimiter=' ' --fields=2)" = '1.100.0' \
     && test "$(cmake --version | head -n 1)" = 'cmake version 4.4.5'
 
 WORKDIR /tmp

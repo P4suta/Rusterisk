@@ -9,7 +9,7 @@ Build the public verification image and inspect its immutable identity.
 ```sh
 mise x -- just verification-build --dry-run
 mise x -- just verification-build --run
-native_image="$(mise x -- docker image inspect rusterisk-input-verification:rust-1.99.0 --format '{{.Id}}')"
+native_image="$(mise x -- docker image inspect rusterisk-input-verification:rust-1.100.0 --format '{{.Id}}')"
 mise x -- just native-sanitizers --dry-run --image "$native_image"
 mise x -- just native-sanitizers --run --image "$native_image"
 ```

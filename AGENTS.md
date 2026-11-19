@@ -16,7 +16,7 @@ Run applicable checks and repair failures before reporting success.
 Keep integration and release checks at their declared stages.
 
 Keep call transitions, ownership, cancellation, and terminal cleanup in the dependency-free `no_std` core.
-Use Rust 1.89-compatible language features in that crate and Rust 1.99.0 for development.
+Use Rust 1.89-compatible language features in that crate and Rust 1.100.0 for development.
 The fast gate runs the core tests with the pinned Rust 1.89.0 toolchain.
 Use `mise x -- just core-msrv` to run the Rust 1.89.0 core tests directly.
 Keep network, clock, filesystem, and persistence effects in adapters.

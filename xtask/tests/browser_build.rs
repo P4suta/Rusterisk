@@ -18,7 +18,7 @@ fn browser_builds_isolate_resources_and_remove_only_the_owned_builder() -> Resul
     assert!(steps[3]
         .arguments
         .iter()
-        .any(|value| value == "rusterisk-browser-verification:rust-1.99.0-playwright-1.65.1"));
+        .any(|value| value == "rusterisk-browser-verification:rust-1.100.0-playwright-1.65.1"));
     assert_eq!(
         steps[3].arguments.last().map(String::as_str),
         Some("containers/browser-verification")

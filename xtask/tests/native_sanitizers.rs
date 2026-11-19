@@ -57,7 +57,7 @@ fn native_sanitizers_rebuild_real_dependencies_in_bounded_isolated_containers(
 
 #[test]
 fn native_sanitizer_plans_reject_mutable_images_and_ambiguous_mounts() {
-    for image in ["latest", "rust:1.99.0", "sha256:short"] {
+    for image in ["latest", "rust:1.100.0", "sha256:short"] {
         assert!(NativeSanitizerPlan::new("fixture", "/source", "/state", image).is_err());
     }
     for (source, state) in [

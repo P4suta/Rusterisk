@@ -208,7 +208,7 @@ impl Fixture {
         self.temporary = state.parent().map(Path::to_owned);
         let text = match phase {
             Phase::RustVersion | Phase::CargoVersion => {
-                "release: 1.99.0\nhost: aarch64-unknown-linux-gnu\n"
+                "release: 1.100.0\nhost: aarch64-unknown-linux-gnu\n"
             }
             Phase::NodeVersion => "v26.13.1\n",
             Phase::NpmVersion => "11.20.0\n",

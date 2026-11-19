@@ -163,7 +163,7 @@ impl Fixture<'_> {
         let text = match phase {
             Phase::ClangVersion => "Debian clang version 14.0.6\n".to_owned(),
             Phase::RustVersion => format!(
-                "release: 1.99.0\nhost: {}-unknown-linux-gnu\n",
+                "release: 1.100.0\nhost: {}-unknown-linux-gnu\n",
                 std::env::consts::ARCH
             ),
             Phase::RejectProbe(Defect::Address) => {

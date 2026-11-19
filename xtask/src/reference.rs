@@ -214,7 +214,7 @@ impl VerificationBuild {
     pub fn steps(&self) -> Vec<Step> {
         build_steps(
             &self.name,
-            "rusterisk-input-verification:rust-1.99.0",
+            "rusterisk-input-verification:rust-1.100.0",
             "containers/input-verification",
             900,
         )

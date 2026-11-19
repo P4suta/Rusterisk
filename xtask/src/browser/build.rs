@@ -18,7 +18,7 @@ impl Build {
     pub fn steps(&self) -> Vec<Step> {
         build_steps(
             &self.name,
-            "rusterisk-browser-verification:rust-1.99.0-playwright-1.65.1",
+            "rusterisk-browser-verification:rust-1.100.0-playwright-1.65.1",
             "containers/browser-verification",
             900,
         )

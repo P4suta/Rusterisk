@@ -88,7 +88,7 @@ impl ServerContainerBuildPlan {
             "CARGO_TARGET_DIR=/state/target",
             "CARGO_BUILD_JOBS=2",
             "TMPDIR=/state/tmp",
-            "RUSTUP_TOOLCHAIN=1.99.0",
+            "RUSTUP_TOOLCHAIN=1.100.0",
             match phase {
                 ServerBuildPhase::Fetch => "CARGO_NET_OFFLINE=false",
                 ServerBuildPhase::Build => "CARGO_NET_OFFLINE=true",

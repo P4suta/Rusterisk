@@ -123,7 +123,7 @@ pub(super) fn compiler(phase: Phase, bytes: &[u8], architecture: &str) -> io::Re
                 "x86_64" => "host: x86_64-unknown-linux-gnu",
                 _ => return Err(io::Error::other("unsupported native sanitizer host")),
             };
-            text.lines().any(|line| line == "release: 1.99.0")
+            text.lines().any(|line| line == "release: 1.100.0")
                 && text.lines().any(|line| line == host)
         }
         Phase::CompileProbe(_)

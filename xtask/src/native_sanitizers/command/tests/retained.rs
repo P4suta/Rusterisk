@@ -76,7 +76,7 @@ fn retained_native_models_use_recorded_linux_architecture_instead_of_reader_arch
         };
         fs::write(
             fixture.destination.join("rust-version.txt"),
-            format!("release: 1.99.0\nhost: {architecture}-unknown-linux-gnu\n"),
+            format!("release: 1.100.0\nhost: {architecture}-unknown-linux-gnu\n"),
         )?;
         rejected(fixture, &execution)?;
         let recorded = changed(&execution, "architecture", architecture.into())?;
