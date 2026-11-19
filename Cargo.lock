@@ -2383,7 +2383,7 @@ name = "rusterisk-client"
 version = "0.1.0"
 dependencies = [
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures-util",
  "reqwest",
  "rusterisk-api",
@@ -2432,7 +2432,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "axum-server",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures-util",
  "getrandom 0.4.3",
  "hickory-resolver",
@@ -2477,7 +2477,6 @@ dependencies = [
 name = "rusterisk-sip"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
  "getrandom 0.4.3",
  "hmac 0.13.0",
  "md-5 0.11.0",
