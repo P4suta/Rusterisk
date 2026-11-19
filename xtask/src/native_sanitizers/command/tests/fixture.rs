@@ -167,7 +167,7 @@ impl Fixture<'_> {
                 "release: 1.100.0\nhost: {}-unknown-linux-gnu\n",
                 std::env::consts::ARCH
             ),
-            Phase::LldVersion => format!("{}\n", crate::native_sanitizers::LLD_VERSION),
+            Phase::LldVersion => "LLD 23.1.5 (/checkout/src/llvm-project/llvm 0a5579eb649d3634a9c30ac873300cc2944fa070) (compatible with GNU linkers)\n".to_owned(),
             Phase::RejectProbe(Defect::Address) => {
                 "ERROR: AddressSanitizer: heap-use-after-free\n".to_owned()
             }

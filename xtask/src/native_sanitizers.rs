@@ -11,7 +11,7 @@ mod command;
 pub(crate) use command::retained::NativeExecution;
 pub use command::{execute, plan, Execution, NativeOutcome};
 
-const LLD_VERSION: &str = "LLD 23.1.5 (https://github.com/rust-lang/llvm-project.git 0a5579eb649d3634a9c30ac873300cc2944fa070) (compatible with GNU linkers)";
+const LLD_VERSION: &str = "LLD 23.1.5 (/checkout/src/llvm-project/llvm 0a5579eb649d3634a9c30ac873300cc2944fa070) (compatible with GNU linkers)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {

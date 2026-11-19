@@ -51,6 +51,7 @@ fn retained_native_requires_the_pinned_lld_receipt() -> io::Result<()> {
             "GNU ld (GNU Binutils for Debian) 2.40\n",
             "LLD 14.0.6 (compatible with GNU linkers)\n",
             "LLD 23.1.5 (foreign build) (compatible with GNU linkers)\n",
+            "LLD 23.1.5 (https://github.com/rust-lang/llvm-project.git 0a5579eb649d3634a9c30ac873300cc2944fa070) (compatible with GNU linkers)\n",
         ] {
             fs::write(&path, changed)?;
             rejected(fixture, &execution)?;
