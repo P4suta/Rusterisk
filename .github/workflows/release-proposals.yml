@@ -79,4 +79,6 @@ jobs:
         env:
           GIT_TOKEN: ${{ steps.app.outputs.token }}
           CARGO_BUILD_JOBS: '2'
-        run: mise x aqua:release-plz/release-plz@0.4.3 -- release-plz release-pr
+        run: >-
+          mise x aqua:release-plz/release-plz@0.4.3 --
+          release-plz release-pr --max-analyze-commits 100

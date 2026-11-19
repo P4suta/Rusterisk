@@ -13,9 +13,11 @@ Store its scoped read-only service token as `DOPPLER_TOKEN` in the environment.
 Run `verify-auth` to check read access to `main` before setting `RELEASE_PLZ_PROPOSALS` to `enabled`.
 
 Run the updater in a disposable checkout to inspect a proposal locally.
+The first proposal examines up to 100 commits per package.
+Use the [compatibility contract](compatibility.md) to review the first changelog's coverage.
 
 ```sh
-mise x aqua:release-plz/release-plz@0.4.3 -- release-plz update
+mise x aqua:release-plz/release-plz@0.4.3 -- release-plz update --max-analyze-commits 100
 ```
 
 Install `cargo-semver-checks` version `0.51.0` for proposals with an existing release tag.
