@@ -214,16 +214,26 @@ async fn compare_subscriptions(
         rejection(actual.subscribe_resources(app, &batch).await)?,
         rejection(reference.subscribe_resources(app, &batch).await)?
     );
-    assert_eq!(
-        actual.application(app).await?,
-        reference.application(app).await?
-    );
+    let mut released = actual.application(app).await?;
+    assert_eq!(released, reference.application(app).await?);
+    assert_eq!(released.bridge_ids.as_slice(), std::slice::from_ref(&id));
+    released.bridge_ids.clear();
     actual.destroy_bridge(&id).await?;
     reference.destroy_bridge(&id).await?;
-    assert_eq!(
-        actual.application(app).await?,
-        reference.application(app).await?
-    );
+    assert_eq!(actual.application(app).await?, released);
+    // Asterisk unsubscribes in its bridge snapshot callback.
+    let reference_released = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let application = reference.application(app).await?;
+            if !application.bridge_ids.contains(&id) {
+                return Ok::<_, Error>(application);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| Error::Invalid("reference bridge subscription cleanup deadline"))??;
+    assert_eq!(reference_released, released);
     assert_eq!(
         rejection(
             actual
