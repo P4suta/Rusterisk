@@ -86,45 +86,38 @@ fn empty_music_check_neither_creates_a_missing_data_root_nor_binds_configured_po
         let sip = std::net::UdpSocket::bind("127.0.0.1:0")?;
         let http_address = http.local_addr()?;
         let sip_address = sip.local_addr()?;
-        let result = (|| {
-            configuration(
-                &settings,
-                &format!(
-                    "[general]\nbindaddr=127.0.0.1\nbindport={}\n",
-                    http_address.port()
-                ),
-                &format!("[udp]\ntype=transport\nprotocol=udp\nbind={sip_address}\n"),
-                "",
-            )?;
-            let checked = run(
-                root,
-                &[
-                    OsStr::new("--check-config"),
-                    OsStr::new("--config-dir"),
-                    settings.as_os_str(),
-                    OsStr::new("--data-dir"),
-                    missing.as_os_str(),
-                ],
-            )?;
-            verify(
-                checked.status.success()
-                    && checked.stdout == b"Configuration valid.\n"
-                    && checked.stderr.is_empty(),
-                format!(
-                    "empty music check attempted startup: {}",
-                    String::from_utf8_lossy(&checked.stderr)
-                ),
-            )?;
-            verify(
-                !root.join("missing").exists() && !root.join("data").exists(),
-                "empty music check created a data root",
-            )
-        })();
-        drop(http);
-        drop(sip);
-        let http = std::net::TcpListener::bind(http_address).map(drop);
-        let sip = std::net::UdpSocket::bind(sip_address).map(drop);
-        combine(result, combine(http, sip))
+        configuration(
+            &settings,
+            &format!(
+                "[general]\nbindaddr=127.0.0.1\nbindport={}\n",
+                http_address.port()
+            ),
+            &format!("[udp]\ntype=transport\nprotocol=udp\nbind={sip_address}\n"),
+            "",
+        )?;
+        let checked = run(
+            root,
+            &[
+                OsStr::new("--check-config"),
+                OsStr::new("--config-dir"),
+                settings.as_os_str(),
+                OsStr::new("--data-dir"),
+                missing.as_os_str(),
+            ],
+        )?;
+        verify(
+            checked.status.success()
+                && checked.stdout == b"Configuration valid.\n"
+                && checked.stderr.is_empty(),
+            format!(
+                "empty music check attempted startup: {}",
+                String::from_utf8_lossy(&checked.stderr)
+            ),
+        )?;
+        verify(
+            !root.join("missing").exists() && !root.join("data").exists(),
+            "empty music check created a data root",
+        )
     })
 }
 

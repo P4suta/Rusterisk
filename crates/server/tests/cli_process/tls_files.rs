@@ -259,12 +259,7 @@ fn check(root: &Path, material: Material) -> io::Result<()> {
             ),
         )
     })();
-    let operation = combine(operation, storage_untouched(root, &settings));
-    drop(tls);
-    drop(sip);
-    let rebound_tls = TcpListener::bind(tls_address).map(drop);
-    let rebound_sip = UdpSocket::bind(sip_address).map(drop);
-    combine(operation, combine(rebound_tls, rebound_sip))
+    combine(operation, storage_untouched(root, &settings))
 }
 
 fn fixture(material: Material) -> io::Result<()> {

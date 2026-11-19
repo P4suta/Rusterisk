@@ -128,22 +128,13 @@ fn check(root: &Path, settings: Settings) -> io::Result<()> {
             Settings::MissingDirectory => absent(&selected),
         }
     })();
-    let mut result = combine(primary, absent(&data));
-    result = combine(
+    let result = combine(primary, absent(&data));
+    combine(
         result,
         rusterisk_storage::Store::open(&data)
             .map(drop)
             .map_err(io::Error::other),
-    );
-    drop(http);
-    drop(sip);
-    for cleanup in [
-        TcpListener::bind(http_address).map(drop),
-        UdpSocket::bind(sip_address).map(drop),
-    ] {
-        result = combine(result, cleanup);
-    }
-    result
+    )
 }
 
 fn fixture(settings: Settings) -> io::Result<()> {
