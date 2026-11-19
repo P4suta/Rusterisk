@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 rusterisk-core = { version = "0.1.0", path = "../core" }
 rusterisk-config = { version = "0.1.0", path = "../config" }
-rsipstack = { version = "=0.8.5", default-features = false, features = ["std"] }
+rsipstack = { version = "=0.8.6", default-features = false, features = ["std"] }
 tokio.workspace = true
 sha2 = "0.11.0"
 md-5 = "=0.11.0"

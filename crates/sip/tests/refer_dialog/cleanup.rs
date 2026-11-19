@@ -426,12 +426,12 @@ fn a_subscription_target_refresh_updates_notify_routing_and_rejects_ambiguous_co
     assert!(status(&ambiguous, 400));
     assert!(notifies(&ambiguous)?.is_empty());
     for (index, (target, code)) in [
-        ("sip:updated@127.0.0.1:5061;method=INVITE", 501),
-        ("sip:updated@127.0.0.1:5061?Subject=ignored", 501),
-        ("sip:updated:private-password@127.0.0.1:5061", 501),
-        ("sip:updated%0d%0a@127.0.0.1:5061", 400),
-        ("sip:updated@[::1]suffix", 400),
-        ("sip:updated@peer^invalid", 400),
+        ("sip:updated@127.0.0.1:5061;method=INVITE", Some(501)),
+        ("sip:updated@127.0.0.1:5061?Subject=ignored", Some(501)),
+        ("sip:updated:private-password@127.0.0.1:5061", Some(501)),
+        ("sip:updated%0d%0a@127.0.0.1:5061", Some(400)),
+        ("sip:updated@[::1]suffix", Some(400)),
+        ("sip:updated@peer^invalid", None),
     ]
     .into_iter()
     .enumerate()
@@ -446,7 +446,13 @@ fn a_subscription_target_refresh_updates_notify_routing_and_rejects_ambiguous_co
         let rejected =
             fixture
                 .engine
-                .receive(packet.as_bytes(), fixture.peer, u64::from(sequence) + 5)?;
+                .receive(packet.as_bytes(), fixture.peer, u64::from(sequence) + 5);
+        let Some(code) = code else {
+            assert!(matches!(rejected, Err(SipError::Parse(_))), "{target}");
+            continue;
+        };
+        assert!(rejected.is_ok(), "expected a response for {target}");
+        let rejected = rejected?;
         assert!(status(&rejected, code), "{target}");
         assert!(notifies(&rejected)?.is_empty());
         assert!(no_call_end(&rejected));
