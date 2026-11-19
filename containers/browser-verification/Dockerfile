@@ -19,8 +19,8 @@ RUN timeout 180 apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 RUN case "$TARGETARCH" in \
-        amd64) node_arch=x64; node_digest=5c063e46bab0fbc1c17cc445d7ff129cbdcd0471be6ed83b6ab864f8143bc864; cmake_arch=x86_64; cmake_digest=ed85135c5a5135b45e50423cb406dea04ca3338da0b8ef3c9ede963559680be0 ;; \
-        arm64) node_arch=arm64; node_digest=89e1853138db51e8b82d3e98ba9c0d3f2956a28e5e55ea1b7e12d25aae92d5dd; cmake_arch=aarch64; cmake_digest=301d5063ab259577c1b57ce5490b1aab9ea5c56dc4c822f73499553dab94925f ;; \
+        amd64) node_arch=x64; node_digest=5c063e46bab0fbc1c17cc445d7ff129cbdcd0471be6ed83b6ab864f8143bc864; cmake_arch=x86_64; cmake_digest=81f0d5b0960fb6adc8197030ffc827fba937640d51e73e39e0e9e40d88c66f6f ;; \
+        arm64) node_arch=arm64; node_digest=89e1853138db51e8b82d3e98ba9c0d3f2956a28e5e55ea1b7e12d25aae92d5dd; cmake_arch=aarch64; cmake_digest=0c8447e7bba9701467b5ac6155d157aa9e309e71af4981f78bd4b9176107f553 ;; \
         *) exit 1 ;; \
     esac \
     && curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
@@ -31,7 +31,7 @@ RUN case "$TARGETARCH" in \
     && tar --extract --xz --file /tmp/node.tar.xz --strip-components=1 --directory /opt/node \
     && curl --fail --location --proto '=https' --tlsv1.2 --max-time 120 \
         --output /tmp/cmake.tar.gz \
-        "https://github.com/Kitware/CMake/releases/download/v4.4.5/cmake-4.4.5-linux-${cmake_arch}.tar.gz" \
+        "https://github.com/Kitware/CMake/releases/download/v4.5.0/cmake-4.5.0-linux-${cmake_arch}.tar.gz" \
     && printf '%s  %s\n' "$cmake_digest" /tmp/cmake.tar.gz | sha256sum --check --strict \
     && mkdir /opt/cmake \
     && tar --extract --gzip --file /tmp/cmake.tar.gz --strip-components=1 --directory /opt/cmake \
@@ -41,6 +41,6 @@ ENV PATH="/opt/node/bin:/opt/cmake/bin:/usr/local/cargo/bin:${PATH}"
 
 RUN test "$(node --version)" = 'v26.13.1' \
     && test "$(rustc --version | cut --delimiter=' ' --fields=2)" = '1.100.0' \
-    && test "$(cmake --version | head -n 1)" = 'cmake version 4.4.5'
+    && test "$(cmake --version | head -n 1)" = 'cmake version 4.5.0'
 
 WORKDIR /tmp

@@ -13,10 +13,10 @@ The [fuzz workflow](https://rust-fuzz.github.io/book/cargo-fuzz.html) also needs
 
 ## Decision
 
-Build an independent image from the pinned public Rust 1.99 image.
+Build an independent image from the pinned public Rust image in the [Dockerfile](../../containers/input-verification/Dockerfile).
 Install the dated nightly with Miri and Rust source.
 Pin cargo-fuzz 0.13.2 and cargo-mutants 27.1.0.
-Verify [CMake 4.4.5](https://github.com/Kitware/CMake/releases/tag/v4.4.5) archives with the published architecture hashes.
+Verify [CMake 4.5.0](https://github.com/Kitware/CMake/releases/tag/v4.5.0) archives with the published architecture hashes.
 Use Debian's [Clang package](https://packages.debian.org/bookworm/clang) for native compilation.
 Pin its [sanitizer runtime](https://packages.debian.org/bookworm/libclang-rt-14-dev) and [symbolizer](https://packages.debian.org/bookworm/llvm-14) for native defect diagnostics.
 Reuse the owned builder with explicit processor, memory, process, and time limits.
