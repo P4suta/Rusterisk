@@ -44,6 +44,7 @@ fn prepare(root: &Path) -> io::Result<()> {
         "clippy.toml",
         "deny.toml",
         "justfile",
+        ".gitignore",
         "crates/core/proofs/Cargo.lock",
         "docs/server-distribution.md",
     ] {

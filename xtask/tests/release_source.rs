@@ -92,6 +92,7 @@ fn one_release_source_contains_each_runner_projection_and_its_governing_inputs()
             "clippy.toml",
             "deny.toml",
             "justfile",
+            ".gitignore",
             "api/policy-exceptions.toml",
             "api/gitleaks.toml",
             ".github/workflows/check.yml",

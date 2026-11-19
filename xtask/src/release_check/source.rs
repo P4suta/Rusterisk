@@ -6,11 +6,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const FILES: [&str; 7] = [
+const FILES: [&str; 8] = [
     "rust-toolchain.toml",
     "clippy.toml",
     "deny.toml",
     "justfile",
+    ".gitignore",
     "crates/core/proofs/Cargo.lock",
     "crates/core/assurance/Cargo.lock",
     "docs/server-distribution.md",

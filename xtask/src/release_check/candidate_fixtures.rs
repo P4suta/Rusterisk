@@ -142,6 +142,7 @@ fn inputs(source: &Path) -> io::Result<()> {
         "clippy.toml",
         "deny.toml",
         "justfile",
+        ".gitignore",
         "crates/core/proofs/Cargo.lock",
         "crates/core/assurance/Cargo.lock",
     ] {
