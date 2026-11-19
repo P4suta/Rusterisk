@@ -371,7 +371,10 @@ impl AudioWindow {
                 && elapsed_samples < (1_u32 << 31)
                 && elapsed_samples
                     .checked_sub(step)
-                    .is_some_and(|gap| gap != 0 && gap.is_multiple_of(160));
+                    .is_some_and(|gap| match self.server {
+                        ComparisonServer::Rusterisk => gap != 0 && gap.is_multiple_of(160),
+                        ComparisonServer::Asterisk => gap >= 160,
+                    });
             if !continuous && !restart {
                 eprintln!(
                     "MOH RTP clock mismatch: previous=(ssrc={ssrc}, sequence={sequence}, timestamp={timestamp}, samples={previous_samples}), expected=(ssrc={ssrc}, sequence={expected_sequence}, timestamp={}), observed=(ssrc={}, sequence={}, timestamp={}, samples={samples})",
@@ -753,6 +756,49 @@ fn short_pcmu_payloads_contribute_only_their_received_samples() -> Result<(), Er
         )?;
     }
     Ok(())
+}
+
+#[test]
+fn asterisk_presentation_gap_starts_a_fresh_audio_window() -> Result<(), Error> {
+    let started = Instant::now();
+    let first = known_packet(11998, 1549565144)?;
+    let second = known_packet(11999, 1549566880)?;
+    let mut reference = AudioWindow::new(1200, ComparisonServer::Asterisk);
+    reference.observe(&first, started)?;
+    reference.observe(&second, started + Duration::from_millis(217))?;
+    require(
+        reference.samples == 160
+            && reference.total_samples == 320
+            && !reference.complete(2, started + Duration::from_millis(217)),
+        "An Asterisk presentation gap retained samples from the previous audio window",
+    )?;
+    let mut rusterisk = AudioWindow::new(1200, ComparisonServer::Rusterisk);
+    rusterisk.observe(&first, started)?;
+    require(
+        matches!(
+            rusterisk.observe(&second, started + Duration::from_millis(217)),
+            Err(Error::Invalid(_))
+        ),
+        "A Rusterisk RTP clock accepted an Asterisk-specific presentation gap",
+    )?;
+    for elapsed_samples in [159_u32, 319, 1_u32 << 31] {
+        let mut invalid = AudioWindow::new(1200, ComparisonServer::Asterisk);
+        invalid.observe(&known_packet(0, 0)?, started)?;
+        require(
+            matches!(
+                invalid.observe(&known_packet(1, elapsed_samples)?, started),
+                Err(Error::Invalid(_))
+            ),
+            "An Asterisk RTP clock accepted a partial or backward presentation gap",
+        )?;
+    }
+    let mut boundary = AudioWindow::new(1200, ComparisonServer::Asterisk);
+    boundary.observe(&known_packet(0, 0)?, started)?;
+    boundary.observe(&known_packet(1, 320)?, started + Duration::from_millis(40))?;
+    require(
+        boundary.samples == 160 && boundary.total_samples == 320,
+        "An Asterisk one-frame presentation gap did not start a fresh audio window",
+    )
 }
 
 #[test]
