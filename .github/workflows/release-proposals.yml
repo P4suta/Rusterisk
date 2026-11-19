@@ -39,7 +39,7 @@ jobs:
       - uses: jdx/mise-action@90f833d396d0cc3674b631d2d225e306476c303a # v5.2.10
         if: inputs.operation != 'verify-auth'
         with:
-          version: 2026.10.24
+          version: 2026.11.10
           install_args: rust
       - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         if: inputs.operation != 'verify-auth'
