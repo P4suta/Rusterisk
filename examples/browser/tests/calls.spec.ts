@@ -11,6 +11,7 @@ import { receivedTone } from "./audio.ts";
 import { browserFailure, launchBrowser } from "./browser.ts";
 import { BrowserProcesses, usingBrowsers } from "./browser-lifetime.ts";
 import type { BrowserProcess } from "./browser-process.ts";
+import { usingCallChannels } from "./call-channels.ts";
 import { captureCheckpoint } from "./capture-checkpoint.ts";
 import {
 	type CaptureState,
@@ -85,47 +86,27 @@ async function outgoing(): Promise<string | undefined> {
 	return (await channelIds()).find((id: string) => id !== "browser-incoming");
 }
 
-async function releaseChannels(): Promise<void> {
-	const ids = await channelIds();
-	const results = await Promise.allSettled(
-		ids.map(
-			(id: string): Promise<Response> =>
-				command(`channels/${encodeURIComponent(id)}`, "DELETE"),
-		),
-	);
-	const failures: unknown[] = [];
-	for (const result of results)
-		if (result.status === "rejected") failures.push(result.reason);
-	if (failures.length > 0)
-		throw new AggregateError(failures, "The browser call cleanup failed.");
-	await expect.poll(channelIds).toEqual([]);
-}
-
-async function usingBrowserCalls(
+function usingBrowserCalls(
 	processes: BrowserProcesses,
 	operation: () => Promise<void>,
 ): Promise<void> {
-	assert.deepEqual(await channelIds(), []);
-	try {
-		await usingBrowsers(processes, async (): Promise<void> => {
-			await operation();
-			await expect.poll(channelIds).toEqual([]);
-		});
-	} catch (primary: unknown) {
-		let cleanup: { error: unknown } | undefined;
-		try {
-			await releaseChannels();
-		} catch (error: unknown) {
-			cleanup = { error };
-		}
-		if (cleanup)
-			throw new AggregateError(
-				[primary, cleanup.error],
-				"The browser call and its channel cleanup failed.",
-				{ cause: primary },
-			);
-		throw primary;
-	}
+	const requireEmpty = async (): Promise<void> => {
+		await expect.poll(channelIds).toEqual([]);
+	};
+	return usingCallChannels(
+		{
+			list: channelIds,
+			hangup: async (id: string): Promise<void> => {
+				await command(`channels/${encodeURIComponent(id)}`, "DELETE");
+			},
+			requireEmpty,
+		},
+		(): Promise<void> =>
+			usingBrowsers(processes, async (): Promise<void> => {
+				await operation();
+				await requireEmpty();
+			}),
+	);
 }
 
 async function connect(page: Page, name: string): Promise<void> {
