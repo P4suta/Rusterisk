@@ -490,6 +490,46 @@ async fn audio(
     result
 }
 
+async fn observe_reference_mute(peers: &[Peer; 2]) -> Result<(), Error> {
+    let [muted, audible] = peers;
+    muted.drain()?;
+    audible.drain()?;
+    let mut window = AudioWindow::new(0, RtpClock::Asterisk);
+    let mut muted_bytes = [0; 2049];
+    let mut audible_bytes = [0; 2049];
+    let result = bounded(async {
+        for _ in 0..256 {
+            tokio::select! {
+                biased;
+                result = muted.socket.data().recv_from(&mut muted_bytes) => {
+                    let (_, source) = result?;
+                    muted.check_source(source)?;
+                    window = AudioWindow::new(0, RtpClock::Asterisk);
+                }
+                result = audible.socket.data().recv_from(&mut audible_bytes) => {
+                    let (size, source) = result?;
+                    audible.check_source(source)?;
+                    let now = Instant::now();
+                    let packet = RtpPacket::parse(&audible_bytes[..size]).map_err(invalid)?;
+                    window.observe(&packet, now)?;
+                    if window.complete(12, now) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Err(Error::Capacity)
+    })
+    .await;
+    if let Err(error) = &result {
+        eprintln!(
+            "Reference did not suppress muted RTP while the other route stayed live: samples={}, error={error}",
+            window.samples
+        );
+    }
+    result
+}
+
 async fn exercise(
     client: &Client,
     session: &mut Session,
@@ -518,7 +558,10 @@ async fn exercise(
     bounded(client.start_music_on_hold(&id, Some("missing-music-class"))).await?;
     receive(1200, 12, None, "unknown class fallback").await?;
     bounded(client.mute(&id, MuteDirection::Outgoing)).await?;
-    receive(0, 12, None, "muted MOH").await?;
+    match clock {
+        RtpClock::FirstSample => receive(0, 12, None, "muted MOH").await?,
+        RtpClock::Asterisk => observe_reference_mute(peers).await?,
+    }
     bounded(client.unmute(&id, MuteDirection::Outgoing)).await?;
     receive(1200, 12, None, "unmuted MOH").await?;
     let media =
