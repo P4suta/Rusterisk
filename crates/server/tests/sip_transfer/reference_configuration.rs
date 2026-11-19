@@ -8,7 +8,10 @@ use std::{
     path::{Path, PathBuf},
     time::Duration,
 };
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+const SIP_FIXTURE: &str = "pjsip-scenario-fixture.conf";
+const DIALPLAN_FIXTURE: &str = "extensions-scenario-fixture.conf";
 
 pub(super) struct Configuration {
     root: PathBuf,
@@ -37,6 +40,30 @@ async fn original(path: &Path) -> Result<Vec<u8>, ControlError> {
         return Err(ControlError::Capacity);
     }
     Ok(bytes)
+}
+
+async fn replace(path: &Path, bytes: &[u8]) -> Result<(), ControlError> {
+    let staging = path.with_extension("staging");
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staging)
+        .await
+        .map_err(failure)?;
+    let result = async {
+        file.write_all(bytes).await?;
+        file.sync_all().await?;
+        drop(file);
+        tokio::fs::rename(&staging, path).await
+    }
+    .await;
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => combine(
+            Err(failure(error)),
+            tokio::fs::remove_file(&staging).await.map_err(failure),
+        ),
+    }
 }
 
 impl Configuration {
@@ -78,8 +105,8 @@ impl Configuration {
             ));
         }
         Ok(Self {
-            sip: original(&root.join("pjsip.conf")).await?,
-            extensions: original(&root.join("extensions.conf")).await?,
+            sip: original(&root.join(SIP_FIXTURE)).await?,
+            extensions: original(&root.join(DIALPLAN_FIXTURE)).await?,
             root,
             client: Client::builder()
                 .timeout(Duration::from_secs(2))
@@ -124,20 +151,14 @@ impl Configuration {
         charlie: SocketAddr,
     ) -> Result<(), ControlError> {
         let sip = format!("[global]\ntype=global\nendpoint_identifier_order=auth_username,username,ip\n[udp]\ntype=transport\nprotocol=udp\nbind=0.0.0.0:5060\n[auth]\ntype=auth\nauth_type=userpass\nusername=phone\npassword=test-password\nsupported_algorithms_uas=MD5\n[dynamic]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=dynamic\ncontext=internal\nidentify_by=auth_username\ndisallow=all\nallow=ulaw\ndirect_media=no\nallow_transfer=yes\nrefer_blind_progress=yes\n[spoofed]\ntype=endpoint\ntransport=udp\nauth=auth\naors=dynamic\ncontext=outside\nidentify_by=auth_username\ndisallow=all\nallow=ulaw\ndirect_media=no\n[bob-aor]\ntype=aor\ncontact=sip:bob@{bob}\n[transfer-bob]\ntype=endpoint\ntransport=udp\naors=bob-aor\ndisallow=all\nallow=ulaw\ndirect_media=no\n[charlie-aor]\ntype=aor\ncontact=sip:charlie@{charlie}\n[transfer-charlie]\ntype=endpoint\ntransport=udp\naors=charlie-aor\ndisallow=all\nallow=ulaw\ndirect_media=no\n");
-        tokio::fs::write(self.root.join("pjsip.conf"), sip)
-            .await
-            .map_err(failure)?;
-        tokio::fs::write(self.root.join("extensions.conf"), "[internal]\nexten => 100,1,Dial(PJSIP/transfer-bob,5)\nsame => n,Hangup()\nexten => 200,1,Dial(PJSIP/transfer-charlie,5)\nsame => n,Hangup()\n[outside]\nexten => 100,1,Hangup()\n").await.map_err(failure)?;
+        replace(&self.root.join(SIP_FIXTURE), sip.as_bytes()).await?;
+        replace(&self.root.join(DIALPLAN_FIXTURE), b"[internal]\nexten => 100,1,Dial(PJSIP/transfer-bob,5)\nsame => n,Hangup()\nexten => 200,1,Dial(PJSIP/transfer-charlie,5)\nsame => n,Hangup()\n[outside]\nexten => 100,1,Hangup()\n").await?;
         self.reload().await
     }
 
     pub(super) async fn restore(&self) -> Result<(), ControlError> {
-        let sip = tokio::fs::write(self.root.join("pjsip.conf"), &self.sip)
-            .await
-            .map_err(failure);
-        let extensions = tokio::fs::write(self.root.join("extensions.conf"), &self.extensions)
-            .await
-            .map_err(failure);
+        let sip = replace(&self.root.join(SIP_FIXTURE), &self.sip).await;
+        let extensions = replace(&self.root.join(DIALPLAN_FIXTURE), &self.extensions).await;
         combine(combine(sip, extensions), self.reload().await)
     }
 

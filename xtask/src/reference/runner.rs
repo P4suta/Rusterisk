@@ -60,6 +60,13 @@ impl ReferenceRunner {
     pub(crate) fn prepare_configuration(source: &Path, destination: &Path) -> io::Result<()> {
         copy_configuration(source, destination)?;
         let operation = (|| {
+            // Asterisk rechecks wildcard includes even when the outer file metadata matches.
+            for name in ["pjsip", "extensions"] {
+                let path = destination.join(format!("{name}.conf"));
+                fs::File::create_new(destination.join(format!("{name}-scenario-fixture.conf")))?
+                    .write_all(&fs::read(&path)?)?;
+                fs::write(path, format!("#include {name}-scenario-*.conf\n"))?;
+            }
             let music = prepare_music_fixture(destination)?;
             fs::create_dir(destination.join("sounds"))?;
             for (relative, bytes) in music.native_files() {

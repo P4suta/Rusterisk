@@ -69,6 +69,27 @@ fn configuration_preparation_writes_both_music_roles_before_container_start() ->
 }
 
 #[test]
+fn configuration_preparation_keeps_transfer_inputs_in_reloadable_includes() -> io::Result<()> {
+    using_configuration(|parent| {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/interop/asterisk");
+        let configuration = parent.join("configuration");
+        ReferenceRunner::prepare_configuration(&source, &configuration)?;
+        for name in ["pjsip", "extensions"] {
+            let file = format!("{name}.conf");
+            assert_eq!(
+                fs::read_to_string(configuration.join(&file))?,
+                format!("#include {name}-scenario-*.conf\n")
+            );
+            assert_eq!(
+                fs::read(configuration.join(format!("{name}-scenario-fixture.conf")))?,
+                fs::read(source.join(file))?
+            );
+        }
+        Ok(())
+    })
+}
+
+#[test]
 fn existing_configuration_survives_rejected_preparation() -> io::Result<()> {
     using_configuration(|parent| {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/interop/asterisk");
