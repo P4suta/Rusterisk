@@ -16,7 +16,8 @@ Finite construction and scans differ from symbolic transition boundaries.
 
 Exercise 65 generations, every slot, and absent generations in unit tests through production operations.
 Reject a foreign reference by its domain identifier before searching local slots.
-Use Kani for arbitrary owners, reference counts, and transition results without repeating complete absence scans.
+Compile symbolic settings proofs with the two slots required by their current and retired generations.
+Use Kani for arbitrary owners, reference counts, and transition results through the same operations.
 Keep eighteen harnesses, exact result validation, Kissat 4.0.1, container scratch, and existing limits.
 
 ## Alternatives
