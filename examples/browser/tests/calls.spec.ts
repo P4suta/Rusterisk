@@ -43,7 +43,7 @@ function phase<T>(
 
 async function command(
 	path: string,
-	method: "GET" | "POST" = "POST",
+	method: "GET" | "POST" | "DELETE" = "POST",
 ): Promise<Response> {
 	const response = await fetch(new URL(path, target("RUSTERISK_BROWSER_API")), {
 		method,
@@ -53,31 +53,79 @@ async function command(
 		signal: AbortSignal.timeout(4000),
 	});
 	assert.ok(
-		response.ok,
+		response.ok || (method === "DELETE" && response.status === 404),
 		`The browser fixture control request failed: ${String(response.status)}.`,
 	);
 	return response;
 }
 
-async function outgoing(): Promise<string | undefined> {
+async function channelIds(): Promise<readonly string[]> {
 	const response = await command("channels", "GET");
 	const value: unknown = await response.json();
 	if (!Array.isArray(value) || value.length > 8)
 		throw new Error("The browser fixture received invalid channel state.");
 	const channels: readonly unknown[] = value;
-	for (const channel of channels) {
+	const ids = channels.map((channel: unknown): string => {
 		if (
-			typeof channel === "object" &&
-			channel !== null &&
-			"id" in channel &&
-			typeof channel.id === "string" &&
-			channel.id.length > 0 &&
-			channel.id.length <= 128 &&
-			channel.id !== "browser-incoming"
+			typeof channel !== "object" ||
+			channel === null ||
+			!("id" in channel) ||
+			typeof channel.id !== "string" ||
+			channel.id.length === 0 ||
+			channel.id.length > 128
 		)
-			return channel.id;
+			throw new Error("The browser fixture received an invalid channel ID.");
+		return channel.id;
+	});
+	assert.equal(new Set(ids).size, ids.length, "Channel IDs must be unique.");
+	return ids;
+}
+
+async function outgoing(): Promise<string | undefined> {
+	return (await channelIds()).find((id: string) => id !== "browser-incoming");
+}
+
+async function releaseChannels(): Promise<void> {
+	const ids = await channelIds();
+	const results = await Promise.allSettled(
+		ids.map(
+			(id: string): Promise<Response> =>
+				command(`channels/${encodeURIComponent(id)}`, "DELETE"),
+		),
+	);
+	const failures: unknown[] = [];
+	for (const result of results)
+		if (result.status === "rejected") failures.push(result.reason);
+	if (failures.length > 0)
+		throw new AggregateError(failures, "The browser call cleanup failed.");
+	await expect.poll(channelIds).toEqual([]);
+}
+
+async function usingBrowserCalls(
+	processes: BrowserProcesses,
+	operation: () => Promise<void>,
+): Promise<void> {
+	assert.deepEqual(await channelIds(), []);
+	try {
+		await usingBrowsers(processes, async (): Promise<void> => {
+			await operation();
+			await expect.poll(channelIds).toEqual([]);
+		});
+	} catch (primary: unknown) {
+		let cleanup: { error: unknown } | undefined;
+		try {
+			await releaseChannels();
+		} catch (error: unknown) {
+			cleanup = { error };
+		}
+		if (cleanup)
+			throw new AggregateError(
+				[primary, cleanup.error],
+				"The browser call and its channel cleanup failed.",
+				{ cause: primary },
+			);
+		throw primary;
 	}
-	return undefined;
 }
 
 async function connect(page: Page, name: string): Promise<void> {
@@ -190,7 +238,7 @@ test("actual outgoing and incoming browser calls exchange known audio and save a
 	const observations: BrowserProcess[] = [];
 	const callObservations = new FirstCallObservations();
 	let messages = 0;
-	const operation = usingBrowsers(processes, async (): Promise<void> => {
+	const operation = usingBrowserCalls(processes, async (): Promise<void> => {
 		const alice = await launchBrowser(
 			"Alice",
 			target("RUSTERISK_BROWSER_ALICE_AUDIO"),
@@ -381,7 +429,7 @@ test("actual outgoing and incoming browser calls exchange known audio and save a
 test("cancelling or disconnecting during native capture releases late tracks and preserves reconnect", async (): Promise<void> => {
 	const processes = new BrowserProcesses();
 	const observations: BrowserProcess[] = [];
-	await usingBrowsers(processes, async (): Promise<void> => {
+	await usingBrowserCalls(processes, async (): Promise<void> => {
 		const browser = await launchBrowser(
 			"Alice",
 			target("RUSTERISK_BROWSER_ALICE_AUDIO"),
@@ -435,7 +483,7 @@ test("cancelling or disconnecting during native capture releases late tracks and
 					await expect
 						.poll((): Promise<boolean> => captureStopped(page))
 						.toBe(true);
-					assert.equal(await outgoing(), undefined);
+					assert.deepEqual(await channelIds(), []);
 					if (action === "Disconnect") {
 						await expect(page.locator("#connection-status")).toHaveText(
 							"Disconnected",
