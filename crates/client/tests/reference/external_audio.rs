@@ -86,16 +86,19 @@ pub(super) async fn received(
     result
 }
 
+pub(super) fn local_media_ip(server_ip: Ipv4Addr) -> Result<IpAddr, Error> {
+    let route = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    route.connect((server_ip, 9))?;
+    Ok(route.local_addr()?.ip())
+}
+
 pub async fn compare(
     client: &Client,
     session: &mut Session,
     app: &str,
     server_ip: Ipv4Addr,
 ) -> Result<(), Error> {
-    let route = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-    route.connect((server_ip, 9))?;
-    let host_ip = route.local_addr()?.ip();
-    drop(route);
+    let host_ip = local_media_ip(server_ip)?;
     for codec in [StaticRtpCodec::Pcmu, StaticRtpCodec::Pcma] {
         let left = SocketPair::bind(host_ip, 0, 0)?;
         let right = SocketPair::bind(host_ip, 0, 0)?;

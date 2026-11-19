@@ -547,7 +547,7 @@ async fn compare_resources(
             &reference,
             &mut reference_session,
             app.as_str(),
-            callback_ip,
+            reference_media_ip,
         )
         .await?;
         playback_position::compare(

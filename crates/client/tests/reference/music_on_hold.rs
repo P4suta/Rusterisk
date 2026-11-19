@@ -72,10 +72,10 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(id: &str) -> Result<Self, Error> {
+    fn new(id: &str, local_ip: IpAddr) -> Result<Self, Error> {
         Ok(Self {
             id: ChannelId::try_from(id.to_owned())?,
-            socket: SocketPair::bind(Ipv4Addr::UNSPECIFIED.into(), 0, 0)?,
+            socket: SocketPair::bind(local_ip, 0, 0)?,
             destination: None,
             lifetime: Lifetime::Unused,
         })
@@ -84,6 +84,18 @@ impl Peer {
     fn destination(&self) -> Result<SocketAddr, Error> {
         self.destination
             .ok_or(Error::Invalid("MOH RTP route is absent"))
+    }
+
+    fn check_source(&self, source: SocketAddr) -> Result<(), Error> {
+        let expected = self.destination()?;
+        if source == expected {
+            Ok(())
+        } else {
+            Err(invalid(format_args!(
+                "MOH RTP route differs for {}: expected {expected}, received {source}",
+                self.id.as_str()
+            )))
+        }
     }
 
     fn route(channel: Channel) -> Result<SocketAddr, Error> {
@@ -110,11 +122,10 @@ impl Peer {
         client: &Client,
         session: &mut Session,
         app: &str,
-        callback: Ipv4Addr,
     ) -> Result<(), Error> {
         missing(bounded(client.channel(&self.id)).await)?;
-        let target = SocketAddr::new(callback.into(), self.socket.local_addr()?.port());
-        let target = ExternalRtpTarget::new(target, StaticRtpCodec::Pcmu).map_err(invalid)?;
+        let target = ExternalRtpTarget::new(self.socket.local_addr()?, StaticRtpCodec::Pcmu)
+            .map_err(invalid)?;
         self.lifetime = Lifetime::Requested;
         let channel = bounded(client.external_rtp(&self.id, app, target, "music")).await?;
         self.lifetime = Lifetime::Admitted;
@@ -183,9 +194,12 @@ struct Resources {
 }
 
 impl Resources {
-    fn new() -> Result<Self, Error> {
+    fn new(local_ip: IpAddr) -> Result<Self, Error> {
         Ok(Self {
-            peers: [Peer::new("music-output")?, Peer::new("music-clock")?],
+            peers: [
+                Peer::new("music-output", local_ip)?,
+                Peer::new("music-clock", local_ip)?,
+            ],
             bridge: ChannelId::try_from("music-bridge".to_owned())?,
             bridge_lifetime: Lifetime::Unused,
             playback: ChannelId::try_from("music-interruption".to_owned())?,
@@ -198,12 +212,11 @@ impl Resources {
         client: &Client,
         session: &mut Session,
         app: &str,
-        callback: Ipv4Addr,
     ) -> Result<(), Error> {
         missing(bounded(client.bridge(&self.bridge)).await)?;
         missing(bounded(client.playback(&self.playback)).await)?;
         for peer in &mut self.peers {
-            peer.admit(client, session, app, callback).await?;
+            peer.admit(client, session, app).await?;
         }
         self.bridge_lifetime = Lifetime::Requested;
         let bridge = bounded(client.create_bridge(&self.bridge, "Music comparison")).await?;
@@ -430,22 +443,25 @@ async fn audio(
                 }
                 result = left.socket.data().recv_from(&mut first) => {
                     let (size, source) = result?;
-                    require(source == left.destination()?, "MOH audio arrived from another RTP route")?;
+                    left.check_source(source)?;
                     let packet = RtpPacket::parse(&first[..size]).map_err(invalid)?;
                     window.observe(&packet, Instant::now())?;
                 }
                 result = right.socket.data().recv_from(&mut second) => {
                     let (_, source) = result?;
-                    require(source == right.destination()?, "MOH clock received another RTP route")?;
+                    right.check_source(source)?;
                 }
             }
             let now = Instant::now();
-            if window.complete(frames, now) && repeat_complete(window.total_frames, repeated, post_repeat, now) {
+            if window.complete(frames, now)
+                && repeat_complete(window.total_frames, repeated, post_repeat, now)
+            {
                 return Ok(());
             }
         }
         Err(Error::Capacity)
-    }).await;
+    })
+    .await;
     if let Err(error) = &result {
         eprintln!(
             "MOH audio comparison failed: phase={phase}, frames={}, total_frames={}, error={error}",
@@ -542,9 +558,10 @@ pub async fn compare(
     client: &Client,
     session: &mut Session,
     application: &str,
-    callback: Ipv4Addr,
+    server_ip: Ipv4Addr,
 ) -> Result<(), Error> {
-    let mut resources = Resources::new()?;
+    let local_ip = super::external_audio::local_media_ip(server_ip)?;
+    let mut resources = Resources::new(local_ip)?;
     let addresses = [
         resources.peers[0].socket.local_addr()?,
         resources.peers[0].socket.control_addr()?,
@@ -553,7 +570,7 @@ pub async fn compare(
     ];
     let operation = tokio::time::timeout(
         Duration::from_secs(10),
-        resources.prepare(client, session, application, callback),
+        resources.prepare(client, session, application),
     )
     .await
     .map_err(|_| Error::Timeout)
