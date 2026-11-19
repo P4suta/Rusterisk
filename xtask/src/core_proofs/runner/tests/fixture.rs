@@ -34,6 +34,11 @@ pub struct Fixture {
 }
 
 fn native_result() -> io::Result<Vec<u8>> {
+    let solvers = [serde_json::json!({"name":"kissat","version":"4.0.1"})];
+    let cbmc: Vec<_> = HARNESSES
+        .into_iter()
+        .map(|name| serde_json::json!({"harness_id":name,"configuration":{"solver":"kissat"}}))
+        .collect();
     let results: Vec<_> = HARNESSES
         .into_iter()
         .map(|name| {
@@ -46,7 +51,7 @@ fn native_result() -> io::Result<Vec<u8>> {
             serde_json::json!({"harness_id":name,"status":"Success","checks":checks})
         })
         .collect();
-    serde_json::to_vec(&serde_json::json!({"metadata":{"version":"1.0","kani_version":"0.68.0"},"tools":{"kani":"0.68.0","cbmc":"6.11.0"},"verification_results":{"summary":{"total_harnesses":HARNESSES.len(),"executed":HARNESSES.len(),"successful":HARNESSES.len(),"failed":0,"status":"completed"},"results":results}})).map_err(io::Error::other)
+    serde_json::to_vec(&serde_json::json!({"metadata":{"version":"1.0","kani_version":"0.68.0"},"tools":{"kani":"0.68.0","cbmc":"6.11.0","solvers":solvers},"cbmc":cbmc,"verification_results":{"summary":{"total_harnesses":HARNESSES.len(),"executed":HARNESSES.len(),"successful":HARNESSES.len(),"failed":0,"status":"completed"},"results":results}})).map_err(io::Error::other)
 }
 impl Fixture {
     pub fn working(&self) -> io::Result<&Path> {
@@ -69,9 +74,9 @@ impl Fixture {
             CommandMode::Cleanup => {
                 self.cleanups += 1;
                 assert_eq!(budget.as_secs(), 30);
-                assert_eq!(&args[..2], ["rm", "--force"]);
-                assert_eq!(args.len(), 3);
-                assert!(args[2].starts_with("rusterisk-core-proofs-"));
+                assert_eq!(&args[..3], ["rm", "--force", "--volumes"]);
+                assert_eq!(args.len(), 4);
+                assert!(args[3].starts_with("rusterisk-core-proofs-"));
                 return Ok(());
             }
             CommandMode::Work => {}

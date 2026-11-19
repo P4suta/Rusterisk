@@ -19,7 +19,7 @@ use std::{
 };
 
 const METADATA: &str = "native-check.toml";
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 
 #[cfg(test)]
 mod capture_tests;
@@ -52,6 +52,8 @@ struct Metadata {
     format: u32,
     kind: String,
     image: String,
+    solver: String,
+    scratch_mount: String,
     source_root: PathBuf,
     results_root: PathBuf,
     files: Vec<FileFingerprint>,
@@ -120,8 +122,15 @@ fn original_path(path: &Path) -> Result<(), ProofError> {
 }
 
 fn original_plan(metadata: &Metadata, image: &str) -> Result<CoreProofPlan, ProofError> {
-    if metadata.format != FORMAT || metadata.kind != "core-proofs" || metadata.image != image {
-        return Err(invalid("retained proof format, gate, or image differs"));
+    if metadata.format != FORMAT
+        || metadata.kind != "core-proofs"
+        || metadata.image != image
+        || metadata.solver != core_proofs::SOLVER
+        || metadata.scratch_mount != core_proofs::SCRATCH_MOUNT
+    {
+        return Err(invalid(
+            "retained proof format, gate, image, or execution profile differs",
+        ));
     }
     original_path(&metadata.source_root)?;
     original_path(&metadata.results_root)?;
@@ -339,6 +348,8 @@ fn execute_with(
             format: FORMAT,
             kind: "core-proofs".to_owned(),
             image: image.to_owned(),
+            solver: core_proofs::SOLVER.to_owned(),
+            scratch_mount: core_proofs::SCRATCH_MOUNT.to_owned(),
             source_root: proof.source_root().to_owned(),
             results_root: proof.results_root().to_owned(),
             files: fingerprints(publication.staging())?,
