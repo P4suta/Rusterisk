@@ -615,17 +615,15 @@ fn compare_names(left: &str, right: &str) -> Ordering {
 }
 
 fn linked(metadata: &Metadata) -> bool {
-    if metadata.file_type().is_symlink() {
-        return true;
-    }
+    let symbolic_link = metadata.file_type().is_symlink();
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        reparse_attributes(metadata.file_attributes())
+        symbolic_link || reparse_attributes(metadata.file_attributes())
     }
     #[cfg(not(windows))]
     {
-        false
+        symbolic_link
     }
 }
 
