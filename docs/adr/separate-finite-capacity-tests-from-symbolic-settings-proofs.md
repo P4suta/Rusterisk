@@ -8,28 +8,28 @@ status: proposed
 ## Context
 
 The [container scratch decision](use-container-owned-disk-scratch-for-kani.md) requires reconsideration when unchanged harnesses exceed its limits.
-With two CPUs and 2 GiB, the saturated settings harness timed out at 120, 300, and 600 seconds under Kissat and at 120 seconds under CaDiCaL.
-The 65-generation path is finite, while other settings harnesses cover symbolic ownership.
+The saturated harness timed out under two solvers and at 600 seconds.
+The complete campaign then timed out three ownership harnesses during repeated 65-slot absence scans.
+Finite construction and scans differ from symbolic transition boundaries.
 
 ## Decision
 
-Test the 65-generation path with production operations, exact model comparison, and every releasable slot.
-Replace its Kani entry with a symbolic reference-count boundary over every `u64` count and arbitrary owner.
+Exercise 65 generations, every slot, and absent generations in unit tests through production operations.
+Reject a foreign reference by its domain identifier before searching local slots.
+Use Kani for arbitrary owners, reference counts, and transition results without repeating complete absence scans.
 Keep eighteen harnesses, exact result validation, Kissat 4.0.1, container scratch, and existing limits.
-Only the earlier unchanged-harness condition changes.
 
 ## Alternatives
 
-Increasing the timeout failed at 600 seconds.
-Changing the SAT solver failed at 120 seconds.
-The [Kani contract interface](https://model-checking.github.io/kani/crates/doc/kani/contracts/index.html) remains unstable and would add assumptions.
+Longer timeouts and CaDiCaL did not complete the saturated harness.
+The unstable [Kani contract interface](https://model-checking.github.io/kani/crates/doc/kani/contracts/index.html) would add assumptions.
 
 ## Consequences
 
-Kani verifies the symbolic reference-count transition instead of replaying deterministic construction.
-Reconsider when the full proof completes under these limits without experimental contracts, or when capacity becomes dynamic.
+Unit tests establish finite reachability while Kani establishes symbolic boundaries.
+Reconsider when capacity becomes dynamic or stable contracts remove the scan product.
 
 ## Confirmation
 
-Core tests must reach 65 generations, compare every modeled slot and handle, and reuse all 64 releasable slots.
-The Kani result must contain eighteen exact successes, including the symbolic boundary harness.
+Core tests must compare the modeled state and reuse all 64 retired slots.
+The Kani result must contain eighteen exact successes.
