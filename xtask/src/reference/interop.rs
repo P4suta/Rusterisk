@@ -145,6 +145,8 @@ impl Interop {
                 "--detach",
                 "--name",
                 &self.name,
+                "--hostname",
+                "asterisk-reference",
                 "--cpus=1",
                 "--memory=512m",
                 "--memory-swap=512m",
@@ -238,6 +240,18 @@ impl Interop {
 #[cfg(all(test, unix))]
 mod browser_tests {
     use super::*;
+
+    #[test]
+    fn reference_start_uses_a_sip_uri_hostname() -> Result<(), ReferenceError> {
+        let plan = Interop::new("browser", "/fixture/asterisk")?;
+        let arguments = plan.start().arguments;
+        let hostnames = arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "--hostname")
+            .map(|pair| pair[1].as_str());
+        assert!(hostnames.eq(["asterisk-reference"]));
+        Ok(())
+    }
 
     #[test]
     fn browser_reference_uses_only_its_owned_internal_network() -> Result<(), ReferenceError> {
