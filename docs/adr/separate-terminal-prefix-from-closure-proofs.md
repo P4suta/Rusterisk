@@ -10,6 +10,7 @@ status: proposed
 The terminal cleanup harness expanded independent four-operation prefixes and suffixes as one product.
 The isolated harness needed 102 seconds, and the complete two-GiB campaign exhausted memory.
 The terminal transition and post-terminal closure are independent properties.
+Kani 0.68 evaluates proof definitions in reverse source order.
 
 ## Decision
 
@@ -18,6 +19,7 @@ The transition mode applies every four-operation prefix, then asserts complete c
 The closure mode starts from a canonical ended call and applies every four-operation suffix.
 Assert the same complete call value after each suffix operation.
 Keep the existing limits, assertions, and cover goals without assumptions or stubs.
+Define the terminal harness after every other harness.
 
 ## Alternatives
 
@@ -27,6 +29,7 @@ Reducing either sequence would remove previously checked traces.
 ## Consequences
 
 Kani preserves both complete sequence spaces without their unrelated Cartesian product.
+The memory-intensive terminal harness runs before the smaller proofs.
 
 ## Confirmation
 

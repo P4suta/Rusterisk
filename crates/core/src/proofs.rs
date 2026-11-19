@@ -158,52 +158,6 @@ fn assert_terminal_release(call: Call, generation: u64) {
 
 #[kani::proof]
 #[kani::unwind(12)]
-fn terminal_release_is_absorbing() {
-    let generation: u64 = kani::any();
-    let transition_mode: bool = kani::any();
-    if transition_mode {
-        let mut call = Call::outgoing(generation);
-        for operation in kani::any::<[Input; 4]>() {
-            call = input(call, operation);
-        }
-        let before = call.state();
-        let media_before = call.media();
-        let terminal: Terminal = kani::any();
-        call = call.apply(terminal.event()).call();
-        assert_terminal_release(call, generation);
-        let Ok(canonical) = Call::outgoing(generation).with_peer_direction(call.peer_direction())
-        else {
-            assert!(false, "canonical peer direction failed");
-            return;
-        };
-        let canonical = canonical.apply(terminal.event()).call();
-        assert_eq!(call, canonical);
-        kani::cover!(before == CallState::Down);
-        kani::cover!(before == CallState::Ringing);
-        kani::cover!(before == CallState::Up);
-        kani::cover!(before == CallState::Ended);
-        kani::cover!(media_before == MediaState::Early);
-    } else {
-        let direction = kani::any::<SymbolicPeerDirection>().value();
-        let Ok(call) = Call::outgoing(generation).with_peer_direction(direction) else {
-            assert!(false, "symbolic peer direction failed");
-            return;
-        };
-        let mut call = call.apply(kani::any::<Terminal>().event()).call();
-        assert_terminal_release(call, generation);
-        let ended = call;
-        for operation in kani::any::<[Input; 4]>() {
-            call = input(call, operation);
-            assert_eq!(call, ended);
-        }
-        assert_eq!(call.connect_media().transition(), Transition::Ignore);
-    }
-    kani::cover!(transition_mode);
-    kani::cover!(!transition_mode);
-}
-
-#[kani::proof]
-#[kani::unwind(12)]
 fn connection_claims_are_exclusive() {
     let generation: u64 = kani::any();
     let answered: bool = kani::any();
@@ -1251,4 +1205,50 @@ fn settings_reference_count_boundaries_preserve_publication() {
     assert_eq!(result, Ok(()));
     kani::cover!(result.is_ok() && references == u64::MAX);
     kani::cover!(result.is_ok() && references < u64::MAX);
+}
+
+#[kani::proof]
+#[kani::unwind(12)]
+fn terminal_release_is_absorbing() {
+    let generation: u64 = kani::any();
+    let transition_mode: bool = kani::any();
+    if transition_mode {
+        let mut call = Call::outgoing(generation);
+        for operation in kani::any::<[Input; 4]>() {
+            call = input(call, operation);
+        }
+        let before = call.state();
+        let media_before = call.media();
+        let terminal: Terminal = kani::any();
+        call = call.apply(terminal.event()).call();
+        assert_terminal_release(call, generation);
+        let Ok(canonical) = Call::outgoing(generation).with_peer_direction(call.peer_direction())
+        else {
+            assert!(false, "canonical peer direction failed");
+            return;
+        };
+        let canonical = canonical.apply(terminal.event()).call();
+        assert_eq!(call, canonical);
+        kani::cover!(before == CallState::Down);
+        kani::cover!(before == CallState::Ringing);
+        kani::cover!(before == CallState::Up);
+        kani::cover!(before == CallState::Ended);
+        kani::cover!(media_before == MediaState::Early);
+    } else {
+        let direction = kani::any::<SymbolicPeerDirection>().value();
+        let Ok(call) = Call::outgoing(generation).with_peer_direction(direction) else {
+            assert!(false, "symbolic peer direction failed");
+            return;
+        };
+        let mut call = call.apply(kani::any::<Terminal>().event()).call();
+        assert_terminal_release(call, generation);
+        let ended = call;
+        for operation in kani::any::<[Input; 4]>() {
+            call = input(call, operation);
+            assert_eq!(call, ended);
+        }
+        assert_eq!(call.connect_media().transition(), Transition::Ignore);
+    }
+    kani::cover!(transition_mode);
+    kani::cover!(!transition_mode);
 }

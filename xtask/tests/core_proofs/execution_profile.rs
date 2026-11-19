@@ -58,6 +58,31 @@ fn disk_scratch_profile_preserves_the_bounded_complete_proof_run() -> Result<(),
 }
 
 #[test]
+fn the_memory_intensive_terminal_harness_is_defined_last_for_kani() -> Result<(), ProofError> {
+    let source = include_str!("../../../crates/core/src/proofs.rs");
+    let parsed = syn::parse_file(source).map_err(ProofError::Syntax)?;
+    let last = parsed.items.iter().rev().find_map(|item| {
+        let syn::Item::Fn(function) = item else {
+            return None;
+        };
+        function
+            .attrs
+            .iter()
+            .any(|attribute| {
+                attribute.path().segments.len() == 2
+                    && attribute.path().segments[0].ident == "kani"
+                    && attribute.path().segments[1].ident == "proof"
+            })
+            .then_some(&function.sig.ident)
+    });
+    assert_eq!(
+        last.map(ToString::to_string).as_deref(),
+        Some("terminal_release_is_absorbing")
+    );
+    Ok(())
+}
+
+#[test]
 fn solver_profile_accepts_native_configuration_for_every_harness() -> Result<(), ProofError> {
     super::validate_results(&serde_json::to_vec(&report()).map_err(ProofError::Json)?)
 }
