@@ -1,0 +1,32 @@
+[workspace]
+allow_dirty = false
+dependencies_update = false
+git_only = true
+git_tag_name = "v{{ version }}"
+git_tag_enable = false
+git_release_enable = false
+publish = false
+release = false
+release_always = false
+pr_draft = true
+pr_name = "chore(release): v{{ version }}"
+semver_check = true
+
+[[package]]
+name = "rusterisk-server"
+release = true
+changelog_path = "CHANGELOG.md"
+changelog_include = [
+  "rusterisk-api",
+  "rusterisk-client",
+  "rusterisk-config",
+  "rusterisk-core",
+  "rusterisk-media",
+  "rusterisk-sip",
+  "rusterisk-storage",
+  "rusterisk-windows-job-accounting",
+]
+
+[changelog]
+protect_breaking_commits = true
+tag_pattern = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
