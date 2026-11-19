@@ -1,8 +1,11 @@
 name = "Rusterisk"
-summary = "Rust call control with bounded state and explicit protocol contracts"
-install = "mise install"
+summary = "Run phone and browser calls with an Asterisk-compatible control API"
+install = """
+git clone https://github.com/P4suta/Rusterisk.git
+cd Rusterisk
+mise install"""
 usage = """
-mise x -- just check
-mise x -- just security"""
+mise x -- cargo run --locked --package rusterisk-server --bin rusterisk -- --config-dir config --data-dir .cache/rusterisk-data"""
+documentation_index = true
 copyright = "Yasunobu"
 license = "MIT OR Apache-2.0"

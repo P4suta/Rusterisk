@@ -1,19 +1,24 @@
 # Rusterisk
 
-Rust call control with bounded state and explicit protocol contracts.
+Run phone and browser calls with an Asterisk-compatible control API.
 
 ## Installation
 
 ```sh
+git clone https://github.com/P4suta/Rusterisk.git
+cd Rusterisk
 mise install
 ```
 
 ## Usage
 
 ```sh
-mise x -- just check
-mise x -- just security
+mise x -- cargo run --locked --package rusterisk-server --bin rusterisk -- --config-dir config --data-dir .cache/rusterisk-data
 ```
+
+## Documentation
+
+[Read the documentation](docs/README.md).
 
 ## License
 
