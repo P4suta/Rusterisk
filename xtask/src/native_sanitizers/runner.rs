@@ -159,8 +159,15 @@ fn phase(
         .create_new(true)
         .open(&path)?;
     let mut command = Command::new("docker");
+    command.args(step.arguments.iter().take(1));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let owner = fs::metadata(&plan.state)?;
+        command.arg(format!("--user={}:{}", owner.uid(), owner.gid()));
+    }
     command
-        .args(&step.arguments)
+        .args(step.arguments.iter().skip(1))
         .current_dir(source)
         .env("MISE_TRUSTED_CONFIG_PATHS", source)
         .stdout(capture.try_clone()?)

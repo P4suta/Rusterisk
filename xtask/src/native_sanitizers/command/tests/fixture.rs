@@ -160,6 +160,18 @@ impl Fixture<'_> {
             })
             .map(PathBuf::from)
             .ok_or(ProcessError::InvalidOutput)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let owner = std::fs::metadata(&state)?;
+            assert_eq!(
+                args.iter()
+                    .filter(|arg| arg.starts_with("--user"))
+                    .collect::<Vec<_>>(),
+                [&format!("--user={}:{}", owner.uid(), owner.gid())],
+                "native work must run as the owner of its writable state"
+            );
+        }
         self.phases.push(phase);
         let text = match phase {
             Phase::ClangVersion => "Debian clang version 14.0.6\n".to_owned(),
