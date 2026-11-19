@@ -248,7 +248,7 @@ pub(super) fn phase_with_target(
         }
         command
             .current_dir(plan.directory(phase.scope()))?
-            .env("CARGO_TARGET_DIR", plan.target(phase.scope()))?
+            .env("CARGO_TARGET_DIR", plan.cargo_target(phase.scope()))?
             .env("CARGO_BUILD_JOBS", plan.jobs().to_string())?
             .env("CARGO_NET_OFFLINE", "true")?;
         if let Some(target) = target {

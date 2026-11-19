@@ -1,10 +1,9 @@
-use super::build::cargo_path;
 use super::{
     check_server_tar_gzip, check_server_zip, write_server_tar_gzip, write_server_zip,
     ArchiveFormat, CapturedServer, NativeServerBuildLimits, ServerBuildCommandMode,
     ServerBuildPhase, ServerBuildPlan, ServerContainerBuildPlan, ServerPayload,
 };
-use crate::process::{CommandStream, ProcessError, SupervisedCommand};
+use crate::process::{cargo_path, CommandStream, ProcessError, SupervisedCommand};
 use sha2::{Digest, Sha256};
 use std::{
     io::{self, Read, Write},

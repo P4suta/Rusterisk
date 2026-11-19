@@ -1,6 +1,21 @@
 use std::{num::NonZeroUsize, path::Path, time::Duration};
 use xtask::distribution::{SdkConsumerAction, SdkConsumerPhase, SdkConsumerPlan, SdkConsumerScope};
 
+#[cfg(windows)]
+#[test]
+fn sdk_cargo_targets_use_ordinary_drive_paths() -> Result<(), std::io::Error> {
+    let work = Path::new(r"\\?\C:\fixture\work");
+    let state = Path::new(r"\\?\C:\fixture\state");
+    let plan = SdkConsumerPlan::new(work, state)?;
+    for scope in SdkConsumerScope::ALL {
+        let target = format!(r"C:\fixture\state\target\{}", scope.label());
+        assert_eq!(plan.target(scope), state.join("target").join(scope.label()));
+        let step = plan.step(SdkConsumerPhase::new(scope, SdkConsumerAction::Build));
+        assert_eq!(step.arguments.last(), Some(&target));
+    }
+    Ok(())
+}
+
 #[test]
 fn independent_consumers_resolve_then_inspect_build_and_run_with_finite_budgets(
 ) -> Result<(), std::io::Error> {

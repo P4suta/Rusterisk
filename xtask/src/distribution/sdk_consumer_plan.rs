@@ -1,4 +1,4 @@
-use crate::reference::Step;
+use crate::{process::cargo_path, reference::Step};
 use std::{
     num::NonZeroUsize,
     path::{Component, Path, PathBuf},
@@ -89,7 +89,10 @@ impl Paths {
         let target = state.join("target").join(scope.label());
         Ok(Self {
             directory: work.join("consumers").join(scope.label()),
-            target_argument: target.to_str().ok_or_else(invalid)?.to_owned(),
+            target_argument: cargo_path(&target)?
+                .to_str()
+                .ok_or_else(invalid)?
+                .to_owned(),
             executable: target
                 .join("debug")
                 .join(format!(
@@ -174,6 +177,10 @@ impl SdkConsumerPlan {
         &self.paths(scope).target
     }
 
+    pub(super) fn cargo_target(&self, scope: SdkConsumerScope) -> &str {
+        &self.paths(scope).target_argument
+    }
+
     pub fn program(&self, phase: SdkConsumerPhase) -> &str {
         match (phase.scope, phase.action) {
             (scope, SdkConsumerAction::Run) => &self.paths(scope).executable,
@@ -219,7 +226,7 @@ impl SdkConsumerPlan {
                     ]
                     .map(str::to_owned),
                 );
-                arguments.push(self.paths(phase.scope).target_argument.clone());
+                arguments.push(self.cargo_target(phase.scope).to_owned());
                 900
             }
             SdkConsumerAction::Run => 30,

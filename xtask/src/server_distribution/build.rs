@@ -1,4 +1,5 @@
 use super::ServerTarget;
+use crate::process::cargo_path;
 use crate::reference::Step;
 use std::{
     io,
@@ -82,20 +83,6 @@ fn absolute(path: &Path) -> bool {
         && !path
             .components()
             .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
-}
-
-pub(super) fn cargo_path(path: &Path) -> io::Result<&Path> {
-    #[cfg(windows)]
-    if matches!(path.components().next(), Some(Component::Prefix(prefix))
-        if matches!(prefix.kind(), std::path::Prefix::VerbatimDisk(_)))
-    {
-        return path
-            .to_str()
-            .and_then(|value| value.strip_prefix(r"\\?\"))
-            .map(Path::new)
-            .ok_or_else(|| io::Error::other("Windows Cargo path is not a UTF-8 drive path"));
-    }
-    Ok(path)
 }
 
 impl ServerBuildPlan {

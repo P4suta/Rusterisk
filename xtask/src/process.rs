@@ -6,6 +6,20 @@ use std::time::{Duration, Instant};
 mod request;
 pub use request::{CommandField, CommandRequestError, CommandStream, SupervisedCommand};
 
+pub(crate) fn cargo_path(path: &Path) -> io::Result<&Path> {
+    #[cfg(windows)]
+    if matches!(path.components().next(), Some(std::path::Component::Prefix(prefix))
+        if matches!(prefix.kind(), std::path::Prefix::VerbatimDisk(_)))
+    {
+        return path
+            .to_str()
+            .and_then(|value| value.strip_prefix(r"\\?\"))
+            .map(Path::new)
+            .ok_or_else(|| io::Error::other("Windows Cargo path is not a UTF-8 drive path"));
+    }
+    Ok(path)
+}
+
 pub(crate) fn scope_captured_tools(
     command: &mut Command,
     source: &Path,
