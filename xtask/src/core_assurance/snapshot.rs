@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Read,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 #[derive(PartialEq, Eq)]
@@ -47,41 +47,143 @@ struct Dependencies {
     target: BTreeMap<String, serde::de::IgnoredAny>,
 }
 
-#[derive(Default)]
-struct Tests {
+struct Tests<'inputs> {
+    files: &'inputs [InputFile],
     names: BTreeSet<String>,
-    modules: Vec<String>,
-    invalid: bool,
+    active: Vec<&'inputs Path>,
 }
-impl<'ast> syn::visit::Visit<'ast> for Tests {
-    fn visit_item_mod(&mut self, module: &'ast syn::ItemMod) {
-        self.modules.push(module.ident.to_string());
-        syn::visit::visit_item_mod(self, module);
-        if self.modules.pop().is_none() {
-            self.invalid = true;
-        }
+
+fn explicit_module_path(module: &syn::ItemMod) -> Result<Option<PathBuf>, AssuranceError> {
+    let mut attributes = module
+        .attrs
+        .iter()
+        .filter(|attribute| attribute.path().is_ident("path"));
+    let Some(attribute) = attributes.next() else {
+        return Ok(None);
+    };
+    let syn::Meta::NameValue(value) = &attribute.meta else {
+        return Err(AssuranceError::Manifest);
+    };
+    let syn::Expr::Lit(expression) = &value.value else {
+        return Err(AssuranceError::Manifest);
+    };
+    let syn::Lit::Str(path) = &expression.lit else {
+        return Err(AssuranceError::Manifest);
+    };
+    let value = path.value();
+    let path = Path::new(&value);
+    if attributes.next().is_some()
+        || value.is_empty()
+        || value
+            .chars()
+            .any(|character| character.is_control() || character == '\\')
+        || !path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(AssuranceError::Manifest);
     }
-    fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
-        if function
-            .attrs
-            .iter()
-            .any(|attribute| attribute.path().is_ident("test"))
-        {
-            let mut name = self.modules.join("::");
-            if !name.is_empty() {
-                name.push_str("::");
+    Ok(Some(path.to_owned()))
+}
+
+impl<'inputs> Tests<'inputs> {
+    fn read(
+        files: &'inputs [InputFile],
+        root: &'inputs InputFile,
+    ) -> Result<BTreeSet<String>, AssuranceError> {
+        let mut tests = Self {
+            files,
+            names: BTreeSet::new(),
+            active: Vec::new(),
+        };
+        tests.file(root, "", None)?;
+        Ok(tests.names)
+    }
+
+    fn file(
+        &mut self,
+        file: &'inputs InputFile,
+        prefix: &str,
+        relative: Option<&str>,
+    ) -> Result<(), AssuranceError> {
+        if self.active.contains(&file.path.as_path()) {
+            return Err(AssuranceError::Manifest);
+        }
+        let directory = file.path.parent().ok_or(AssuranceError::Manifest)?;
+        let inferred = relative.map_or_else(|| directory.to_owned(), |name| directory.join(name));
+        let syntax = syn::parse_file(
+            std::str::from_utf8(&file.bytes).map_err(|_| AssuranceError::Manifest)?,
+        )
+        .map_err(AssuranceError::Syntax)?;
+        self.active.push(&file.path);
+        let result = self.items(&syntax.items, prefix, directory, &inferred);
+        self.active.pop().ok_or(AssuranceError::Manifest)?;
+        result
+    }
+
+    fn items(
+        &mut self,
+        items: &[syn::Item],
+        prefix: &str,
+        directory: &Path,
+        inferred: &Path,
+    ) -> Result<(), AssuranceError> {
+        for item in items {
+            if let syn::Item::Mod(module) = item {
+                self.module(module, prefix, directory, inferred)?;
             }
-            name.push_str(&function.sig.ident.to_string());
+            let syn::Item::Fn(function) = item else {
+                continue;
+            };
+            if !function
+                .attrs
+                .iter()
+                .any(|attribute| attribute.path().is_ident("test"))
+            {
+                continue;
+            }
             if function
                 .attrs
                 .iter()
                 .any(|attribute| attribute.path().is_ident("ignore"))
-                || !self.names.insert(name)
+                || !self.names.insert(format!("{prefix}{}", function.sig.ident))
             {
-                self.invalid = true;
+                return Err(AssuranceError::Manifest);
             }
         }
-        syn::visit::visit_item_fn(self, function);
+        Ok(())
+    }
+
+    fn module(
+        &mut self,
+        module: &syn::ItemMod,
+        prefix: &str,
+        directory: &Path,
+        inferred: &Path,
+    ) -> Result<(), AssuranceError> {
+        let name = module.ident.to_string();
+        let prefix = format!("{prefix}{name}::");
+        let explicit = explicit_module_path(module)?.map(|path| directory.join(path));
+        if let Some((_, items)) = &module.content {
+            let directory = explicit.unwrap_or_else(|| inferred.join(&name));
+            return self.items(items, &prefix, &directory, &directory);
+        }
+        let files = self.files;
+        let lookup = |path: &Path| files.iter().find(|file| file.path == path);
+        if let Some(explicit) = explicit {
+            return self.file(
+                lookup(&explicit).ok_or(AssuranceError::Manifest)?,
+                &prefix,
+                None,
+            );
+        }
+        let flat = inferred.join(format!("{name}.rs"));
+        let nested = inferred.join(&name).join("mod.rs");
+        match (lookup(&flat), lookup(&nested)) {
+            (Some(file), None) => self.file(file, &prefix, Some(&name)),
+            (None, Some(file)) => self.file(file, &prefix, None),
+            _ => Err(AssuranceError::Manifest),
+        }
     }
 }
 
@@ -164,7 +266,6 @@ impl Snapshot {
         }
         let mut targets = BTreeSet::new();
         let mut tests = BTreeSet::new();
-        use syn::visit::Visit;
         for file in &files {
             if file.path.parent() != Some(Path::new("tests"))
                 || file
@@ -183,19 +284,11 @@ impl Snapshot {
             if !targets.insert(name) {
                 return Err(AssuranceError::Manifest);
             }
-            let parsed = syn::parse_file(
-                std::str::from_utf8(&file.bytes).map_err(|_| AssuranceError::Manifest)?,
-            )
-            .map_err(AssuranceError::Syntax)?;
-            let mut found = Tests::default();
-            found.visit_file(&parsed);
-            if found.invalid
-                || found.names.is_empty()
-                || found.names.iter().any(|name| tests.contains(name))
-            {
+            let found = Tests::read(&files, file)?;
+            if found.is_empty() || found.iter().any(|name| tests.contains(name)) {
                 return Err(AssuranceError::Manifest);
             }
-            tests.extend(found.names);
+            tests.extend(found);
         }
         if tests.is_empty() || tests.len() > 1024 {
             return Err(AssuranceError::Inventory);
@@ -212,10 +305,9 @@ impl Snapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{AssuranceError, Snapshot, Tests};
+    use super::{AssuranceError, InputFile, Snapshot, Tests};
     use crate::core_assurance::validate_miri_discovery;
     use std::{collections::BTreeSet, path::Path};
-    use syn::visit::Visit;
 
     fn discovery(names: &BTreeSet<String>) -> Result<Vec<u8>, AssuranceError> {
         let mut source =
@@ -239,20 +331,11 @@ mod tests {
             .iter()
             .find(|file| file.path == Path::new(path))
             .ok_or(AssuranceError::Manifest)?;
-        let file = syn::parse_file(
-            std::str::from_utf8(&transfer.bytes).map_err(|_| AssuranceError::Manifest)?,
-        )
-        .map_err(AssuranceError::Syntax)?;
-        let mut selected = Tests::default();
-        selected.visit_file(&file);
-        assert!(!selected.names.is_empty());
-        assert!(selected.names.is_subset(&snapshot.tests));
+        let selected = Tests::read(&snapshot.files, transfer)?;
+        assert!(!selected.is_empty());
+        assert!(selected.is_subset(&snapshot.tests));
         validate_miri_discovery(&discovery(&snapshot.tests)?, &snapshot.tests, 1)?;
-        let missing = snapshot
-            .tests
-            .difference(&selected.names)
-            .cloned()
-            .collect();
+        let missing = snapshot.tests.difference(&selected).cloned().collect();
         assert!(validate_miri_discovery(&discovery(&missing)?, &snapshot.tests, 1).is_err());
         Ok(())
     }
@@ -273,5 +356,71 @@ mod tests {
     fn miri_discovery_cannot_omit_owned_pair_tests_from_the_actual_source(
     ) -> Result<(), AssuranceError> {
         omission_is_rejected("tests/owned_call_pair.rs")
+    }
+
+    #[test]
+    fn miri_inventory_cannot_omit_tests_in_a_file_backed_module() -> Result<(), AssuranceError> {
+        let core = Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/core");
+        let snapshot = Snapshot::read(&core)?;
+        let missing = snapshot
+            .tests
+            .iter()
+            .filter(|name| !name.starts_with("early::"))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(snapshot.tests.len() - missing.len(), 4);
+        assert!(snapshot.targets.contains("music_gate"));
+        assert!(validate_miri_discovery(&discovery(&missing)?, &snapshot.tests, 1).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn native_inventory_follows_declared_modules_without_counting_unreferenced_files(
+    ) -> Result<(), AssuranceError> {
+        let files = [
+            ("tests/example.rs", "mod child; mod inline { mod other; }"),
+            ("tests/child.rs", "mod nested; #[test] fn first() {}"),
+            ("tests/child/nested.rs", "#[test] fn second() {}"),
+            ("tests/inline/other/mod.rs", "#[test] fn third() {}"),
+            ("tests/unused.rs", "#[test] fn unused() {}"),
+        ]
+        .map(|(path, source)| InputFile {
+            path: path.into(),
+            bytes: source.as_bytes().to_vec(),
+        });
+        assert_eq!(
+            Tests::read(&files, &files[0])?,
+            BTreeSet::from([
+                "child::first".into(),
+                "child::nested::second".into(),
+                "inline::other::third".into(),
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn native_inventory_rejects_missing_cyclic_and_ignored_module_inputs() {
+        for (declaration, child) in [
+            ("mod missing;", "#[test] fn found() {}"),
+            ("mod nested;", "#[path = \"nested.rs\"] mod cycle;"),
+            ("mod nested;", "#[ignore] #[test] fn found() {}"),
+            (
+                "#[path = \"../nested.rs\"] mod nested;",
+                "#[test] fn found() {}",
+            ),
+        ] {
+            let files = [
+                InputFile {
+                    path: "tests/example.rs".into(),
+                    bytes: declaration.as_bytes().to_vec(),
+                },
+                InputFile {
+                    path: "tests/nested.rs".into(),
+                    bytes: child.as_bytes().to_vec(),
+                },
+            ];
+            assert!(Tests::read(&files, &files[0]).is_err());
+        }
     }
 }
