@@ -42,7 +42,7 @@ async fn app_queries_require_authentication_and_follow_subscription_lifetimes(
             app.clone()
                 .oneshot(request("GET", "/ari/applications", None)?)
                 .await
-                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .unwrap_or_else(|error| match error {})
                 .status(),
             StatusCode::UNAUTHORIZED
         );
@@ -57,7 +57,7 @@ async fn app_queries_require_authentication_and_follow_subscription_lifetimes(
             .clone()
             .oneshot(request("GET", "/ari/applications", Some("reader"))?)
             .await
-            .map_err(|error| ControlError::Adapter(error.to_string()))?;
+            .unwrap_or_else(|error| match error {});
         assert_eq!(listed.status(), StatusCode::OK);
         let listed: Vec<Application> = serde_json::from_slice(
             &listed
@@ -87,7 +87,7 @@ async fn app_queries_require_authentication_and_follow_subscription_lifetimes(
             .clone()
             .oneshot(request("GET", "/ari/applications/phones", Some("reader"))?)
             .await
-            .map_err(|error| ControlError::Adapter(error.to_string()))?;
+            .unwrap_or_else(|error| match error {});
         assert_eq!(detail.status(), StatusCode::OK);
         let detail: Application = serde_json::from_slice(
             &detail
@@ -102,7 +102,7 @@ async fn app_queries_require_authentication_and_follow_subscription_lifetimes(
             app.clone()
                 .oneshot(request("GET", "/ari/applications/missing", Some("reader"))?)
                 .await
-                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .unwrap_or_else(|error| match error {})
                 .status(),
             StatusCode::NOT_FOUND
         );
@@ -110,7 +110,7 @@ async fn app_queries_require_authentication_and_follow_subscription_lifetimes(
         assert_eq!(
             app.oneshot(request("GET", "/ari/applications/phones", Some("reader"))?)
                 .await
-                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .unwrap_or_else(|error| match error {})
                 .status(),
             StatusCode::NOT_FOUND
         );
@@ -149,7 +149,7 @@ async fn discovery_documents_use_the_requested_authority_and_refuse_invalid_host
                 .clone()
                 .oneshot(request)
                 .await
-                .map_err(|error| ControlError::Adapter(error.to_string()))?;
+                .unwrap_or_else(|error| match error {});
             assert_eq!(response.status(), StatusCode::OK);
             let bytes = response
                 .into_body()
@@ -177,7 +177,7 @@ async fn discovery_documents_use_the_requested_authority_and_refuse_invalid_host
                 app.clone()
                     .oneshot(request)
                     .await
-                    .map_err(|error| ControlError::Adapter(error.to_string()))?
+                    .unwrap_or_else(|error| match error {})
                     .status(),
                 StatusCode::BAD_REQUEST
             );
@@ -201,7 +201,7 @@ async fn authentication_origin_and_read_only_permissions_apply_to_all_resources(
         app.clone()
             .oneshot(request("GET", "/ari/channels", None)?)
             .await
-            .map_err(|error| ControlError::Adapter(error.to_string()))?
+            .unwrap_or_else(|error| match error {})
             .status(),
         StatusCode::UNAUTHORIZED
     );
@@ -209,7 +209,7 @@ async fn authentication_origin_and_read_only_permissions_apply_to_all_resources(
         app.clone()
             .oneshot(request("GET", "/ari/channels", Some("reader"))?)
             .await
-            .map_err(|error| ControlError::Adapter(error.to_string()))?
+            .unwrap_or_else(|error| match error {})
             .status(),
         StatusCode::OK
     );
@@ -221,7 +221,7 @@ async fn authentication_origin_and_read_only_permissions_apply_to_all_resources(
                 Some("reader")
             )?)
             .await
-            .map_err(|error| ControlError::Adapter(error.to_string()))?
+            .unwrap_or_else(|error| match error {})
             .status(),
         StatusCode::FORBIDDEN
     );
@@ -237,7 +237,7 @@ async fn authentication_origin_and_read_only_permissions_apply_to_all_resources(
     assert_eq!(
         app.oneshot(wrong_origin)
             .await
-            .map_err(|error| ControlError::Adapter(error.to_string()))?
+            .unwrap_or_else(|error| match error {})
             .status(),
         StatusCode::FORBIDDEN
     );
@@ -261,7 +261,7 @@ async fn http_bridge_lifecycle_and_known_unsupported_operations_have_ari_errors(
             Some("test"),
         )?)
         .await
-        .map_err(|error| ControlError::Adapter(error.to_string()))?;
+        .unwrap_or_else(|error| match error {});
     assert_eq!(created.status(), StatusCode::OK);
     let bytes = created
         .into_body()
@@ -275,7 +275,7 @@ async fn http_bridge_lifecycle_and_known_unsupported_operations_have_ari_errors(
         app.clone()
             .oneshot(request("DELETE", "/ari/bridges/mix", Some("test"))?)
             .await
-            .map_err(|error| ControlError::Adapter(error.to_string()))?
+            .unwrap_or_else(|error| match error {})
             .status(),
         StatusCode::NO_CONTENT
     );
@@ -283,7 +283,7 @@ async fn http_bridge_lifecycle_and_known_unsupported_operations_have_ari_errors(
         .clone()
         .oneshot(request("GET", "/ari/bridges/mix", Some("test"))?)
         .await
-        .map_err(|error| ControlError::Adapter(error.to_string()))?;
+        .unwrap_or_else(|error| match error {});
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     let bytes = missing
         .into_body()
@@ -301,7 +301,7 @@ async fn http_bridge_lifecycle_and_known_unsupported_operations_have_ari_errors(
                 Some("test")
             )?)
             .await
-            .map_err(|error| ControlError::Adapter(error.to_string()))?
+            .unwrap_or_else(|error| match error {})
             .status(),
         StatusCode::BAD_REQUEST
     );
@@ -310,7 +310,7 @@ async fn http_bridge_lifecycle_and_known_unsupported_operations_have_ari_errors(
             app.clone()
                 .oneshot(request("POST", path, Some("test"))?)
                 .await
-                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .unwrap_or_else(|error| match error {})
                 .status(),
             StatusCode::NOT_IMPLEMENTED,
             "{path}"
@@ -325,7 +325,7 @@ async fn http_bridge_lifecycle_and_known_unsupported_operations_have_ari_errors(
             app.clone()
                 .oneshot(request("POST", path, Some("test"))?)
                 .await
-                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .unwrap_or_else(|error| match error {})
                 .status(),
             StatusCode::NOT_FOUND,
             "{path}"

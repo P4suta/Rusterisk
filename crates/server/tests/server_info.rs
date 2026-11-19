@@ -44,7 +44,7 @@ async fn info_filters_are_case_insensitive_and_keep_process_identity_and_startup
             .clone()
             .oneshot(request("/ari/asterisk/ping", true)?)
             .await
-            .map_err(|error| ControlError::Adapter(error.to_string()))?;
+            .unwrap_or_else(|error| match error {});
         assert_eq!(ping.status(), StatusCode::OK);
         let bytes = ping
             .into_body()
@@ -60,7 +60,7 @@ async fn info_filters_are_case_insensitive_and_keep_process_identity_and_startup
             .clone()
             .oneshot(request("/ari/asterisk/info", false)?)
             .await
-            .map_err(|error| ControlError::Adapter(error.to_string()))?;
+            .unwrap_or_else(|error| match error {});
         assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
         let mut identity = None;
         let mut startup = None;
@@ -74,7 +74,7 @@ async fn info_filters_are_case_insensitive_and_keep_process_identity_and_startup
                 .clone()
                 .oneshot(request(&format!("/ari/asterisk/info{query}"), true)?)
                 .await
-                .map_err(|error| ControlError::Adapter(error.to_string()))?;
+                .unwrap_or_else(|error| match error {});
             assert_eq!(response.status(), StatusCode::OK, "{query}");
             let bytes = response
                 .into_body()

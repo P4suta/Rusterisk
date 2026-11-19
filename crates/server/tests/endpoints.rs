@@ -190,7 +190,7 @@ async fn endpoint_routes_authenticate_and_return_reference_errors() -> Result<()
                 .clone()
                 .oneshot(request)
                 .await
-                .map_err(|error| ControlError::Adapter(error.to_string()))?;
+                .unwrap_or_else(|error| match error {});
             assert_eq!(response.status().as_u16(), status, "{path}");
             let body: serde_json::Value = serde_json::from_slice(
                 &response
@@ -218,7 +218,7 @@ async fn endpoint_routes_authenticate_and_return_reference_errors() -> Result<()
         assert_eq!(
             app.oneshot(request)
                 .await
-                .map_err(|error| ControlError::Adapter(error.to_string()))?
+                .unwrap_or_else(|error| match error {})
                 .status()
                 .as_u16(),
             401
