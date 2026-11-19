@@ -298,13 +298,25 @@ test("actual outgoing and incoming browser calls exchange known audio and save a
 			"Alice: answer the outgoing SIP call",
 			async (): Promise<void> => {
 				await command(`channels/${encodeURIComponent(id)}/answer`);
-				await expect(first.locator("#call-status")).toHaveText("Call answered");
+				await captureCheckpoint(
+					(): Promise<CaptureState> => captureState(first),
+					async (): Promise<void> => {
+						await expect(first.locator("#call-status")).toHaveText(
+							"Call answered",
+						);
+					},
+				);
 			},
 		);
 		await phase(
 			"Bob: receive the incoming SIP call",
 			async (): Promise<void> => {
-				await command(incomingCall(process.env.RUSTERISK_BROWSER_SERVER));
+				await command(
+					incomingCall(
+						process.env.RUSTERISK_BROWSER_SERVER,
+						test.info().timeout,
+					),
+				);
 				callObservations.mark("bobOriginateHttpAccepted");
 				await expect(
 					second.getByRole("button", { name: "Answer", exact: true }),
@@ -333,8 +345,13 @@ test("actual outgoing and incoming browser calls exchange known audio and save a
 				await second
 					.getByRole("button", { name: "Answer", exact: true })
 					.click();
-				await expect(second.locator("#call-status")).toHaveText(
-					"Call answered",
+				await captureCheckpoint(
+					(): Promise<CaptureState> => captureState(second),
+					async (): Promise<void> => {
+						await expect(second.locator("#call-status")).toHaveText(
+							"Call answered",
+						);
+					},
 				);
 				callObservations.mark("bothBrowsersAnswered");
 			},
