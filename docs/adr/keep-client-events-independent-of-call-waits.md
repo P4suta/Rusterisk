@@ -18,7 +18,7 @@ Run bounded HTTP workers independently of event reception.
 Track independent milestones for request acceptance, Stasis entry, answer, and media connection.
 Cancel owned channels when their handles or session end, including late originate responses.
 
-Use reqwest 0.13.5 and tokio-tungstenite 0.29.0 as concrete transport adapters.
+Use reqwest 0.13.5 and tokio-tungstenite 0.30.0 as concrete transport adapters.
 Confine their internal sharing and type erasure to HTTP, TLS, and WebSocket machinery.
 Bound response bodies, message sizes, pending calls, deadlines, and worker counts.
 
@@ -36,5 +36,5 @@ Reconsider the adapters if their lifecycle prevents bounded shutdown.
 ## Confirmation
 
 The [reqwest builder](https://docs.rs/reqwest/0.13.5/reqwest/struct.ClientBuilder.html) supplies deadlines and redirect control.
-Source inspection found `Arc<ClientRef>` in reqwest and TLS sharing in tokio-tungstenite.
+Source inspection found `Arc<ClientRef>` in reqwest and [shared TLS settings](https://github.com/snapview/tokio-tungstenite/blob/4994a078037a18a9347b8cf49291a5031d63d9e0/src/tls.rs) in tokio-tungstenite.
 Race, cancellation, overflow, and real socket tests must pass before acceptance.

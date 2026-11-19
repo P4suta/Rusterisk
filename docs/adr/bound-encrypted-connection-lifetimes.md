@@ -11,7 +11,7 @@ The approved plan requires AWS-LC encryption and bounded resources without share
 
 ## Decision
 
-Use axum-server 0.8.0's concrete `RustlsAcceptor` in an owned connection loop.
+Use axum-server 0.9.2's concrete `RustlsAcceptor` in an owned connection loop.
 Limit admission to 64 connections, handshakes to five seconds, and shutdown to five seconds.
 Bound certificate and private-key reads.
 Track upgraded event callbacks with owned lifetime channels and wait for their release during shutdown.
@@ -29,5 +29,5 @@ Reconsider the helper if a fixed API offers owned configuration directly.
 
 ## Confirmation
 
-[The pinned acceptor source](https://raw.githubusercontent.com/programatik29/axum-server/v0.8.0/src/tls_rustls/mod.rs) exposes a concrete acceptor and configurable handshake timeout.
+[The pinned acceptor source](https://github.com/programatik29/axum-server/blob/ad890d8b4f168cca6fb44c0ee20201f4f4178d08/src/tls_rustls/mod.rs) exposes a concrete acceptor and configurable handshake timeout.
 Encrypted requests, malformed credentials, connection saturation, and shutdown must pass before acceptance.

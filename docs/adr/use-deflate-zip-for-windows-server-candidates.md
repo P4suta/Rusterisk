@@ -12,7 +12,7 @@ Windows server candidates need ZIP archives with bounded content verification.
 
 ## Decision
 
-Pin [zip 9.6.0](https://github.com/zip-rs/zip2/tree/ab986cfd822b77d693d98307a3c2505575e4c2eb), licensed under `MIT` with Rust 1.88 support.
+Pin [zip 9.7.3](https://github.com/zip-rs/zip2/tree/7d0d324886eb51cd0c22be21c13e63e77ed37fb4), licensed under `MIT` with Rust 1.88 support.
 Select only `deflate-flate2` and reuse the pinned Rust compression implementation.
 Keep concrete library types at the adapter boundary.
 The dependency contains shared ownership, dynamic dispatch, and unsafe internals.
