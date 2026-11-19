@@ -36,12 +36,31 @@ enum Terminal {
     Timeout,
 }
 
+#[derive(Clone, Copy, kani::Arbitrary)]
+enum SymbolicPeerDirection {
+    SendReceive,
+    SendOnly,
+    ReceiveOnly,
+    Inactive,
+}
+
 impl Terminal {
     fn event(self) -> CallEvent {
         match self {
             Self::Cancel => CallEvent::Cancel,
             Self::Hangup => CallEvent::Hangup,
             Self::Timeout => CallEvent::Timeout,
+        }
+    }
+}
+
+impl SymbolicPeerDirection {
+    const fn value(self) -> PeerMediaDirection {
+        match self {
+            Self::SendReceive => PeerMediaDirection::SendReceive,
+            Self::SendOnly => PeerMediaDirection::SendOnly,
+            Self::ReceiveOnly => PeerMediaDirection::ReceiveOnly,
+            Self::Inactive => PeerMediaDirection::Inactive,
         }
     }
 }
@@ -125,17 +144,7 @@ fn input(call: Call, operation: Input) -> Call {
     }
 }
 
-#[kani::proof]
-#[kani::unwind(12)]
-fn terminal_release_is_absorbing() {
-    let generation: u64 = kani::any();
-    let mut call = Call::outgoing(generation);
-    for operation in kani::any::<[Input; 4]>() {
-        call = input(call, operation);
-    }
-    let before = call.state();
-    let media_before = call.media();
-    call = call.apply(kani::any::<Terminal>().event()).call();
+fn assert_terminal_release(call: Call, generation: u64) {
     assert_eq!(call.generation(), generation);
     assert_eq!(call.state(), CallState::Ended);
     assert_eq!(call.media(), MediaState::Released);
@@ -145,17 +154,52 @@ fn terminal_release_is_absorbing() {
     assert_eq!(call.generated_audio_gate(), AudioGate::Closed);
     assert_eq!(call.bridge(), None);
     assert_eq!(call.stasis(), StasisMembership::Released);
-    let ended = call;
-    for operation in kani::any::<[Input; 4]>() {
-        call = input(call, operation);
-        assert_eq!(call, ended);
+}
+
+#[kani::proof]
+#[kani::unwind(12)]
+fn terminal_release_is_absorbing() {
+    let generation: u64 = kani::any();
+    let transition_mode: bool = kani::any();
+    if transition_mode {
+        let mut call = Call::outgoing(generation);
+        for operation in kani::any::<[Input; 4]>() {
+            call = input(call, operation);
+        }
+        let before = call.state();
+        let media_before = call.media();
+        let terminal: Terminal = kani::any();
+        call = call.apply(terminal.event()).call();
+        assert_terminal_release(call, generation);
+        let Ok(canonical) = Call::outgoing(generation).with_peer_direction(call.peer_direction())
+        else {
+            assert!(false, "canonical peer direction failed");
+            return;
+        };
+        let canonical = canonical.apply(terminal.event()).call();
+        assert_eq!(call, canonical);
+        kani::cover!(before == CallState::Down);
+        kani::cover!(before == CallState::Ringing);
+        kani::cover!(before == CallState::Up);
+        kani::cover!(before == CallState::Ended);
+        kani::cover!(media_before == MediaState::Early);
+    } else {
+        let direction = kani::any::<SymbolicPeerDirection>().value();
+        let Ok(call) = Call::outgoing(generation).with_peer_direction(direction) else {
+            assert!(false, "symbolic peer direction failed");
+            return;
+        };
+        let mut call = call.apply(kani::any::<Terminal>().event()).call();
+        assert_terminal_release(call, generation);
+        let ended = call;
+        for operation in kani::any::<[Input; 4]>() {
+            call = input(call, operation);
+            assert_eq!(call, ended);
+        }
+        assert_eq!(call.connect_media().transition(), Transition::Ignore);
     }
-    assert_eq!(call.connect_media().transition(), Transition::Ignore);
-    kani::cover!(before == CallState::Down);
-    kani::cover!(before == CallState::Ringing);
-    kani::cover!(before == CallState::Up);
-    kani::cover!(before == CallState::Ended);
-    kani::cover!(media_before == MediaState::Early);
+    kani::cover!(transition_mode);
+    kani::cover!(!transition_mode);
 }
 
 #[kani::proof]
