@@ -18,7 +18,10 @@ fn scan(root: &Path, config: &Path) -> Result<(), ProcessError> {
     )
 }
 
-fn using_fixture(perform: impl FnOnce(&Path, &Path) -> io::Result<()>) -> io::Result<()> {
+fn using_fixture(
+    case: &str,
+    perform: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
     let project = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .ok_or_else(|| std::io::Error::other("missing project directory"))?;
@@ -27,7 +30,7 @@ fn using_fixture(perform: impl FnOnce(&Path, &Path) -> io::Result<()>) -> io::Re
         .map_err(std::io::Error::other)?
         .as_nanos();
     let root = std::env::temp_dir().join(format!(
-        "rusterisk-vendor-secrets-{}-{stamp}",
+        "rusterisk-vendor-secrets-{case}-{}-{stamp}",
         std::process::id()
     ));
     std::fs::create_dir(&root)?;
@@ -53,7 +56,7 @@ fn require_detection(root: &Path, config: &Path) -> io::Result<()> {
 #[test]
 fn published_fixture_exclusions_keep_other_paths_and_metadata_secrets_detectable() -> io::Result<()>
 {
-    using_fixture(|project, root| {
+    using_fixture("publisher-fixtures", |project, root| {
         for path in [
             "vendor/str0m/cert.pem",
             "vendor/str0m/examples/key.pem",
@@ -103,7 +106,7 @@ fn write_websocket_nonce(root: &Path, path: &str, nonce: &str) -> io::Result<()>
 
 #[test]
 fn published_websocket_nonce_is_accepted_in_downloaded_sipp_sources() -> io::Result<()> {
-    using_fixture(|project, root| {
+    using_fixture("published-nonce", |project, root| {
         for path in SIPP_WEBSOCKET_PATHS {
             write_websocket_nonce(root, path, RFC6455_NONCE)?;
         }
@@ -113,7 +116,7 @@ fn published_websocket_nonce_is_accepted_in_downloaded_sipp_sources() -> io::Res
 
 #[test]
 fn other_websocket_nonce_values_remain_detectable_in_downloaded_sipp_sources() -> io::Result<()> {
-    using_fixture(|project, root| {
+    using_fixture("unknown-nonce", |project, root| {
         let config = project.join("api/gitleaks.toml");
         let other = RFC6455_NONCE.replace("dGhl", "c29t");
         for path in SIPP_WEBSOCKET_PATHS {
@@ -132,7 +135,7 @@ fn other_websocket_nonce_values_remain_detectable_in_downloaded_sipp_sources() -
 
 #[test]
 fn published_websocket_nonce_remains_detectable_in_other_paths() -> io::Result<()> {
-    using_fixture(|project, root| {
+    using_fixture("other-path", |project, root| {
         let config = project.join("api/gitleaks.toml");
         for path in [
             ".cache/interop-inputs/sipp-source/sipp-3.8.0/src/unexpected.cpp",
