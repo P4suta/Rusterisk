@@ -29,12 +29,8 @@ impl DenyTemporary {
 
     fn run(&self, arguments: &[&str]) -> Result<(), TaskError> {
         println!("check: cargo {}", arguments.join(" "));
-        let status = self.command(arguments).status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(TaskError::Contract(format!("cargo failed: {status}")))
-        }
+        xtask::process::run(&mut self.command(arguments), Duration::from_secs(300))
+            .map_err(TaskError::Process)
     }
 }
 
@@ -151,6 +147,7 @@ fn snapshot(root: &Path) -> Result<(), TaskError> {
         return Err(TaskError::Contract("no advisory database inspected".into()));
     }
     for manifest in ["Cargo.toml", "xtask/fuzz/Cargo.toml"] {
+        temporary.run(&["fetch", "--locked", "--manifest-path", manifest])?;
         temporary.run(&[
             "deny",
             "--manifest-path",

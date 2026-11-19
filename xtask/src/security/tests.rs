@@ -8,7 +8,7 @@ use std::{
 };
 
 const KEYS: [&str; 3] = ["TMPDIR", "TMP", "TEMP"];
-const REQUESTS: [&[&str]; 3] = [
+const REQUESTS: [&[&str]; 5] = [
     &[
         "deny",
         "--config",
@@ -18,6 +18,7 @@ const REQUESTS: [&[&str]; 3] = [
         "index",
         "std-replacement",
     ],
+    &["fetch", "--locked", "--manifest-path", "Cargo.toml"],
     &[
         "deny",
         "--manifest-path",
@@ -29,6 +30,12 @@ const REQUESTS: [&[&str]; 3] = [
         "--locked",
         "check",
         "--hide-inclusion-graph",
+    ],
+    &[
+        "fetch",
+        "--locked",
+        "--manifest-path",
+        "xtask/fuzz/Cargo.toml",
     ],
     &[
         "deny",
