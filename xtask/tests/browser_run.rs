@@ -1,6 +1,66 @@
 use xtask::browser::{Phase, RunPlan};
 
 #[test]
+fn browser_runtime_uses_bounded_tmpfs_and_keeps_reports_on_owned_state(
+) -> Result<(), xtask::browser::BrowserError> {
+    let image = format!("sha256:{}", "a".repeat(64));
+    let plan = RunPlan::new("fixture", "/owned/source", "/owned/state", &image)?;
+    for phase in Phase::ALL {
+        let arguments = plan.step(phase).arguments;
+        let temporary: Vec<_> = arguments
+            .iter()
+            .filter(|value| value.starts_with("--env=TMPDIR="))
+            .map(String::as_str)
+            .collect();
+        let expected = if phase == Phase::Run {
+            "--env=TMPDIR=/tmp"
+        } else {
+            "--env=TMPDIR=/state/tmp"
+        };
+        assert_eq!(temporary, [expected], "{}", phase.label());
+        let mounts: Vec<_> = arguments
+            .windows(2)
+            .filter(|pair| pair[0] == "--tmpfs")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(mounts, ["/tmp:mode=1777,size=128m"]);
+        for persistent in [
+            "type=bind,source=/owned/state,target=/state",
+            "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/browser-results.json",
+            "--env=RUSTERISK_BROWSER_ARTIFACTS=/state/browser-artifacts",
+        ] {
+            assert_eq!(
+                arguments
+                    .iter()
+                    .filter(|value| *value == persistent)
+                    .count(),
+                1,
+                "{}: {persistent}",
+                phase.label()
+            );
+        }
+    }
+    assert!(plan.step(Phase::Run).arguments.ends_with(
+        &[
+            "cargo",
+            "test",
+            "--locked",
+            "--offline",
+            "--package",
+            "rusterisk-server",
+            "--test",
+            "browser_calls",
+            "--",
+            "--include-ignored",
+            "--test-threads=1",
+            "--nocapture",
+        ]
+        .map(str::to_owned)
+    ));
+    Ok(())
+}
+
+#[test]
 fn browser_execution_bounds_every_phase_and_restricts_network_to_dependency_fetching(
 ) -> Result<(), xtask::browser::BrowserError> {
     let image = format!("sha256:{}", "a".repeat(64));

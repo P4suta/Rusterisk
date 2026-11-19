@@ -271,7 +271,11 @@ impl RunPlan {
             },
             "--env=HOME=/state/home",
             "--env=XDG_CACHE_HOME=/state/cache",
-            "--env=TMPDIR=/state/tmp",
+            if phase == Phase::Run {
+                "--env=TMPDIR=/tmp"
+            } else {
+                "--env=TMPDIR=/state/tmp"
+            },
             report,
             artifacts,
             "--entrypoint=/usr/bin/timeout",
@@ -398,6 +402,41 @@ impl RunPlan {
 #[cfg(all(test, unix))]
 mod reference_tests {
     use super::*;
+
+    #[test]
+    fn every_native_backend_uses_tmpfs_and_keeps_its_selected_report() -> Result<(), BrowserError> {
+        let image = format!("sha256:{}", "b".repeat(64));
+        let id = "a".repeat(64);
+        let plan = RunPlan::new("compare", "/source", "/state", &image)?;
+        for (step, report) in [
+            (plan.step(Phase::Run), BROWSER_OUTPUTS[0]),
+            (plan.packaged_step(&id)?, BROWSER_OUTPUTS[0]),
+            (
+                plan.reference_step(&id)?,
+                "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/reference-browser-results.json",
+            ),
+            (
+                plan.matched_reference_step(&id)?,
+                "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/reference-browser-results.json",
+            ),
+        ] {
+            let temporary: Vec<_> = step
+                .arguments
+                .iter()
+                .filter(|value| value.starts_with("--env=TMPDIR="))
+                .map(String::as_str)
+                .collect();
+            assert_eq!(temporary, ["--env=TMPDIR=/tmp"]);
+            assert_eq!(
+                step.arguments
+                    .iter()
+                    .filter(|value| *value == report)
+                    .count(),
+                1
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn comparison_joins_the_verified_container_only_for_native_browser_use(
