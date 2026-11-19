@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use xtask::legacy_audit::{assess, assess_fixture, AuditError};
 
@@ -15,6 +16,7 @@ const TYPESCRIPT: &str = include_str!("../../tests/interop/node-ari-client/tscon
 const REPORT: &str = r#"{"auditReportVersion":2,"vulnerabilities":{},"metadata":{"vulnerabilities":{"info":0,"low":0,"moderate":0,"high":0,"critical":0,"total":0}}}"#;
 const ENTRY: &str = "export { globSync, isDynamicPattern } from \"./index.ts\";\n";
 const SOURCE: &str = "export function isDynamicPattern(): never {\n\tthrow new Error(\n\t\t\"Explicit project lists are unsupported; use projectService: true.\",\n\t);\n}\n\nexport function globSync(): never {\n\tthrow new Error(\n\t\t\"Explicit project lists are unsupported; use projectService: true.\",\n\t);\n}\n";
+static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn read_json(path: &Path) -> io::Result<Value> {
     serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)
@@ -68,15 +70,20 @@ fn write_fixture(root: &Path) -> io::Result<()> {
     write_json(&root.join("package-lock.json"), &lock)
 }
 
+fn fixture_directory(stamp: u128) -> PathBuf {
+    let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "rusterisk-project-service-profile-{}-{stamp}-{sequence}",
+        std::process::id()
+    ))
+}
+
 fn fixture(check: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?
         .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "rusterisk-project-service-profile-{}-{stamp}",
-        std::process::id()
-    ));
+    let directory = fixture_directory(stamp);
     fs::create_dir(&directory)?;
     let result = write_fixture(&directory).and_then(|()| check(&directory));
     let cleanup = fs::remove_dir_all(directory);
@@ -88,6 +95,11 @@ fn fixture(check: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
             "{primary}; fixture cleanup failed: {cleanup}"
         ))),
     }
+}
+
+#[test]
+fn fixture_paths_differ_within_one_clock_tick() {
+    assert_ne!(fixture_directory(1), fixture_directory(1));
 }
 
 #[test]
