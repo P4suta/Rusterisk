@@ -581,6 +581,7 @@ fn run_phase(
         .current_dir(root)
         .stdout(output.try_clone()?)
         .stderr(output);
+    crate::process::scope_captured_tools(&mut command, root, &state.join("mise-global.toml"))?;
     let started = std::time::Instant::now();
     let result = perform(&mut command, step.budget, BrowserCommand::Run);
     println!(
@@ -602,6 +603,16 @@ fn run_phase(
                 .and_then(|stderr| stderr.try_clone().map(|stdout| (stdout, stderr)));
             let mut command = Command::new("docker");
             command.args(&cleanup.arguments).current_dir(root);
+            if let Err(cleanup) = crate::process::scope_captured_tools(
+                &mut command,
+                root,
+                &state.join("mise-global.toml"),
+            ) {
+                return Err(RunError::ContainerCleanup {
+                    operation: primary.to_string(),
+                    cleanup: ProcessError::Io(cleanup),
+                });
+            }
             let capture_error = match capture {
                 Ok((stdout, stderr)) => {
                     command.stdout(stdout).stderr(stderr);
@@ -683,6 +694,11 @@ where
         for name in ["cargo", "tmp", "target", "cache", "home"] {
             std::fs::create_dir(state.join(name))?;
         }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(state.join("mise-global.toml"))?
+            .flush()?;
         let mut inventory: Option<BrowserInventory> = None;
         let report = state.join("browser-results.json");
         #[cfg(unix)]
