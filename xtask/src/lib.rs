@@ -354,7 +354,7 @@ impl<'ast> Visit<'ast> for Policy<'_> {
     }
 
     fn visit_signature(&mut self, node: &'ast syn::Signature) {
-        if node.unsafety.is_some() {
+        if matches!(node.safety, syn::Safety::Unsafe(_)) {
             self.reject("unsafe-code", "unsafe functions are prohibited");
         }
         visit::visit_signature(self, node);
