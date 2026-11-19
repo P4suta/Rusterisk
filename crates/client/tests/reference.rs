@@ -269,6 +269,7 @@ async fn compare_existing_client(actual: &str, reference: &str) -> Result<(), Er
         .env("RUSTERISK_ACTUAL_URL", actual)
         .env("RUSTERISK_REFERENCE_URL", reference)
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()?;
     let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
@@ -279,6 +280,7 @@ async fn compare_existing_client(actual: &str, reference: &str) -> Result<(), Er
         }
     };
     if status.success() {
+        println!("Existing client resource comparison passed.");
         Ok(())
     } else {
         eprintln!("Existing client comparison failed: {status}");
