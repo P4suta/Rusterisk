@@ -179,7 +179,7 @@ impl NativeSanitizerPlan {
             | Phase::RustVersion
             | Phase::LldVersion
             | Phase::CompileProbe(_)
-            | Phase::RejectProbe(_) => 30,
+            | Phase::RejectProbe(_) => 50,
             Phase::InspectArchive(_) => 30,
             Phase::Fetch | Phase::Build(_) => 900,
             Phase::Inventory(_) | Phase::Run(_) => 180,

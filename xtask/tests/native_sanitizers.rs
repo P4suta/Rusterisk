@@ -146,6 +146,19 @@ fn native_sanitizers_probe_the_runtime_and_discover_tests_before_execution(
         .arguments
         .iter()
         .any(|argument| argument == "rustc"));
+    for phase in [
+        Phase::ClangVersion,
+        Phase::RustVersion,
+        Phase::LldVersion,
+        Phase::CompileProbe(Defect::Address),
+        Phase::RejectProbe(Defect::Address),
+        Phase::CompileProbe(Defect::Undefined),
+        Phase::RejectProbe(Defect::Undefined),
+    ] {
+        let step = plan.step(phase);
+        assert_eq!(step.budget.as_secs(), 50);
+        assert!(step.arguments.iter().any(|argument| argument == "30s"));
+    }
     for defect in [Defect::Address, Defect::Undefined] {
         let compile = plan.step(Phase::CompileProbe(defect));
         assert!(compile.arguments.iter().any(|argument| argument == "clang"));
