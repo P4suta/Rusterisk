@@ -9,7 +9,7 @@ struct BuildScript<'a> {
     linked_paths: [String; 1],
 }
 
-fn build() -> Result<String, std::io::Error> {
+fn build(separator: &str) -> Result<String, std::io::Error> {
     let mut records = Vec::new();
     for (package, library) in [
         ("opusic-sys@0.7.7", "opus"),
@@ -17,7 +17,7 @@ fn build() -> Result<String, std::io::Error> {
         ("aws-lc-sys@0.47.0", "aws_lc_0_47_0_crypto"),
     ] {
         let owner = package.split('@').next().unwrap_or("");
-        let directory = format!("/state/target/debug/build/{owner}-fixture/out");
+        let directory = format!("/state/target/debug/build/{owner}{separator}fixture/out");
         records.push(
             serde_json::to_string(&BuildScript {
                 reason: "build-script-executed",
@@ -38,16 +38,18 @@ fn build() -> Result<String, std::io::Error> {
 #[test]
 fn native_archives_follow_the_linked_libraries_of_the_actual_build_scripts(
 ) -> Result<(), std::io::Error> {
-    let archives = native_archives(build()?.as_bytes())?;
-    assert_eq!(archives.len(), 3);
-    for (archive, (library, filename)) in archives.iter().zip([
-        (NativeLibrary::Opus, "libopus.a"),
-        (NativeLibrary::Sqlite, "libsqlite3.a"),
-        (NativeLibrary::AwsLc, "libaws_lc_0_47_0_crypto.a"),
-    ]) {
-        assert_eq!(archive.library(), library);
-        assert_eq!(archive.paths().len(), 1);
-        assert!(archive.paths()[0].ends_with(filename));
+    for separator in ["/", "-"] {
+        let archives = native_archives(build(separator)?.as_bytes())?;
+        assert_eq!(archives.len(), 3);
+        for (archive, (library, filename)) in archives.iter().zip([
+            (NativeLibrary::Opus, "libopus.a"),
+            (NativeLibrary::Sqlite, "libsqlite3.a"),
+            (NativeLibrary::AwsLc, "libaws_lc_0_47_0_crypto.a"),
+        ]) {
+            assert_eq!(archive.library(), library);
+            assert_eq!(archive.paths().len(), 1);
+            assert!(archive.paths()[0].ends_with(filename));
+        }
     }
     Ok(())
 }
@@ -55,20 +57,21 @@ fn native_archives_follow_the_linked_libraries_of_the_actual_build_scripts(
 #[test]
 fn missing_or_redirected_native_archives_cannot_receive_a_successful_verdict(
 ) -> Result<(), std::io::Error> {
-    let original = build()?;
+    let original = build("/")?;
     for changed in [
         String::new(),
         original.replace("\"success\":true", "\"success\":false"),
         original.replace("static=opus", "dylib=opus"),
         original.replace("opusic-sys@0.7.7", "another-sys@0.7.7"),
         original.replace(
-            "/state/target/debug/build/opusic-sys-fixture/out/lib",
+            "/state/target/debug/build/opusic-sys/fixture/out/lib",
             "/outside",
         ),
         original.replace(
-            "/state/target/debug/build/opusic-sys-fixture/out/lib",
-            "/state/target/debug/build/opusic-sys-fixture/out/../outside",
+            "/state/target/debug/build/opusic-sys/fixture/out/lib",
+            "/state/target/debug/build/opusic-sys/fixture/out/../outside",
         ),
+        original.replace("opusic-sys/fixture/out", "opusic-sys/fixture/extra/out"),
         original.replace("static=sqlite3", "static=../sqlite3"),
         format!("{original}\n{}", original.lines().next().unwrap_or("")),
     ] {

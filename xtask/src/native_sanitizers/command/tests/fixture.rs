@@ -196,9 +196,9 @@ impl Fixture<'_> {
                     if self.fault == Fault::MissingArchive && package == "aws-lc-sys" {
                         continue;
                     }
-                    let relative = format!("target/debug/build/{package}-fixture/out/lib");
+                    let relative = format!("target/debug/build/{package}/fixture/out/lib");
                     project::write(&state, &format!("{relative}/lib{library}.a"), b"archive")?;
-                    text.push_str(&serde_json::to_string(&BuildScript{reason:"build-script-executed",package_id:format!("registry+https://github.com/rust-lang/crates.io-index#{package}@0.1.0"),out_dir:format!("/state/target/debug/build/{package}-fixture/out"),linked_libs:[format!("static={library}")],linked_paths:[format!("native=/state/{relative}")]}).map_err(io::Error::other)?);
+                    text.push_str(&serde_json::to_string(&BuildScript{reason:"build-script-executed",package_id:format!("registry+https://github.com/rust-lang/crates.io-index#{package}@0.1.0"),out_dir:format!("/state/target/debug/build/{package}/fixture/out"),linked_libs:[format!("static={library}")],linked_paths:[format!("native=/state/{relative}")]}).map_err(io::Error::other)?);
                     text.push('\n');
                 }
                 text.push_str("{\"reason\":\"build-finished\",\"success\":true}\n");
