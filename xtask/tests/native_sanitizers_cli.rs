@@ -24,6 +24,7 @@ fn native_dry_runs_show_instrumentation_and_boundaries_without_a_daemon() -> std
     for expected in [
         "source=",
         "phase=clang-version",
+        "phase=lld-version",
         "phase=reject-probe-address",
         "phase=reject-probe-undefined",
         "phase=inspect-opus",

@@ -18,9 +18,10 @@ mod project {
 }
 
 pub const IMAGE: &str = "sha256:8e26e6eeb29b66c3849295c5606adaed78a2c6bd9ef17644370256c7fa977d20";
-pub const PHASES: [Phase; 19] = [
+pub const PHASES: [Phase; 20] = [
     Phase::ClangVersion,
     Phase::RustVersion,
+    Phase::LldVersion,
     Phase::CompileProbe(Defect::Address),
     Phase::RejectProbe(Defect::Address),
     Phase::CompileProbe(Defect::Undefined),
@@ -166,6 +167,7 @@ impl Fixture<'_> {
                 "release: 1.100.0\nhost: {}-unknown-linux-gnu\n",
                 std::env::consts::ARCH
             ),
+            Phase::LldVersion => format!("{}\n", crate::native_sanitizers::LLD_VERSION),
             Phase::RejectProbe(Defect::Address) => {
                 "ERROR: AddressSanitizer: heap-use-after-free\n".to_owned()
             }

@@ -12,9 +12,10 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-const PHASES: [Phase; 19] = [
+const PHASES: [Phase; 20] = [
     Phase::ClangVersion,
     Phase::RustVersion,
+    Phase::LldVersion,
     Phase::CompileProbe(Defect::Address),
     Phase::RejectProbe(Defect::Address),
     Phase::CompileProbe(Defect::Undefined),
@@ -74,7 +75,7 @@ impl NativeExecution {
         {
             return Err(invalid("native retained execution profile differs"));
         }
-        NativeSanitizerPlan::new(
+        NativeSanitizerPlan::for_architecture(
             &self.identity,
             self.directory
                 .join("source")
@@ -85,6 +86,7 @@ impl NativeExecution {
                 .to_str()
                 .ok_or_else(|| invalid("native state path is not UTF-8"))?,
             image,
+            &self.architecture,
         )
         .map_err(NativeError::Io)
     }

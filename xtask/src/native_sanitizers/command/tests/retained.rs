@@ -3,7 +3,7 @@ use super::{
     fixture::{using_fixture, Fixture, IMAGE},
     CapturedNative,
 };
-use crate::native_sanitizers::{command::retained::NativeExecution, NativeOutcome};
+use crate::native_sanitizers::{command::retained::NativeExecution, NativeOutcome, Phase};
 use std::{fs, io};
 
 fn using(
@@ -39,6 +39,31 @@ fn rejected(fixture: &Fixture<'_>, execution: &NativeExecution) -> io::Result<()
         .read_retained(IMAGE, &fixture.destination, execution)
         .is_err());
     Ok(())
+}
+
+#[test]
+fn retained_native_requires_the_pinned_lld_receipt() -> io::Result<()> {
+    using(|fixture, _, execution| {
+        let path = fixture.destination.join("lld-version.txt");
+        let original = fs::read(&path)?;
+        for changed in [
+            "",
+            "GNU ld (GNU Binutils for Debian) 2.40\n",
+            "LLD 14.0.6 (compatible with GNU linkers)\n",
+            "LLD 23.1.5 (foreign build) (compatible with GNU linkers)\n",
+        ] {
+            fs::write(&path, changed)?;
+            rejected(fixture, &execution)?;
+        }
+        fs::remove_file(&path)?;
+        rejected(fixture, &execution)?;
+        fs::write(path, original)?;
+        let captured = CapturedNative::read(fixture.root).map_err(io::Error::other)?;
+        captured
+            .read_retained(IMAGE, &fixture.destination, &execution)
+            .map_err(io::Error::other)?;
+        Ok(())
+    })
 }
 
 #[test]
@@ -84,6 +109,13 @@ fn retained_native_models_use_recorded_linux_architecture_instead_of_reader_arch
         let restored = captured
             .read_retained(IMAGE, &fixture.destination, &recorded)
             .map_err(io::Error::other)?;
+        let linker = format!("/usr/local/rustup/toolchains/1.100.0-{architecture}-unknown-linux-gnu/lib/rustlib/{architecture}-unknown-linux-gnu/bin/gcc-ld/ld.lld");
+        assert!(restored
+            .checked
+            .plan
+            .step(Phase::LldVersion)
+            .arguments
+            .contains(&linker));
         assert_eq!(restored.test_count(), 8);
         Ok(())
     })
