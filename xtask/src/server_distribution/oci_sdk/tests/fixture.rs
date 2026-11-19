@@ -293,6 +293,9 @@ pub(super) fn execute(root: &Path) -> io::Result<()> {
         }
         "stop" => {
             trace(root, "stop")?;
+            if args.get(1).map(String::as_str) != Some("--timeout=5") {
+                return Err(io::Error::other("fixture stop timeout option changed"));
+            }
             if matches!(case.as_str(), "stop-failure" | "replacement") {
                 return Err(io::Error::other("requested stop failure"));
             }

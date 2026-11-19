@@ -156,7 +156,7 @@ impl ServerOciRuntimePlan {
         Step {
             arguments: [
                 "stop".into(),
-                "--time=5".into(),
+                "--timeout=5".into(),
                 self.container(ServerOciRunPhase::Serve),
             ]
             .into(),

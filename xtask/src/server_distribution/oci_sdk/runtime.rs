@@ -232,7 +232,7 @@ where
     }
     let step = runtime.plan.stop();
     let stopped = match ownership {
-        Some(owned) => match docker.command(&arguments(["stop", "--time=5", &owned]), "stop") {
+        Some(owned) => match docker.command(&arguments(["stop", "--timeout=5", &owned]), "stop") {
             Ok(mut request) => {
                 let result = service
                     .stop_with(&mut request.command, step.budget)
