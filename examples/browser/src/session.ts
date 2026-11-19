@@ -1,5 +1,5 @@
 import { Invitation, type Inviter, SessionState, Web } from "sip.js";
-import type { BrowserCapture } from "./capture.ts";
+import type { MediaCapture } from "./capture.ts";
 import type { SessionEvents } from "./phone.ts";
 import type { AudioOutput } from "./sip.ts";
 
@@ -9,7 +9,7 @@ export class OwnedSession {
 	private readonly output: AudioOutput;
 	private readonly released: () => void;
 	private readonly run: (operation: () => Promise<void>) => void;
-	private capture: BrowserCapture | undefined;
+	private capture: MediaCapture | undefined;
 	private remote: MediaStream | undefined;
 	private answered: boolean = false;
 	private finished: boolean = false;
@@ -17,7 +17,7 @@ export class OwnedSession {
 
 	public constructor(
 		session: Invitation | Inviter,
-		capture: BrowserCapture | undefined,
+		capture: MediaCapture | undefined,
 		events: SessionEvents,
 		output: AudioOutput,
 		released: () => void,
@@ -96,7 +96,7 @@ export class OwnedSession {
 		});
 	}
 
-	public async answer(capture: BrowserCapture): Promise<void> {
+	public async answer(capture: MediaCapture): Promise<void> {
 		if (
 			!(this.session instanceof Invitation) ||
 			this.session.state !== SessionState.Initial ||

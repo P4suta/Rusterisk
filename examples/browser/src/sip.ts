@@ -8,7 +8,7 @@ import {
 	type Web,
 } from "sip.js";
 import { releaseFailedCall } from "./call-failure.ts";
-import type { BrowserCapture } from "./capture.ts";
+import type { MediaCapture } from "./capture.ts";
 import type { CallEvents, ConnectionOptions, SessionEvents } from "./phone.ts";
 import { OwnedSession } from "./session.ts";
 
@@ -110,7 +110,7 @@ export class SipPhone {
 	private own(
 		connection: Connection,
 		session: Invitation | Inviter,
-		capture: BrowserCapture | undefined,
+		capture: MediaCapture | undefined,
 		events: SessionEvents,
 	): OwnedSession {
 		const owned = new OwnedSession(
@@ -246,7 +246,7 @@ export class SipPhone {
 
 	public async call(
 		destination: string,
-		capture: BrowserCapture,
+		capture: MediaCapture,
 		events: SessionEvents,
 	): Promise<void> {
 		const connection = this.current;
@@ -278,7 +278,7 @@ export class SipPhone {
 		}
 	}
 
-	public async answer(capture: BrowserCapture): Promise<void> {
+	public async answer(capture: MediaCapture): Promise<void> {
 		const owned = this.callSession;
 		if (!owned) throw new Error("An incoming call is required.");
 		await owned.answer(capture);

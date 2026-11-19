@@ -1,6 +1,10 @@
 import type { Capture } from "./phone.ts";
 
-export class BrowserCapture implements Capture {
+export interface MediaCapture extends Capture {
+	readonly stream: MediaStream;
+}
+
+export class BrowserCapture implements MediaCapture {
 	public readonly stream: MediaStream;
 	public constructor(stream: MediaStream) {
 		this.stream = stream;
