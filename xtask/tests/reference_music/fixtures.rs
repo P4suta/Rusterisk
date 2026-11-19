@@ -3,6 +3,7 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 use xtask::reference::{copy_configuration, prepare_music_fixture, ReferenceMusicFixture};
@@ -12,6 +13,7 @@ const HEADER: [u8; 44] = [
     0, 0, 0, 1, 0, 1, 0, 0x40, 0x1f, 0, 0, 0x80, 0x3e, 0, 0, 2, 0, 16, 0, b'd', b'a', b't', b'a',
     0x80, 0x3e, 0, 0,
 ];
+static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn verify(condition: bool, reason: &'static str) -> io::Result<()> {
     condition
@@ -94,15 +96,20 @@ fn tree(root: &Path) -> io::Result<Vec<Entry>> {
     Ok(entries)
 }
 
+fn fixture_path(parent: &Path, stamp: u128) -> PathBuf {
+    let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!(
+        "rusterisk-reference-music-{}-{stamp}-{sequence}",
+        std::process::id()
+    ))
+}
+
 fn using_fixture(test: impl FnOnce(&Path, &Path) -> io::Result<()>) -> io::Result<()> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(io::Error::other)?
         .as_nanos();
-    let parent = fs::canonicalize(std::env::temp_dir())?.join(format!(
-        "rusterisk-reference-music-{}-{stamp}",
-        std::process::id()
-    ));
+    let parent = fixture_path(&fs::canonicalize(std::env::temp_dir())?, stamp);
     fs::create_dir(&parent)?;
     let operation = (|| {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/interop/asterisk");
@@ -127,6 +134,15 @@ fn using_fixture(test: impl FnOnce(&Path, &Path) -> io::Result<()>) -> io::Resul
             "{operation}; reference music fixture cleanup failed: {cleanup}"
         ))),
     }
+}
+
+#[test]
+fn fixture_paths_differ_within_one_clock_tick() -> io::Result<()> {
+    let parent = fs::canonicalize(std::env::temp_dir())?;
+    verify(
+        fixture_path(&parent, 1) != fixture_path(&parent, 1),
+        "Reference music fixture paths collided",
+    )
 }
 
 fn wave(bytes: &[u8], sample: i16) -> io::Result<()> {
