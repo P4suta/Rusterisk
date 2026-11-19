@@ -24,33 +24,49 @@ fn cpu_usage(source: &str) -> io::Result<u64> {
     Ok(value)
 }
 
-struct ProcessRss {
-    pid: NonZeroU32,
-    kib: u64,
+fn server_child(source: &str) -> io::Result<NonZeroU32> {
+    source
+        .trim()
+        .parse::<NonZeroU32>()
+        .ok()
+        .filter(|pid| pid.get() > 1)
+        .ok_or_else(|| io::Error::other("browser server wrapper has no unique child"))
 }
 
-fn process_rss(source: &str, server: &str) -> io::Result<ProcessRss> {
-    let invalid = || io::Error::other("browser server process or resident memory is ambiguous");
-    let mut rows = source.lines().filter_map(|line| {
-        let mut fields = line.split_ascii_whitespace();
-        let pid = fields.next()?;
-        (fields.next() == Some(server)).then_some((pid, fields))
+fn status_field<'a>(source: &'a str, field: &str) -> Option<&'a str> {
+    let mut values = source.lines().filter_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        (name == field).then_some(value.trim())
     });
-    let (pid, mut fields) = rows.next().ok_or_else(invalid)?;
-    let pid = pid.parse().map_err(|_| invalid())?;
+    let value = values.next()?;
+    values.next().is_none().then_some(value)
+}
+
+fn process_rss(source: &str, server: &str, pid: NonZeroU32) -> io::Result<u64> {
+    if status_field(source, "Name") != Some(server)
+        || status_field(source, "Pid").and_then(|value| value.parse().ok()) != Some(pid)
+        || status_field(source, "PPid") != Some("1")
+    {
+        return Err(io::Error::other("browser server child identity differs"));
+    }
+    let invalid = || io::Error::other("browser server resident memory is invalid");
+    let mut fields = status_field(source, "VmRSS")
+        .ok_or_else(invalid)?
+        .split_ascii_whitespace();
     let kib = fields
         .next()
         .and_then(|value| value.parse().ok())
         .ok_or_else(invalid)?;
-    if fields.next().is_some() || rows.next().is_some() {
+    if fields.next() != Some("kB") || fields.next().is_some() {
         return Err(invalid());
     }
-    Ok(ProcessRss { pid, kib })
+    Ok(kib)
 }
 
 struct Sample {
     cpu: u64,
-    process: ProcessRss,
+    pid: NonZeroU32,
+    rss_kib: u64,
 }
 
 fn sample(
@@ -59,27 +75,24 @@ fn sample(
     commands: &mut Commands<'_>,
     supervisor: &mut CommandSupervisor,
 ) -> io::Result<Sample> {
-    let budget = Duration::from_secs(5);
-    let stat = commands.run(
-        docker(&arguments([
-            "exec",
-            id,
-            "/usr/bin/head",
-            "--bytes=32768",
-            "/sys/fs/cgroup/cpu.stat",
-        ])),
-        budget,
-        |command, deadline| supervisor.run(command, deadline),
-    )?;
-    let top = commands.run(
-        docker(&arguments(["top", id, "-eo", "pid,comm,rss"])),
-        budget,
-        |command, deadline| supervisor.run(command, deadline),
-    )?;
-    Ok(Sample {
-        cpu: cpu_usage(stat.text()?)?,
-        process: process_rss(top.text()?, server)?,
-    })
+    let mut read = |path| {
+        commands.run(
+            docker(&arguments([
+                "exec",
+                id,
+                "/usr/bin/head",
+                "--bytes=32768",
+                path,
+            ])),
+            Duration::from_secs(5),
+            |command, deadline| supervisor.run(command, deadline),
+        )
+    };
+    let cpu = cpu_usage(read("/sys/fs/cgroup/cpu.stat")?.text()?)?;
+    let pid = server_child(read("/proc/1/task/1/children")?.text()?)?;
+    let status = format!("/proc/{pid}/status");
+    let rss_kib = process_rss(read(&status)?.text()?, server, pid)?;
+    Ok(Sample { cpu, pid, rss_kib })
 }
 
 pub(super) fn measure<T>(
@@ -95,7 +108,7 @@ pub(super) fn measure<T>(
     let outcome = compare(id)?;
     let milliseconds = started.elapsed().as_millis();
     let after = sample(id, server, commands, supervisor)?;
-    if before.process.pid != after.process.pid {
+    if before.pid != after.pid {
         return Err(io::Error::other(
             "browser server process changed during measurement",
         ));
@@ -111,7 +124,7 @@ pub(super) fn measure<T>(
     writeln!(
         report,
         "server={server}\ndriver_elapsed_ms={milliseconds}\ncpu_usec={cpu}\nrss_before_kib={}\nrss_after_kib={}",
-        before.process.kib, after.process.kib
+        before.rss_kib, after.rss_kib
     )?;
     report.flush()?;
     Ok(outcome)
@@ -119,7 +132,7 @@ pub(super) fn measure<T>(
 
 #[cfg(test)]
 mod tests {
-    use super::{cpu_usage, process_rss};
+    use super::{cpu_usage, process_rss, server_child};
     use std::io;
 
     #[test]
@@ -141,21 +154,34 @@ mod tests {
     }
 
     #[test]
-    fn resident_memory_requires_one_identified_server_process() -> io::Result<()> {
-        let top = "PID COMMAND RSS\n2 timeout 144\n100 rusterisk 12864\n";
-        let process = process_rss(top, "rusterisk")?;
-        assert_eq!(process.pid.get(), 100);
-        assert_eq!(process.kib, 12864);
-        for invalid in [
-            "PID COMMAND RSS\n2 timeout 144\n",
-            "PID COMMAND RSS\n0 rusterisk 12864\n",
-            "PID COMMAND RSS\n100 rusterisk -1\n",
-            "PID COMMAND RSS\n100 rusterisk 1\n101 rusterisk 2\n",
-            "PID COMMAND RSS\n100 rusterisk-worker 1\n",
-        ] {
-            assert!(process_rss(invalid, "rusterisk").is_err(), "{invalid:?}");
+    fn a_timeout_wrapper_must_have_one_server_child() -> io::Result<()> {
+        assert_eq!(server_child("2 ")?.get(), 2);
+        for invalid in ["", "0", "1", "2 3", "2 2", "-2"] {
+            assert!(server_child(invalid).is_err(), "{invalid:?}");
         }
-        assert!(process_rss(top, "asterisk").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn resident_memory_requires_the_expected_child_identity_and_linux_units() -> io::Result<()> {
+        let pid = server_child("2 ")?;
+        let status = "Name:\trusterisk\nPid:\t2\nPPid:\t1\nVmRSS:\t12864 kB\n";
+        assert_eq!(process_rss(status, "rusterisk", pid)?, 12864);
+        for invalid in [
+            status.replace("Pid:\t2", "Pid:\t3"),
+            status.replace("PPid:\t1", "PPid:\t3"),
+            status.replace("12864 kB", "13m"),
+            status.replace("12864 kB", "-1 kB"),
+            status.replace("12864 kB", "12864 kB extra"),
+            status.replace("VmRSS", "VmHWM"),
+            format!("{status}VmRSS:\t1 kB\n"),
+        ] {
+            assert!(
+                process_rss(&invalid, "rusterisk", pid).is_err(),
+                "{invalid:?}"
+            );
+        }
+        assert!(process_rss(status, "asterisk", pid).is_err());
         Ok(())
     }
 }
