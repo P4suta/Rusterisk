@@ -11,9 +11,10 @@ Keep passwords out of arguments, URLs, and logs.
 In a POSIX shell, redirect an existing protected UTF-8 secret file into standard input:
 
 ```sh
-rusterisk reload --server http://127.0.0.1:8088 --username operator --password-stdin < "/secure/rusterisk-reload-password"
+rusterisk-cli reload --server http://127.0.0.1:8088 --username operator --password-stdin < "/secure/rusterisk-reload-password"
 ```
 
+The server executable also accepts `rusterisk reload` with the same options.
 The CLI removes one optional trailing `LF` or `CRLF`.
 The password must contain 1 to 256 UTF-8 bytes after removal.
 The CLI preserves spaces and rejects other line breaks, empty input, and invalid UTF-8 before connecting.

@@ -4,6 +4,7 @@ members = [
   "crates/config",
   "crates/api",
   "crates/client",
+  "crates/cli",
   "crates/media",
   "crates/storage",
   "crates/server",
@@ -18,6 +19,7 @@ resolver = "2"
 str0m = { path = "vendor/str0m" }
 
 [workspace.package]
+publish = false
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.99"

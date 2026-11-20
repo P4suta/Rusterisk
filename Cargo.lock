@@ -2380,6 +2380,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusterisk-cli"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "rusterisk-client"
 version = "0.1.0"
 dependencies = [
@@ -2449,6 +2461,7 @@ dependencies = [
  "rsipstack",
  "rusqlite",
  "rusterisk-api",
+ "rusterisk-cli",
  "rusterisk-client",
  "rusterisk-config",
  "rusterisk-core",
