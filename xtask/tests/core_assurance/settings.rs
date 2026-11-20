@@ -15,6 +15,15 @@ const METHODS: [&str; 8] = [
     "SettingsError::into_reference",
 ];
 
+fn assurance_only(function: &syn::ImplItemFn) -> bool {
+    function.attrs.iter().any(|attribute| {
+        attribute.path().is_ident("cfg")
+            && attribute
+                .parse_args::<syn::Path>()
+                .is_ok_and(|path| path.is_ident("test") || path.is_ident("kani"))
+    })
+}
+
 #[test]
 fn both_mutation_phases_select_settings_lifetimes_and_reference_recovery(
 ) -> Result<(), AssuranceError> {
@@ -94,7 +103,7 @@ fn every_settings_selector_names_an_actual_nonconstant_method() -> Result<(), As
             let syn::ImplItem::Fn(function) = item else {
                 continue;
             };
-            if function.sig.constness.is_none() {
+            if function.sig.constness.is_none() && !assurance_only(&function) {
                 methods.insert(format!("{name}::{}", function.sig.ident));
             }
         }

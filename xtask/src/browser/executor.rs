@@ -581,6 +581,7 @@ fn run_phase(
         .current_dir(root)
         .stdout(output.try_clone()?)
         .stderr(output);
+    crate::process::scope_captured_tools(&mut command, root, &state.join("mise-global.toml"))?;
     let started = std::time::Instant::now();
     let result = perform(&mut command, step.budget, BrowserCommand::Run);
     println!(
@@ -602,6 +603,16 @@ fn run_phase(
                 .and_then(|stderr| stderr.try_clone().map(|stdout| (stdout, stderr)));
             let mut command = Command::new("docker");
             command.args(&cleanup.arguments).current_dir(root);
+            if let Err(cleanup) = crate::process::scope_captured_tools(
+                &mut command,
+                root,
+                &state.join("mise-global.toml"),
+            ) {
+                return Err(RunError::ContainerCleanup {
+                    operation: primary.to_string(),
+                    cleanup: ProcessError::Io(cleanup),
+                });
+            }
             let capture_error = match capture {
                 Ok((stdout, stderr)) => {
                     command.stdout(stdout).stderr(stderr);
@@ -683,7 +694,13 @@ where
         for name in ["cargo", "tmp", "target", "cache", "home"] {
             std::fs::create_dir(state.join(name))?;
         }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(state.join("mise-global.toml"))?
+            .flush()?;
         let mut inventory: Option<BrowserInventory> = None;
+        let inventory_report = state.join("browser-inventory.json");
         let report = state.join("browser-results.json");
         #[cfg(unix)]
         if let Some((_, package)) = packaged {
@@ -768,7 +785,6 @@ where
                         &mut perform,
                     )?;
                 }
-                std::fs::remove_file(&report)?;
             }
             let mut run = |step| {
                 run_phase(
@@ -804,14 +820,8 @@ where
                 | Phase::NpmVersion
                 | Phase::BrowserVersion => version(phase, &bytes)?,
                 Phase::Inventory => {
-                    let bytes = read(&report)?;
+                    let bytes = read(&inventory_report)?;
                     inventory = Some(validate_inventory(&bytes)?);
-                    let mut saved = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(state.join("browser-inventory.json"))?;
-                    saved.write_all(&bytes)?;
-                    saved.flush()?;
                 }
                 Phase::Run => {
                     #[cfg(unix)]

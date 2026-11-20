@@ -60,7 +60,7 @@ fn image_runtime_checks_bound_resources_and_keep_configuration_read_only() -> io
         stop.arguments,
         [
             "stop",
-            "--time=5",
+            "--timeout=5",
             "rusterisk-server-oci-check-fixture-serve"
         ]
     );

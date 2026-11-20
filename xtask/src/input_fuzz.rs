@@ -183,12 +183,17 @@ impl FuzzPlan {
             Phase::Run(_) => 90,
         };
         let fetch = phase == Phase::Fetch;
+        let file_limit = if matches!(phase, Phase::Build(_)) {
+            "fsize=536870912:536870912"
+        } else {
+            "fsize=134217728:134217728"
+        };
         let mut arguments: Vec<String> = [
             "run", "--rm", "--pull=never", "--name", &self.name(phase),
             "--cpus=2", "--memory=2g", "--memory-swap=2g", "--pids-limit=256",
             if fetch { "--network=bridge" } else { "--network=none" },
             "--read-only", "--cap-drop=ALL", "--security-opt=no-new-privileges",
-            "--ulimit", "fsize=134217728:134217728",
+            "--ulimit", file_limit,
             "--tmpfs", "/tmp:mode=1777,size=128m",
             "--mount", &format!("type=bind,source={},target=/project,readonly", self.source),
             "--mount", &format!("type=bind,source={},target=/state", self.state),

@@ -179,6 +179,31 @@ impl Fixture {
             .collect();
         assert_eq!(command.get_program(), "docker");
         assert!(!budget.is_zero() && budget.as_secs() <= 900);
+        let source = command
+            .get_current_dir()
+            .ok_or(ProcessError::InvalidOutput)?;
+        let scoped = |key: &str| {
+            command
+                .get_envs()
+                .find(|(name, _)| *name == key)
+                .and_then(|(_, value)| value)
+        };
+        assert_eq!(
+            scoped("MISE_TRUSTED_CONFIG_PATHS"),
+            Some(source.as_os_str())
+        );
+        let ceiling = source.parent().ok_or(ProcessError::InvalidOutput)?;
+        assert_eq!(
+            scoped("MISE_CEILING_PATHS"),
+            Some(
+                std::env::join_paths([ceiling])
+                    .map_err(|_| ProcessError::InvalidOutput)?
+                    .as_os_str()
+            )
+        );
+        let profile = scoped("MISE_GLOBAL_CONFIG_FILE").ok_or(ProcessError::InvalidOutput)?;
+        assert_eq!(scoped("MISE_SYSTEM_CONFIG_FILE"), Some(profile));
+        assert!(Path::new(profile).is_file());
         if mode == BrowserCommand::Cleanup {
             assert_eq!(&arguments[..2], ["rm", "--force"]);
             assert_eq!(arguments.len(), 3);
@@ -227,7 +252,12 @@ impl Fixture {
         if matches!(phase, Phase::Inventory | Phase::Run) {
             let bytes =
                 serde_json::to_vec(&report(phase == Phase::Run)).map_err(io::Error::other)?;
-            write(&state, "browser-results.json", &bytes)?;
+            let report = if phase == Phase::Inventory {
+                "browser-inventory.json"
+            } else {
+                "browser-results.json"
+            };
+            write(&state, report, &bytes)?;
         }
         if phase == Phase::Run {
             match self.fault {

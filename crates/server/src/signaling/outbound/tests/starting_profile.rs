@@ -45,18 +45,29 @@ fn configuration(protocol: Protocol, uri: &str, replaced: bool) -> Result<Config
         ("captured-user", "captured-password", "ulaw")
     };
     let contact = uri.replace(';', "\\;");
-    let config = Config::parse(
+    let mut config = Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
         "[app]\ntype=user\npassword=test\n",
         &format!("[transport]\ntype=transport\nprotocol={token}\nbind=127.0.0.1:0\n[incoming]\ntype=auth\nusername=incoming\npassword=sample\n[remote]\ntype=auth\nusername={username}\npassword={password}\nrealm=profile.test\n[phone]\ntype=aor\ncontact={contact}\n[phone]\ntype=endpoint\ntransport=transport\nauth=incoming\noutbound_auth=remote\naors=phone\nallow={codec}\n"),
         "",
         "",
     ).map_err(failure)?;
+    config.rtp.start = 0;
+    config.rtp.end = 0;
     require(
         config.aors.first().and_then(|aor| aor.contact.as_deref()) == Some(uri),
         "Starting profile fixture lost its configured contact URI",
     )?;
     Ok(config)
+}
+
+#[test]
+fn starting_profile_fixtures_use_os_assigned_media_ports() -> Result<(), ControlError> {
+    let config = configuration(Protocol::Udp, "sip:phone@127.0.0.1:5060", false)?;
+    require(
+        (config.rtp.start, config.rtp.end) == (0, 0),
+        "Starting profile fixture shares the default media port range",
+    )
 }
 
 struct Packet {

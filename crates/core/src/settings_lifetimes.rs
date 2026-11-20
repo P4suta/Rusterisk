@@ -1,3 +1,8 @@
+#[cfg(kani)]
+const SETTINGS_SLOT_CAPACITY: usize = 2;
+#[cfg(not(kani))]
+const SETTINGS_SLOT_CAPACITY: usize = 65;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SettingsGeneration {
     owner: u128,
@@ -98,7 +103,7 @@ struct Generation {
 pub struct SettingsLifetimes {
     sequence: u64,
     current: SettingsGeneration,
-    slots: [Option<Generation>; Self::CAPACITY],
+    slots: [Option<Generation>; SETTINGS_SLOT_CAPACITY],
     candidate: Option<SettingsCandidate>,
 }
 
@@ -108,7 +113,7 @@ impl SettingsLifetimes {
     /// Callers must use a distinct owner for each settings lifetime domain.
     pub const fn new(owner: u128) -> Self {
         let current = SettingsGeneration { owner, sequence: 1 };
-        let mut slots = [None; Self::CAPACITY];
+        let mut slots = [None; SETTINGS_SLOT_CAPACITY];
         slots[0] = Some(Generation {
             key: current,
             references: 0,
@@ -119,6 +124,103 @@ impl SettingsLifetimes {
             slots,
             candidate: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn saturated_publication_state(
+        owner: u128,
+    ) -> (
+        Self,
+        [Option<SettingsReference>; Self::CAPACITY],
+        SettingsCandidate,
+    ) {
+        let first = SettingsGeneration { owner, sequence: 1 };
+        let mut slots = [Some(Generation {
+            key: first,
+            references: 1,
+        }); Self::CAPACITY];
+        let mut references = [const { None }; Self::CAPACITY];
+        let mut index = 0_usize;
+        let mut sequence = 1_u64;
+        while index < Self::CAPACITY {
+            let generation = SettingsGeneration { owner, sequence };
+            slots[index] = Some(Generation {
+                key: generation,
+                references: 1,
+            });
+            references[index] = Some(SettingsReference { generation });
+            index = index.saturating_add(1);
+            sequence = sequence.saturating_add(1);
+        }
+        let current = SettingsGeneration {
+            owner,
+            sequence: sequence.saturating_sub(1),
+        };
+        let candidate = SettingsCandidate { owner, sequence };
+        (
+            Self {
+                sequence: candidate.sequence,
+                current,
+                slots,
+                candidate: Some(candidate),
+            },
+            references,
+            candidate,
+        )
+    }
+
+    #[cfg(kani)]
+    pub(crate) fn reference_count_state(
+        owner: u128,
+        references: u64,
+    ) -> (Self, SettingsGeneration) {
+        let mut settings = Self::new(owner);
+        let generation = settings.current;
+        settings.slots[0] = Some(Generation {
+            key: generation,
+            references,
+        });
+        (settings, generation)
+    }
+
+    #[cfg(kani)]
+    pub(crate) fn current_reference_count(&self) -> Option<u64> {
+        self.slots[0].map(|retained| retained.references)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn matches_saturated_publication(
+        &self,
+        owner: u128,
+        released_index: usize,
+        publication: &SettingsPublication,
+    ) -> bool {
+        if released_index >= Self::CAPACITY - 1
+            || self.current != publication.generation
+            || publication.slot.index != released_index
+            || publication.retired.is_some()
+            || self.candidate.is_some()
+        {
+            return false;
+        }
+        let mut sequence = 0_u64;
+        for (index, slot) in self.slots.iter().enumerate() {
+            sequence = sequence.saturating_add(1);
+            let Some(generation) = slot else {
+                return false;
+            };
+            let (key, references) = if index == released_index {
+                (publication.generation, 0)
+            } else {
+                (SettingsGeneration { owner, sequence }, 1)
+            };
+            if generation.key != key || generation.references != references {
+                return false;
+            }
+        }
+        self.sequence == publication.generation.sequence
+            && publication.generation.owner == owner
+            && publication.generation.sequence == sequence.saturating_add(1)
     }
 
     pub const fn current(&self) -> SettingsGeneration {
@@ -221,6 +323,9 @@ impl SettingsLifetimes {
         &mut self,
         reference: SettingsReference,
     ) -> Result<Option<SettingsSlot>, SettingsError> {
+        if reference.generation.owner != self.current.owner {
+            return Err(SettingsError::ForeignReference(reference));
+        }
         let Some((index, retained)) =
             self.slots.iter_mut().enumerate().find_map(|(index, slot)| {
                 slot.as_mut()
@@ -249,7 +354,30 @@ mod contracts;
 
 #[cfg(test)]
 mod tests {
-    use super::{SettingsError, SettingsLifetimes, SettingsReference};
+    use super::{SettingsCandidate, SettingsError, SettingsLifetimes, SettingsReference};
+
+    fn reachable_saturated_publication(
+        owner: u128,
+    ) -> Result<
+        (
+            SettingsLifetimes,
+            [Option<SettingsReference>; SettingsLifetimes::CAPACITY],
+            SettingsCandidate,
+        ),
+        SettingsError,
+    > {
+        let mut settings = SettingsLifetimes::new(owner);
+        let mut references: [Option<SettingsReference>; SettingsLifetimes::CAPACITY] =
+            [const { None }; SettingsLifetimes::CAPACITY];
+        for reference in references.iter_mut().take(SettingsLifetimes::CAPACITY - 1) {
+            *reference = Some(settings.retain(settings.current())?);
+            let candidate = settings.prepare()?;
+            settings.commit(candidate)?;
+        }
+        let candidate = settings.prepare()?;
+        references[SettingsLifetimes::CAPACITY - 1] = Some(settings.retain(settings.current())?);
+        Ok((settings, references, candidate))
+    }
 
     #[test]
     fn generation_exhaustion_refuses_preparation_without_changing_publication() {
@@ -278,6 +406,49 @@ mod tests {
             settings.slots[0].map(|slot| slot.references),
             Some(u64::MAX)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn saturated_assurance_state_matches_the_reachable_publication_state(
+    ) -> Result<(), SettingsError> {
+        let owner = 17;
+        let (reachable, references, candidate) = reachable_saturated_publication(owner)?;
+        let (modeled, modeled_references, modeled_candidate) =
+            SettingsLifetimes::saturated_publication_state(owner);
+
+        assert_eq!(candidate, modeled_candidate);
+        assert_eq!(reachable.sequence, modeled.sequence);
+        assert_eq!(reachable.current, modeled.current);
+        assert_eq!(reachable.candidate, modeled.candidate);
+        for (actual, expected) in reachable.slots.iter().zip(&modeled.slots) {
+            assert_eq!(
+                actual.map(|generation| (generation.key, generation.references)),
+                expected.map(|generation| (generation.key, generation.references))
+            );
+        }
+        for (actual, expected) in references.iter().zip(&modeled_references) {
+            assert_eq!(
+                actual.as_ref().map(SettingsReference::generation),
+                expected.as_ref().map(SettingsReference::generation)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn every_retired_slot_is_reused_without_invalidating_other_references(
+    ) -> Result<(), SettingsError> {
+        let owner = 23;
+        for released_index in 0..SettingsLifetimes::CAPACITY - 1 {
+            let (mut settings, mut references, candidate) = reachable_saturated_publication(owner)?;
+            let released = references[released_index]
+                .take()
+                .ok_or(SettingsError::Capacity)?;
+            assert!(settings.release(released)?.is_some());
+            let publication = settings.commit(candidate)?;
+            assert!(settings.matches_saturated_publication(owner, released_index, &publication));
+        }
         Ok(())
     }
 

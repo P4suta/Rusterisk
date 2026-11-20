@@ -11,6 +11,8 @@ mod command;
 pub(crate) use command::retained::NativeExecution;
 pub use command::{execute, plan, Execution, NativeOutcome};
 
+const LLD_VERSION: &str = "LLD 23.1.5 (/checkout/src/llvm-project/llvm 0a5579eb649d3634a9c30ac873300cc2944fa070) (compatible with GNU linkers)";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     Media,
@@ -60,6 +62,7 @@ impl Scope {
 pub enum Phase {
     ClangVersion,
     RustVersion,
+    LldVersion,
     CompileProbe(Defect),
     RejectProbe(Defect),
     InspectArchive(NativeLibrary),
@@ -74,6 +77,7 @@ impl Phase {
         match self {
             Self::ClangVersion => "clang-version".to_owned(),
             Self::RustVersion => "rust-version".to_owned(),
+            Self::LldVersion => "lld-version".to_owned(),
             Self::CompileProbe(defect) => format!("compile-probe-{}", defect.label()),
             Self::RejectProbe(defect) => format!("reject-probe-{}", defect.label()),
             Self::InspectArchive(library) => format!("inspect-{}", library.label()),
@@ -108,6 +112,7 @@ pub struct NativeSanitizerPlan {
     source: String,
     state: String,
     image: ImageIdentity,
+    linker: String,
 }
 
 impl NativeSanitizerPlan {
@@ -116,6 +121,16 @@ impl NativeSanitizerPlan {
     }
 
     pub fn new(identity: &str, source: &str, state: &str, image: &str) -> io::Result<Self> {
+        Self::for_architecture(identity, source, state, image, std::env::consts::ARCH)
+    }
+
+    pub(super) fn for_architecture(
+        identity: &str,
+        source: &str,
+        state: &str,
+        image: &str,
+        architecture: &str,
+    ) -> io::Result<Self> {
         let invalid = || io::Error::other("invalid native sanitizer plan");
         let image = ImageIdentity::parse(image).ok_or_else(invalid)?;
         if identity.is_empty()
@@ -137,6 +152,7 @@ impl NativeSanitizerPlan {
             })
             || Path::new(source).starts_with(state)
             || Path::new(state).starts_with(source)
+            || !matches!(architecture, "aarch64" | "x86_64")
         {
             return Err(invalid());
         }
@@ -145,6 +161,7 @@ impl NativeSanitizerPlan {
             source: source.into(),
             state: state.into(),
             image,
+            linker: format!("/usr/local/rustup/toolchains/1.100.0-{architecture}-unknown-linux-gnu/lib/rustlib/{architecture}-unknown-linux-gnu/bin/gcc-ld/ld.lld"),
         })
     }
 
@@ -160,8 +177,9 @@ impl NativeSanitizerPlan {
         let budget = match phase {
             Phase::ClangVersion
             | Phase::RustVersion
+            | Phase::LldVersion
             | Phase::CompileProbe(_)
-            | Phase::RejectProbe(_) => 30,
+            | Phase::RejectProbe(_) => 50,
             Phase::InspectArchive(_) => 30,
             Phase::Fetch | Phase::Build(_) => 900,
             Phase::Inventory(_) | Phase::Run(_) => 180,
@@ -186,7 +204,7 @@ impl NativeSanitizerPlan {
             "--env=CC=clang", "--env=CXX=clang++", "--env=AWS_LC_SYS_SANITIZER=asan",
             "--env=CFLAGS=-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g",
             "--env=CXXFLAGS=-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g",
-            "--env=RUSTFLAGS=-C linker=clang -C link-arg=-fsanitize=address,undefined",
+            &format!("--env=RUSTFLAGS=-C linker=clang -C link-arg=-fsanitize=address,undefined -C link-arg=--ld-path={} -C link-arg=-Wl,--threads=1", self.linker),
             "--env=ASAN_SYMBOLIZER_PATH=/usr/bin/llvm-symbolizer-14",
             &format!("--env=ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:abort_on_error=0:exitcode={exit_code}:detect_odr_violation=1"),
             &format!("--env=UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:exitcode={exit_code}"),
@@ -197,8 +215,11 @@ impl NativeSanitizerPlan {
         match phase {
             Phase::ClangVersion => arguments.extend(["clang", "--version"].map(str::to_owned)),
             Phase::RustVersion => arguments.extend(["rustc", "-vV"].map(str::to_owned)),
+            Phase::LldVersion => arguments.extend([self.linker.clone(), "--version".into()]),
             Phase::CompileProbe(defect) => arguments.extend([
                 "clang".to_owned(),
+                format!("--ld-path={}", self.linker),
+                "-Wl,--threads=1".to_owned(),
                 "-O1".to_owned(),
                 "-g".to_owned(),
                 "-fsanitize=address,undefined".to_owned(),
@@ -243,6 +264,7 @@ impl NativeSanitizerPlan {
                     }
                     Phase::ClangVersion
                     | Phase::RustVersion
+                    | Phase::LldVersion
                     | Phase::CompileProbe(_)
                     | Phase::RejectProbe(_)
                     | Phase::InspectArchive(_)

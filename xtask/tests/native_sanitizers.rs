@@ -3,6 +3,66 @@ use xtask::native_sanitizers::{NativeSanitizerPlan, Phase, Scope};
 const IMAGE: &str = "sha256:8e26e6eeb29b66c3849295c5606adaed78a2c6bd9ef17644370256c7fa977d20";
 
 #[test]
+fn native_sanitizers_link_every_scope_and_probe_with_the_bundled_single_thread_lld(
+) -> Result<(), std::io::Error> {
+    use xtask::native_sanitizers::Defect;
+    let plan = NativeSanitizerPlan::new("fixture", "/source", "/state", IMAGE)?;
+    let architecture = std::env::consts::ARCH;
+    let linker = format!("/usr/local/rustup/toolchains/1.100.0-{architecture}-unknown-linux-gnu/lib/rustlib/{architecture}-unknown-linux-gnu/bin/gcc-ld/ld.lld");
+    let rustflags = format!("--env=RUSTFLAGS=-C linker=clang -C link-arg=-fsanitize=address,undefined -C link-arg=--ld-path={linker} -C link-arg=-Wl,--threads=1");
+    for scope in Scope::ALL {
+        for phase in [
+            Phase::Build(scope),
+            Phase::Inventory(scope),
+            Phase::Run(scope),
+        ] {
+            let args = plan.step(phase).arguments;
+            assert!(
+                args.iter().any(|argument| argument == &rustflags),
+                "{phase:?}: {args:?}"
+            );
+            for required in [
+                "--memory=2g",
+                "--memory-swap=2g",
+                "--network=none",
+                "type=bind,source=/source,target=/project,readonly",
+                "--env=AWS_LC_SYS_SANITIZER=asan",
+                "--env=ASAN_OPTIONS=detect_leaks=1:halt_on_error=1:abort_on_error=0:exitcode=86:detect_odr_violation=1",
+                "--env=UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1:exitcode=86",
+            ] {
+                assert!(args.iter().any(|argument| argument == required), "{phase:?}: {required}");
+            }
+            if scope == Scope::Tls {
+                assert!(args
+                    .windows(2)
+                    .any(|pair| pair == ["--package", "rusterisk-server"]));
+                assert!(args.iter().any(|argument| argument == "--lib"));
+                if !matches!(phase, Phase::Build(_)) {
+                    assert!(args
+                        .iter()
+                        .any(|argument| argument == "signaling::stream_tests::"));
+                }
+            }
+        }
+    }
+    for defect in Defect::ALL {
+        let args = plan.step(Phase::CompileProbe(defect)).arguments;
+        for required in [
+            format!("--ld-path={linker}"),
+            "-Wl,--threads=1".into(),
+            "-fsanitize=address,undefined".into(),
+            "-fno-sanitize-recover=all".into(),
+        ] {
+            assert!(
+                args.iter().any(|argument| argument == &required),
+                "{required}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn native_sanitizers_rebuild_real_dependencies_in_bounded_isolated_containers(
 ) -> Result<(), std::io::Error> {
     let plan = NativeSanitizerPlan::new("fixture", "/source", "/state", IMAGE)?;
@@ -38,8 +98,9 @@ fn native_sanitizers_rebuild_real_dependencies_in_bounded_isolated_containers(
             .iter()
             .any(|argument| argument == "type=bind,source=/source,target=/project,readonly"));
         assert!(args.iter().any(|argument| argument == "--env=CFLAGS=-fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer -g"));
-        assert!(args.iter().any(|argument| argument
-            == "--env=RUSTFLAGS=-C linker=clang -C link-arg=-fsanitize=address,undefined"));
+        assert!(args.iter().any(|argument| argument.starts_with(
+            "--env=RUSTFLAGS=-C linker=clang -C link-arg=-fsanitize=address,undefined "
+        )));
         assert!(args
             .iter()
             .any(|argument| argument == "--env=CARGO_BUILD_JOBS=1"));
@@ -85,6 +146,19 @@ fn native_sanitizers_probe_the_runtime_and_discover_tests_before_execution(
         .arguments
         .iter()
         .any(|argument| argument == "rustc"));
+    for phase in [
+        Phase::ClangVersion,
+        Phase::RustVersion,
+        Phase::LldVersion,
+        Phase::CompileProbe(Defect::Address),
+        Phase::RejectProbe(Defect::Address),
+        Phase::CompileProbe(Defect::Undefined),
+        Phase::RejectProbe(Defect::Undefined),
+    ] {
+        let step = plan.step(phase);
+        assert_eq!(step.budget.as_secs(), 50);
+        assert!(step.arguments.iter().any(|argument| argument == "30s"));
+    }
     for defect in [Defect::Address, Defect::Undefined] {
         let compile = plan.step(Phase::CompileProbe(defect));
         assert!(compile.arguments.iter().any(|argument| argument == "clang"));

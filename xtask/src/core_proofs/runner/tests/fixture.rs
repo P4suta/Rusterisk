@@ -1,5 +1,8 @@
 use super::{CapturedCoreProofs, CommandMode};
-use crate::{core_proofs::HARNESSES, process::ProcessError};
+use crate::{
+    core_proofs::{HARNESSES, RESULTS_BYTE_LIMIT},
+    process::ProcessError,
+};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -34,6 +37,11 @@ pub struct Fixture {
 }
 
 fn native_result() -> io::Result<Vec<u8>> {
+    let solvers = [serde_json::json!({"name":"kissat","version":"4.0.1"})];
+    let cbmc: Vec<_> = HARNESSES
+        .into_iter()
+        .map(|name| serde_json::json!({"harness_id":name,"configuration":{"solver":"kissat"}}))
+        .collect();
     let results: Vec<_> = HARNESSES
         .into_iter()
         .map(|name| {
@@ -46,7 +54,7 @@ fn native_result() -> io::Result<Vec<u8>> {
             serde_json::json!({"harness_id":name,"status":"Success","checks":checks})
         })
         .collect();
-    serde_json::to_vec(&serde_json::json!({"metadata":{"version":"1.0","kani_version":"0.68.0"},"tools":{"kani":"0.68.0","cbmc":"6.11.0"},"verification_results":{"summary":{"total_harnesses":HARNESSES.len(),"executed":HARNESSES.len(),"successful":HARNESSES.len(),"failed":0,"status":"completed"},"results":results}})).map_err(io::Error::other)
+    serde_json::to_vec(&serde_json::json!({"metadata":{"version":"1.0","kani_version":"0.68.0"},"tools":{"kani":"0.68.0","cbmc":"6.11.0","solvers":solvers},"cbmc":cbmc,"verification_results":{"summary":{"total_harnesses":HARNESSES.len(),"executed":HARNESSES.len(),"successful":HARNESSES.len(),"failed":0,"status":"completed"},"results":results}})).map_err(io::Error::other)
 }
 impl Fixture {
     pub fn working(&self) -> io::Result<&Path> {
@@ -69,9 +77,9 @@ impl Fixture {
             CommandMode::Cleanup => {
                 self.cleanups += 1;
                 assert_eq!(budget.as_secs(), 30);
-                assert_eq!(&args[..2], ["rm", "--force"]);
-                assert_eq!(args.len(), 3);
-                assert!(args[2].starts_with("rusterisk-core-proofs-"));
+                assert_eq!(&args[..3], ["rm", "--force", "--volumes"]);
+                assert_eq!(args.len(), 4);
+                assert!(args[3].starts_with("rusterisk-core-proofs-"));
                 return Ok(());
             }
             CommandMode::Work => {}
@@ -102,7 +110,7 @@ impl Fixture {
             Fault::None | Fault::Interrupted | Fault::TimedOut => std::fs::write(&result, text)?,
             Fault::FullResult => {
                 let mut bytes = text.into_bytes();
-                bytes.resize(4 * 1024 * 1024, b' ');
+                bytes.resize(RESULTS_BYTE_LIMIT, b' ');
                 std::fs::write(&result, bytes)?;
             }
             Fault::Missing => {}
@@ -122,7 +130,9 @@ impl Fixture {
                 )?;
             }
             Fault::Uncovered => std::fs::write(&result, text.replace("Satisfied", "Uncovered"))?,
-            Fault::Oversized => std::fs::File::create(&result)?.set_len(4 * 1024 * 1024 + 1)?,
+            Fault::Oversized => {
+                std::fs::File::create(&result)?.set_len(RESULTS_BYTE_LIMIT as u64 + 1)?;
+            }
             Fault::ChangedSource => {
                 std::fs::write(&result, text)?;
                 std::fs::write(source.join("src/lib.rs"), b"changed captured source")?;

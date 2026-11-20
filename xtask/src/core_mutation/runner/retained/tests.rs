@@ -2,7 +2,9 @@ use super::{verify_retained_with, MutationExecution, MutationPort};
 use crate::{
     core_assurance::FieldMutation,
     core_mutation::{
-        runner::tests::fixture::{using_fixture, Fault, Fixture, IMAGE, PHASES},
+        runner::tests::fixture::{
+            using_fixture, Fault, Fixture, ASSURANCE_TEST_COUNT, IMAGE, PHASES,
+        },
         CapturedCoreMutation, CoreMutationError, CoreMutationOutcome,
     },
     process::ProcessError,
@@ -109,7 +111,7 @@ fn accepted(fixture: &Fixture, root: &Path, execution: &MutationExecution) -> io
         .and_then(|capture| capture.read_retained(IMAGE, root, execution))
         .map_err(io::Error::other)?;
     assert_eq!(outcome.image(), IMAGE);
-    assert_eq!(outcome.test_count(), 70);
+    assert_eq!(outcome.test_count(), ASSURANCE_TEST_COUNT);
     Ok(())
 }
 
@@ -127,7 +129,7 @@ fn retained_mutation_round_trip_requires_actual_phase_exits_after_owned_cleanup(
         let (outcome, mut execution) =
             produce(fixture, Finish::Success)?.map_err(io::Error::other)?;
         assert_eq!(outcome.image(), IMAGE);
-        assert_eq!(outcome.test_count(), 70);
+        assert_eq!(outcome.test_count(), ASSURANCE_TEST_COUNT);
         assert!(fixture.phases == PHASES);
         assert!(!fixture.working()?.exists());
         assert_eq!(execution.exits, [0, 0, 0, 101, 0, 101]);

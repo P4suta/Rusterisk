@@ -1,4 +1,6 @@
-use super::{validate_results, CapturedCoreProofs, CoreProofPlan, ProofError, HARNESSES};
+use super::{
+    validate_results, CapturedCoreProofs, CoreProofPlan, ProofError, HARNESSES, RESULTS_BYTE_LIMIT,
+};
 use crate::process::{CommandSupervisor, ProcessError};
 use std::{
     io::{self, Read},
@@ -120,7 +122,11 @@ fn reserve(parent: &Path, identity: &str) -> Result<(String, PathBuf), ProofErro
 
 fn print(plan: &CoreProofPlan) {
     let step = plan.run();
-    println!("Kani 0.68.0: {} harnesses; snapshot the production core; temporary source <= 8 MiB; native export <= 128 MiB; accepted report <= 4 MiB",HARNESSES.len());
+    println!(
+        "Kani 0.68.0: {} harnesses; snapshot the production core; temporary source <= 8 MiB; native export <= 128 MiB; accepted report <= {} MiB",
+        HARNESSES.len(),
+        RESULTS_BYTE_LIMIT / (1024 * 1024)
+    );
     println!(
         "budget={}s docker {}",
         step.budget.as_secs(),
@@ -136,12 +142,12 @@ fn print(plan: &CoreProofPlan) {
 
 fn native_bytes(path: &Path) -> Result<Vec<u8>, ProofError> {
     let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.is_file() || metadata.len() > 4 * 1024 * 1024 {
+    if !metadata.is_file() || metadata.len() > RESULTS_BYTE_LIMIT as u64 {
         return Err(ProofError::Results);
     }
     let mut bytes = Vec::new();
     std::fs::File::open(path)?
-        .take(4 * 1024 * 1024 + 1)
+        .take(RESULTS_BYTE_LIMIT as u64 + 1)
         .read_to_end(&mut bytes)?;
     validate_results(&bytes)?;
     Ok(bytes)

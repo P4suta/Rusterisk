@@ -124,6 +124,7 @@ fn preview(capture: &CapturedNative, image: &str) -> Result<(), NativeError> {
     for phase in [
         Phase::ClangVersion,
         Phase::RustVersion,
+        Phase::LldVersion,
         Phase::CompileProbe(Defect::Address),
         Phase::RejectProbe(Defect::Address),
         Phase::CompileProbe(Defect::Undefined),

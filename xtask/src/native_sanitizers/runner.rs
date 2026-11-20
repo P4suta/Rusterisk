@@ -1,6 +1,6 @@
 use super::{
     native_archives, validate_instrumented_archive, validate_rejection, Defect, NativeArchive,
-    NativeInventory, NativeSanitizerPlan, Phase, Scope,
+    NativeInventory, NativeSanitizerPlan, Phase, Scope, LLD_VERSION,
 };
 use crate::{
     distribution::{SnapshotError, SourceSnapshot},
@@ -126,6 +126,7 @@ pub(super) fn compiler(phase: Phase, bytes: &[u8], architecture: &str) -> io::Re
             text.lines().any(|line| line == "release: 1.100.0")
                 && text.lines().any(|line| line == host)
         }
+        Phase::LldVersion => text.strip_suffix('\n').unwrap_or(text) == LLD_VERSION,
         Phase::CompileProbe(_)
         | Phase::RejectProbe(_)
         | Phase::InspectArchive(_)
@@ -158,8 +159,15 @@ fn phase(
         .create_new(true)
         .open(&path)?;
     let mut command = Command::new("docker");
+    command.args(step.arguments.iter().take(1));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let owner = fs::metadata(&plan.state)?;
+        command.arg(format!("--user={}:{}", owner.uid(), owner.gid()));
+    }
     command
-        .args(&step.arguments)
+        .args(step.arguments.iter().skip(1))
         .current_dir(source)
         .env("MISE_TRUSTED_CONFIG_PATHS", source)
         .stdout(capture.try_clone()?)
@@ -431,7 +439,7 @@ impl CapturedNative {
             )?;
             let operation = (|| {
                 let mut probe_codes = [None, None];
-                for selected in [Phase::ClangVersion, Phase::RustVersion] {
+                for selected in [Phase::ClangVersion, Phase::RustVersion, Phase::LldVersion] {
                     phase(
                         &plan,
                         selected,

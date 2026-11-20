@@ -7,10 +7,18 @@ const SETTINGS: [&str; 4] = [
     "proofs::settings_references_preserve_their_generation_until_release",
     "proofs::settings_candidates_cannot_cross_domains_or_replace_later_candidates",
     "proofs::settings_foreign_references_leave_both_domains_unchanged",
-    "proofs::settings_publication_preserves_saturated_references",
+    "proofs::settings_reference_count_boundaries_preserve_publication",
 ];
 
-fn harnesses(selected: &str, bound: u16) -> Result<String, ProofError> {
+fn bound(name: &str) -> u16 {
+    if name == "proofs::settings_reference_count_boundaries_preserve_publication" {
+        2
+    } else {
+        3
+    }
+}
+
+fn harnesses(selected: &str, selected_bound: u16) -> Result<String, ProofError> {
     HARNESSES
         .iter()
         .chain(SETTINGS.iter())
@@ -19,9 +27,9 @@ fn harnesses(selected: &str, bound: u16) -> Result<String, ProofError> {
         .into_iter()
         .map(|name| {
             let unwind = if name == selected {
-                bound
+                selected_bound
             } else if SETTINGS.contains(&name) {
-                66
+                bound(name)
             } else {
                 12
             };
@@ -34,13 +42,14 @@ fn harnesses(selected: &str, bound: u16) -> Result<String, ProofError> {
 }
 
 #[test]
-fn settings_harnesses_require_the_exact_slot_scan_bound() -> Result<(), ProofError> {
+fn settings_harnesses_require_their_exact_transition_bounds() -> Result<(), ProofError> {
     for name in SETTINGS {
-        validate_harnesses(&harnesses(name, 66)?)?;
-        for bound in [65, 67] {
+        let expected = bound(name);
+        validate_harnesses(&harnesses(name, expected)?)?;
+        for rejected in [expected - 1, expected + 1] {
             assert!(
-                validate_harnesses(&harnesses(name, bound)?).is_err(),
-                "{name}: {bound}"
+                validate_harnesses(&harnesses(name, rejected)?).is_err(),
+                "{name}: {rejected}"
             );
         }
     }

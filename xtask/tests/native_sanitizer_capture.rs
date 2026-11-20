@@ -112,9 +112,9 @@ fn interrupted_native_work_cleans_the_named_container_and_preserves_cleanup_fail
             |command, budget, mode| {
                 calls += 1;
                 let arguments: Vec<_> = command.get_args().collect();
-                assert_eq!(budget, std::time::Duration::from_secs(30));
                 match mode {
                     CommandMode::Work => {
+                        assert_eq!(budget, std::time::Duration::from_secs(50));
                         assert_eq!(
                             arguments.first().copied(),
                             Some(std::ffi::OsStr::new("run"))
@@ -127,6 +127,7 @@ fn interrupted_native_work_cleans_the_named_container_and_preserves_cleanup_fail
                         Err(ProcessError::Interrupted)
                     }
                     CommandMode::Cleanup => {
+                        assert_eq!(budget, std::time::Duration::from_secs(30));
                         assert_eq!(
                             arguments,
                             [

@@ -145,6 +145,15 @@ fn modeled_retained_proofs_publish_after_finish_and_preserve_native_bytes() -> i
             outcome.image() == IMAGE && outcome.harnesses() == HARNESSES,
             "Modeled proof outcome lost its image or declared harnesses",
         )?;
+        let metadata: toml::Value =
+            toml::from_str(&fs::read_to_string(destination.join("native-check.toml"))?)
+                .map_err(io::Error::other)?;
+        require(
+            metadata.get("solver").and_then(toml::Value::as_str) == Some("kissat")
+                && metadata.get("scratch_mount").and_then(toml::Value::as_str)
+                    == Some("type=volume,target=/tmp,volume-nocopy"),
+            "Retained proof metadata omitted its solver or scratch boundary",
+        )?;
         let expected = SourceInputs::new(outcome.inputs())
             .map_err(io::Error::other)?
             .key();
@@ -166,7 +175,29 @@ fn modeled_retained_proofs_publish_after_finish_and_preserve_native_bytes() -> i
                 && retained.image() == IMAGE
                 && retained.harnesses() == HARNESSES,
             "Modeled proof reader changed the retained source, image, or harnesses",
-        )
+        )?;
+        let metadata_path = destination.join("native-check.toml");
+        let original = fs::read(&metadata_path)?;
+        for (field, value) in [
+            ("solver", "cadical"),
+            ("scratch_mount", "type=tmpfs,target=/tmp"),
+            ("scratch_mount", "type=bind,source=/foreign,target=/tmp"),
+        ] {
+            let mut changed = metadata.clone();
+            changed[field] = value.into();
+            fs::write(
+                &metadata_path,
+                toml::to_string(&changed).map_err(io::Error::other)?,
+            )?;
+            require(
+                captured
+                    .read_core_proofs_artifact(&destination, IMAGE)
+                    .is_err(),
+                "Retained proof reader accepted a different execution profile",
+            )?;
+        }
+        fs::write(metadata_path, original)?;
+        Ok(())
     })
 }
 

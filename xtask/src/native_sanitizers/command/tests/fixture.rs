@@ -18,9 +18,10 @@ mod project {
 }
 
 pub const IMAGE: &str = "sha256:8e26e6eeb29b66c3849295c5606adaed78a2c6bd9ef17644370256c7fa977d20";
-pub const PHASES: [Phase; 19] = [
+pub const PHASES: [Phase; 20] = [
     Phase::ClangVersion,
     Phase::RustVersion,
+    Phase::LldVersion,
     Phase::CompileProbe(Defect::Address),
     Phase::RejectProbe(Defect::Address),
     Phase::CompileProbe(Defect::Undefined),
@@ -159,6 +160,18 @@ impl Fixture<'_> {
             })
             .map(PathBuf::from)
             .ok_or(ProcessError::InvalidOutput)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let owner = std::fs::metadata(&state)?;
+            assert_eq!(
+                args.iter()
+                    .filter(|arg| arg.starts_with("--user"))
+                    .collect::<Vec<_>>(),
+                [&format!("--user={}:{}", owner.uid(), owner.gid())],
+                "native work must run as the owner of its writable state"
+            );
+        }
         self.phases.push(phase);
         let text = match phase {
             Phase::ClangVersion => "Debian clang version 14.0.6\n".to_owned(),
@@ -166,6 +179,7 @@ impl Fixture<'_> {
                 "release: 1.100.0\nhost: {}-unknown-linux-gnu\n",
                 std::env::consts::ARCH
             ),
+            Phase::LldVersion => "LLD 23.1.5 (/checkout/src/llvm-project/llvm 0a5579eb649d3634a9c30ac873300cc2944fa070) (compatible with GNU linkers)\n".to_owned(),
             Phase::RejectProbe(Defect::Address) => {
                 "ERROR: AddressSanitizer: heap-use-after-free\n".to_owned()
             }
@@ -182,9 +196,9 @@ impl Fixture<'_> {
                     if self.fault == Fault::MissingArchive && package == "aws-lc-sys" {
                         continue;
                     }
-                    let relative = format!("target/debug/build/{package}-fixture/out/lib");
+                    let relative = format!("target/debug/build/{package}/fixture/out/lib");
                     project::write(&state, &format!("{relative}/lib{library}.a"), b"archive")?;
-                    text.push_str(&serde_json::to_string(&BuildScript{reason:"build-script-executed",package_id:format!("registry+https://github.com/rust-lang/crates.io-index#{package}@0.1.0"),out_dir:format!("/state/target/debug/build/{package}-fixture/out"),linked_libs:[format!("static={library}")],linked_paths:[format!("native=/state/{relative}")]}).map_err(io::Error::other)?);
+                    text.push_str(&serde_json::to_string(&BuildScript{reason:"build-script-executed",package_id:format!("registry+https://github.com/rust-lang/crates.io-index#{package}@0.1.0"),out_dir:format!("/state/target/debug/build/{package}/fixture/out"),linked_libs:[format!("static={library}")],linked_paths:[format!("native=/state/{relative}")]}).map_err(io::Error::other)?);
                     text.push('\n');
                 }
                 text.push_str("{\"reason\":\"build-finished\",\"success\":true}\n");

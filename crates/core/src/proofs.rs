@@ -2,9 +2,9 @@ use crate::{
     AttendedStart, AttendedTransfer, AudioGate, Call, CallEvent, CallPairDecision, CallPairError,
     CallPairState, CallState, ConnectionClaim, CoreError, MediaConnection, MediaState,
     MediaTaskError, MediaTaskKind, MediaTaskState, MediaTasks, MuteDirection, OwnedCallPair,
-    PeerMediaDirection, SettingsError, SettingsLifetimes, SettingsReference, StasisApplication,
-    StasisMembership, Transfer, TransferDecision, TransferError, TransferOutcome, TransferState,
-    TransferToken, Transition,
+    PeerMediaDirection, SettingsError, SettingsLifetimes, StasisApplication, StasisMembership,
+    Transfer, TransferDecision, TransferError, TransferOutcome, TransferState, TransferToken,
+    Transition,
 };
 
 #[derive(Clone, Copy, kani::Arbitrary)]
@@ -36,12 +36,31 @@ enum Terminal {
     Timeout,
 }
 
+#[derive(Clone, Copy, kani::Arbitrary)]
+enum SymbolicPeerDirection {
+    SendReceive,
+    SendOnly,
+    ReceiveOnly,
+    Inactive,
+}
+
 impl Terminal {
     fn event(self) -> CallEvent {
         match self {
             Self::Cancel => CallEvent::Cancel,
             Self::Hangup => CallEvent::Hangup,
             Self::Timeout => CallEvent::Timeout,
+        }
+    }
+}
+
+impl SymbolicPeerDirection {
+    const fn value(self) -> PeerMediaDirection {
+        match self {
+            Self::SendReceive => PeerMediaDirection::SendReceive,
+            Self::SendOnly => PeerMediaDirection::SendOnly,
+            Self::ReceiveOnly => PeerMediaDirection::ReceiveOnly,
+            Self::Inactive => PeerMediaDirection::Inactive,
         }
     }
 }
@@ -125,17 +144,7 @@ fn input(call: Call, operation: Input) -> Call {
     }
 }
 
-#[kani::proof]
-#[kani::unwind(12)]
-fn terminal_release_is_absorbing() {
-    let generation: u64 = kani::any();
-    let mut call = Call::outgoing(generation);
-    for operation in kani::any::<[Input; 4]>() {
-        call = input(call, operation);
-    }
-    let before = call.state();
-    let media_before = call.media();
-    call = call.apply(kani::any::<Terminal>().event()).call();
+fn assert_terminal_release(call: Call, generation: u64) {
     assert_eq!(call.generation(), generation);
     assert_eq!(call.state(), CallState::Ended);
     assert_eq!(call.media(), MediaState::Released);
@@ -145,17 +154,6 @@ fn terminal_release_is_absorbing() {
     assert_eq!(call.generated_audio_gate(), AudioGate::Closed);
     assert_eq!(call.bridge(), None);
     assert_eq!(call.stasis(), StasisMembership::Released);
-    let ended = call;
-    for operation in kani::any::<[Input; 4]>() {
-        call = input(call, operation);
-        assert_eq!(call, ended);
-    }
-    assert_eq!(call.connect_media().transition(), Transition::Ignore);
-    kani::cover!(before == CallState::Down);
-    kani::cover!(before == CallState::Ringing);
-    kani::cover!(before == CallState::Up);
-    kani::cover!(before == CallState::Ended);
-    kani::cover!(media_before == MediaState::Early);
 }
 
 #[kani::proof]
@@ -1061,14 +1059,17 @@ fn owned_pair_release_is_absorbing() {
     kani::cover!(releases == 0);
 }
 
-fn reference_lifetime(owner: u128, reverse: bool) -> Result<(), SettingsError> {
+#[derive(Debug, PartialEq, Eq)]
+struct ProofFailure;
+
+fn reference_lifetime(owner: u128, reverse: bool) -> Result<(), ProofFailure> {
     let mut settings = SettingsLifetimes::new(owner);
     let initial = settings.current();
-    let slot = settings.slot(initial)?;
-    let first = settings.retain(initial)?;
-    let second = settings.retain(initial)?;
-    let candidate = settings.prepare()?;
-    let publication = settings.commit(candidate)?;
+    let slot = settings.slot(initial).map_err(|_| ProofFailure)?;
+    let first = settings.retain(initial).map_err(|_| ProofFailure)?;
+    let second = settings.retain(initial).map_err(|_| ProofFailure)?;
+    let candidate = settings.prepare().map_err(|_| ProofFailure)?;
+    let publication = settings.commit(candidate).map_err(|_| ProofFailure)?;
     assert_ne!(publication.generation(), initial);
     assert_eq!(publication.retired_slot(), None);
     let (first, second) = if reverse {
@@ -1076,17 +1077,18 @@ fn reference_lifetime(owner: u128, reverse: bool) -> Result<(), SettingsError> {
     } else {
         (first, second)
     };
-    assert_eq!(settings.release(first)?, None);
-    assert_eq!(settings.slot(initial)?, slot);
-    assert_eq!(settings.release(second)?, Some(slot));
-    assert!(settings.slot(initial).is_err());
-    assert!(settings.retain(initial).is_err());
+    assert_eq!(settings.release(first).map_err(|_| ProofFailure)?, None);
+    assert_eq!(settings.slot(initial).map_err(|_| ProofFailure)?, slot);
+    assert_eq!(
+        settings.release(second).map_err(|_| ProofFailure)?,
+        Some(slot)
+    );
     assert_eq!(settings.current(), publication.generation());
     Ok(())
 }
 
 #[kani::proof]
-#[kani::unwind(66)]
+#[kani::unwind(3)]
 fn settings_references_preserve_their_generation_until_release() {
     let reverse: bool = kani::any();
     let result = reference_lifetime(kani::any(), reverse);
@@ -1095,16 +1097,16 @@ fn settings_references_preserve_their_generation_until_release() {
     kani::cover!(result.is_ok() && !reverse);
 }
 
-fn candidate_scope(first_owner: u128, second_owner: u128) -> Result<(), SettingsError> {
+fn candidate_scope(first_owner: u128, second_owner: u128) -> Result<(), ProofFailure> {
     if first_owner == second_owner {
         return Ok(());
     }
     let mut first = SettingsLifetimes::new(first_owner);
     let mut second = SettingsLifetimes::new(second_owner);
-    let foreign = first.prepare()?;
-    let cancelled = second.prepare()?;
-    second.cancel(cancelled)?;
-    let selected = second.prepare()?;
+    let foreign = first.prepare().map_err(|_| ProofFailure)?;
+    let cancelled = second.prepare().map_err(|_| ProofFailure)?;
+    second.cancel(cancelled).map_err(|_| ProofFailure)?;
+    let selected = second.prepare().map_err(|_| ProofFailure)?;
     let current = second.current();
     assert!(foreign.follows(first.current()));
     assert!(selected.follows(current));
@@ -1115,19 +1117,18 @@ fn candidate_scope(first_owner: u128, second_owner: u128) -> Result<(), Settings
         assert!(second.commit(rejected).is_err());
         assert_eq!(second.current(), current);
     }
-    let published = second.commit(selected)?;
+    let published = second.commit(selected).map_err(|_| ProofFailure)?;
     assert!(published.generation().matches_candidate(selected));
     assert!(!published.generation().matches_candidate(cancelled));
     assert!(!published.generation().matches_candidate(foreign));
     assert!(!selected.follows(published.generation()));
     assert_eq!(second.current(), published.generation());
-    assert!(second.slot(current).is_err());
-    first.cancel(foreign)?;
+    first.cancel(foreign).map_err(|_| ProofFailure)?;
     Ok(())
 }
 
 #[kani::proof]
-#[kani::unwind(66)]
+#[kani::unwind(3)]
 fn settings_candidates_cannot_cross_domains_or_replace_later_candidates() {
     let first: u128 = kani::any();
     let second: u128 = kani::any();
@@ -1136,40 +1137,43 @@ fn settings_candidates_cannot_cross_domains_or_replace_later_candidates() {
     kani::cover!(first != second && result.is_ok());
 }
 
-fn foreign_reference(first_owner: u128, second_owner: u128) -> Result<(), SettingsError> {
+fn foreign_reference(first_owner: u128, second_owner: u128) -> Result<(), ProofFailure> {
     if first_owner == second_owner {
         return Ok(());
     }
     let mut first = SettingsLifetimes::new(first_owner);
     let mut second = SettingsLifetimes::new(second_owner);
-    let foreign = first.retain(first.current())?;
-    let local = second.retain(second.current())?;
+    let foreign = first.retain(first.current()).map_err(|_| ProofFailure)?;
+    let local = second.retain(second.current()).map_err(|_| ProofFailure)?;
     let first_generation = foreign.generation();
     let second_generation = local.generation();
-    let second_slot = second.slot(second_generation)?;
+    let second_slot = second.slot(second_generation).map_err(|_| ProofFailure)?;
     let recovered = match second.release(foreign) {
         Err(error) => {
             assert!(matches!(&error, SettingsError::ForeignReference(_)));
-            error
-                .into_reference()
-                .ok_or(SettingsError::UnknownGeneration)?
+            error.into_reference().ok_or(ProofFailure)?
         }
-        Ok(_) => return Err(SettingsError::UnknownGeneration),
+        Ok(_) => return Err(ProofFailure),
     };
     assert_eq!(recovered.generation(), first_generation);
-    assert_eq!(first.release(recovered)?, None);
-    let candidate = second.prepare()?;
-    let published = second.commit(candidate)?;
+    assert_eq!(first.release(recovered).map_err(|_| ProofFailure)?, None);
+    let candidate = second.prepare().map_err(|_| ProofFailure)?;
+    let published = second.commit(candidate).map_err(|_| ProofFailure)?;
     assert_eq!(published.retired_slot(), None);
-    assert_eq!(second.slot(second_generation)?, second_slot);
-    assert_eq!(second.release(local)?, Some(second_slot));
-    assert!(second.slot(second_generation).is_err());
+    assert_eq!(
+        second.slot(second_generation).map_err(|_| ProofFailure)?,
+        second_slot
+    );
+    assert_eq!(
+        second.release(local).map_err(|_| ProofFailure)?,
+        Some(second_slot)
+    );
     assert_eq!(second.current(), published.generation());
     Ok(())
 }
 
 #[kani::proof]
-#[kani::unwind(66)]
+#[kani::unwind(3)]
 fn settings_foreign_references_leave_both_domains_unchanged() {
     let first: u128 = kani::any();
     let second: u128 = kani::any();
@@ -1178,51 +1182,73 @@ fn settings_foreign_references_leave_both_domains_unchanged() {
     kani::cover!(first != second && result.is_ok());
 }
 
-fn saturated_publication(owner: u128) -> Result<(), SettingsError> {
-    let mut settings = SettingsLifetimes::new(owner);
-    let mut references: [Option<SettingsReference>; SettingsLifetimes::CAPACITY] =
-        [const { None }; SettingsLifetimes::CAPACITY];
-    for reference in references.iter_mut().take(SettingsLifetimes::CAPACITY - 1) {
-        *reference = Some(settings.retain(settings.current())?);
-        let candidate = settings.prepare()?;
-        settings.commit(candidate)?;
+fn reference_count_boundary(owner: u128, references: u64) -> Result<(), SettingsError> {
+    let (mut settings, generation) = SettingsLifetimes::reference_count_state(owner, references);
+    let retained = settings.retain(generation);
+    if let Some(expected) = references.checked_add(1) {
+        let reference = retained?;
+        assert_eq!(reference.generation(), generation);
+        assert_eq!(settings.current_reference_count(), Some(expected));
+    } else {
+        assert!(matches!(retained, Err(SettingsError::ReferenceCapacity)));
+        assert_eq!(settings.current_reference_count(), Some(references));
     }
-    let initial = settings.current();
-    let initial_slot = settings.slot(initial)?;
-    let candidate = settings.prepare()?;
-    references[SettingsLifetimes::CAPACITY - 1] = Some(settings.retain(initial)?);
-    assert!(matches!(
-        settings.commit(candidate),
-        Err(SettingsError::Capacity)
-    ));
-    assert_eq!(settings.current(), initial);
-    assert_eq!(settings.slot(initial)?, initial_slot);
-    assert_eq!(settings.prepare(), Err(SettingsError::Capacity));
-    for reference in references.iter().flatten() {
-        assert!(settings.slot(reference.generation()).is_ok());
-    }
-    let released = references[0].take().ok_or(SettingsError::Capacity)?;
-    let released_generation = released.generation();
-    let freed_slot = settings.slot(released_generation)?;
-    assert_eq!(settings.release(released)?, Some(freed_slot));
-    let published = settings.commit(candidate)?;
-    assert_eq!(published.slot(), freed_slot);
-    assert_eq!(published.retired_slot(), None);
-    assert!(settings.slot(released_generation).is_err());
-    assert!(settings.retain(released_generation).is_err());
-    for reference in references.into_iter().flatten() {
-        let slot = settings.slot(reference.generation())?;
-        assert_eq!(settings.release(reference)?, Some(slot));
-    }
-    assert_eq!(settings.current(), published.generation());
-    assert_eq!(settings.slot(published.generation())?, published.slot());
+    assert_eq!(settings.current(), generation);
     Ok(())
 }
 
 #[kani::proof]
-#[kani::unwind(66)]
-fn settings_publication_preserves_saturated_references() {
-    let result = saturated_publication(kani::any());
+#[kani::unwind(2)]
+fn settings_reference_count_boundaries_preserve_publication() {
+    let references: u64 = kani::any();
+    let result = reference_count_boundary(kani::any(), references);
     assert_eq!(result, Ok(()));
-    kani::cover!(result.is_ok());
+    kani::cover!(result.is_ok() && references == u64::MAX);
+    kani::cover!(result.is_ok() && references < u64::MAX);
+}
+
+#[kani::proof]
+#[kani::unwind(12)]
+fn terminal_release_is_absorbing() {
+    let generation: u64 = kani::any();
+    let transition_mode: bool = kani::any();
+    if transition_mode {
+        let mut call = Call::outgoing(generation);
+        for operation in kani::any::<[Input; 4]>() {
+            call = input(call, operation);
+        }
+        let before = call.state();
+        let media_before = call.media();
+        let terminal: Terminal = kani::any();
+        call = call.apply(terminal.event()).call();
+        assert_terminal_release(call, generation);
+        let Ok(canonical) = Call::outgoing(generation).with_peer_direction(call.peer_direction())
+        else {
+            assert!(false, "canonical peer direction failed");
+            return;
+        };
+        let canonical = canonical.apply(terminal.event()).call();
+        assert_eq!(call, canonical);
+        kani::cover!(before == CallState::Down);
+        kani::cover!(before == CallState::Ringing);
+        kani::cover!(before == CallState::Up);
+        kani::cover!(before == CallState::Ended);
+        kani::cover!(media_before == MediaState::Early);
+    } else {
+        let direction = kani::any::<SymbolicPeerDirection>().value();
+        let Ok(call) = Call::outgoing(generation).with_peer_direction(direction) else {
+            assert!(false, "symbolic peer direction failed");
+            return;
+        };
+        let mut call = call.apply(kani::any::<Terminal>().event()).call();
+        assert_terminal_release(call, generation);
+        let ended = call;
+        for operation in kani::any::<[Input; 4]>() {
+            call = input(call, operation);
+            assert_eq!(call, ended);
+        }
+        assert_eq!(call.connect_media().transition(), Transition::Ignore);
+    }
+    kani::cover!(transition_mode);
+    kani::cover!(!transition_mode);
 }

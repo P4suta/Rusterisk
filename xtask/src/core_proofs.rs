@@ -28,8 +28,12 @@ pub const HARNESSES: [&str; 18] = [
     "proofs::settings_references_preserve_their_generation_until_release",
     "proofs::settings_candidates_cannot_cross_domains_or_replace_later_candidates",
     "proofs::settings_foreign_references_leave_both_domains_unchanged",
-    "proofs::settings_publication_preserves_saturated_references",
+    "proofs::settings_reference_count_boundaries_preserve_publication",
 ];
+
+pub(crate) const SOLVER: &str = "kissat";
+pub(crate) const SCRATCH_MOUNT: &str = "type=volume,target=/tmp,volume-nocopy";
+pub(crate) const RESULTS_BYTE_LIMIT: usize = 8 * 1024 * 1024;
 
 #[derive(Deserialize)]
 struct Manifest {
@@ -81,7 +85,7 @@ impl std::fmt::Display for ProofError {
         match self {
             Self::Plan => formatter.write_str("invalid bounded core proof plan"),
             Self::Results => formatter.write_str(
-                "core proofs require complete Kani 0.68 and CBMC 6.11 results with reachable contracts",
+                "core proofs require complete Kani 0.68, CBMC 6.11, and Kissat 4.0.1 results with reachable contracts",
             ),
             Self::Harnesses => formatter.write_str("core harnesses require the declared scope, explicit bounds, assertions, and cover goals"),
             Self::Syntax(error) => error.fmt(formatter),
@@ -148,6 +152,7 @@ impl CoreProofPlan {
     }
 
     pub fn run(&self) -> Step {
+        let solver = format!("--solver={SOLVER}");
         let mut arguments: Vec<String> = [
             "run",
             "--rm",
@@ -164,13 +169,14 @@ impl CoreProofPlan {
             "--security-opt=no-new-privileges",
             "--ulimit",
             "fsize=134217728:134217728",
-            "--tmpfs",
-            "/tmp:mode=1777,size=768m",
+            "--mount",
+            SCRATCH_MOUNT,
             "--mount",
             &format!("type=bind,source={},target=/project,readonly", self.source),
             "--mount",
             &format!("type=bind,source={},target=/results", self.results),
             "--workdir=/tmp",
+            "--env=TMPDIR=/tmp",
             "--env=CARGO_HOME=/tmp/cargo",
             "--env=CARGO_BUILD_JOBS=1",
             "--env=CARGO_NET_OFFLINE=true",
@@ -189,6 +195,7 @@ impl CoreProofPlan {
             "unstable-options",
             "--jobs=1",
             "--harness-timeout=120s",
+            &solver,
             "--output-format=terse",
             "--export-json=/results/kani.json",
             "--exact",
@@ -208,7 +215,7 @@ impl CoreProofPlan {
 
     pub fn cleanup(&self) -> Step {
         Step {
-            arguments: ["rm", "--force", &self.name]
+            arguments: ["rm", "--force", "--volumes", &self.name]
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
@@ -221,12 +228,28 @@ impl CoreProofPlan {
 struct Export {
     metadata: Metadata,
     tools: Tools,
+    cbmc: Vec<CbmcHarness>,
     verification_results: Verification,
 }
 #[derive(Deserialize)]
 struct Tools {
     kani: String,
     cbmc: String,
+    solvers: Vec<SolverVersion>,
+}
+#[derive(Deserialize)]
+struct SolverVersion {
+    name: String,
+    version: String,
+}
+#[derive(Deserialize)]
+struct CbmcHarness {
+    harness_id: String,
+    configuration: CbmcConfiguration,
+}
+#[derive(Deserialize)]
+struct CbmcConfiguration {
+    solver: String,
 }
 #[derive(Deserialize)]
 struct Metadata {
@@ -277,7 +300,7 @@ enum CheckStatus {
 }
 
 pub fn validate_results(bytes: &[u8]) -> Result<(), ProofError> {
-    if bytes.len() > 4 * 1024 * 1024 {
+    if bytes.len() > RESULTS_BYTE_LIMIT {
         return Err(ProofError::Results);
     }
     let export: Export = serde_json::from_slice(bytes).map_err(ProofError::Json)?;
@@ -287,16 +310,28 @@ pub fn validate_results(bytes: &[u8]) -> Result<(), ProofError> {
         || export.metadata.kani_version != "0.68.0"
         || export.tools.kani != "0.68.0"
         || export.tools.cbmc.split_whitespace().next() != Some("6.11.0")
+        || !matches!(export.tools.solvers.as_slice(), [solver]
+            if solver.name == SOLVER && solver.version == "4.0.1")
         || summary.status != "completed"
         || summary.total_harnesses != HARNESSES.len()
         || summary.executed != HARNESSES.len()
         || summary.successful != HARNESSES.len()
         || summary.failed != 0
         || verification.results.len() != HARNESSES.len()
+        || export.cbmc.len() != HARNESSES.len()
     {
         return Err(ProofError::Results);
     }
     let mut seen = std::collections::BTreeSet::new();
+    for configured in export.cbmc {
+        if configured.configuration.solver != SOLVER
+            || !HARNESSES.contains(&configured.harness_id.as_str())
+            || !seen.insert(configured.harness_id)
+        {
+            return Err(ProofError::Results);
+        }
+    }
+    seen.clear();
     for result in verification.results {
         if result.status != HarnessStatus::Success
             || !HARNESSES.contains(&result.harness_id.as_str())
@@ -396,13 +431,13 @@ pub fn validate_harnesses(source: &str) -> Result<(), ProofError> {
                 continue;
             }
             let name = format!("proofs::{}", function.sig.ident);
-            let settings = matches!(
-                name.as_str(),
+            let settings_bound = match name.as_str() {
                 "proofs::settings_references_preserve_their_generation_until_release"
-                    | "proofs::settings_candidates_cannot_cross_domains_or_replace_later_candidates"
-                    | "proofs::settings_foreign_references_leave_both_domains_unchanged"
-                    | "proofs::settings_publication_preserves_saturated_references"
-            );
+                | "proofs::settings_candidates_cannot_cross_domains_or_replace_later_candidates"
+                | "proofs::settings_foreign_references_leave_both_domains_unchanged" => Some(3),
+                "proofs::settings_reference_count_boundaries_preserve_publication" => Some(2),
+                _ => None,
+            };
             let bounded = function.attrs.iter().any(|attribute| {
                 kani_attribute(attribute, "unwind")
                     && attribute
@@ -410,11 +445,10 @@ pub fn validate_harnesses(source: &str) -> Result<(), ProofError> {
                         .ok()
                         .is_some_and(|value| {
                             value.base10_parse::<u16>().is_ok_and(|bound| {
-                                if settings {
-                                    bound == 66
-                                } else {
-                                    (1..=32).contains(&bound)
-                                }
+                                settings_bound.map_or_else(
+                                    || (1..=32).contains(&bound),
+                                    |expected| bound == expected,
+                                )
                             })
                         })
             });

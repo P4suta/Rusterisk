@@ -3,6 +3,8 @@ use xtask::core_proofs::{
 };
 
 const IMAGE: &str = "registry.example/core-proofs@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+#[path = "core_proofs/execution_profile.rs"]
+mod execution_profile;
 #[path = "core_proofs/settings.rs"]
 mod settings;
 const TRANSFER_HARNESSES: [&str; 3] = [
@@ -117,7 +119,12 @@ fn core_proofs_pin_the_source_image_scope_and_resource_limits() -> Result<(), Pr
     }
     assert_eq!(
         plan.cleanup().arguments,
-        ["rm", "--force", "rusterisk-core-proofs-fixture"]
+        [
+            "rm",
+            "--force",
+            "--volumes",
+            "rusterisk-core-proofs-fixture"
+        ]
     );
     for image in ["registry.example/core-proofs:latest", "@sha256:0123", "registry.example/core-proofs@sha256:invalid", "registry.example/core-proofs@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdeg"] {
         assert!(CoreProofPlan::new("fixture", "/project/core", "/project/results", image).is_err());
@@ -128,6 +135,11 @@ fn core_proofs_pin_the_source_image_scope_and_resource_limits() -> Result<(), Pr
 }
 
 fn complete() -> serde_json::Value {
+    let solvers = [serde_json::json!({"name":"kissat","version":"4.0.1"})];
+    let cbmc: Vec<_> = HARNESSES
+        .into_iter()
+        .map(|name| serde_json::json!({"harness_id":name,"configuration":{"solver":"kissat"}}))
+        .collect();
     let results: Vec<serde_json::Value> = HARNESSES
         .iter()
         .map(|name| {
@@ -140,7 +152,7 @@ fn complete() -> serde_json::Value {
             serde_json::json!({"harness_id": name, "status": "Success", "checks": checks})
         })
         .collect();
-    serde_json::json!({"metadata":{"version":"1.0", "kani_version":"0.68.0"}, "tools":{"kani":"0.68.0", "cbmc":"6.11.0"}, "verification_results":{"summary":{"total_harnesses":HARNESSES.len(), "executed":HARNESSES.len(), "successful":HARNESSES.len(), "failed":0, "status":"completed"}, "results":results}})
+    serde_json::json!({"metadata":{"version":"1.0", "kani_version":"0.68.0"}, "tools":{"kani":"0.68.0", "cbmc":"6.11.0", "solvers":solvers}, "cbmc":cbmc, "verification_results":{"summary":{"total_harnesses":HARNESSES.len(), "executed":HARNESSES.len(), "successful":HARNESSES.len(), "failed":0, "status":"completed"}, "results":results}})
 }
 
 #[test]

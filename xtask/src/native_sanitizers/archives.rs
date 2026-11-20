@@ -63,18 +63,24 @@ fn safe_path(path: &str) -> bool {
             .all(|part| !matches!(part, "" | "." | ".."))
 }
 
+fn build_owner(package: &str, owner: &str) -> bool {
+    owner
+        .strip_prefix(package)
+        .and_then(|suffix| {
+            suffix
+                .strip_prefix('-')
+                .or_else(|| suffix.strip_prefix('/'))
+        })
+        .is_some_and(|hash| !hash.is_empty() && !hash.contains('/'))
+}
+
 fn archive(library: NativeLibrary, record: &Value) -> io::Result<NativeArchive> {
     let directory = record["out_dir"].as_str().ok_or_else(invalid)?;
     let owner = directory
         .strip_prefix("/state/target/debug/build/")
         .and_then(|path| path.strip_suffix("/out"))
         .ok_or_else(invalid)?;
-    if !safe_path(directory)
-        || owner.contains('/')
-        || !owner
-            .strip_prefix(library.package())
-            .is_some_and(|hash| hash.starts_with('-') && hash.len() > 1)
-    {
+    if !safe_path(directory) || !build_owner(library.package(), owner) {
         return Err(invalid());
     }
     let libs = record["linked_libs"].as_array().ok_or_else(invalid)?;
