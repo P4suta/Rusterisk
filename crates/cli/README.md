@@ -2,7 +2,13 @@
 
 Use `rusterisk-cli` to check connectivity or reload configuration on a running Rusterisk server.
 
-Install the command from the repository root.
+Install a published release from crates.io with Cargo.
+
+```sh
+cargo install --locked rusterisk-cli
+```
+
+To install from a source checkout, run Cargo at the repository root.
 
 ```sh
 mise x -- cargo install --locked --path crates/cli
