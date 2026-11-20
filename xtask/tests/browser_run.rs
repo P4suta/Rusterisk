@@ -26,7 +26,11 @@ fn browser_runtime_uses_bounded_tmpfs_and_keeps_reports_on_owned_state(
         assert_eq!(mounts, ["/tmp:mode=1777,size=128m"]);
         for persistent in [
             "type=bind,source=/owned/state,target=/state",
-            "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/browser-results.json",
+            if phase == Phase::Inventory {
+                "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/browser-inventory.json"
+            } else {
+                "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/browser-results.json"
+            },
             "--env=RUSTERISK_BROWSER_ARTIFACTS=/state/browser-artifacts",
         ] {
             assert_eq!(
@@ -40,6 +44,14 @@ fn browser_runtime_uses_bounded_tmpfs_and_keeps_reports_on_owned_state(
             );
         }
     }
+    let inventory = plan.step(Phase::Inventory);
+    let run = plan.step(Phase::Run);
+    assert!(inventory.arguments.iter().any(|argument| {
+        argument == "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/browser-inventory.json"
+    }));
+    assert!(!run.arguments.iter().any(|argument| {
+        argument == "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/browser-inventory.json"
+    }));
     assert!(plan.step(Phase::Run).arguments.ends_with(
         &[
             "cargo",

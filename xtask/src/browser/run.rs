@@ -2,10 +2,10 @@ use super::BrowserError;
 use crate::reference::{valid_identity, ImageIdentity, Step};
 use std::time::Duration;
 
-const BROWSER_OUTPUTS: [&str; 2] = [
-    "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/browser-results.json",
-    "--env=RUSTERISK_BROWSER_ARTIFACTS=/state/browser-artifacts",
-];
+const BROWSER_RESULTS: &str = "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/browser-results.json";
+const BROWSER_INVENTORY: &str = "--env=PLAYWRIGHT_JSON_OUTPUT_FILE=/state/browser-inventory.json";
+const BROWSER_ARTIFACTS: &str = "--env=RUSTERISK_BROWSER_ARTIFACTS=/state/browser-artifacts";
+const BROWSER_OUTPUTS: [&str; 2] = [BROWSER_RESULTS, BROWSER_ARTIFACTS];
 
 struct ExternalBrowser<'a> {
     id: &'a str,
@@ -222,9 +222,11 @@ impl RunPlan {
         } else {
             ["--cpus=2", "--memory=2g", "--memory-swap=2g"]
         };
-        let [report, artifacts] = external
-            .as_ref()
-            .map_or(BROWSER_OUTPUTS, |browser| browser.outputs);
+        let [report, artifacts] = match external.as_ref() {
+            Some(browser) => browser.outputs,
+            None if phase == Phase::Inventory => [BROWSER_INVENTORY, BROWSER_ARTIFACTS],
+            None => BROWSER_OUTPUTS,
+        };
         let mut arguments: Vec<String> = [
             "run",
             "--rm",

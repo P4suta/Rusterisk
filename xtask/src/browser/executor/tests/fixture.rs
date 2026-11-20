@@ -252,7 +252,12 @@ impl Fixture {
         if matches!(phase, Phase::Inventory | Phase::Run) {
             let bytes =
                 serde_json::to_vec(&report(phase == Phase::Run)).map_err(io::Error::other)?;
-            write(&state, "browser-results.json", &bytes)?;
+            let report = if phase == Phase::Inventory {
+                "browser-inventory.json"
+            } else {
+                "browser-results.json"
+            };
+            write(&state, report, &bytes)?;
         }
         if phase == Phase::Run {
             match self.fault {

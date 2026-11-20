@@ -700,6 +700,7 @@ where
             .open(state.join("mise-global.toml"))?
             .flush()?;
         let mut inventory: Option<BrowserInventory> = None;
+        let inventory_report = state.join("browser-inventory.json");
         let report = state.join("browser-results.json");
         #[cfg(unix)]
         if let Some((_, package)) = packaged {
@@ -784,7 +785,6 @@ where
                         &mut perform,
                     )?;
                 }
-                std::fs::remove_file(&report)?;
             }
             let mut run = |step| {
                 run_phase(
@@ -820,14 +820,8 @@ where
                 | Phase::NpmVersion
                 | Phase::BrowserVersion => version(phase, &bytes)?,
                 Phase::Inventory => {
-                    let bytes = read(&report)?;
+                    let bytes = read(&inventory_report)?;
                     inventory = Some(validate_inventory(&bytes)?);
-                    let mut saved = std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(state.join("browser-inventory.json"))?;
-                    saved.write_all(&bytes)?;
-                    saved.flush()?;
                 }
                 Phase::Run => {
                     #[cfg(unix)]
