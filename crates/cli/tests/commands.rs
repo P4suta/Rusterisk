@@ -13,6 +13,9 @@ use tokio::{io::AsyncWriteExt, net::TcpListener, process::Command};
 async fn invoke(arguments: &[&str], password: &[u8]) -> io::Result<Output> {
     let mut child = Command::new(env!("CARGO_BIN_EXE_rusterisk-cli"))
         .args(arguments)
+        .env_remove("REQUEST_METHOD")
+        .env("HTTP_PROXY", "http://127.0.0.1:0")
+        .env("NO_PROXY", "")
         .kill_on_drop(true)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -65,7 +68,7 @@ async fn exchange(
 }
 
 #[tokio::test]
-async fn ping_requires_the_ari_reply_and_reload_requires_completion() -> io::Result<()> {
+async fn loopback_commands_bypass_the_proxy_and_require_completed_responses() -> io::Result<()> {
     let ping = exchange(
         "ping",
         MethodFilter::GET,

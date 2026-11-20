@@ -80,12 +80,17 @@ pub(super) async fn request(
         ),
     };
     url.set_path(path);
-    let client = reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .retry(reqwest::retry::never())
         .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(timeout))
-        .build()?;
+        .timeout(Duration::from_secs(timeout));
+    let builder = if url.scheme() == "http" {
+        builder.no_proxy()
+    } else {
+        builder
+    };
+    let client = builder.build()?;
     let response = client
         .request(method, url)
         .basic_auth(&options.username, Some(password))
