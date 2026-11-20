@@ -96,6 +96,28 @@ fn normalized_package_metadata_cannot_redirect_builds_or_change_the_source_contr
 }
 
 #[test]
+fn private_sdk_fixtures_only_allow_the_packaging_registry() {
+    let workspace = WORKSPACE.replace(
+        "[workspace.package]",
+        "[workspace.package]\npublish = false",
+    );
+    let original = ORIGINAL.replace("[package]", "[package]\npublish.workspace = true");
+    let allowed = PUBLISHED.replace(
+        "[package]",
+        "[package]\npublish = ['rusterisk-sdk-fixtures']",
+    );
+    assert!(check_sdk_manifest(SdkPackage::Client, &original, &workspace, &allowed).is_ok());
+    for unexpected in [
+        PUBLISHED.to_owned(),
+        allowed.replace("rusterisk-sdk-fixtures", "crates-io"),
+    ] {
+        assert!(
+            check_sdk_manifest(SdkPackage::Client, &original, &workspace, &unexpected).is_err()
+        );
+    }
+}
+
+#[test]
 fn normalized_dependencies_reject_backend_requirements_source_fallbacks_and_extra_features() {
     for addition in [
         "\n[dev-dependencies.rusterisk-server]\nversion='0.1.0'\n",

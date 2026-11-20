@@ -1,5 +1,6 @@
 [package]
 name = "rusterisk-server"
+publish = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 rusterisk-api = { version = "0.1.0", path = "../api" }
-rusterisk-client = { version = "0.1.0", path = "../client" }
+rusterisk-cli = { version = "0.1.0", path = "../cli" }
 rusterisk-core = { version = "0.1.0", path = "../core" }
 rusterisk-config = { version = "0.1.0", path = "../config" }
 rusterisk-media = { version = "0.1.0", path = "../media" }
@@ -63,6 +64,7 @@ tower-http = { version = "0.7.1", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+rusterisk-client = { version = "0.1.0", path = "../client" }
 tokio = { workspace = true, features = ["test-util"] }
 sha2 = "0.11.0"
 rusqlite = { version = "=0.43.0", features = ["bundled"] }

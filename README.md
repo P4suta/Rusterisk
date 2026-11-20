@@ -8,6 +8,7 @@ Run phone and browser calls with an Asterisk-compatible control API.
 git clone https://github.com/P4suta/Rusterisk.git
 cd Rusterisk
 mise install
+mise x -- cargo install --locked --path crates/cli
 ```
 
 ## Usage

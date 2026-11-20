@@ -21,6 +21,9 @@ browser-check:
 distribution-check:
     cargo run --locked --target-dir target/xtask --package xtask -- distribution-check
 
+distribution-cli-check:
+    cargo run --locked --target-dir target/xtask --package xtask -- distribution cli verify
+
 distribution-sdk-plan:
     cargo run --locked --target-dir target/xtask --package xtask -- distribution sdk plan
 

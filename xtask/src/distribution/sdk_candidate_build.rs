@@ -157,6 +157,31 @@ fn preserve_logs(state: &Path, destination: &Path) -> Result<(), std::io::Error>
     Ok(())
 }
 
+fn fixture_workspace(original: &[u8]) -> Result<Vec<u8>, SdkCandidateBuildError> {
+    let mut manifest = sdk::manifest("Cargo.toml", original)?;
+    let Some(publish) = manifest
+        .get_mut("workspace")
+        .and_then(|value| value.get_mut("package"))
+        .and_then(|value| value.get_mut("publish"))
+    else {
+        return Ok(original.to_vec());
+    };
+    if publish.as_bool() != Some(false) {
+        return Err(
+            std::io::Error::other("SDK workspace must disable registry publication").into(),
+        );
+    }
+    *publish = toml::Value::Array(
+        [toml::Value::String(
+            super::sdk_build::FIXTURE_REGISTRY.to_owned(),
+        )]
+        .into(),
+    );
+    Ok(toml::to_string(&manifest)
+        .map_err(std::io::Error::other)?
+        .into_bytes())
+}
+
 fn collect(state: &Path, destination: &Path, version: &str) -> Result<(), SdkCandidateBuildError> {
     let mut checksums = String::new();
     for package in ["rusterisk-core", "rusterisk-api", "rusterisk-client"] {
@@ -264,11 +289,24 @@ impl CapturedSdk {
         let state = directory.join("state");
         let operation = (|| {
             self.source.write(&source, &state)?;
+            let manifest = source.join("Cargo.toml");
+            let original = captured(&self.source, "Cargo.toml")?;
+            let fixture = fixture_workspace(&original)?;
+            std::fs::write(&manifest, &fixture)?;
             let plan = SdkBuildPlan::new(&source, &state)?;
             let operation = plan
                 .execute_with(perform)
                 .map_err(SdkCandidateBuildError::Build);
-            match (operation, self.source.check(&source)) {
+            let checked = (|| {
+                if bounded_file(&manifest, sdk::MAX_INPUT as u64)? != fixture {
+                    return Err(SdkCandidateBuildError::Snapshot(SnapshotError::Changed));
+                }
+                std::fs::write(&manifest, &original)?;
+                self.source
+                    .check(&source)
+                    .map_err(SdkCandidateBuildError::Snapshot)
+            })();
+            match (operation, checked) {
                 (Ok(()), Ok(())) => collect(&state, destination, &self.version),
                 (Err(error), Ok(())) => Err(error),
                 (operation, Err(source)) => Err(SdkCandidateBuildError::SourceChanged {

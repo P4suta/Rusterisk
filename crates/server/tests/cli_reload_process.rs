@@ -100,7 +100,7 @@ async fn wait(child: &mut Child) -> io::Result<ExitStatus> {
     }
 }
 
-async fn run(directory: &Path, address: SocketAddr) -> io::Result<Output> {
+async fn run(directory: &Path, origin: &str) -> io::Result<Output> {
     let stdout = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -115,7 +115,7 @@ async fn run(directory: &Path, address: SocketAddr) -> io::Result<Output> {
         .args([
             "reload",
             "--server",
-            &format!("http://{address}"),
+            origin,
             "--username",
             "operator",
             "--password-stdin",
@@ -305,7 +305,7 @@ async fn exchange(reply: Reply, password: &str, suffix: &str) -> io::Result<Outp
     let primary = async {
         prepare(directory.path(), format!("{password}{suffix}").as_bytes())?;
         let fixture = HttpFixture::start(reply, password)?;
-        let output = run(directory.path(), fixture.address).await;
+        let output = run(directory.path(), &format!("http://{}", fixture.address)).await;
         let output = fixture.finish(output).await?;
         redacted(&output, password.as_bytes())?;
         Ok(output)
@@ -392,7 +392,7 @@ async fn rejected_input(input: &[u8], secret: &[u8]) -> io::Result<()> {
         let address = listener.local_addr()?;
         let primary = async {
             prepare(directory.path(), input)?;
-            let output = run(directory.path(), address).await?;
+            let output = run(directory.path(), &format!("http://{address}")).await?;
             redacted(&output, secret)?;
             verify(
                 output.status.code() == Some(2),
@@ -422,6 +422,22 @@ async fn rejected_input(input: &[u8], secret: &[u8]) -> io::Result<()> {
     }
     .await;
     let primary = combine(primary, unchanged(directory.path()));
+    combine(primary, directory.close())
+}
+
+#[tokio::test]
+async fn invalid_remote_origin_preserves_the_client_failure_status() -> io::Result<()> {
+    let directory = tempfile::tempdir()?;
+    let primary = async {
+        prepare(directory.path(), b"stdin-secret\n")?;
+        let output = run(directory.path(), "http://operator:uri-secret@localhost").await?;
+        assert_eq!(output.status.code(), Some(1));
+        assert!(output.stdout.is_empty());
+        assert!(!output.stderr.is_empty());
+        redacted(&output, b"stdin-secret")?;
+        redacted(&output, b"uri-secret")
+    }
+    .await;
     combine(primary, directory.close())
 }
 

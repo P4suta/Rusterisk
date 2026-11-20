@@ -93,6 +93,7 @@ fn metadata(
             "rust-version",
             "license",
             "repository",
+            "publish",
             "description",
             "readme",
             "exclude",
@@ -105,6 +106,21 @@ fn metadata(
         ],
         "package fields",
     )?;
+    let publication_matches = match (original.get("publish"), published.get("publish")) {
+        (None, None) => true,
+        (Some(setting), Some(allowed)) => {
+            setting.get("workspace").and_then(Value::as_bool) == Some(true)
+                && workspace.get("publish").and_then(Value::as_bool) == Some(false)
+                && allowed.as_array().is_some_and(|registries| {
+                    matches!(registries.as_slice(),
+                    [registry] if registry.as_str() == Some(super::sdk_build::FIXTURE_REGISTRY))
+                })
+        }
+        _ => false,
+    };
+    if !publication_matches {
+        return Err(SdkManifestError::Contract("SDK publication setting"));
+    }
     if original.get("name").and_then(Value::as_str) != Some(package.name())
         || published.get("name") != original.get("name")
     {

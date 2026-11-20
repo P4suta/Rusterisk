@@ -6,6 +6,8 @@ use std::{
     time::Duration,
 };
 
+pub(super) const FIXTURE_REGISTRY: &str = "rusterisk-sdk-fixtures";
+
 #[derive(Debug)]
 pub enum SdkBuildError {
     Io(std::io::Error),
@@ -108,6 +110,10 @@ impl SdkBuildPlan {
                     "rusterisk-client",
                     "--target-dir",
                     &self.target,
+                    "--registry",
+                    FIXTURE_REGISTRY,
+                    "--config",
+                    "registries.rusterisk-sdk-fixtures.index='sparse+https://index.crates.io/'",
                 ]
                 .map(str::to_owned)
                 .to_vec(),

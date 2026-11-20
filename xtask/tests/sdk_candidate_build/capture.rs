@@ -76,6 +76,43 @@ fn sdk_build_reports_execution_source_changes_with_the_primary_process_error(
 }
 
 #[test]
+fn only_the_disposable_workspace_may_use_the_sdk_fixture_registry(
+) -> Result<(), SdkCandidateBuildError> {
+    using_project("registry", |root, parent| {
+        let original = std::fs::read_to_string(root.join("Cargo.toml"))? + "publish=false\n";
+        write(root, "Cargo.toml", original.as_bytes())?;
+        let capture = CapturedSdk::read(root)?;
+        let candidate = parent.join("candidate");
+        let result = capture.build_with(&candidate, |command, _| {
+            let directory = command
+                .get_current_dir()
+                .ok_or(xtask::process::ProcessError::InvalidOutput)?;
+            let path = directory.join("Cargo.toml");
+            let fixture = std::fs::read_to_string(&path)?;
+            let manifest: toml::Value = toml::from_str(&fixture).map_err(std::io::Error::other)?;
+            assert_eq!(
+                manifest["workspace"]["package"]["publish"]
+                    .as_array()
+                    .map(Vec::as_slice),
+                Some([toml::Value::String("rusterisk-sdk-fixtures".to_owned())].as_slice())
+            );
+            std::fs::write(path, b"changed")?;
+            Err(xtask::process::ProcessError::Timeout)
+        });
+        assert!(matches!(
+            result,
+            Err(SdkCandidateBuildError::SourceChanged { .. })
+        ));
+        assert_eq!(std::fs::read_to_string(root.join("Cargo.toml"))?, original);
+        assert_eq!(
+            std::fs::read_to_string(candidate.join("source/Cargo.toml"))?,
+            original
+        );
+        Ok(())
+    })
+}
+
+#[test]
 fn sdk_build_does_not_replace_an_existing_candidate() -> Result<(), SdkCandidateBuildError> {
     using_project("existing", |root, parent| {
         let capture = CapturedSdk::read(root)?;

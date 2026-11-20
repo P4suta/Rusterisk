@@ -13,7 +13,7 @@ pr_name = "chore(release): v{{ version }}"
 semver_check = true
 
 [[package]]
-name = "rusterisk-server"
+name = "rusterisk-cli"
 release = true
 changelog_path = "CHANGELOG.md"
 changelog_include = [
@@ -22,6 +22,7 @@ changelog_include = [
   "rusterisk-config",
   "rusterisk-core",
   "rusterisk-media",
+  "rusterisk-server",
   "rusterisk-sip",
   "rusterisk-storage",
   "rusterisk-windows-job-accounting",

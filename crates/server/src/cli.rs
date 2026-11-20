@@ -116,49 +116,18 @@ impl Command {
         })
     }
 
-    fn parse_reload(mut arguments: impl Iterator<Item = OsString>) -> Result<Self, CliError> {
-        let mut server = None;
-        let mut username = None;
-        let mut password_stdin = false;
-        while let Some(argument) = arguments.next() {
-            match argument.to_str() {
-                Some(option @ ("--server" | "--username")) => {
-                    let (destination, maximum) = if option == "--server" {
-                        (&mut server, 2048)
-                    } else {
-                        (&mut username, 128)
-                    };
-                    if destination.is_some() {
-                        return Err(CliError::DuplicateOption);
-                    }
-                    let value = arguments.next().ok_or(CliError::MissingReloadArgument)?;
-                    if value.is_empty() {
-                        return Err(CliError::MissingReloadArgument);
-                    }
-                    if value.as_encoded_bytes().len() > maximum {
-                        return Err(CliError::Capacity);
-                    }
-                    *destination = Some(
-                        value
-                            .into_string()
-                            .map_err(|_| CliError::InvalidReloadArgument)?,
-                    );
-                }
-                Some("--password-stdin") => {
-                    if password_stdin {
-                        return Err(CliError::DuplicateOption);
-                    }
-                    password_stdin = true;
-                }
-                Some(_) | None => return Err(CliError::UnknownOption),
-            }
-        }
-        if !password_stdin {
-            return Err(CliError::MissingReloadArgument);
-        }
+    fn parse_reload(arguments: impl Iterator<Item = OsString>) -> Result<Self, CliError> {
+        let options =
+            rusterisk_cli::RemoteOptions::parse(arguments).map_err(|error| match error {
+                rusterisk_cli::OptionError::Unknown => CliError::UnknownOption,
+                rusterisk_cli::OptionError::Missing => CliError::MissingReloadArgument,
+                rusterisk_cli::OptionError::Duplicate => CliError::DuplicateOption,
+                rusterisk_cli::OptionError::Capacity => CliError::Capacity,
+                rusterisk_cli::OptionError::Invalid => CliError::InvalidReloadArgument,
+            })?;
         Ok(Self::Reload {
-            server: server.ok_or(CliError::MissingReloadArgument)?,
-            username: username.ok_or(CliError::MissingReloadArgument)?,
+            server: options.server,
+            username: options.username,
         })
     }
 }

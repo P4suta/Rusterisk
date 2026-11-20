@@ -2,7 +2,7 @@ use rusterisk_config::{Config, ConfigError};
 use rusterisk_server::cli::{CliError, Command};
 use rusterisk_server::runtime::Server;
 use rusterisk_server::ControlError;
-use std::io::{self, IsTerminal, Read};
+use std::io;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -15,8 +15,7 @@ enum AppError {
     Control(ControlError),
     Runtime(io::Error),
     Logging(tracing::subscriber::SetGlobalDefaultError),
-    CredentialInput(io::Error),
-    Client(rusterisk_client::Error),
+    Remote(rusterisk_cli::Error),
     Shutdown {
         signal: io::Error,
         cleanup: Option<ControlError>,
@@ -28,13 +27,9 @@ impl AppError {
         match self {
             Self::Arguments(_)
             | Self::Config(_)
-            | Self::CredentialInput(_)
             | Self::Control(ControlError::Configuration(_)) => 2,
-            Self::Control(_)
-            | Self::Runtime(_)
-            | Self::Logging(_)
-            | Self::Client(_)
-            | Self::Shutdown { .. } => 1,
+            Self::Control(_) | Self::Runtime(_) | Self::Logging(_) | Self::Shutdown { .. } => 1,
+            Self::Remote(error) => error.exit_status(),
         }
     }
 }
@@ -47,11 +42,7 @@ impl std::fmt::Display for AppError {
             Self::Control(error) => write!(f, "{error}"),
             Self::Runtime(error) => write!(f, "{error}"),
             Self::Logging(error) => write!(f, "{error}"),
-            Self::CredentialInput(error) => write!(f, "{error}"),
-            Self::Client(rusterisk_client::Error::Api { status, message }) => {
-                write!(f, "HTTP {status}: {}", message.message)
-            }
-            Self::Client(error) => write!(f, "{error}"),
+            Self::Remote(error) => error.fmt(f),
             Self::Shutdown { signal, cleanup } => {
                 write!(f, "Shutdown signal failed: {signal}")?;
                 if let Some(error) = cleanup {
@@ -61,31 +52,6 @@ impl std::fmt::Display for AppError {
             }
         }
     }
-}
-
-fn reload_password(input: impl Read) -> Result<String, AppError> {
-    let mut bytes = Vec::with_capacity(259);
-    input
-        .take(259)
-        .read_to_end(&mut bytes)
-        .map_err(AppError::CredentialInput)?;
-    if bytes.ends_with(b"\r\n") {
-        bytes.truncate(bytes.len() - 2);
-    } else if bytes.ends_with(b"\n") {
-        bytes.pop();
-    }
-    if bytes.is_empty() || bytes.len() > 256 || bytes.contains(&b'\n') || bytes.contains(&b'\r') {
-        return Err(AppError::CredentialInput(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Standard input must contain one password of 1 to 256 UTF-8 bytes",
-        )));
-    }
-    String::from_utf8(bytes).map_err(|_| {
-        AppError::CredentialInput(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "The password must be valid UTF-8",
-        ))
-    })
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime, AppError> {
@@ -177,22 +143,10 @@ fn execute(command: Command) -> Result<(), AppError> {
             Ok(())
         }
         Command::Reload { server, username } => {
-            let input = io::stdin();
-            if input.is_terminal() {
-                return Err(AppError::CredentialInput(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "Use --password-stdin with a pipe or file",
-                )));
-            }
-            let password = reload_password(input.lock())?;
-            runtime()?.block_on(async {
-                rusterisk_client::Client::new(&server, &username, &password)
-                    .map_err(AppError::Client)?
-                    .reload_configuration()
-                    .await
-                    .map_err(AppError::Client)
-            })?;
-            println!("Configuration reloaded.");
+            let options = rusterisk_cli::RemoteOptions { server, username };
+            let message = rusterisk_cli::run(rusterisk_cli::Operation::Reload, &options)
+                .map_err(AppError::Remote)?;
+            println!("{message}");
             Ok(())
         }
         Command::Check {

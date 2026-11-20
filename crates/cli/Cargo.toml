@@ -1,0 +1,27 @@
+[package]
+name = "rusterisk-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Check and reload a running Rusterisk server from the command line"
+readme = "README.md"
+include = ["src/**", "tests/**", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
+
+[dependencies]
+reqwest = { version = "0.13.5", default-features = false, features = [
+  "rustls",
+] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1.50.0", features = ["rt", "time", "net"] }
+url = "2.5.8"
+
+[dev-dependencies]
+axum = "0.8.8"
+tokio = { workspace = true, features = ["process"] }
+
+[lints]
+workspace = true
