@@ -257,18 +257,40 @@ impl RtpPacket {
     }
 
     pub fn parse(bytes: &[u8]) -> Result<Self, MediaError> {
-        if bytes.len() > MAX_PACKET || bytes.len() < 12 {
+        use rtc_rtp::header::{Header, CC_MASK, CSRC_LENGTH, CSRC_OFFSET};
+        if bytes.len() > MAX_PACKET || bytes.len() < CSRC_OFFSET || bytes[0] >> 6 != 2 {
             return Err(MediaError::InvalidPacket);
         }
-        if bytes[0] & 0x20 != 0 && bytes.last() == Some(&0) {
-            return Err(MediaError::InvalidPacket);
+        let mut header_len = CSRC_OFFSET + usize::from(bytes[0] & CC_MASK) * CSRC_LENGTH;
+        if bytes[0] & 0x10 != 0 {
+            let Some([_, _, high, low, ..]) = bytes.get(header_len..) else {
+                return Err(MediaError::InvalidPacket);
+            };
+            header_len += 4 + 4 * usize::from(u16::from_be_bytes([*high, *low]));
         }
-        let packet = rtc_rtp::packet::Packet::unmarshal(&mut &bytes[..])
+        let (mut header_bytes, payload) = bytes
+            .split_at_checked(header_len)
+            .ok_or(MediaError::InvalidPacket)?;
+        let mut header = Header::unmarshal(&mut header_bytes)
             .map_err(|error| MediaError::Transport(error.to_string()))?;
-        if packet.header.version != 2 || packet.payload.is_empty() {
+        let padding = if header.padding {
+            let count = payload.last().copied().filter(|&count| count != 0);
+            usize::from(count.ok_or(MediaError::InvalidPacket)?)
+        } else {
+            0
+        };
+        if payload.len() <= padding {
             return Err(MediaError::InvalidPacket);
         }
-        Ok(Self(packet))
+        if header.extension {
+            // The writer aligns the decoded elements to the next word.
+            let size = header.get_extension_payload_len();
+            header.extensions_padding = size.next_multiple_of(4) - size;
+        }
+        Ok(Self(rtc_rtp::packet::Packet {
+            header,
+            payload: Bytes::copy_from_slice(&payload[..payload.len() - padding]),
+        }))
     }
 
     pub fn encode(&self) -> Result<Bytes, MediaError> {

@@ -79,6 +79,36 @@ fn opus_transmits_a_non_silent_known_signal() -> Result<(), MediaError> {
 }
 
 #[test]
+fn padded_rtp_header_extensions_keep_the_audio_on_roundtrip() -> Result<(), MediaError> {
+    let audio = [0x7f, 0xff, 0x55, 0xd5];
+    for (profile, elements, aligned) in [
+        (
+            0xbede_u16,
+            [0, 0x10, 0x42, 0, 0, 0, 0, 0],
+            [0x10, 0x42, 0, 0],
+        ),
+        (0x1000, [0, 1, 1, 0x42, 0, 0, 0, 0], [1, 1, 0x42, 0]),
+    ] {
+        let mut wire = Vec::from([0x91, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4]);
+        wire.extend(profile.to_be_bytes());
+        wire.extend([0, 2]);
+        wire.extend(elements);
+        wire.extend(audio);
+        let packet = RtpPacket::parse(&wire)?;
+        assert_eq!(packet.payload(), audio);
+        let encoded = packet.clone().with_marker(true).encode()?;
+        assert_eq!(&encoded[12..18], &wire[12..18]);
+        assert_eq!(&encoded[18..20], &[0, 1]);
+        assert_eq!(&encoded[20..24], &aligned);
+        let decoded = RtpPacket::parse(&encoded)?;
+        assert!(decoded.marker());
+        assert_eq!(decoded.payload(), audio);
+        assert_eq!(decoded.with_marker(false), packet);
+    }
+    Ok(())
+}
+
+#[test]
 fn rtp_padding_must_have_a_positive_length() {
     let invalid = [0xa0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 17, 0xff, 0];
     assert!(RtpPacket::parse(&invalid).is_err());
