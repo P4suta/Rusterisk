@@ -1,6 +1,7 @@
 # Rust client libraries
 
-Rusterisk provides three Rust library packages.
+Rusterisk provides three Rust libraries in the source checkout.
+Install the [remote CLI](../crates/cli/README.md) to control a running server from the terminal.
 `rusterisk-core` defines bounded call state and ownership transitions without runtime effects.
 The crate uses `no_std`, has no dependencies, and supports Rust 1.89.
 `rusterisk-api` defines Asterisk REST Interface (ARI) resources, operation contracts, and events.

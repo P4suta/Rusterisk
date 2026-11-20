@@ -1,6 +1,7 @@
 # Preparing a release
 
-The server archives, Linux images, and Rust client packages share the version in the workspace manifest.
+The server archives, Linux images, and remote CLI share the version in the workspace manifest.
+Only `rusterisk-cli` permits publication to crates.io.
 Review the changelog and the workspace version together.
 The first proposal targets `0.1.0`.
 Later proposals use version tags as their baseline.
@@ -33,7 +34,15 @@ mise x -- just security
 
 ## Verify a candidate
 
-Freeze the source commit before building the [server archives](server-distribution.md) and the [Rust client packages](rust-sdk.md).
+Freeze the source commit before building the [server archives](server-distribution.md) and the [remote CLI](../crates/cli/README.md).
+Verify the CLI archive by installing its contents in a temporary directory and running the installed command.
+
+```sh
+mise x -- just distribution-cli-check
+```
+
+The server integration checks use three private [Rust SDK libraries](rust-sdk.md).
+Their offline Cargo packaging workspace enables a fixture registry so that the client lockfile records the exact core and API archive checksums.
 Use the required inventory to select the checks.
 
 ```sh

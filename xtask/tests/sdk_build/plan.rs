@@ -29,7 +29,15 @@ fn sdk_packaging_verifies_three_candidates_together_in_an_owned_target_directory
             })?,
         ]
     );
-    assert_eq!(arguments.len(), 13);
+    assert_eq!(
+        &arguments[13..],
+        [
+            "--registry",
+            "rusterisk-sdk-fixtures",
+            "--config",
+            "registries.rusterisk-sdk-fixtures.index='sparse+https://index.crates.io/'",
+        ]
+    );
     for forbidden in [
         "--no-verify",
         "--allow-dirty",

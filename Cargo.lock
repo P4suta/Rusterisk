@@ -3975,6 +3975,7 @@ dependencies = [
  "signal-hook",
  "syn 3.0.10",
  "tar",
+ "tempfile",
  "tokio",
  "toml",
  "win32console",

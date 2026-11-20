@@ -1,5 +1,6 @@
 [package]
 name = "rusterisk-core"
+publish.workspace = true
 version.workspace = true
 edition.workspace = true
 rust-version = "1.89"
