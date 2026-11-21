@@ -200,7 +200,7 @@ impl Control {
                 deadline: Some(deadline),
                 variables,
                 dtmf: None,
-                dialplan: None,
+                dialplan: Some(super::DialplanFrame::dormant(self.dialplan_program.clone())),
                 media_tasks: MediaTasks::new(generation),
                 music: None,
                 settings,

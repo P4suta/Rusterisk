@@ -25,6 +25,17 @@ fn incoming(control: &mut Control, id: &str) -> Result<CallKey, ControlError> {
 }
 
 #[test]
+fn dialplan_patterns_keep_the_dialed_number_through_goto_and_stasis() -> Result<(), ControlError> {
+    let mut control = Control::new(4);
+    control.subscribe("calls")?;
+    let key = incoming(&mut control, "pattern")?;
+    let program = Dialplan::parse("[internal]\nexten => _.,1,Hangup()\nexten => _[+0-9].,1,Goto(other,+${EXTEN},1)\n[other]\nexten => _.,1,Hangup()\nexten => _+XXX,1,Goto(2)\nexten => _+X.,2,Stasis(calls,${CONTEXT},${EXTEN})\n").map_err(failure)?;
+    let outcome = control.start_dialplan(&key, program, 0, "now")?;
+    assert!(outcome.events.iter().any(|event| matches!(&event.kind, EventKind::StasisStart { channel, args } if channel.dialplan.exten == "+200" && args == &["other", "+200"])));
+    Ok(())
+}
+
+#[test]
 fn waits_resume_the_starting_program_and_stasis_observes_the_current_priority(
 ) -> Result<(), ControlError> {
     let mut control = Control::new(4);

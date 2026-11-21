@@ -96,9 +96,7 @@ impl Control {
                 .chars()
                 .chain(extension.chars())
                 .any(char::is_control)
-            && frame.program().steps.iter().any(|step| {
-                step.context == context && step.extension == extension && step.priority == 1
-            });
+            && frame.program().position(context, extension, 1).is_some();
         let (program, context, extension, source_call) = (
             frame.program().clone(),
             context.to_owned(),
