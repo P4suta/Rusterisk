@@ -63,17 +63,18 @@ impl std::fmt::Display for InvalidId {
 
 impl std::error::Error for InvalidId {}
 
+pub fn is_valid_resource_id(value: &str) -> bool {
+    (1..=128).contains(&value.len())
+        && !matches!(value, "." | "..")
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+}
+
 impl TryFrom<String> for ChannelId {
     type Error = InvalidId;
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.is_empty()
-            || value.len() > 128
-            || value == "."
-            || value == ".."
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-        {
+        if !is_valid_resource_id(&value) {
             return Err(InvalidId);
         }
         Ok(Self(value))
@@ -493,6 +494,7 @@ pub enum ManagementOperation {
     ChannelRtpObservation,
     DiagnoseExtension,
     DiagnoseChannel,
+    TestCall,
 }
 
 impl ManagementOperation {
@@ -534,6 +536,15 @@ impl ManagementOperation {
                 success_status: 200,
                 parameters: &[],
             },
+            Self::TestCall => &Operation {
+                id: "testCalls.probe",
+                nickname: "testCall",
+                method: Method::Post,
+                path: test_call::PATH,
+                response: "TestCallResult",
+                success_status: 200,
+                parameters: &["deadline_seconds"],
+            },
         }
     }
 }
@@ -543,6 +554,7 @@ pub const MANAGEMENT_OPERATIONS: &[ManagementOperation] = &[
     ManagementOperation::ChannelRtpObservation,
     ManagementOperation::DiagnoseExtension,
     ManagementOperation::DiagnoseChannel,
+    ManagementOperation::TestCall,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -607,8 +619,8 @@ impl Operation {
             return None;
         }
         Some(match name {
-            "timeout" | "priority" | "before" | "between" | "duration" | "after"
-            | "maxDurationSeconds" | "maxSilenceSeconds" | "offsetms" | "skipms" => {
+            "deadline_seconds" | "timeout" | "priority" | "before" | "between" | "duration"
+            | "after" | "maxDurationSeconds" | "maxSilenceSeconds" | "offsetms" | "skipms" => {
                 ParameterKind::Integer
             }
             "beep" | "subscribeAll" => ParameterKind::Boolean,
@@ -1321,6 +1333,10 @@ fn path_parameters(path: &str) -> impl Iterator<Item = &str> {
 
 fn parameter_schema(operation: &Operation, name: &str, kind: ParameterKind) -> Value {
     match name {
+        "deadline_seconds" => json!({
+            "type": "integer", "minimum": 1, "maximum": test_call::MAX_SECONDS,
+            "default": test_call::DEFAULT_SECONDS,
+        }),
         "only" => {
             json!({"type": "array", "items": schemars::schema_for!(InfoSection).to_value(), "maxItems": 32})
         }
@@ -1455,7 +1471,6 @@ pub fn openapi() -> Value {
         let security = json_array([json!({"basicAuth": []})]);
         entry[operation.method.as_str()] = json!({"operationId": operation.id, "parameters": parameters(operation, None), "responses": responses, "security": security});
     }
-    test_call::describe(&mut paths);
     let servers = json_array([json!({"url": "/ari"})]);
     observation::describe(&mut paths);
     json!({"openapi": "3.1.0", "info": {"title": "Rusterisk", "version": env!("CARGO_PKG_VERSION")}, "servers": servers, "paths": paths, "components": {"schemas": schemas(), "securitySchemes": {"basicAuth": {"type": "http", "scheme": "basic"}}}})

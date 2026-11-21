@@ -27,12 +27,3 @@ pub struct TestCallResult {
     pub signal_verified: bool,
     pub outcome: TestCallOutcome,
 }
-
-pub(super) fn describe(paths: &mut serde_json::Map<String, serde_json::Value>) {
-    use serde_json::json;
-    let mut parameters: Vec<_> = super::path_parameters(PATH)
-        .map(|name| json!({"name":name,"in":"path","required":true,"schema":{"type":"string"}}))
-        .collect();
-    parameters.push(json!({"name":"deadline_seconds","in":"query","schema":{"type":"integer","minimum":1,"maximum":MAX_SECONDS,"default":DEFAULT_SECONDS}}));
-    paths.insert(PATH.into(),json!({"servers":super::json_array([json!({"url":"/"})]),"post":{"operationId":"testCalls.probe","parameters":parameters,"security":super::json_array([json!({"basicAuth":super::json_array([])})]),"responses":{"200":{"description":"Test call milestones and verified audio result","content":{"application/json":{"schema":{"$ref":"#/components/schemas/TestCallResult"}}}}}}}));
-}
