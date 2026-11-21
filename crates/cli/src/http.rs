@@ -104,6 +104,18 @@ impl<'a> Remote<'a> {
         })
     }
 
+    fn builder(&self, method: Method, path: &[&str]) -> Result<reqwest::RequestBuilder, Error> {
+        let mut url = self.origin.clone();
+        url.path_segments_mut()
+            .map_err(|_| Error::ConnectionSettings("Invalid server origin"))?
+            .clear()
+            .extend(path);
+        Ok(self
+            .client
+            .request(method, url)
+            .basic_auth(self.username, Some(&self.password)))
+    }
+
     async fn request(
         &self,
         method: Method,
@@ -111,18 +123,24 @@ impl<'a> Remote<'a> {
         expected: StatusCode,
         timeout: Duration,
     ) -> Result<reqwest::Response, Error> {
-        let mut url = self.origin.clone();
-        url.path_segments_mut()
-            .map_err(|_| Error::ConnectionSettings("Invalid server origin"))?
-            .clear()
-            .extend(path);
-        let response = self
-            .client
-            .request(method, url)
-            .basic_auth(self.username, Some(&self.password))
-            .timeout(timeout)
-            .send()
-            .await?;
+        let response = self.builder(method, path)?.timeout(timeout).send().await?;
+        self.check_status(response, expected).await
+    }
+
+    pub(super) async fn stream(&self, path: &[&str]) -> Result<reqwest::Response, Error> {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let response = self.builder(Method::GET, path)?.send().await?;
+            self.check_status(response, StatusCode::OK).await
+        })
+        .await
+        .map_err(|_| Error::Response("Timed out opening the observation stream"))?
+    }
+
+    async fn check_status(
+        &self,
+        response: reqwest::Response,
+        expected: StatusCode,
+    ) -> Result<reqwest::Response, Error> {
         let status = response.status();
         if status != expected {
             let message = serde_json::from_slice::<Problem>(&body(response).await?)

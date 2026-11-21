@@ -2,7 +2,9 @@ mod http;
 mod inspection;
 mod options;
 mod profiles;
+mod watch;
 pub use profiles::profile_names;
+pub use watch::Watch;
 
 pub use inspection::Inspection;
 pub use options::{OptionError, RemoteOptions};
@@ -104,4 +106,9 @@ pub fn inspect(
 ) -> Result<String, Error> {
     let (runtime, remote) = session(options)?;
     runtime.block_on(operation.read(&remote, json))
+}
+
+pub fn watch(target: &Watch, options: &RemoteOptions, json: bool) -> Result<(), Error> {
+    let (runtime, remote) = session(options)?;
+    runtime.block_on(target.follow(&remote, json, &mut io::stdout().lock()))
 }

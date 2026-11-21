@@ -1,7 +1,7 @@
-use rusterisk_cli::{Inspection, Operation, RemoteOptions};
+use rusterisk_cli::{Inspection, Operation, RemoteOptions, Watch};
 use std::{ffi::OsString, process::ExitCode};
 
-const HELP: &str = "Usage: rusterisk-cli COMMAND [TARGET] (--server URL --username USER | --profile NAME) --password-stdin\n\n  profiles                List local server profiles.\n  ping                    Check connectivity.\n  reload                  Reload the server configuration.\n  status                  Show the server version and start time.\n  endpoints               List endpoint routes.\n  endpoint TECH/RESOURCE  Inspect one endpoint route.\n  channels                List active call legs and their bridges.\n  channel ID              Inspect one call leg and its bridges.\n\n  --json          Print inspection results as JSON.\n  -h, --help      Print usage.\n  -V, --version   Print the version.\n\nUse HTTPS or loopback HTTP and read the password from a pipe or file.";
+const HELP: &str = "Usage: rusterisk-cli COMMAND [TARGET] (--server URL --username USER | --profile NAME) --password-stdin\n\n  profiles                List local server profiles.\n  ping                    Check connectivity.\n  reload                  Reload the server configuration.\n  status                  Show the server version and start time.\n  endpoints               List endpoint routes.\n  endpoint TECH/RESOURCE  Inspect one endpoint route.\n  channels                List active call legs and their bridges.\n  channel ID              Inspect one call leg and its bridges.\n  watch channel ID        Follow one call leg until it ends.\n  watch endpoint TECH/RESOURCE  Follow an endpoint and its call legs.\n\n  --json          Print inspection results as JSON or watch records as NDJSON.\n  -h, --help      Print usage.\n  -V, --version   Print the version.\n\nUse HTTPS or loopback HTTP and read the password from a pipe or file.";
 
 type UsageError = (u8, String);
 
@@ -29,6 +29,26 @@ fn target(arguments: &mut impl Iterator<Item = OsString>) -> Result<String, Usag
 enum Command {
     Control(Operation),
     Inspect(Inspection),
+    Watch(Watch),
+}
+
+fn endpoint(
+    arguments: &mut impl Iterator<Item = OsString>,
+) -> Result<(String, String), UsageError> {
+    let id = target(arguments)?;
+    let (technology, resource) = id
+        .split_once('/')
+        .filter(|(t, r)| segment(t) && segment(r))
+        .ok_or_else(|| (2, "Supply the endpoint as TECH/RESOURCE".to_owned()))?;
+    Ok((technology.to_owned(), resource.to_owned()))
+}
+
+fn channel(arguments: &mut impl Iterator<Item = OsString>) -> Result<String, UsageError> {
+    let id = target(arguments)?;
+    if !segment(&id) {
+        return Err((2, "Invalid channel identifier".to_owned()));
+    }
+    Ok(id)
 }
 
 fn execute(arguments: impl Iterator<Item = OsString>) -> Result<(), UsageError> {
@@ -48,6 +68,7 @@ fn execute(arguments: impl Iterator<Item = OsString>) -> Result<(), UsageError> 
                 | "channels"
                 | "channel"
                 | "profiles"
+                | "watch"
         ) && arguments
             .peek()
             .is_some_and(|option| option == "-h" || option == "--help")
@@ -75,23 +96,24 @@ fn execute(arguments: impl Iterator<Item = OsString>) -> Result<(), UsageError> 
         "endpoints" => Command::Inspect(Inspection::Endpoints),
         "channels" => Command::Inspect(Inspection::Channels),
         "endpoint" => {
-            let id = target(&mut arguments)?;
-            let (technology, resource) = id
-                .split_once('/')
-                .filter(|(t, r)| segment(t) && segment(r))
-                .ok_or_else(|| (2, "Supply the endpoint as TECH/RESOURCE".to_owned()))?;
+            let (technology, resource) = endpoint(&mut arguments)?;
             Command::Inspect(Inspection::Endpoint {
-                technology: technology.to_owned(),
-                resource: resource.to_owned(),
+                technology,
+                resource,
             })
         }
-        "channel" => {
-            let id = target(&mut arguments)?;
-            if !segment(&id) {
-                return Err((2, "Invalid channel identifier".to_owned()));
+        "channel" => Command::Inspect(Inspection::Channel(channel(&mut arguments)?)),
+        "watch" => match target(&mut arguments)?.as_str() {
+            "channel" => Command::Watch(Watch::Channel(channel(&mut arguments)?)),
+            "endpoint" => {
+                let (technology, resource) = endpoint(&mut arguments)?;
+                Command::Watch(Watch::Endpoint {
+                    technology,
+                    resource,
+                })
             }
-            Command::Inspect(Inspection::Channel(id))
-        }
+            _ => return Err((2, "Select a channel or endpoint to watch".to_owned())),
+        },
         _ => return Err((2, "Unknown command. See --help.".to_owned())),
     };
     let (options, json) =
@@ -102,6 +124,10 @@ fn execute(arguments: impl Iterator<Item = OsString>) -> Result<(), UsageError> 
         }
         Command::Control(operation) => rusterisk_cli::run(operation, &options).map(str::to_owned),
         Command::Inspect(operation) => rusterisk_cli::inspect(&operation, &options, json),
+        Command::Watch(target) => {
+            return rusterisk_cli::watch(&target, &options, json)
+                .map_err(|error| (error.exit_status(), error.to_string()))
+        }
     }
     .map_err(|error| (error.exit_status(), error.to_string()))?;
     println!("{message}");

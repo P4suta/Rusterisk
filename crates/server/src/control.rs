@@ -22,6 +22,7 @@ mod music;
 #[cfg(test)]
 mod music_tests;
 mod native_start;
+mod observation;
 mod playback;
 mod recording;
 mod reload;

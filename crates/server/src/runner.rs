@@ -15,6 +15,8 @@ mod endpoint_queries_tests;
 mod external_admission;
 mod history;
 mod media_connections;
+mod observation;
+pub(crate) use observation::{Filter as WatchFilter, Target as WatchTarget};
 mod native_start;
 mod recording_admission;
 mod reload;
@@ -66,6 +68,12 @@ impl Credentials {
 }
 
 enum Request {
+    ObserveCalls {
+        credentials: Credentials,
+        origin: Option<String>,
+        target: WatchTarget,
+        reply: oneshot::Sender<Result<observation::Observation, ControlError>>,
+    },
     Answer {
         credentials: Credentials,
         origin: Option<String>,
@@ -176,6 +184,7 @@ pub struct Controller {
 }
 
 pub struct Runner {
+    observations: tokio::sync::broadcast::Sender<rusterisk_api::observation::WatchRecord>,
     control: Control,
     config: Config,
     requests: mpsc::Receiver<Request>,
@@ -276,6 +285,7 @@ impl Controller {
                 stop: shutdown,
                 reload: reload::ReloadCoordinator::new(reload_receiver, directory_reload_receiver),
                 subscribers: BTreeMap::new(),
+                observations: tokio::sync::broadcast::channel(128).0,
                 sessions: BTreeMap::new(),
                 subscription_generation: 0,
                 storage: None,
@@ -527,6 +537,7 @@ impl Runner {
     }
 
     fn publish(&mut self, outcome: &mut Outcome) -> Result<(), ControlError> {
+        self.publish_observations(outcome);
         self.control.route_resource_events(outcome);
         self.publish_history(outcome)?;
         for effect in outcome.effects.drain(..) {
@@ -549,6 +560,7 @@ impl Runner {
         for application in disconnected {
             self.subscribers.remove(&application);
             let mut cleanup = self.control.unsubscribe(&application, &timestamp())?;
+            self.publish_observations(&cleanup);
             self.publish_history(&mut cleanup)?;
             for effect in cleanup.effects.drain(..) {
                 self.emit_effect(effect)?;
@@ -559,6 +571,19 @@ impl Runner {
 
     fn request(&mut self, request: Request, now_ms: u64) -> Result<(), ControlError> {
         match request {
+            Request::ObserveCalls {
+                credentials,
+                origin,
+                target,
+                reply,
+            } => {
+                if reply
+                    .send(self.observe_calls(&credentials, origin.as_deref(), target))
+                    .is_err()
+                {
+                    tracing::debug!("Call observer disconnected during setup");
+                }
+            }
             Request::Answer {
                 credentials,
                 origin,

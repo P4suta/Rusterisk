@@ -11,6 +11,7 @@ readme = "README.md"
 include = ["src/**", "tests/**", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
 
 [dependencies]
+jiff = { version = "=1.0.1", default-features = false, features = ["std"] }
 reqwest = { version = "0.13.5", default-features = false, features = [
   "rustls",
 ] }

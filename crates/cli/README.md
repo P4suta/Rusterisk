@@ -49,6 +49,21 @@ The [ARI endpoint model](https://github.com/asterisk/asterisk/blob/22.9.0/rest-a
 Each channel object has `kind` set to `call_leg` and includes `id`, `name`, `state`, `creationtime`, and `bridge_ids`.
 A failed request writes a diagnostic to standard error and exits unsuccessfully.
 
+## Watch a call or endpoint
+
+Use `watch channel ID` to follow one channel from its initial snapshot through hangup.
+Use `watch endpoint TECH/RESOURCE` to follow changes to a route and its call legs until interrupted.
+The read-only observer runs independently of the Stasis application controlling the call.
+
+```sh
+rusterisk-cli watch channel inbound-42 --json --profile lab --password-stdin < password.txt
+```
+
+Each line of JSON contains a timestamp and a `type` of `snapshot`, `event`, or `gap`.
+Channel generations distinguish calls that reuse an identifier.
+A gap reports a lost connection or missed records and exits unsuccessfully.
+Start another watch to obtain a fresh snapshot.
+
 ## Named servers
 
 Store server origins and usernames in `rusterisk/profiles.json` under the [XDG configuration directory](https://specifications.freedesktop.org/basedir/latest/).

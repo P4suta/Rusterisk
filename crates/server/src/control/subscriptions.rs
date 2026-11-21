@@ -4,8 +4,8 @@ use rusterisk_core::{ResourceKind, ResourceSource, StasisApplication, Subscripti
 
 #[derive(Debug)]
 pub(super) struct Notice {
-    timestamp: String,
-    kind: EventKind,
+    pub(super) timestamp: String,
+    pub(super) kind: EventKind,
     source: Option<ResourceSource>,
 }
 

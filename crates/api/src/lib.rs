@@ -35,6 +35,7 @@ pub use recording_policy::{InvalidRecordingIfExists, RecordingIfExists};
 pub use swagger::SwaggerError;
 
 mod ari_route;
+pub mod observation;
 pub use ari_route::{ari_route, is_known_operation, AriRoute};
 
 pub const REFERENCE_VERSION: &str = "22.9.0";
@@ -1241,6 +1242,7 @@ pub fn schemas() -> Value {
     settings.definitions_path = "/components/schemas".into();
     let mut generator = settings.into_generator();
     let _channel = generator.subschema_for::<Channel>();
+    let _observation = generator.subschema_for::<observation::WatchRecord>();
     let _bridge = generator.subschema_for::<Bridge>();
     let _application = generator.subschema_for::<Application>();
     let _filter = generator.subschema_for::<EventFilterRequest>();
@@ -1406,6 +1408,7 @@ pub fn openapi() -> Value {
         entry[operation.method.as_str()] = json!({"operationId": operation.id, "parameters": parameters(operation, None), "responses": responses, "security": security});
     }
     let servers = json_array([json!({"url": "/ari"})]);
+    observation::describe(&mut paths);
     json!({"openapi": "3.1.0", "info": {"title": "Rusterisk", "version": env!("CARGO_PKG_VERSION")}, "servers": servers, "paths": paths, "components": {"schemas": schemas(), "securitySchemes": {"basicAuth": {"type": "http", "scheme": "basic"}}}})
 }
 
