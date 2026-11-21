@@ -47,6 +47,153 @@ fn parses_asterisk_sections_without_leaking_secrets_in_debug() -> Result<(), Con
 }
 
 #[test]
+fn file_managed_dialplan_options_do_not_become_extensions() -> Result<(), ConfigError> {
+    let header = "[general]\nstatic=yes\nwriteprotect=yes\n";
+    let dialplan = Dialplan::parse(&format!(
+        "{header}[home-carrier]\nexten => _.,1,Stasis(homephone,inbound)\n"
+    ))?;
+    assert_eq!(dialplan.steps.len(), 1);
+    assert_eq!(dialplan.steps[0].context, "home-carrier");
+    for option in ["writeprotect=no", "static=invalid", "unknown=yes"] {
+        assert!(matches!(
+            Dialplan::parse(&format!("{header}{option}\n")),
+            Err(ConfigError { line: 4, .. })
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn dialplan_selects_the_most_specific_match_at_each_priority() -> Result<(), ConfigError> {
+    let program = Dialplan::parse("[office]\nexten => _!,1,Hangup()\nexten => _.,1,Hangup()\nexten => _[35]XX,1,Hangup()\nexten => _[23]XX,1,Hangup()\nexten => 3-00,1,Hangup()\nexten => _[0-9],2,Hangup()\nexten => _[+0-9].,2,Hangup()\n")?;
+    for (number, priority, index) in [
+        ("300", 1, Some(4)),
+        ("301", 1, Some(3)),
+        ("501", 1, Some(2)),
+        ("s", 1, Some(1)),
+        ("", 1, Some(0)),
+        ("1", 2, Some(5)),
+        ("+1", 2, Some(6)),
+        ("+", 2, None),
+    ] {
+        assert_eq!(program.position("office", number, priority), index);
+    }
+    assert_eq!(program.position("other", "300", 1), None);
+    for pattern in ["_", "_[]", "_[1-0]", "_[123"] {
+        assert!(matches!(
+            Dialplan::parse(&format!("[office]\nexten => {pattern},1,Hangup()")),
+            Err(ConfigError { line: 2, .. })
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn registered_application_names_are_case_insensitive_and_arguments_keep_their_case(
+) -> Result<(), ConfigError> {
+    for (canonical, mixed) in [
+        ("NoOp(TraceID)", "nOoP(TraceID)"),
+        ("Set(Token=AbC)", "sET(Token=AbC)"),
+        ("Answer()", "ansWer()"),
+        ("Hangup()", "HANGUP()"),
+        ("Playback(Welcome)", "pLAYback(Welcome)"),
+        ("Wait(1)", "wAiT(1)"),
+        ("Stasis(Sales,AbC)", "sTaSiS(Sales,AbC)"),
+        ("Dial(PJSIP/Alice,2)", "dIAL(PJSIP/Alice,2)"),
+        ("Goto(Office,Sales,2)", "goTO(Office,Sales,2)"),
+    ] {
+        let parse = |app: &str| Dialplan::parse(&format!("[Office]\nexten => Sales,1,{app}"));
+        assert_eq!(parse(mixed)?, parse(canonical)?, "{mixed}");
+    }
+    Ok(())
+}
+
+#[test]
+fn documented_pattern_order_routes_every_four_digit_number_under_six_at_each_priority(
+) -> Result<(), ConfigError> {
+    let program = Dialplan::parse(concat!(
+        "[office]\n",
+        "exten => 6401,1,Hangup()\n",
+        "exten => _6.,1,Hangup()\n",
+        "exten => _6XX1,1,Hangup()\n",
+        "exten => _6[45]NX,1,Hangup()\n",
+        "exten => _6[34]NX,1,Hangup()\n",
+        "exten => _64XX,1,Hangup()\n",
+        "exten => _64NX,1,Hangup()\n",
+        "exten => _640X,1,Hangup()\n",
+        "exten => _6XX1,2,Hangup()\n",
+    ))?;
+    for number in 6000..7000 {
+        let dialed = number.to_string();
+        let selected = |priority| {
+            program
+                .position("office", &dialed, priority)
+                .and_then(|index| program.steps.get(usize::from(index)))
+                .map(|step| step.extension.as_str())
+        };
+        let expected = match number {
+            6401 => "6401",
+            6400..=6409 => "_640X",
+            6420..=6499 => "_64NX",
+            6410..=6419 => "_64XX",
+            6320..=6399 => "_6[34]NX",
+            6520..=6599 => "_6[45]NX",
+            n if n % 10 == 1 => "_6XX1",
+            _ => "_6.",
+        };
+        assert_eq!(selected(1), Some(expected), "{number}");
+        assert_eq!(
+            selected(2),
+            (number % 10 == 1).then_some("_6XX1"),
+            "{number}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn ari_accepts_explicit_compact_json_output() -> Result<(), ConfigError> {
+    let ari = ARI.replace("enabled=yes", "enabled=yes\npretty=no");
+    assert_eq!(
+        Config::parse(HTTP, &ari, SIP, "", "")?,
+        Config::parse(HTTP, ARI, SIP, "", "")?
+    );
+    for value in ["yes", "invalid"] {
+        let ari = ari.replace("pretty=no", &format!("pretty={value}"));
+        assert!(matches!(
+            Config::parse(HTTP, &ari, SIP, "", ""),
+            Err(ConfigError { line: 3, .. })
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn asterisk_prefers_the_early_match_to_the_end_of_an_otherwise_equal_pattern(
+) -> Result<(), ConfigError> {
+    let program = Dialplan::parse(include_str!(
+        "../../../tests/interop/asterisk/extensions.conf"
+    ))?;
+    for (number, pattern) in [
+        ("7", "_X!"),
+        ("234", "_NXX"),
+        ("123", "_ZXX"),
+        ("300", "3-00"),
+        ("+12", "_[+0-9]."),
+    ] {
+        let selected = program
+            .position("route-order", number, 1)
+            .and_then(|index| program.steps.get(usize::from(index)));
+        assert_eq!(
+            selected.map(|step| step.extension.as_str()),
+            Some(pattern),
+            "{number}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn refuses_unknown_options_with_their_position() {
     let result = Config::parse(&format!("{HTTP}mystery=yes\n"), ARI, SIP, "", "");
     assert!(matches!(result, Err(ConfigError { line: 5, .. })));
