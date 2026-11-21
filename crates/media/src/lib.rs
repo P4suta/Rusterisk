@@ -10,7 +10,7 @@ mod rtcp;
 mod streams;
 mod telephone_events;
 pub use mixing::{AudioTarget, Gate, MixedAudio, Mixer};
-pub use rtcp::{goodbye_reports, sender_reports, SourceReport};
+pub use rtcp::{goodbye_reports, reception_report, sender_reports, ReceptionReport, SourceReport};
 pub use streams::{AudioDecoder, AudioFormat, RtpReceiver, RtpSender};
 pub use telephone_events::{
     TelephoneEvent, TelephoneEvents, TelephoneFormat, TelephoneReceiver, TelephoneSender,

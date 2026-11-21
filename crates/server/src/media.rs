@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 #[cfg(test)]
 mod admission_tests;
+mod measurements;
 mod playback;
 mod recording;
 mod streams;
@@ -74,6 +75,10 @@ impl AttachmentReceipt {
 }
 
 enum Command {
+    Measurements {
+        key: CallKey,
+        reply: oneshot::Sender<Option<crate::rtp::Measurements>>,
+    },
     ReceivedDigit {
         key: CallKey,
         digit: rusterisk_core::DtmfDigit,
@@ -555,6 +560,7 @@ struct SavedMusic {
     cursor: MusicCursor,
 }
 struct Port {
+    measurements: Option<watch::Receiver<crate::rtp::Measurements>>,
     connection_lease: Option<crate::MediaConnectionLease>,
     answers: Option<mpsc::Receiver<()>>,
     incoming: mpsc::Receiver<Frame>,
@@ -663,8 +669,9 @@ impl MediaHub {
             .telephone
             .map(DigitSupport::Rfc4733)
             .unwrap_or(DigitSupport::Unsupported);
-        let (port, channels) = Port::new(initial_direction, support);
+        let (mut port, channels) = Port::new(initial_direction, support);
         let link = RtpLink::new(sockets, session, channels)?;
+        port.measurements = Some(link.observations());
         self.install_link(key.clone(), port, mode.gate(initial_direction))?;
         self.workers.spawn(async move { (key, link.run().await) });
         Ok(())
@@ -686,6 +693,17 @@ impl MediaHub {
     fn command(&mut self, command: Command) -> Result<(), MediaError> {
         self.remember_music();
         match command {
+            Command::Measurements { key, reply } => {
+                let sample = self
+                    .ports
+                    .get(&key)
+                    .and_then(|port| port.measurements.as_ref())
+                    .filter(|reader| reader.has_changed().is_ok())
+                    .map(|reader| reader.borrow().clone());
+                if reply.send(sample).is_err() {
+                    tracing::debug!("RTP statistics requester disconnected");
+                }
+            }
             Command::ReceivedDigit { key, digit } => {
                 if self.ports.contains_key(&key) {
                     self.recordings

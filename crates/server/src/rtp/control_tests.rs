@@ -254,6 +254,97 @@ enum ReceiptFailure {
 }
 
 #[tokio::test]
+async fn live_counts_follow_peer_datagrams_and_bind_reception_reports_to_the_sent_source(
+) -> Result<(), MediaError> {
+    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let Fixture {
+        local,
+        control,
+        link,
+        received: _received,
+        outgoing,
+        stop,
+        _direction,
+    } = fixture(&peer)?;
+    let mut observations = link.observations();
+    assert_eq!(observations.borrow().local.rxcount, 0);
+    assert_eq!(observations.borrow().local.txcount, 0);
+    assert!(observations.borrow().peer.is_none());
+    let (receipts, mut reports) = mpsc::channel(4);
+    let task = tokio::spawn(
+        link.serve(move |receipt| receipts.try_send(receipt).map_err(|_| MediaError::Capacity)),
+    );
+    let traffic = tokio::time::timeout(Duration::from_secs(3), async {
+        let mut sender = RtpSender::new(AudioFormat::Pcmu, 0, [4; 10])?;
+        let frame = Frame::new(&[750; 160], 8000)?;
+        let incoming = sender.packet_at(frame, 20)?.encode()?;
+        peer.data()
+            .send_to(&incoming, local)
+            .await
+            .map_err(failure)?;
+        observations
+            .wait_for(|snapshot| snapshot.local.rxcount == 1)
+            .await
+            .map_err(failure)?;
+        assert_eq!(observations.borrow().local.txcount, 0);
+        outgoing.send(frame).await.map_err(failure)?;
+        let mut buffer = [0; rusterisk_media::MAX_PACKET];
+        let (size, _) = peer.data().recv_from(&mut buffer).await.map_err(failure)?;
+        let sent = RtpPacket::parse(&buffer[..size])?;
+        observations
+            .wait_for(|snapshot| snapshot.local.txcount == 1)
+            .await
+            .map_err(failure)?;
+        assert_eq!(observations.borrow().local.rxcount, 1);
+        assert!(observations.borrow().peer.is_none());
+        let mut report = [0_u8; 32];
+        report[..8].copy_from_slice(&[0x81, 201, 0, 7, 0, 0, 0, 21]);
+        report[8..12].copy_from_slice(&sent.ssrc().wrapping_add(1).to_be_bytes());
+        report[13..16].copy_from_slice(&[0xff, 0xff, 0xff]);
+        report[16..20].copy_from_slice(&u32::from(sent.sequence()).to_be_bytes());
+        peer.control()
+            .send_to(&report, control)
+            .await
+            .map_err(failure)?;
+        assert!(matches!(
+            reports.recv().await,
+            Some(ControlReception::Accepted)
+        ));
+        assert!(observations.borrow().peer.is_none());
+        report[8..12].copy_from_slice(&sent.ssrc().to_be_bytes());
+        peer.control()
+            .send_to(&report, control)
+            .await
+            .map_err(failure)?;
+        assert!(matches!(
+            reports.recv().await,
+            Some(ControlReception::Accepted)
+        ));
+        let snapshot = observations.borrow().clone();
+        let remote = snapshot.peer.as_ref().ok_or(MediaError::InvalidPacket)?;
+        assert_eq!(remote.reporter_ssrc, 21);
+        assert_eq!(remote.reported_ssrc, sent.ssrc());
+        assert_eq!(remote.extended_highest_sequence, u32::from(sent.sequence()));
+        assert_eq!(remote.cumulative_lost, -1);
+        tokio::time::sleep(Duration::from_millis(45)).await;
+        assert_eq!(observations.borrow().local, snapshot.local);
+        Ok::<(), MediaError>(())
+    })
+    .await
+    .map_err(failure)
+    .and_then(|result| result);
+    stop.send_replace(true);
+    let cleanup = finish(task).await;
+    match (traffic, cleanup) {
+        (Ok(()), Ok(_)) => Ok(()),
+        (Err(primary), Err(cleanup)) => {
+            Err(failure(format!("{primary}; cleanup failed: {cleanup}")))
+        }
+        (Err(error), Ok(_)) | (Ok(()), Err(error)) => Err(error),
+    }
+}
+
+#[tokio::test]
 async fn receipt_failures_end_the_owned_worker_and_release_its_sockets() -> Result<(), MediaError> {
     for failure_kind in [ReceiptFailure::Closed, ReceiptFailure::Full] {
         let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;

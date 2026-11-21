@@ -31,6 +31,7 @@ impl Port {
         let (direction, directed) = watch::channel(initial_direction);
         (
             Self {
+                measurements: None,
                 connection_lease: None,
                 answers: None,
                 incoming: input,
