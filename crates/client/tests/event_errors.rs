@@ -3,6 +3,12 @@ use rusterisk_client::{api::ChannelId, Client, Error};
 use std::{future::IntoFuture, time::Duration};
 
 async fn malformed_event(mut socket: WebSocket) {
+    for text in [
+        r#"{"type":"ApplicationRegistered","application":"calls","timestamp":"first","asterisk_id":"pbx"}"#,
+        r#"{"type":"ApplicationReplaced","application":"calls","timestamp":"second"}"#,
+    ] {
+        assert!(socket.send(Message::Text(text.into())).await.is_ok());
+    }
     let result = socket
         .send(Message::Text("{\"type\":\"UnknownEvent\"}".into()))
         .await;
@@ -32,6 +38,15 @@ async fn event_consumers_receive_the_driver_error_when_decoding_stops_the_sessio
         let mut session = client
             .subscribe(&ChannelId::try_from("calls".to_owned())?)
             .await?;
+        let published = tokio::time::timeout(Duration::from_secs(2), session.next_event())
+            .await
+            .map_err(|_| Error::Timeout)??;
+        assert_eq!(published.kind.event_type(), "ApplicationRegistered");
+        assert_eq!(serde_json::to_value(published)?["asterisk_id"], "pbx");
+        let modeled = tokio::time::timeout(Duration::from_secs(2), session.next_event())
+            .await
+            .map_err(|_| Error::Timeout)??;
+        assert_eq!(modeled.kind.event_type(), "ApplicationReplaced");
         let error = tokio::time::timeout(Duration::from_secs(2), session.next_event())
             .await
             .map_err(|_| Error::Timeout)?;
