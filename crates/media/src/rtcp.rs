@@ -2,6 +2,7 @@ use crate::{MediaError, MAX_PACKET};
 use rtcp_types::prelude::{RtcpPacketWriter, RtcpPacketWriterExt};
 mod validation;
 pub(crate) use validation::inspect_rtcp;
+pub use validation::{reception_report, ReceptionReport};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceReport {

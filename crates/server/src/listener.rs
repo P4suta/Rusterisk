@@ -118,7 +118,7 @@ impl HttpServer {
         let application = http::router_for_scheme(controller.clone(), scheme).layer(
             TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, Duration::from_secs(10)),
         );
-        let application = http::with_management(application, controller.clone());
+        let application = http::with_management(application, controller.clone(), None);
         Ok(Self {
             listener,
             requested_bind: config.bind,
@@ -168,7 +168,8 @@ impl HttpServer {
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(10),
         ));
-        self.application = http::with_management(application, self.controller.clone());
+        self.application =
+            http::with_management(application, self.controller.clone(), self.media.clone());
     }
 
     pub async fn run(mut self) -> Result<(), ControlError> {

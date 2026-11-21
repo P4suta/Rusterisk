@@ -36,7 +36,11 @@ pub use swagger::SwaggerError;
 
 mod ari_route;
 pub mod observation;
+mod rtp_observation;
 pub use ari_route::{ari_route, is_known_operation, AriRoute};
+pub use rtp_observation::{
+    PeerReception, PeerReportSource, RtpObservation, ServerPacketCounts, ServerPacketSource,
+};
 
 pub const REFERENCE_VERSION: &str = "22.9.0";
 
@@ -484,6 +488,7 @@ pub struct Operation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManagementOperation {
     ReloadConfiguration,
+    ChannelRtpObservation,
 }
 
 impl ManagementOperation {
@@ -498,12 +503,23 @@ impl ManagementOperation {
                 success_status: 204,
                 parameters: &[],
             },
+            Self::ChannelRtpObservation => &Operation {
+                id: "channels.rtpObservation",
+                nickname: "rtpObservation",
+                method: Method::Get,
+                path: "/rusterisk/channels/{channelId}/rtp-statistics",
+                response: "RtpObservation",
+                success_status: 200,
+                parameters: &[],
+            },
         }
     }
 }
 
-pub const MANAGEMENT_OPERATIONS: &[ManagementOperation] =
-    &[ManagementOperation::ReloadConfiguration];
+pub const MANAGEMENT_OPERATIONS: &[ManagementOperation] = &[
+    ManagementOperation::ReloadConfiguration,
+    ManagementOperation::ChannelRtpObservation,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParameterKind {
@@ -1243,6 +1259,7 @@ pub fn schemas() -> Value {
     let mut generator = settings.into_generator();
     let _channel = generator.subschema_for::<Channel>();
     let _observation = generator.subschema_for::<observation::WatchRecord>();
+    let _rtp = generator.subschema_for::<RtpObservation>();
     let _bridge = generator.subschema_for::<Bridge>();
     let _application = generator.subschema_for::<Application>();
     let _filter = generator.subschema_for::<EventFilterRequest>();
@@ -1400,7 +1417,11 @@ pub fn openapi() -> Value {
         let mut responses = Map::new();
         responses.insert(
             operation.success_status.to_string(),
-            json!({"description": "Configuration applied"}),
+            if operation.response == "void" {
+                json!({"description": "Completed"})
+            } else {
+                json!({"description": "Observation", "content":{"application/json":{"schema": response_schema(operation.response)}}})
+            },
         );
         let entry = paths.entry(operation.path).or_insert_with(|| json!({}));
         entry["servers"] = json_array([json!({"url": "/"})]);
