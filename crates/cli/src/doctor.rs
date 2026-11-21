@@ -1,6 +1,6 @@
 use crate::{http::Remote, Error};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub enum Doctor {
     Extension { context: String, extension: String },
@@ -178,7 +178,7 @@ async fn route(remote: &Remote<'_>, context: &str, extension: &str) -> Result<Ro
     Ok(RouteReport { route, next_check })
 }
 
-fn changes(first: Sample, last: Sample, interval: Duration) -> Traffic {
+fn changes(first: Sample, last: Sample) -> Traffic {
     if first.channel_id != last.channel_id
         || first.creationtime != last.creationtime
         || first.generation != last.generation
@@ -190,6 +190,19 @@ fn changes(first: Sample, last: Sample, interval: Duration) -> Traffic {
     };
     if a.source != "server_rtp" || b.source != "server_rtp" {
         return Traffic::unavailable("unavailable");
+    }
+    let (Ok(start), Ok(end)) = (
+        first.observed_at.parse::<jiff::Timestamp>(),
+        last.observed_at.parse::<jiff::Timestamp>(),
+    ) else {
+        return Traffic::unavailable("invalid_interval");
+    };
+    let interval = end.duration_since(start);
+    let Ok(interval_ms) = u64::try_from(interval.as_millis()) else {
+        return Traffic::unavailable("invalid_interval");
+    };
+    if interval_ms == 0 {
+        return Traffic::unavailable("invalid_interval");
     }
     let (Some(rx), Some(tx)) = (
         b.rxcount.checked_sub(a.rxcount),
@@ -205,11 +218,19 @@ fn changes(first: Sample, last: Sample, interval: Duration) -> Traffic {
     };
     Traffic {
         observation,
-        interval_ms: Some(u64::try_from(interval.as_millis()).unwrap_or(u64::MAX)),
+        interval_ms: Some(interval_ms),
         start: Some(first.observed_at),
         end: Some(last.observed_at),
         received: Some(rx),
         sent: Some(tx),
+    }
+}
+
+async fn packet_sample(remote: &Remote<'_>, path: &[&str]) -> Result<Option<Sample>, Error> {
+    match optional(remote, path).await {
+        Err(Error::Remote(status, _)) if status.is_server_error() => Ok(None),
+        Err(Error::Transport(_)) => Ok(None),
+        result => result,
     }
 }
 
@@ -219,7 +240,7 @@ async fn traffic(
     generation: Option<u64>,
 ) -> Result<Traffic, Error> {
     let path = ["rusterisk", "channels", &channel.id, "rtp-statistics"];
-    let Some(first): Option<Sample> = optional(remote, &path).await? else {
+    let Some(first) = packet_sample(remote, &path).await? else {
         return Ok(Traffic::unavailable("unavailable"));
     };
     if first.channel_id != channel.id
@@ -231,12 +252,11 @@ async fn traffic(
     if first.local.is_none() {
         return Ok(Traffic::unavailable("unavailable"));
     }
-    let start = Instant::now();
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let Some(last): Option<Sample> = optional(remote, &path).await? else {
+    let Some(last) = packet_sample(remote, &path).await? else {
         return Ok(Traffic::unavailable("unavailable"));
     };
-    Ok(changes(first, last, start.elapsed()))
+    Ok(changes(first, last))
 }
 
 async fn channel(remote: &Remote<'_>, id: &str) -> Result<Report, Error> {
@@ -266,7 +286,7 @@ async fn channel(remote: &Remote<'_>, id: &str) -> Result<Report, Error> {
         (_, "sent_only") => "Inspect the peer's transmitter and the server's inbound media route.",
         (_, "both_directions") => "Verify the received signal at the intended endpoint.",
         (_, "idle") => "Check the negotiated media address and direction at both ends.",
-        (_, "lifetime_changed" | "counter_reset") => {
+        (_, "lifetime_changed" | "counter_reset" | "invalid_interval") => {
             "Start another sample against the current channel generation."
         }
         _ => "Check whether the server and transport expose packet measurements for this channel.",
@@ -374,12 +394,34 @@ mod tests {
             channel_id: "leg".into(),
             creationtime: "start".into(),
             generation,
-            observed_at: "sample".into(),
+            observed_at: "2026-11-21T10:00:00.000Z".into(),
             local: Some(Counts {
                 source: "server_rtp".into(),
                 rxcount: rx,
                 txcount: tx,
             }),
+        }
+    }
+
+    #[test]
+    fn packet_interval_uses_the_two_capture_times() {
+        let mut first = sample(4, 7, 1);
+        first.observed_at = "2026-11-21T10:00:00.000Z".into();
+        let mut last = sample(5, 9, 1);
+        last.observed_at = "2026-11-21T11:00:02.250+01:00".into();
+        let span = changes(first, last);
+        assert_eq!(span.interval_ms, Some(2250));
+    }
+
+    #[test]
+    fn invalid_or_non_increasing_capture_times_leave_the_interval_unavailable() {
+        for end in ["invalid", "2026-11-21T09:59:59Z", "2026-11-21T10:00:00Z"] {
+            let mut last = sample(5, 9, 1);
+            last.observed_at = end.into();
+            let traffic = changes(sample(4, 7, 1), last);
+            assert_eq!(traffic.observation, "invalid_interval");
+            assert!(traffic.interval_ms.is_none());
+            assert!(traffic.received.is_none());
         }
     }
 
@@ -393,11 +435,9 @@ mod tests {
             (4, 10, 2, "lifetime_changed"),
             (3, 10, 1, "counter_reset"),
         ] {
-            let result = changes(
-                sample(4, 7, 1),
-                sample(rx, tx, generation),
-                Duration::from_millis(505),
-            );
+            let mut last = sample(rx, tx, generation);
+            last.observed_at = "2026-11-21T10:00:00.505Z".into();
+            let result = changes(sample(4, 7, 1), last);
             assert_eq!(result.observation, expected);
             if let Some(interval) = result.interval_ms {
                 assert_eq!(interval, 505);
