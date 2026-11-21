@@ -71,6 +71,21 @@ struct Located {
     damage: Option<io::Error>,
 }
 
+fn lookup_after_launch(
+    mut lookup: impl FnMut() -> io::Result<Vec<u8>>,
+    mut wait: impl FnMut(Duration),
+) -> io::Result<Vec<u8>> {
+    let mut ids = lookup()?;
+    for _ in 0..3 {
+        if !ids.is_empty() {
+            break;
+        }
+        wait(Duration::from_secs(10));
+        ids = lookup()?;
+    }
+    Ok(ids)
+}
+
 fn locate_container(
     cidfile: io::Result<Vec<u8>>,
     attempted: bool,
@@ -203,7 +218,7 @@ impl Reference {
         supervisor: &mut CommandSupervisor,
     ) -> io::Result<Located> {
         let filter = format!("label={OWNERSHIP_LABEL}={}", self.owner);
-        locate_container(read(&self.cidfile, 65), self.attempted, || {
+        let lookup = || {
             let observed = commands.run(
                 docker(&arguments([
                     "container",
@@ -220,6 +235,9 @@ impl Reference {
             )?;
             observed.text()?;
             Ok(observed.stdout)
+        };
+        locate_container(read(&self.cidfile, 65), self.attempted, || {
+            lookup_after_launch(lookup, std::thread::sleep)
         })
     }
 
@@ -437,6 +455,34 @@ mod tests {
         ] {
             assert!(!boot_confirmed(pending), "{pending:?}");
         }
+    }
+
+    #[test]
+    fn a_delayed_docker_creation_stays_visible_to_cleanup() -> io::Result<()> {
+        let id = "a".repeat(64).into_bytes();
+        let mut observations = [Vec::new(), Vec::new(), id.clone()].into_iter();
+        let mut waits = 0;
+        let found = lookup_after_launch(
+            || {
+                observations
+                    .next()
+                    .ok_or_else(|| io::Error::other("lookup after discovery"))
+            },
+            |_| waits += 1,
+        )?;
+        assert_eq!(found, id);
+        assert_eq!(waits, 2);
+        let mut reads = 0;
+        let absent = lookup_after_launch(
+            || {
+                reads += 1;
+                Ok(Vec::new())
+            },
+            |_| {},
+        )?;
+        assert!(absent.is_empty());
+        assert_eq!(reads, 4);
+        Ok(())
     }
 
     #[test]
