@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = ["crates-io"]
-description = "Check and reload a running Rusterisk server from the command line"
+description = "Inspect call routing, diagnose media, and verify test calls on a running Rusterisk server"
 readme = "README.md"
 include = ["src/**", "tests/**", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
 
