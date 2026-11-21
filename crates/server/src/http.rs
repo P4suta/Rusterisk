@@ -15,6 +15,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 mod configuration;
 mod external_media;
+mod observation;
 mod recording;
 mod request_body;
 
@@ -33,7 +34,9 @@ pub fn router_with_media(controller: Controller, media: crate::media::MediaPort)
 }
 
 pub(crate) fn with_management(application: Router, controller: Controller) -> Router {
-    application.merge(configuration::router(controller))
+    application
+        .merge(configuration::router(controller.clone()))
+        .merge(observation::router(controller))
 }
 
 pub(crate) fn router_with_media_for_scheme(
