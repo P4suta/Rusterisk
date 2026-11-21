@@ -71,7 +71,12 @@ pub(crate) fn router_for_scheme(controller: Controller, scheme: HttpScheme) -> R
               headers: HeaderMap,
               body: Bytes| { api(controller, scheme, method, uri, headers, body) };
     Router::new()
-        .route("/ari/events", get(crate::websocket::upgrade))
+        .route(
+            "/ari/events",
+            get(crate::websocket::upgrade)
+                .head(handler)
+                .fallback(handler),
+        )
         .fallback(any(handler))
         .layer(DefaultBodyLimit::max(16384))
         .with_state(controller)
@@ -194,6 +199,24 @@ fn originate(
             .transpose()
             .map_err(|_| ControlError::Invalid("Invalid timeout"))?
             .unwrap_or(30),
+    })
+}
+
+fn create_bridge(
+    id: ChannelId,
+    parameters: &BTreeMap<String, String>,
+) -> Result<Action, ControlError> {
+    if let Some(types) = parameters.get("type") {
+        if types
+            .split(',')
+            .any(|kind| !matches!(kind, "" | "mixing" | "proxy_media"))
+        {
+            return Err(ControlError::Unsupported);
+        }
+    }
+    Ok(Action::CreateBridge {
+        id,
+        name: parameters.get("name").cloned().unwrap_or_default(),
     })
 }
 
@@ -382,10 +405,59 @@ async fn dispatch(
     body: &[u8],
 ) -> Result<Response, ControlError> {
     let path = uri.path();
-    if method == Method::GET && path == "/rusterisk/openapi.json" {
+    let decoded = path
+        .split('/')
+        .skip(1)
+        .map(|part| percent_encoding::percent_decode_str(part).decode_utf8())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ControlError::Invalid("Invalid path encoding"))?;
+    let segments: Vec<&str> = decoded.iter().map(|part| part.as_ref()).collect();
+    let operation = if let ["ari", resource @ ..] = segments.as_slice() {
+        if let Some(slashless) = path.strip_suffix('/') {
+            return Ok((
+                StatusCode::NOT_FOUND,
+                Json(rusterisk_api::ApiError {
+                    message: format!("ARI URLs do not end with a slash. Try {slashless}"),
+                }),
+            )
+                .into_response());
+        }
+        match rusterisk_api::ari_route(method.as_str(), resource.iter().copied()) {
+            rusterisk_api::AriRoute::Declared(operation) => Some(operation),
+            rusterisk_api::AriRoute::Unsupported => return Err(ControlError::Unsupported),
+            rusterisk_api::AriRoute::NotFound => {
+                return Err(ControlError::NotFound("Resource not found"))
+            }
+            rusterisk_api::AriRoute::OtherMethods(allow) => {
+                let mut response = if method == Method::OPTIONS {
+                    StatusCode::NO_CONTENT.into_response()
+                } else {
+                    (
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        Json(rusterisk_api::ApiError {
+                            message: "Invalid method".into(),
+                        }),
+                    )
+                        .into_response()
+                };
+                response.headers_mut().insert(
+                    axum::http::header::ALLOW,
+                    allow
+                        .parse()
+                        .map_err(|error: axum::http::header::InvalidHeaderValue| {
+                            ControlError::Encoding(error.to_string())
+                        })?,
+                );
+                return Ok(response);
+            }
+        }
+    } else {
+        None
+    };
+    if method == Method::GET && segments == ["rusterisk", "openapi.json"] {
         return Ok(Json(rusterisk_api::openapi()).into_response());
     }
-    if method == Method::GET && path == "/ari/asterisk/ping" {
+    if method == Method::GET && segments == ["ari", "asterisk", "ping"] {
         return Ok(Json(rusterisk_api::AsteriskPing {
             ping: "pong".into(),
             timestamp: crate::utc_timestamps::now_default(),
@@ -393,7 +465,7 @@ async fn dispatch(
         })
         .into_response());
     }
-    if method == Method::GET && path == "/ari/asterisk/info" {
+    if method == Method::GET && segments == ["ari", "asterisk", "info"] {
         return Ok(Json(
             controller
                 .server_info(parameters.get("only").map(String::as_str))
@@ -401,7 +473,7 @@ async fn dispatch(
         )
         .into_response());
     }
-    if method == Method::GET && path == "/rusterisk/capabilities" {
+    if method == Method::GET && segments == ["rusterisk", "capabilities"] {
         let operations: Vec<Value> = rusterisk_api::OPERATIONS
             .iter()
             .map(|operation| json!({"operation": operation.id, "call_verified": false}))
@@ -411,22 +483,17 @@ async fn dispatch(
         )
         .into_response());
     }
-    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     if method == Method::GET {
-        let sound_query = if path == "/ari/sounds" {
-            Some(crate::runner::SoundQuery::List {
+        let sound_query = match segments.as_slice() {
+            ["ari", "sounds"] => Some(crate::runner::SoundQuery::List {
                 language: parameters.get("lang").cloned(),
                 format: parameters.get("format").cloned(),
-            })
-        } else if let Some(name) = path.strip_prefix("/ari/sounds/") {
-            let name = percent_encoding::percent_decode_str(name)
-                .decode_utf8()
-                .map_err(|_| ControlError::Invalid("Invalid sound name"))?;
-            let name = rusterisk_api::SoundId::try_from(name.into_owned())
-                .map_err(|_| ControlError::Invalid("Invalid sound name"))?;
-            Some(crate::runner::SoundQuery::Get(name))
-        } else {
-            None
+            }),
+            ["ari", "sounds", name] => Some(crate::runner::SoundQuery::Get(
+                rusterisk_api::SoundId::try_from((*name).to_owned())
+                    .map_err(|_| ControlError::Invalid("Invalid sound name"))?,
+            )),
+            _ => None,
         };
         if let Some(query) = sound_query {
             return response(controller.sounds(credentials, origin, query).await?);
@@ -465,11 +532,6 @@ async fn dispatch(
                 .await?,
         );
     }
-    let operation = path.strip_prefix("/ari").and_then(|path| {
-        rusterisk_api::OPERATIONS
-            .iter()
-            .find(|operation| operation.matches(method.as_str(), path))
-    });
     let fields = request_body::decode(parameters, operation, body)?;
     let parameters = fields.parameters.as_ref();
     let stored = match (method.as_str(), segments.as_slice()) {
@@ -694,15 +756,11 @@ async fn dispatch(
         },
         ("DELETE", ["ari", "channels", channel]) => Action::Hangup(id(channel)?),
         ("GET", ["ari", "bridges"]) => Action::ListBridges,
-        ("POST", ["ari", "bridges"]) => Action::CreateBridge {
-            id: optional_id(parameters, "bridgeId")?,
-            name: parameters.get("name").cloned().unwrap_or_default(),
-        },
+        ("POST", ["ari", "bridges"]) => {
+            create_bridge(optional_id(parameters, "bridgeId")?, parameters)?
+        }
         ("GET", ["ari", "bridges", bridge]) => Action::GetBridge(id(bridge)?),
-        ("POST", ["ari", "bridges", bridge]) => Action::CreateBridge {
-            id: id(bridge)?,
-            name: parameters.get("name").cloned().unwrap_or_default(),
-        },
+        ("POST", ["ari", "bridges", bridge]) => create_bridge(id(bridge)?, parameters)?,
         ("DELETE", ["ari", "bridges", bridge]) => Action::DestroyBridge(id(bridge)?),
         ("POST", ["ari", "bridges", bridge, "addChannel"]) => Action::AddChannels {
             bridge: id(bridge)?,
@@ -718,15 +776,16 @@ async fn dispatch(
                 .map(id)
                 .collect::<Result<Vec<_>, _>>()?,
         },
-        (_, ["ari", ..])
-            if path
-                .strip_prefix("/ari")
-                .is_some_and(|path| rusterisk_api::is_known_operation(method.as_str(), path)) =>
-        {
-            return Err(ControlError::Unsupported)
-        }
+        _ if operation.is_some() => return Err(ControlError::Unsupported),
         _ => return Err(ControlError::NotFound("Resource not found")),
     };
+    if let Action::Answer(channel) = action {
+        return response(
+            controller
+                .answer_channel(credentials, origin, channel)
+                .await?,
+        );
+    }
     response(
         controller
             .execute_with_variables(credentials, origin, action, fields.variables)
@@ -751,7 +810,11 @@ async fn api(
             .transpose()
             .map_err(|_| ControlError::Forbidden)?;
         controller
-            .authorize(credentials.clone(), origin.clone(), method == Method::GET)
+            .authorize(
+                credentials.clone(),
+                origin.clone(),
+                method == Method::GET || method == Method::OPTIONS,
+            )
             .await?;
         if let Some(response) = documentation(&method, &uri, &headers, scheme)? {
             return Ok(response);

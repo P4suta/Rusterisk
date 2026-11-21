@@ -138,7 +138,12 @@ async fn http_recording_admission_reports_conflicts_and_preserves_pause_stop_and
         assert!(matches!(finished.kind, EventKind::RecordingFinished { recording } if recording.name == "limited" && recording.state == RecordingState::Done));
         assert_eq!(app.clone().oneshot(request("GET", "/ari/recordings/live/limited", "app")?).await.map_err(failure)?.status(), StatusCode::NOT_FOUND);
         assert!(directory.path().join("recordings/limited.wav").exists());
-        assert_eq!(app.oneshot(request("POST", "/ari/bridges/mix/record?name=invalid&format=wav&terminateOn=0", "app")?).await.map_err(failure)?.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(app.clone().oneshot(request("POST", "/ari/bridges/mix/record?name=invalid&format=wav&terminateOn=0", "app")?).await.map_err(failure)?.status(), StatusCode::BAD_REQUEST);
+        for body in [r#"{"terminateOn":"0"}"#, r#"{"maxSilenceSeconds":-1}"#] {
+            let mut req = request("POST", "/ari/bridges/mix/record?name=json-options&format=wav&terminateOn=none&maxSilenceSeconds=1", "app")?;
+            *req.body_mut() = Body::from(body);
+            assert_eq!(app.clone().oneshot(req).await.map_err(failure)?.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
         Ok(())
     }.await;
     controller.shutdown();

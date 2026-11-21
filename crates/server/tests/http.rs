@@ -9,7 +9,176 @@ use rusterisk_config::Config;
 use rusterisk_server::{
     http::router, ControlError, Controller, Credentials, IncomingCall, IncomingTarget,
 };
+use std::collections::{BTreeMap, BTreeSet};
 use tower::ServiceExt;
+
+#[tokio::test]
+async fn published_paths_report_methods_and_unavailable_operations_through_http(
+) -> Result<(), ControlError> {
+    let (controller, runner, _effects) = Controller::new(config()?, 4);
+    let task = tokio::spawn(runner.run());
+    let app = router(controller.clone());
+    let mut paths: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+    let mut unavailable = 0;
+    for row in include_str!("../../api/tests/fixtures/asterisk-22.9.0-routes.tsv").lines() {
+        let mut fields = row.split('\t');
+        let method = fields
+            .next()
+            .ok_or(ControlError::Invalid("Missing fixture method"))?;
+        let template = fields
+            .next()
+            .ok_or(ControlError::Invalid("Missing fixture path"))?;
+        let concrete = template
+            .split('/')
+            .map(|part| if part.starts_with('{') { "probe" } else { part })
+            .collect::<Vec<_>>()
+            .join("/");
+        let uri = format!("/ari{concrete}");
+        paths.entry(uri.clone()).or_default().insert(method);
+        if rusterisk_api::OPERATIONS
+            .iter()
+            .any(|op| op.method.upper() == method && op.path == template)
+        {
+            continue;
+        }
+        unavailable += 1;
+        for (user, expected) in [
+            (None, StatusCode::UNAUTHORIZED),
+            (
+                Some("reader"),
+                if method == "GET" {
+                    StatusCode::NOT_IMPLEMENTED
+                } else {
+                    StatusCode::FORBIDDEN
+                },
+            ),
+            (Some("test"), StatusCode::NOT_IMPLEMENTED),
+        ] {
+            let reply = app
+                .clone()
+                .oneshot(request(method, &uri, user)?)
+                .await
+                .unwrap_or_else(|error| match error {});
+            assert_eq!(reply.status(), expected, "{method} {uri} {user:?}");
+            if expected == StatusCode::NOT_IMPLEMENTED {
+                let bytes = reply
+                    .into_body()
+                    .collect()
+                    .await
+                    .map_err(|error| ControlError::Adapter(error.to_string()))?
+                    .to_bytes();
+                assert_eq!(
+                    serde_json::from_slice::<rusterisk_api::ApiError>(&bytes)?.message,
+                    "Operation not supported"
+                );
+            }
+        }
+    }
+    assert_eq!(unavailable, 38);
+    assert_eq!(paths.len(), 72);
+    for (uri, methods) in paths {
+        let allow = ["OPTIONS", "GET", "POST", "PUT", "DELETE"]
+            .into_iter()
+            .filter(|method| {
+                *method == "OPTIONS" || (uri != "/ari/events" && methods.contains(method))
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        for (method, status) in [
+            ("OPTIONS", StatusCode::NO_CONTENT),
+            ("PATCH", StatusCode::METHOD_NOT_ALLOWED),
+        ] {
+            let reply = app
+                .clone()
+                .oneshot(request(method, &uri, Some("test"))?)
+                .await
+                .unwrap_or_else(|error| match error {});
+            assert_eq!(reply.status(), status, "{method} {uri}");
+            assert_eq!(
+                reply
+                    .headers()
+                    .get("allow")
+                    .and_then(|value| value.to_str().ok()),
+                Some(allow.as_str()),
+                "{method} {uri}"
+            );
+        }
+    }
+    controller.shutdown();
+    task.await
+        .map_err(|error| ControlError::Adapter(error.to_string()))??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn ari_routing_distinguishes_unknown_methods_and_unavailable_adapters(
+) -> Result<(), ControlError> {
+    let (controller, runner, _effects) = Controller::new(config()?, 8);
+    let task = tokio::spawn(runner.run());
+    let app = router(controller.clone());
+    for (method, path, status, allow) in [
+        ("GET", "/ari/asterisk/modules", 501, None),
+        ("GET", "/ari/channels/user/rtp_statistics", 501, None),
+        ("PUT", "/ari/deviceStates/test", 501, None),
+        ("POST", "/ari/channels/create/answer", 404, None),
+        (
+            "DELETE",
+            "/ari/channels/%63reate",
+            405,
+            Some("OPTIONS,POST"),
+        ),
+        ("GET", "/ari/%61sterisk/ping", 200, None),
+        (
+            "DELETE",
+            "/ari/channels/externalMedia",
+            405,
+            Some("OPTIONS,POST"),
+        ),
+        ("OPTIONS", "/ari/channels/create", 204, Some("OPTIONS,POST")),
+        ("OPTIONS", "/ari/events", 204, Some("OPTIONS")),
+        (
+            "OPTIONS",
+            "/ari/channels/user",
+            204,
+            Some("OPTIONS,GET,POST,DELETE"),
+        ),
+        ("OPTIONS", "/ari/missing", 404, None),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(request(method, path, Some("test"))?)
+            .await
+            .unwrap_or_else(|error| match error {});
+        assert_eq!(response.status().as_u16(), status, "{method} {path}");
+        assert_eq!(
+            response
+                .headers()
+                .get("allow")
+                .and_then(|value| value.to_str().ok()),
+            allow,
+            "{method} {path}"
+        );
+    }
+    let response = app
+        .oneshot(request("GET", "/ari/channels/", Some("test"))?)
+        .await
+        .unwrap_or_else(|error| match error {});
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .map_err(|error| ControlError::Adapter(error.to_string()))?
+        .to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<rusterisk_api::ApiError>(&body)?.message,
+        "ARI URLs do not end with a slash. Try /ari/channels"
+    );
+    controller.shutdown();
+    task.await
+        .map_err(|error| ControlError::Adapter(error.to_string()))??;
+    Ok(())
+}
 
 fn config() -> Result<Config, ControlError> {
     Config::parse("[general]\nbindaddr=127.0.0.1\n", "[general]\nallowed_origins=https://localhost\n[test]\ntype=user\npassword=password\n[reader]\ntype=user\npassword=password\nread_only=yes\n", "", "", "").map_err(|error| ControlError::Adapter(error.to_string()))
@@ -248,11 +417,130 @@ async fn authentication_origin_and_read_only_permissions_apply_to_all_resources(
 }
 
 #[tokio::test]
+async fn unavailable_bridge_features_preserve_membership_until_an_ordinary_add(
+) -> Result<(), ControlError> {
+    let (controller, runner, _effects) = Controller::new(config()?, 8);
+    let task = tokio::spawn(runner.run());
+    let app = router(controller.clone());
+    let _subscription = controller
+        .subscribe(
+            Credentials::new("test".into(), "password".into())?,
+            None,
+            "phones".into(),
+        )
+        .await?;
+    let channel = ChannelId::try_from("incoming".to_owned())?;
+    let key = controller
+        .incoming(IncomingCall {
+            id: channel.clone(),
+            endpoint: "phone".into(),
+            caller: "100".into(),
+            context: "internal".into(),
+            extension: "100".into(),
+            target: IncomingTarget::Stasis {
+                application: "phones".into(),
+                arguments: Vec::new(),
+            },
+        })
+        .await?;
+    controller
+        .signal(rusterisk_server::Signal::Milestone {
+            key,
+            milestone: rusterisk_server::Milestone::Answered,
+        })
+        .await?;
+    let route = "/ari/bridges/mix/addChannel?channel=incoming";
+    let send = |req| app.clone().oneshot(req);
+    let created = send(request("POST", "/ari/bridges?bridgeId=mix", Some("test"))?)
+        .await
+        .unwrap_or_else(|e| match e {});
+    assert_eq!(created.status(), StatusCode::OK);
+    for (query, body) in [
+        ("&mute=true", ""),
+        ("", r#"{"absorbDTMF":true}"#),
+        ("&inhibitConnectedLineUpdates=yes", ""),
+        ("", r#"{"role":"announcer"}"#),
+    ] {
+        let mut req = request("POST", &format!("{route}{query}"), Some("test"))?;
+        *req.body_mut() = Body::from(body);
+        let response = send(req).await.unwrap_or_else(|e| match e {});
+        assert_eq!(
+            response.status(),
+            StatusCode::NOT_IMPLEMENTED,
+            "{query} {body}"
+        );
+    }
+    for added in [false, true] {
+        if added {
+            let mut req = request(
+                "POST",
+                &format!("{route}&mute=true&absorbDTMF=no"),
+                Some("test"),
+            )?;
+            *req.body_mut() = Body::from(r#"{"mute":false,"inhibitConnectedLineUpdates":false}"#);
+            assert_eq!(
+                send(req).await.unwrap_or_else(|e| match e {}).status(),
+                StatusCode::NO_CONTENT
+            );
+        }
+        let response = send(request("GET", "/ari/bridges/mix", Some("test"))?)
+            .await
+            .unwrap_or_else(|e| match e {});
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .map_err(|error| ControlError::Adapter(error.to_string()))?
+            .to_bytes();
+        let bridge: rusterisk_api::Bridge = serde_json::from_slice(&bytes)?;
+        assert_eq!(
+            bridge.channels.as_slice(),
+            if added {
+                std::slice::from_ref(&channel)
+            } else {
+                &[]
+            }
+        );
+    }
+    controller.shutdown();
+    task.await
+        .map_err(|error| ControlError::Adapter(error.to_string()))??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn http_bridge_lifecycle_and_known_unsupported_operations_have_ari_errors(
 ) -> Result<(), ControlError> {
     let (controller, runner, _effects) = Controller::new(config()?, 8);
     let task = tokio::spawn(runner.run());
     let app = router(controller.clone());
+    for (path, body) in [
+        ("/ari/bridges?bridgeId=staging&type=holding", ""),
+        (
+            "/ari/bridges/staging?type=mixing",
+            r#"{"type":"mixing,video_sfu"}"#,
+        ),
+    ] {
+        let mut req = request("POST", path, Some("test"))?;
+        *req.body_mut() = Body::from(body);
+        assert_eq!(
+            app.clone()
+                .oneshot(req)
+                .await
+                .unwrap_or_else(|e| match e {})
+                .status(),
+            StatusCode::NOT_IMPLEMENTED
+        );
+        let read = request("GET", "/ari/bridges/staging", Some("test"))?;
+        assert_eq!(
+            app.clone()
+                .oneshot(read)
+                .await
+                .unwrap_or_else(|e| match e {})
+                .status(),
+            StatusCode::NOT_FOUND
+        );
+    }
     let created = app
         .clone()
         .oneshot(request(
