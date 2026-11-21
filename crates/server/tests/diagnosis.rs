@@ -1,0 +1,136 @@
+use axum::{body::Body, http::Request, Router};
+use http_body_util::BodyExt;
+use rusterisk_api::ChannelId;
+use rusterisk_config::Config;
+use rusterisk_server::{
+    http::router, Action, ControlError, Controller, Credentials, IncomingCall, IncomingTarget,
+    Milestone, Signal,
+};
+use serde_json::Value;
+use tower::ServiceExt;
+
+fn fail(error: impl std::fmt::Display) -> ControlError {
+    ControlError::Adapter(error.to_string())
+}
+
+async fn read(app: &Router, path: &str) -> Result<Value, ControlError> {
+    let req = Request::builder()
+        .uri(path)
+        .header("Authorization", "Basic cmVhZGVyOnBhc3N3b3Jk")
+        .body(Body::empty())
+        .map_err(fail)?;
+    let response = app
+        .clone()
+        .oneshot(req)
+        .await
+        .unwrap_or_else(|never| match never {});
+    assert_eq!(response.status().as_u16(), 200, "{path}");
+    Ok(serde_json::from_slice(
+        &response
+            .into_body()
+            .collect()
+            .await
+            .map_err(fail)?
+            .to_bytes(),
+    )?)
+}
+
+#[tokio::test]
+async fn diagnosis_follows_dialplan_and_live_call_identity_with_read_only_credentials(
+) -> Result<(), ControlError> {
+    let config=Config::parse("[general]\nbindaddr=127.0.0.1\n","[app]\ntype=user\npassword=write\n[reader]\ntype=user\nread_only=yes\npassword=password\n",
+      "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=local\n[a]\ntype=aor\ncontact=sip:p@127.0.0.1:5061\n[b]\ntype=aor\n[desk]\ntype=endpoint\ntransport=udp\nauth=auth\naors=a\nallow=ulaw\n[mobile]\ntype=endpoint\ntransport=udp\nauth=auth\naors=b\nallow=ulaw\n",
+      "","[home]\nexten => _2XX,1,Goto(route,300,1)\nexten => 201,1,Stasis(phone)\n[route]\nexten => 300,1,Dial(PJSIP/desk&PJSIP/mobile)\n").map_err(fail)?;
+    let (controller, runner, _effects) = Controller::new(config, 8);
+    let task = tokio::spawn(runner.run());
+    let result = async {
+        let app = router(controller.clone());
+        let owner = Credentials::new("app".into(), "write".into())?;
+        let _phone = controller
+            .subscribe(owner.clone(), None, "phone".into())
+            .await?;
+        for name in ["first-leg", "second-leg"] {
+            let key = controller
+                .incoming(IncomingCall {
+                    id: ChannelId::try_from(name.to_owned())?,
+                    endpoint: "desk".into(),
+                    caller: "432".into(),
+                    context: "home".into(),
+                    extension: "201".into(),
+                    target: IncomingTarget::Stasis {
+                        application: "phone".into(),
+                        arguments: Vec::new(),
+                    },
+                })
+                .await?;
+            controller
+                .signal(Signal::Milestone {
+                    key: key.clone(),
+                    milestone: Milestone::Answered,
+                })
+                .await?;
+            if name == "first-leg" {
+                controller
+                    .execute(owner.clone(), None, Action::Hold(key.id))
+                    .await?;
+            }
+        }
+        let key = rusterisk_server::EndpointKey {
+            resource: "mobile".into(),
+            generation: 1,
+        };
+        for presence in [
+            rusterisk_core::ContactPresence::Present,
+            rusterisk_core::ContactPresence::Absent,
+        ] {
+            controller
+                .signal(Signal::EndpointContact {
+                    key: key.clone(),
+                    presence,
+                })
+                .await?;
+        }
+        assert_eq!(
+            read(&app, "/rusterisk/diagnostics/extensions/home/999").await?["disposition"],
+            "missing"
+        );
+        let route = read(&app, "/rusterisk/diagnostics/extensions/home/234").await?;
+        assert_eq!(route["steps"][0]["pattern"], "_2XX");
+        assert_eq!(route["disposition"], "dial");
+        assert_eq!(route["destinations"][0]["endpoint"], "desk");
+        assert_eq!(route["destinations"][0]["static_contact"], true);
+        assert_eq!(route["destinations"][1]["registration"], "absent");
+        assert_eq!(route["destinations"][1]["available"], false);
+        let handoff = read(&app, "/rusterisk/diagnostics/extensions/home/201").await?;
+        assert_eq!(handoff["application"], "phone");
+        assert_eq!(handoff["channels"].as_array().map(Vec::len), Some(2));
+        for (name, held) in [("first-leg", true), ("second-leg", false)] {
+            let state = read(&app, &format!("/rusterisk/diagnostics/channels/{name}")).await?;
+            assert_eq!(state["held"], held);
+            assert_eq!(state["state"], "Up");
+            assert_eq!(state["endpoint"], "desk");
+            assert_eq!(state["id"], name);
+        }
+        let initial = read(&app, "/rusterisk/diagnostics/channels/second-leg").await?;
+        let key = rusterisk_server::CallKey {
+            id: ChannelId::try_from("second-leg".to_owned())?,
+            generation: initial["generation"]
+                .as_u64()
+                .ok_or(ControlError::Capacity)?,
+        };
+        controller
+            .signal(Signal::PeerDirection {
+                key,
+                direction: rusterisk_core::PeerMediaDirection::SendOnly,
+            })
+            .await?;
+        let remote_hold = read(&app, "/rusterisk/diagnostics/channels/second-leg").await?;
+        assert_eq!(remote_hold["held"], true);
+        assert_eq!(remote_hold["hold_source"], "peer");
+        Ok(())
+    }
+    .await;
+    controller.shutdown();
+    task.await.map_err(fail)??;
+    result
+}

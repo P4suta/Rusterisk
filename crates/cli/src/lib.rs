@@ -1,4 +1,6 @@
+mod doctor;
 mod http;
+pub use doctor::Doctor;
 mod inspection;
 mod options;
 mod profiles;
@@ -111,4 +113,9 @@ pub fn inspect(
 pub fn watch(target: &Watch, options: &RemoteOptions, json: bool) -> Result<(), Error> {
     let (runtime, remote) = session(options)?;
     runtime.block_on(target.follow(&remote, json, &mut io::stdout().lock()))
+}
+
+pub fn diagnose(operation: &Doctor, options: &RemoteOptions, json: bool) -> Result<String, Error> {
+    let (runtime, remote) = session(options)?;
+    runtime.block_on(operation.read(&remote, json))
 }

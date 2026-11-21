@@ -1,6 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+pub mod diagnosis;
 mod event_filter;
 mod event_source;
 mod published_event;
@@ -489,6 +490,8 @@ pub struct Operation {
 pub enum ManagementOperation {
     ReloadConfiguration,
     ChannelRtpObservation,
+    DiagnoseExtension,
+    DiagnoseChannel,
 }
 
 impl ManagementOperation {
@@ -512,6 +515,24 @@ impl ManagementOperation {
                 success_status: 200,
                 parameters: &[],
             },
+            Self::DiagnoseExtension => &Operation {
+                id: "diagnostics.extension",
+                nickname: "diagnoseExtension",
+                method: Method::Get,
+                path: "/rusterisk/diagnostics/extensions/{context}/{extension}",
+                response: "RouteDiagnosis",
+                success_status: 200,
+                parameters: &[],
+            },
+            Self::DiagnoseChannel => &Operation {
+                id: "diagnostics.channel",
+                nickname: "diagnoseChannel",
+                method: Method::Get,
+                path: "/rusterisk/diagnostics/channels/{channelId}",
+                response: "ChannelDiagnosis",
+                success_status: 200,
+                parameters: &[],
+            },
         }
     }
 }
@@ -519,6 +540,8 @@ impl ManagementOperation {
 pub const MANAGEMENT_OPERATIONS: &[ManagementOperation] = &[
     ManagementOperation::ReloadConfiguration,
     ManagementOperation::ChannelRtpObservation,
+    ManagementOperation::DiagnoseExtension,
+    ManagementOperation::DiagnoseChannel,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1259,6 +1282,8 @@ pub fn schemas() -> Value {
     let mut generator = settings.into_generator();
     let _channel = generator.subschema_for::<Channel>();
     let _observation = generator.subschema_for::<observation::WatchRecord>();
+    let _route_diagnosis = generator.subschema_for::<diagnosis::RouteDiagnosis>();
+    let _channel_diagnosis = generator.subschema_for::<diagnosis::ChannelDiagnosis>();
     let _rtp = generator.subschema_for::<RtpObservation>();
     let _bridge = generator.subschema_for::<Bridge>();
     let _application = generator.subschema_for::<Application>();
