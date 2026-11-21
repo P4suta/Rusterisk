@@ -48,3 +48,28 @@ Endpoint objects include `technology`, `resource`, `routing_state`, `registratio
 The [ARI endpoint model](https://github.com/asterisk/asterisk/blob/22.9.0/rest-api/api-docs/endpoints.json) reports routing availability, so registration is `unknown` for static and dynamic contacts.
 Each channel object has `kind` set to `call_leg` and includes `id`, `name`, `state`, `creationtime`, and `bridge_ids`.
 A failed request writes a diagnostic to standard error and exits unsuccessfully.
+
+## Named servers
+
+Store server origins and usernames in `rusterisk/profiles.json` under the [XDG configuration directory](https://specifications.freedesktop.org/basedir/latest/).
+An absolute `XDG_CONFIG_HOME` selects the directory.
+The default is `$HOME/.config` on Unix and `%APPDATA%` on Windows.
+
+```json
+{
+  "profiles": [
+    {"name": "lab", "server": "http://127.0.0.1:8088", "username": "tester"},
+    {"name": "live", "server": "https://pbx.example.org", "username": "reader"}
+  ]
+}
+```
+
+List configured names offline with `rusterisk-cli profiles`.
+Select a profile for any remote command and supply the password at invocation.
+
+```sh
+rusterisk-cli status --profile lab --password-stdin < password.txt
+```
+
+Use either a named profile or the explicit server and username options.
+A missing profile, a duplicate name, an invalid origin, or an unknown configuration field causes profile selection to fail before connecting.

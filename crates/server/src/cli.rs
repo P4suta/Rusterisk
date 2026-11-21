@@ -27,6 +27,7 @@ pub enum CliError {
     Capacity,
     MissingReloadArgument,
     InvalidReloadArgument,
+    ReloadProfile(&'static str),
 }
 
 impl std::fmt::Display for CliError {
@@ -37,9 +38,10 @@ impl std::fmt::Display for CliError {
             Self::DuplicateOption => "Duplicate option",
             Self::Capacity => "Command arguments exceed capacity",
             Self::MissingReloadArgument => {
-                "Reload requires --server, --username, and --password-stdin"
+                "Reload requires --password-stdin and either --profile or both --server and --username"
             }
             Self::InvalidReloadArgument => "Invalid reload argument",
+            Self::ReloadProfile(message) => message,
         })
     }
 }
@@ -124,6 +126,7 @@ impl Command {
                 rusterisk_cli::OptionError::Duplicate => CliError::DuplicateOption,
                 rusterisk_cli::OptionError::Capacity => CliError::Capacity,
                 rusterisk_cli::OptionError::Invalid => CliError::InvalidReloadArgument,
+                rusterisk_cli::OptionError::Profile(message) => CliError::ReloadProfile(message),
             })?;
         Ok(Self::Reload {
             server: options.server,

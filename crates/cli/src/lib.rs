@@ -1,6 +1,8 @@
 mod http;
 mod inspection;
 mod options;
+mod profiles;
+pub use profiles::profile_names;
 
 pub use inspection::Inspection;
 pub use options::{OptionError, RemoteOptions};

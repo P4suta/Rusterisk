@@ -7,16 +7,20 @@ pub enum OptionError {
     Duplicate,
     Capacity,
     Invalid,
+    Profile(&'static str),
 }
 
 impl std::fmt::Display for OptionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Unknown => "Unknown option",
-            Self::Missing => "Supply --server, --username, and --password-stdin",
+            Self::Missing => {
+                "Supply --password-stdin and either --profile or both --server and --username"
+            }
             Self::Duplicate => "Duplicate option",
             Self::Capacity => "Command arguments exceed capacity",
             Self::Invalid => "Invalid command argument",
+            Self::Profile(message) => message,
         })
     }
 }
@@ -41,14 +45,15 @@ impl RemoteOptions {
         let mut json = false;
         let mut server = None;
         let mut username = None;
+        let mut profile = None;
         let mut password_stdin = false;
         while let Some(argument) = arguments.next() {
             match argument.to_str() {
-                Some(option @ ("--server" | "--username")) => {
-                    let (destination, limit) = if option == "--server" {
-                        (&mut server, 2048)
-                    } else {
-                        (&mut username, 128)
+                Some(option @ ("--server" | "--username" | "--profile")) => {
+                    let (destination, limit) = match option {
+                        "--server" => (&mut server, 2048),
+                        "--username" => (&mut username, 128),
+                        _ => (&mut profile, 64),
                     };
                     if destination.is_some() {
                         return Err(OptionError::Duplicate);
@@ -71,6 +76,14 @@ impl RemoteOptions {
         }
         if !password_stdin {
             return Err(OptionError::Missing);
+        }
+        if let Some(name) = profile {
+            if server.is_some() || username.is_some() {
+                return Err(OptionError::Profile(
+                    "Use --profile separately from --server and --username",
+                ));
+            }
+            return Ok((crate::profiles::select(&name)?, json));
         }
         Ok((
             Self {

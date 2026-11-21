@@ -1,7 +1,7 @@
 use rusterisk_cli::{Inspection, Operation, RemoteOptions};
 use std::{ffi::OsString, process::ExitCode};
 
-const HELP: &str = "Usage: rusterisk-cli COMMAND [TARGET] --server URL --username USER --password-stdin\n\n  ping                    Check connectivity.\n  reload                  Reload the server configuration.\n  status                  Show the server version and start time.\n  endpoints               List endpoint routes.\n  endpoint TECH/RESOURCE  Inspect one endpoint route.\n  channels                List active call legs and their bridges.\n  channel ID              Inspect one call leg and its bridges.\n\n  --json          Print inspection results as JSON.\n  -h, --help      Print usage.\n  -V, --version   Print the version.\n\nUse HTTPS or loopback HTTP and read the password from a pipe or file.";
+const HELP: &str = "Usage: rusterisk-cli COMMAND [TARGET] (--server URL --username USER | --profile NAME) --password-stdin\n\n  profiles                List local server profiles.\n  ping                    Check connectivity.\n  reload                  Reload the server configuration.\n  status                  Show the server version and start time.\n  endpoints               List endpoint routes.\n  endpoint TECH/RESOURCE  Inspect one endpoint route.\n  channels                List active call legs and their bridges.\n  channel ID              Inspect one call leg and its bridges.\n\n  --json          Print inspection results as JSON.\n  -h, --help      Print usage.\n  -V, --version   Print the version.\n\nUse HTTPS or loopback HTTP and read the password from a pipe or file.";
 
 type UsageError = (u8, String);
 
@@ -40,7 +40,14 @@ fn execute(arguments: impl Iterator<Item = OsString>) -> Result<(), UsageError> 
     if matches!(name, "-h" | "--help")
         || matches!(
             name,
-            "ping" | "reload" | "status" | "endpoints" | "endpoint" | "channels" | "channel"
+            "ping"
+                | "reload"
+                | "status"
+                | "endpoints"
+                | "endpoint"
+                | "channels"
+                | "channel"
+                | "profiles"
         ) && arguments
             .peek()
             .is_some_and(|option| option == "-h" || option == "--help")
@@ -49,6 +56,15 @@ fn execute(arguments: impl Iterator<Item = OsString>) -> Result<(), UsageError> 
         return Ok(());
     }
     let command = match name {
+        "profiles" => {
+            if arguments.next().is_some() {
+                return Err((2, "The profiles command takes no arguments".to_owned()));
+            }
+            for name in rusterisk_cli::profile_names().map_err(|error| (2, error.to_string()))? {
+                println!("{name}");
+            }
+            return Ok(());
+        }
         "-V" | "--version" => {
             println!("rusterisk-cli {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
