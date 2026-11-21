@@ -77,7 +77,7 @@ impl AttachmentReceipt {
 enum Command {
     Measurements {
         key: CallKey,
-        reply: oneshot::Sender<Option<crate::rtp::Measurements>>,
+        reply: oneshot::Sender<Option<(String, crate::rtp::Measurements)>>,
     },
     ReceivedDigit {
         key: CallKey,
@@ -699,7 +699,10 @@ impl MediaHub {
                     .get(&key)
                     .and_then(|port| port.measurements.as_ref())
                     .filter(|reader| reader.has_changed().is_ok())
-                    .map(|reader| reader.borrow().clone());
+                    .map(|reader| {
+                        let snapshot = reader.borrow();
+                        (crate::utc_timestamps::now_millis(), snapshot.clone())
+                    });
                 if reply.send(sample).is_err() {
                     tracing::debug!("RTP statistics requester disconnected");
                 }

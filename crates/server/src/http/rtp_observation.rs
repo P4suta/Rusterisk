@@ -45,9 +45,10 @@ async fn read(
             Some(port) => port.measurements(key.clone()).await?,
             None => None,
         };
-        let (local, peer) =
-            measurements.map_or((None, None), |sample| (Some(sample.local), sample.peer));
-        let observed_at = crate::utc_timestamps::now_millis();
+        let (observed_at, local, peer) = match measurements {
+            Some((captured, sample)) => (captured, Some(sample.local), sample.peer),
+            None => (crate::utc_timestamps::now_millis(), None, None),
+        };
         if controller.observed_channel(auth, origin, id).await?.0 != key {
             return Err(ControlError::Conflict(
                 "Channel lifetime changed during observation",

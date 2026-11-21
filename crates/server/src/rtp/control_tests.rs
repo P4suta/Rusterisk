@@ -254,6 +254,44 @@ enum ReceiptFailure {
 }
 
 #[tokio::test]
+async fn reception_reports_cover_transmitted_sequences_across_gaps_and_rollover(
+) -> Result<(), MediaError> {
+    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let Fixture { link, .. } = fixture(&peer)?;
+    let mut sources = Vec::new();
+    let ssrc = 22_u32;
+    let mut report = [0_u8; 32];
+    report[..8].copy_from_slice(&[0x81, 201, 0, 7, 0, 0, 0, 21]);
+    report[8..12].copy_from_slice(&ssrc.to_be_bytes());
+    for (sequence, accepted, rejected) in [
+        (65532, 65532_u32, 65531_u32),
+        (65534, 65534, 65535),
+        (1, 65537, 65538),
+        (3, 3, 131075),
+    ] {
+        let packet = RtpPacket::new(0, sequence, 0, ssrc, &[0; 160])?;
+        super::record(&mut sources, &packet, 8000, 0, tokio::time::Instant::now())?;
+        report[16..20].copy_from_slice(&accepted.to_be_bytes());
+        link.received_control(&report, &sources)?;
+        let latest = || {
+            link.measurements
+                .borrow()
+                .peer
+                .as_ref()
+                .map(|peer| peer.extended_highest_sequence)
+        };
+        assert_eq!(latest(), Some(accepted));
+        report[16..20].copy_from_slice(&rejected.to_be_bytes());
+        link.received_control(&report, &sources)?;
+        assert_eq!(latest(), Some(accepted));
+    }
+    let (reports, _) = super::reports(&sources)?;
+    assert_eq!(reports[0].packets, 4);
+    assert_eq!(reports[0].octets, 640);
+    Ok(())
+}
+
+#[tokio::test]
 async fn live_counts_follow_peer_datagrams_and_bind_reception_reports_to_the_sent_source(
 ) -> Result<(), MediaError> {
     let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
