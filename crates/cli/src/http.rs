@@ -6,7 +6,7 @@ use url::{Host, Url};
 
 const MAX_RESPONSE: usize = 1024 * 1024;
 
-fn origin(address: &str) -> Result<Url, Error> {
+pub(super) fn origin(address: &str) -> Result<Url, Error> {
     let url =
         Url::parse(address).map_err(|_| Error::ConnectionSettings("Invalid server address"))?;
     let loopback = match url.host() {
@@ -15,7 +15,13 @@ fn origin(address: &str) -> Result<Url, Error> {
         Some(Host::Ipv6(ip)) => ip.is_loopback(),
         Some(Host::Domain(_)) | None => false,
     };
+    let authority = address
+        .split_once("://")
+        .map(|(_, tail)| tail.strip_suffix('/').unwrap_or(tail));
     if address.len() > 2048
+        || address.chars().any(char::is_whitespace)
+        || !authority
+            .is_some_and(|value| !value.is_empty() && !value.contains(['/', '\\', '?', '#', '@']))
         || !(url.scheme() == "https" || url.scheme() == "http" && loopback)
         || url.host().is_none()
         || !url.username().is_empty()
@@ -29,6 +35,13 @@ fn origin(address: &str) -> Result<Url, Error> {
         ));
     }
     Ok(url)
+}
+
+pub(super) fn valid_username(username: &str) -> bool {
+    !username.is_empty()
+        && username.len() <= 128
+        && !username.contains(':')
+        && !username.chars().any(char::is_control)
 }
 
 async fn body(mut response: reqwest::Response) -> Result<Vec<u8>, Error> {
@@ -70,10 +83,7 @@ pub(super) struct Remote<'a> {
 impl<'a> Remote<'a> {
     pub(super) fn new(options: &'a RemoteOptions, password: String) -> Result<Self, Error> {
         let origin = origin(&options.server)?;
-        if options.username.is_empty()
-            || options.username.len() > 128
-            || options.username.contains(':')
-        {
+        if !valid_username(&options.username) {
             return Err(Error::ConnectionSettings("Invalid username"));
         }
         let builder = reqwest::Client::builder()
