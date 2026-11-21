@@ -82,6 +82,8 @@ Both directions send distinct known samples and check received sample values for
 The hold music comparison checks looping, `channels.mute`, playback interruption, and resource release.
 The first matching audio must arrive within three seconds.
 The measurement deadline includes the time needed to receive the required continuous audio.
+If the Asterisk packet stream skips sequence numbers and its timestamps advance by the corresponding number of 20 ms packets, the measurement starts again with the next received packet.
+The missing packets contribute no samples to the measured interval.
 Asterisk suppresses outgoing voice packets while the other channel continues receiving audio.
 Rusterisk sends silence on the muted channel.
 After channel playback interrupts hold music, the [channel contract](https://docs.asterisk.org/Asterisk_22_Documentation/API_Documentation/Asterisk_REST_Interface/Channels_REST_API/#startmoh) requires an explicit start.
