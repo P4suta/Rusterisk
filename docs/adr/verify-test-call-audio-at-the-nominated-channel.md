@@ -8,14 +8,14 @@ status: proposed
 ## Context
 
 Accepting an outgoing call, receiving an answer, and receiving echoed audio occur at different times.
-The [Asterisk Echo application](https://docs.asterisk.org/Latest_API/API_Documentation/Dialplan_Applications/Echo/) returns voice frames to the caller.
+The [Asterisk `Echo` dialplan operation](https://docs.asterisk.org/Latest_API/API_Documentation/Dialplan_Applications/Echo/) returns voice frames to the caller.
 
 ## Decision
 
-Give each probe a private Stasis application and one explicitly nominated outgoing channel.
+Give each probe a private Stasis app and one outgoing channel selected by the operator.
 Bind its synthetic challenge and receiver to the channel generation.
 Inject the challenge into the outgoing media path and compare incoming audio at the media adapter.
-Close the application when the request ends or its deadline expires.
+Close the app when the request ends or its deadline expires.
 
 ## Alternatives
 
@@ -26,6 +26,7 @@ Counting incoming packets would also accept silence or unrelated sound.
 
 The CLI can use authenticated management requests without linking server media libraries.
 A verified result identifies media returned during one test call.
+Revisit the signal detector if the probe gains support for another codec.
 
 ## Confirmation
 

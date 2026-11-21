@@ -41,6 +41,13 @@ Verify the CLI archive by installing its contents in a temporary directory and r
 mise x -- just distribution-cli-check
 ```
 
+Rehearse the crates.io upload from the selected commit with Cargo.
+The dry run builds and verifies the standalone CLI archive.
+
+```sh
+mise x -- cargo publish --dry-run --locked --registry crates-io -p rusterisk-cli
+```
+
 The server integration checks use three private [Rust SDK libraries](rust-sdk.md).
 Their offline Cargo packaging workspace enables a fixture registry so that the client lockfile records the exact core and API archive checksums.
 Use the required inventory to select the checks.
