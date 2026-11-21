@@ -9,7 +9,9 @@ fn configuration_reload_has_a_separate_closed_management_contract() {
         MANAGEMENT_OPERATIONS,
         &[
             ManagementOperation::ReloadConfiguration,
-            ManagementOperation::ChannelRtpObservation
+            ManagementOperation::ChannelRtpObservation,
+            ManagementOperation::DiagnoseExtension,
+            ManagementOperation::DiagnoseChannel,
         ]
     );
     let operation = ManagementOperation::ReloadConfiguration;

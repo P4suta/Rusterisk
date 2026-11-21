@@ -1,7 +1,28 @@
-use rusterisk_cli::{Inspection, Operation, RemoteOptions, Watch};
+use rusterisk_cli::{Doctor, Inspection, Operation, RemoteOptions, Watch};
 use std::{ffi::OsString, process::ExitCode};
 
-const HELP: &str = "Usage: rusterisk-cli COMMAND [TARGET] (--server URL --username USER | --profile NAME) --password-stdin\n\n  profiles                List local server profiles.\n  ping                    Check connectivity.\n  reload                  Reload the server configuration.\n  status                  Show the server version and start time.\n  endpoints               List endpoint routes.\n  endpoint TECH/RESOURCE  Inspect one endpoint route.\n  channels                List active call legs and their bridges.\n  channel ID              Inspect one call leg and its bridges.\n  watch channel ID        Follow one call leg until it ends.\n  watch endpoint TECH/RESOURCE  Follow an endpoint and its call legs.\n\n  --json          Print inspection results as JSON or watch records as NDJSON.\n  -h, --help      Print usage.\n  -V, --version   Print the version.\n\nUse HTTPS or loopback HTTP and read the password from a pipe or file.";
+const HELP: &str = concat!(
+    "Usage: rusterisk-cli COMMAND [TARGET] (--server URL --username USER | --profile NAME) --password-stdin\n",
+    "\n",
+    "  profiles                List local server profiles.\n",
+    "  ping                    Check connectivity.\n",
+    "  reload                  Reload the server configuration.\n",
+    "  status                  Show the server version and start time.\n",
+    "  endpoints               List endpoint routes.\n",
+    "  endpoint TECH/RESOURCE  Inspect one endpoint route.\n",
+    "  channels                List active call legs and their bridges.\n",
+    "  channel ID              Inspect one call leg and its bridges.\n",
+    "  doctor extension CONTEXT NUMBER  Diagnose a dialplan route.\n",
+    "  doctor channel ID       Diagnose signaling and sample packet traffic.\n",
+    "  watch channel ID        Follow one call leg until it ends.\n",
+    "  watch endpoint TECH/RESOURCE  Follow an endpoint and its call legs.\n",
+    "\n",
+    "  --json          Print inspection results as JSON or watch records as NDJSON.\n",
+    "  -h, --help      Print usage.\n",
+    "  -V, --version   Print the version.\n",
+    "\n",
+    "Use HTTPS or loopback HTTP and read the password from a pipe or file.",
+);
 
 type UsageError = (u8, String);
 
@@ -30,6 +51,7 @@ enum Command {
     Control(Operation),
     Inspect(Inspection),
     Watch(Watch),
+    Diagnose(Doctor),
 }
 
 fn endpoint(
@@ -69,6 +91,7 @@ fn execute(arguments: impl Iterator<Item = OsString>) -> Result<(), UsageError> 
                 | "channel"
                 | "profiles"
                 | "watch"
+                | "doctor"
         ) && arguments
             .peek()
             .is_some_and(|option| option == "-h" || option == "--help")
@@ -93,6 +116,27 @@ fn execute(arguments: impl Iterator<Item = OsString>) -> Result<(), UsageError> 
         "ping" => Command::Control(Operation::Ping),
         "reload" => Command::Control(Operation::Reload),
         "status" => Command::Inspect(Inspection::Status),
+        "doctor" => {
+            let resource = target(&mut arguments)?;
+            let first = target(&mut arguments)?;
+            if !segment(&first) {
+                return Err((2, "Invalid diagnosis target".to_owned()));
+            }
+            match resource.as_str() {
+                "channel" => Command::Diagnose(Doctor::Channel(first)),
+                "extension" => {
+                    let extension = target(&mut arguments)?;
+                    if !segment(&extension) {
+                        return Err((2, "Invalid extension".to_owned()));
+                    }
+                    Command::Diagnose(Doctor::Extension {
+                        context: first,
+                        extension,
+                    })
+                }
+                _ => return Err((2, "Select a channel or an extension to diagnose".to_owned())),
+            }
+        }
         "endpoints" => Command::Inspect(Inspection::Endpoints),
         "channels" => Command::Inspect(Inspection::Channels),
         "endpoint" => {
@@ -128,6 +172,7 @@ fn execute(arguments: impl Iterator<Item = OsString>) -> Result<(), UsageError> 
             return rusterisk_cli::watch(&target, &options, json)
                 .map_err(|error| (error.exit_status(), error.to_string()))
         }
+        Command::Diagnose(operation) => rusterisk_cli::diagnose(&operation, &options, json),
     }
     .map_err(|error| (error.exit_status(), error.to_string()))?;
     println!("{message}");

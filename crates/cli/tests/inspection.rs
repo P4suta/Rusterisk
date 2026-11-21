@@ -24,6 +24,12 @@ fn fixture(
         return (StatusCode::FORBIDDEN, "");
     }
     let body = match uri.path() {
+        "/rusterisk/diagnostics/channels/leg-a" => {
+            r#"{"id":"leg-a","generation":8,"creationtime":"t1","endpoint":"desk","state":"Up","held":true}"#
+        }
+        "/rusterisk/diagnostics/extensions/home/201" => {
+            r#"{"context":"home","extension":"201","steps":[{"context":"home","pattern":"201","priority":1,"operation":"Stasis"}],"disposition":"stasis","application":"phone","destinations":[],"channels":["leg-a","leg-b"]}"#
+        }
         "/ari/asterisk/info" => {
             r#"{"system":{"version":"22.9.0"},"status":{"startup_time":"2026-11-21T04:25:00Z"}}"#
         }
@@ -135,5 +141,22 @@ async fn inspection_counts_legs_and_correlates_bridge_membership() -> io::Result
     assert!(lines
         .lines()
         .any(|line| line.contains("Call leg") && line.contains("leg-b") && line.contains("mix")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn doctor_keeps_signaling_when_media_measurements_are_unavailable() -> io::Result<()> {
+    let value = document(&["doctor", "channel", "leg-a", "--json"], false).await?;
+    assert_eq!(value["state"], "Up");
+    assert_eq!(value["held"], true);
+    assert_eq!(value["traffic"]["observation"], "unavailable");
+    assert!(value["next_check"].as_str().is_some_and(|s| !s.is_empty()));
+    let route = document(&["doctor", "extension", "home", "201", "--json"], false).await?;
+    assert_eq!(route["application"], "phone");
+    assert_eq!(route["channels"].as_array().map(Vec::len), Some(2));
+    let terminal = inspect(&["doctor", "extension", "home", "201"], false).await?;
+    assert!(terminal.status.success());
+    let output = String::from_utf8_lossy(&terminal.stdout);
+    assert!(output.contains("phone") && output.contains("leg-b"));
     Ok(())
 }

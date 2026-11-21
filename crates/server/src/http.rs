@@ -14,6 +14,7 @@ use rusterisk_core::{DtmfTiming, MuteDirection, RecordingControl};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 mod configuration;
+mod diagnosis;
 mod external_media;
 mod observation;
 mod recording;
@@ -44,6 +45,7 @@ pub(crate) fn with_management(
     application
         .merge(configuration::router(controller.clone()))
         .merge(observation::router(controller.clone()))
+        .merge(diagnosis::router(controller.clone()))
         .merge(rtp_observation::router(controller, media))
 }
 
