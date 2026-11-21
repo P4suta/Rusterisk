@@ -18,6 +18,7 @@ mod media_connections;
 mod observation;
 pub(crate) use observation::{Filter as WatchFilter, Target as WatchTarget};
 mod native_start;
+mod observed_channel;
 mod recording_admission;
 mod reload;
 pub(crate) use reload::load_startup_configuration;
@@ -73,6 +74,12 @@ enum Request {
         origin: Option<String>,
         target: WatchTarget,
         reply: oneshot::Sender<Result<observation::Observation, ControlError>>,
+    },
+    ObservedChannel {
+        credentials: Credentials,
+        origin: Option<String>,
+        channel: rusterisk_api::ChannelId,
+        reply: oneshot::Sender<Result<(CallKey, String), ControlError>>,
     },
     Answer {
         credentials: Credentials,
@@ -582,6 +589,24 @@ impl Runner {
                     .is_err()
                 {
                     tracing::debug!("Call observer disconnected during setup");
+                }
+            }
+            Request::ObservedChannel {
+                credentials,
+                origin,
+                channel,
+                reply,
+            } => {
+                let result = self
+                    .authorize(&credentials, origin.as_deref(), true)
+                    .and_then(|()| {
+                        Ok((
+                            self.control.key(&channel)?,
+                            self.control.channel(&channel)?.creationtime.clone(),
+                        ))
+                    });
+                if reply.send(result).is_err() {
+                    tracing::debug!("Channel observer disconnected");
                 }
             }
             Request::Answer {

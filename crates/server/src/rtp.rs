@@ -7,7 +7,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 #[cfg(test)]
 mod control_tests;
 
@@ -94,6 +94,7 @@ pub struct RtpSession {
 }
 
 pub struct RtpLink {
+    measurements: watch::Sender<Measurements>,
     sockets: SocketPair,
     session: RtpSession,
     channels: RtpChannels,
@@ -101,6 +102,12 @@ pub struct RtpLink {
     sender: RtpSender,
     presentation: Option<PresentationClock>,
     telephone: Option<TelephoneTransport>,
+}
+
+#[derive(Default, Clone)]
+pub(crate) struct Measurements {
+    pub(crate) local: rusterisk_api::ServerPacketCounts,
+    pub(crate) peer: Option<rusterisk_api::PeerReception>,
 }
 
 #[derive(Clone, Copy)]
@@ -142,9 +149,23 @@ struct TelephoneTransport {
 }
 
 struct SentSource {
+    first_sequence: u16,
+    last_sequence: u64,
     report: SourceReport,
     rate: u32,
     sampled: tokio::time::Instant,
+}
+
+impl SentSource {
+    fn covers_reported_sequence(&self, sequence: u32) -> bool {
+        let sequence = u64::from(sequence);
+        let earliest = if sequence < u64::from(self.first_sequence) {
+            sequence + (1 << 16)
+        } else {
+            sequence
+        };
+        earliest <= self.last_sequence
+    }
 }
 
 fn record(
@@ -164,6 +185,8 @@ fn record(
             return Err(MediaError::Capacity);
         }
         SentSource {
+            first_sequence: packet.sequence(),
+            last_sequence: u64::from(packet.sequence()),
             report: SourceReport {
                 ssrc: packet.ssrc(),
                 timestamp,
@@ -175,6 +198,8 @@ fn record(
         }
     };
     source.report.timestamp = timestamp;
+    let advance = packet.sequence().wrapping_sub(source.last_sequence as u16);
+    source.last_sequence = source.last_sequence.saturating_add(u64::from(advance));
     source.report.packets = source.report.packets.wrapping_add(1);
     source.report.octets = source
         .report
@@ -240,6 +265,7 @@ impl RtpLink {
             .transpose()?;
         Ok(Self {
             telephone,
+            measurements: watch::channel(Measurements::default()).0,
             receiver: RtpReceiver::new(session.format, session.payload_type)?,
             sender,
             presentation: None,
@@ -265,6 +291,31 @@ impl RtpLink {
 
     pub async fn run(self) -> Result<LinkStats, MediaError> {
         self.serve(|_receipt| Ok(())).await
+    }
+
+    pub(crate) fn observations(&self) -> watch::Receiver<Measurements> {
+        self.measurements.subscribe()
+    }
+
+    fn received_control(&self, bytes: &[u8], sources: &[SentSource]) -> Result<(), MediaError> {
+        let report = rusterisk_media::reception_report(bytes, |ssrc, sequence| {
+            sources.iter().any(|source| {
+                source.report.ssrc == ssrc && source.covers_reported_sequence(sequence)
+            })
+        })?;
+        if let Some(report) = report {
+            self.measurements.send_modify(|snapshot| {
+                snapshot.peer = Some(rusterisk_api::PeerReception {
+                    source: rusterisk_api::PeerReportSource::PeerRtcp,
+                    observed_at: crate::utc_timestamps::now_millis(),
+                    reporter_ssrc: report.reporter_ssrc,
+                    reported_ssrc: report.reported_ssrc,
+                    extended_highest_sequence: report.extended_highest_sequence,
+                    cumulative_lost: report.cumulative_lost,
+                })
+            });
+        }
+        Ok(())
     }
 
     async fn serve(
@@ -305,14 +356,17 @@ impl RtpLink {
                     let (size, peer) = packet.map_err(failure)?;
                     if peer != self.session.remote || size > MAX_PACKET { stats.dropped += 1; continue; }
                     let now = started.elapsed().as_millis() as u64;
-                    match RtpPacket::parse(&data[..size]).and_then(|packet| self.receive(&packet, now)) {
+                    match RtpPacket::parse(&data[..size]).and_then(|packet| {
+                        self.measurements.send_modify(|snapshot| snapshot.local.rxcount = snapshot.local.rxcount.saturating_add(1));
+                        self.receive(&packet, now)
+                    }) {
                         Ok(true) => stats.packets_received += 1,
                         Ok(false) | Err(_) => stats.dropped += 1,
                     }
                 }
                 packet = self.sockets.control.recv_from(&mut control) => {
                     let (size, peer) = packet.map_err(failure)?;
-                    let receipt = if peer != control_peer || size > MAX_PACKET || rusterisk_media::inspect_rtcp(&control[..size]).is_err() {
+                    let receipt = if peer != control_peer || size > MAX_PACKET || self.received_control(&control[..size], &sources).is_err() {
                         stats.dropped += 1;
                         ControlReception::Rejected
                     } else {
@@ -327,6 +381,7 @@ impl RtpLink {
                     let now = sampled.duration_since(started).as_millis() as u64;
                     let packet = self.audio_packet(frame, now)?;
                     send(&self.sockets.data, &packet.encode()?, self.session.remote).await?;
+                    self.measurements.send_modify(|snapshot| snapshot.local.txcount = snapshot.local.txcount.saturating_add(1));
                     record(&mut sources, &packet, self.session.format.rate(), packet.timestamp(), sampled)?;
                     stats.packets_sent += 1;
                 }
@@ -345,6 +400,7 @@ impl RtpLink {
                         for packet in telephone.sender.poll(now, &mut self.sender)? {
                             if !self.channels.direction.borrow().can_receive() { continue; }
                             send(&self.sockets.data, &packet.encode()?, self.session.remote).await?;
+                            self.measurements.send_modify(|snapshot| snapshot.local.txcount = snapshot.local.txcount.saturating_add(1));
                             let timestamp = telephone.sender.timestamp_at(now, &self.sender);
                             record(&mut sources, &packet, telephone.format.rate(), timestamp, sampled)?;
                             stats.packets_sent += 1;

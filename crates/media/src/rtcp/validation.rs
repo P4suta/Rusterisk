@@ -6,6 +6,41 @@ fn failure(error: rtcp_types::RtcpParseError) -> MediaError {
 }
 
 pub(crate) fn inspect_rtcp(bytes: &[u8]) -> Result<Vec<ControlKind>, MediaError> {
+    inspect(bytes, |_, _| {})
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReceptionReport {
+    pub reporter_ssrc: u32,
+    pub reported_ssrc: u32,
+    pub extended_highest_sequence: u32,
+    pub cumulative_lost: i32,
+}
+
+pub fn reception_report(
+    bytes: &[u8],
+    transmitted: impl Fn(u32, u32) -> bool,
+) -> Result<Option<ReceptionReport>, MediaError> {
+    let mut latest = None;
+    inspect(bytes, |reporter_ssrc, block| {
+        let reported_ssrc = block.ssrc();
+        let sequence = block.extended_sequence_number();
+        if transmitted(reported_ssrc, sequence) {
+            latest = Some(ReceptionReport {
+                reporter_ssrc,
+                reported_ssrc,
+                extended_highest_sequence: sequence,
+                cumulative_lost: ((block.cumulative_lost() << 8) as i32) >> 8,
+            });
+        }
+    })?;
+    Ok(latest)
+}
+
+fn inspect(
+    bytes: &[u8],
+    mut report: impl FnMut(u32, rtcp_types::ReportBlock<'_>),
+) -> Result<Vec<ControlKind>, MediaError> {
     if bytes.len() > MAX_PACKET {
         return Err(MediaError::Capacity);
     }
@@ -23,13 +58,16 @@ pub(crate) fn inspect_rtcp(bytes: &[u8]) -> Result<Vec<ControlKind>, MediaError>
         let (packet, rest) = remaining
             .split_at_checked(length)
             .ok_or(MediaError::InvalidPacket)?;
-        kinds.push(inspect_packet(packet)?);
+        kinds.push(inspect_packet(packet, &mut report)?);
         remaining = rest;
     }
     Ok(kinds)
 }
 
-fn inspect_packet(packet: &[u8]) -> Result<ControlKind, MediaError> {
+fn inspect_packet(
+    packet: &[u8],
+    report: &mut impl FnMut(u32, rtcp_types::ReportBlock<'_>),
+) -> Result<ControlKind, MediaError> {
     if packet.len() > MAX_PACKET {
         return Err(MediaError::Capacity);
     }
@@ -80,8 +118,18 @@ fn inspect_packet(packet: &[u8]) -> Result<ControlKind, MediaError> {
     };
     Ok(
         match rtcp_types::Packet::parse(unpadded).map_err(failure)? {
-            rtcp_types::Packet::Sr(_) => ControlKind::Sender,
-            rtcp_types::Packet::Rr(_) => ControlKind::Receiver,
+            rtcp_types::Packet::Sr(sender) => {
+                for block in sender.report_blocks() {
+                    report(sender.ssrc(), block);
+                }
+                ControlKind::Sender
+            }
+            rtcp_types::Packet::Rr(receiver) => {
+                for block in receiver.report_blocks() {
+                    report(receiver.ssrc(), block);
+                }
+                ControlKind::Receiver
+            }
             rtcp_types::Packet::Sdes(_) => ControlKind::Description,
             rtcp_types::Packet::Bye(_) => ControlKind::Goodbye,
             rtcp_types::Packet::App(_) => ControlKind::Application,

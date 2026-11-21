@@ -7,12 +7,13 @@ use rusterisk_api::{
 fn configuration_reload_has_a_separate_closed_management_contract() {
     assert_eq!(
         MANAGEMENT_OPERATIONS,
-        &[ManagementOperation::ReloadConfiguration]
+        &[
+            ManagementOperation::ReloadConfiguration,
+            ManagementOperation::ChannelRtpObservation
+        ]
     );
     let operation = ManagementOperation::ReloadConfiguration;
-    let metadata = match operation {
-        ManagementOperation::ReloadConfiguration => operation.metadata(),
-    };
+    let metadata = operation.metadata();
     assert_eq!(metadata.id, "configuration.reload");
     assert_eq!(metadata.method, Method::Post);
     assert_eq!(metadata.path, "/rusterisk/configuration/reload");

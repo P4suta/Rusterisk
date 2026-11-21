@@ -18,25 +18,33 @@ mod external_media;
 mod observation;
 mod recording;
 mod request_body;
+mod rtp_observation;
 
 pub fn router(controller: Controller) -> Router {
     with_management(
         router_for_scheme(controller.clone(), HttpScheme::Http),
         controller,
+        None,
     )
 }
 
 pub fn router_with_media(controller: Controller, media: crate::media::MediaPort) -> Router {
     with_management(
-        router_with_media_for_scheme(controller.clone(), media, HttpScheme::Http),
+        router_with_media_for_scheme(controller.clone(), media.clone(), HttpScheme::Http),
         controller,
+        Some(media),
     )
 }
 
-pub(crate) fn with_management(application: Router, controller: Controller) -> Router {
+pub(crate) fn with_management(
+    application: Router,
+    controller: Controller,
+    media: Option<crate::media::MediaPort>,
+) -> Router {
     application
         .merge(configuration::router(controller.clone()))
-        .merge(observation::router(controller))
+        .merge(observation::router(controller.clone()))
+        .merge(rtp_observation::router(controller, media))
 }
 
 pub(crate) fn router_with_media_for_scheme(
