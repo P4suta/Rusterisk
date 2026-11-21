@@ -27,7 +27,18 @@ pub struct RemoteOptions {
 }
 
 impl RemoteOptions {
-    pub fn parse(mut arguments: impl Iterator<Item = OsString>) -> Result<Self, OptionError> {
+    pub fn parse(arguments: impl Iterator<Item = OsString>) -> Result<Self, OptionError> {
+        let (options, json) = Self::parse_with_output(arguments)?;
+        if json {
+            return Err(OptionError::Unknown);
+        }
+        Ok(options)
+    }
+
+    pub fn parse_with_output(
+        mut arguments: impl Iterator<Item = OsString>,
+    ) -> Result<(Self, bool), OptionError> {
+        let mut json = false;
         let mut server = None;
         let mut username = None;
         let mut password_stdin = false;
@@ -53,15 +64,20 @@ impl RemoteOptions {
                 }
                 Some("--password-stdin") if !password_stdin => password_stdin = true,
                 Some("--password-stdin") => return Err(OptionError::Duplicate),
+                Some("--json") if !json => json = true,
+                Some("--json") => return Err(OptionError::Duplicate),
                 Some(_) | None => return Err(OptionError::Unknown),
             }
         }
         if !password_stdin {
             return Err(OptionError::Missing);
         }
-        Ok(Self {
-            server: server.ok_or(OptionError::Missing)?,
-            username: username.ok_or(OptionError::Missing)?,
-        })
+        Ok((
+            Self {
+                server: server.ok_or(OptionError::Missing)?,
+                username: username.ok_or(OptionError::Missing)?,
+            },
+            json,
+        ))
     }
 }

@@ -1,0 +1,139 @@
+use axum::{
+    http::{HeaderMap, Method, StatusCode, Uri},
+    routing::get,
+    Router,
+};
+use serde_json::{json, Value};
+use std::{
+    io,
+    process::{Output, Stdio},
+    time::Duration,
+};
+use tokio::{io::AsyncWriteExt, net::TcpListener, process::Command};
+
+fn fixture(
+    method: Method,
+    uri: &Uri,
+    headers: &HeaderMap,
+    empty: bool,
+) -> (StatusCode, &'static str) {
+    let auth = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    if method != Method::GET || auth != Some("Basic cmVhZGVyOnNhbXBsZQ==") {
+        return (StatusCode::FORBIDDEN, "");
+    }
+    let body = match uri.path() {
+        "/ari/asterisk/info" => {
+            r#"{"system":{"version":"22.9.0"},"status":{"startup_time":"2026-11-21T04:25:00Z"}}"#
+        }
+        "/ari/bridges" if !empty => r#"[{"id":"mix","channels":["leg-a","leg-b"]}]"#,
+        "/ari/channels" if !empty => {
+            r#"[
+            {"id":"leg-a","name":"PJSIP/a","state":"Up","creationtime":"t1","channelvars":{"PRIVATE":"omit-me"}},
+            {"id":"leg-b","name":"PJSIP/b","state":"Ringing","creationtime":"t2"}
+        ]"#
+        }
+        "/ari/channels/leg-a" if !empty => {
+            r#"{"id":"leg-a","name":"PJSIP/a","state":"Up","creationtime":"t1"}"#
+        }
+        "/ari/channels" | "/ari/bridges" | "/ari/endpoints" => "[]",
+        "/ari/endpoints/PJSIP/static" => {
+            r#"{"technology":"PJSIP","resource":"static","state":"online","channel_ids":["leg-a"]}"#
+        }
+        "/ari/endpoints/PJSIP/expired" => {
+            r#"{"technology":"PJSIP","resource":"expired","state":"offline","channel_ids":[]}"#
+        }
+        _ => return (StatusCode::NOT_FOUND, r#"{"message":"Endpoint not found"}"#),
+    };
+    (StatusCode::OK, body)
+}
+
+async fn inspect(arguments: &[&str], empty: bool) -> io::Result<Output> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let server = format!("http://{}", listener.local_addr()?);
+    let router = Router::new().fallback(get(
+        move |method: Method, uri: Uri, headers: HeaderMap| async move {
+            fixture(method, &uri, &headers, empty)
+        },
+    ));
+    let mut process = Command::new(env!("CARGO_BIN_EXE_rusterisk-cli"));
+    process
+        .args(arguments)
+        .args([
+            "--server",
+            &server,
+            "--username",
+            "reader",
+            "--password-stdin",
+        ])
+        .kill_on_drop(true)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = process.spawn()?;
+    let mut input = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("missing stdin"))?;
+    input.write_all(b"sample\n").await?;
+    drop(input);
+    tokio::select! {
+        output = tokio::time::timeout(Duration::from_secs(5),child.wait_with_output()) => output?,
+        result = axum::serve(listener,router) => Err(io::Error::other(format!("fixture stopped: {result:?}"))),
+    }
+}
+
+async fn document(arguments: &[&str], empty: bool) -> io::Result<Value> {
+    let output = inspect(arguments, empty).await?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+#[tokio::test]
+async fn inspection_reports_routing_without_inferring_registration() -> io::Result<()> {
+    let status = document(&["status", "--json"], true).await?;
+    assert_eq!(status["version"], "22.9.0");
+    assert_eq!(status["startup_time"], "2026-11-21T04:25:00Z");
+    for command in ["endpoints", "channels"] {
+        assert_eq!(document(&[command, "--json"], true).await?, json!([]));
+    }
+    for (endpoint, state) in [("static", "online"), ("expired", "offline")] {
+        let target = format!("PJSIP/{endpoint}");
+        let value = document(&["endpoint", &target, "--json"], false).await?;
+        assert_eq!(value["routing_state"], state);
+        assert_eq!(value["registration"], "unknown");
+        assert_eq!(value["resource"], endpoint);
+    }
+    let missing = inspect(&["endpoint", "PJSIP/missing", "--json"], false).await?;
+    assert!(!missing.status.success());
+    assert!(missing.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("404"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn inspection_counts_legs_and_correlates_bridge_membership() -> io::Result<()> {
+    let legs = document(&["channels", "--json"], false).await?;
+    for (index, id) in [(0, "leg-a"), (1, "leg-b")] {
+        assert_eq!(legs[index]["kind"], "call_leg");
+        assert_eq!(legs[index]["id"], id);
+        assert_eq!(legs[index]["bridge_ids"], serde_json::to_value(["mix"])?);
+    }
+    assert!(!legs.to_string().contains("omit-me"));
+    assert_eq!(
+        document(&["channel", "leg-a", "--json"], false).await?,
+        legs[0]
+    );
+    let text = inspect(&["channels"], false).await?;
+    assert!(text.status.success());
+    let lines = String::from_utf8_lossy(&text.stdout);
+    assert!(lines
+        .lines()
+        .any(|line| line.contains("Call leg") && line.contains("leg-b") && line.contains("mix")));
+    Ok(())
+}

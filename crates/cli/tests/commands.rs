@@ -125,6 +125,8 @@ async fn command_line_help_and_input_failures_work_without_a_server() -> io::Res
     let subcommand_help = invoke(&["reload", "--help"], b"").await?;
     assert!(subcommand_help.status.success());
     assert!(String::from_utf8_lossy(&subcommand_help.stdout).contains("--server"));
+    let unknown = invoke(&["unrecognized", "--help"], b"").await?;
+    assert_eq!(unknown.status.code(), Some(2));
     let help = invoke(&["--help"], b"").await?;
     assert!(help.status.success());
     let usage = String::from_utf8_lossy(&help.stdout);
