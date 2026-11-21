@@ -83,6 +83,14 @@ fn install_and_run(supervisor: &mut CommandSupervisor, root: &Path, work: &Path)
     run(
         supervisor,
         "cargo",
+        &package,
+        &["test", "--locked", "--jobs", "2"],
+        &[("--target-dir", &target)],
+        cargo_budget,
+    )?;
+    run(
+        supervisor,
+        "cargo",
         work,
         &["install", "--offline", "--locked", "--debug", "--jobs", "2"],
         &[
@@ -103,4 +111,36 @@ fn install_and_run(supervisor: &mut CommandSupervisor, root: &Path, work: &Path)
         &[],
         Duration::from_secs(10),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn distribution_rejects_a_failing_packaged_test() -> io::Result<()> {
+        let fixture = tempfile::tempdir()?;
+        let root = fixture.path();
+        fs::create_dir(root.join("src"))?;
+        fs::create_dir(root.join("tests"))?;
+        fs::write(root.join("LICENSE-MIT"), "fixture")?;
+        fs::write(root.join("LICENSE-APACHE"), "fixture")?;
+        fs::write(root.join("src/main.rs"), "fn main() {}")?;
+        let version = env!("CARGO_PKG_VERSION");
+        fs::write(
+            root.join("Cargo.toml"),
+            format!("[package]\nname='rusterisk-cli'\nversion='{version}'\nedition='2021'\nlicense='MIT OR Apache-2.0'\n"),
+        )?;
+        fs::write(
+            root.join("Cargo.lock"),
+            format!("version = 4\n\n[[package]]\nname = 'rusterisk-cli'\nversion = '{version}'\n"),
+        )?;
+        let test = root.join("tests/packaged.rs");
+        fs::write(&test, "#[test] fn contents() { assert_eq!(1, 1); }")?;
+        verify_cli(root)?;
+        fs::write(test, "#[test] fn contents() { assert_eq!(1, 2); }")?;
+        assert!(verify_cli(root).is_err());
+        Ok(())
+    }
 }

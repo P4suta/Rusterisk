@@ -3,12 +3,12 @@ date: 2026-11-21
 status: proposed
 ---
 
-# Observe call events outside Stasis application ownership
+# Observe calls while the Stasis app retains control
 
 ## Context
 
-Opening a second connection for an existing Stasis application replaces its event connection.
-An operator needs to observe the active telephone application and leave its calls under application control.
+Opening a second connection for an existing Stasis app replaces its event connection.
+An operator needs to observe calls while the telephone app keeps control.
 
 ## Decision
 
@@ -20,15 +20,15 @@ End an interrupted observation with an explicit gap.
 ## Alternatives
 
 Polling misses transitions between samples.
-Registering an observer as an application would add application privileges and disconnect semantics to a read-only operation.
+Registering the observer as a Stasis app would grant it call control and tie calls to its connection.
 
 ## Consequences
 
 Readers can fall behind under sustained load.
-A gap tells the reader when to take a fresh snapshot.
+After a gap, the reader can take a fresh snapshot.
 Reconsider the bounded feed if operators require replay across disconnects.
 
 ## Confirmation
 
 Observe simultaneous calls, hangup, identifier reuse, and a slow reader.
-Disconnect the observer and verify the original application still controls the call.
+Disconnect the observer and verify the original app still controls the call.

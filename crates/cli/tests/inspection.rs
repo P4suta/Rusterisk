@@ -9,7 +9,9 @@ use std::{
     process::{Output, Stdio},
     time::Duration,
 };
-use tokio::{io::AsyncWriteExt, net::TcpListener, process::Command};
+use tokio::{net::TcpListener, process::Command};
+
+mod support;
 
 fn fixture(
     method: Method,
@@ -81,16 +83,10 @@ async fn inspect_with(arguments: &[&str], router: Router) -> io::Result<Output> 
             "--password-stdin",
         ])
         .kill_on_drop(true)
-        .stdin(Stdio::piped())
+        .stdin(support::password_input(b"sample\n")?)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = process.spawn()?;
-    let mut input = child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("missing stdin"))?;
-    input.write_all(b"sample\n").await?;
-    drop(input);
+    let child = process.spawn()?;
     tokio::select! {
         output = tokio::time::timeout(Duration::from_secs(5),child.wait_with_output()) => output?,
         result = axum::serve(listener,router) => Err(io::Error::other(format!("fixture stopped: {result:?}"))),

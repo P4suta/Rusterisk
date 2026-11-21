@@ -8,25 +8,21 @@ use std::{
     process::{Output, Stdio},
     time::Duration,
 };
-use tokio::{io::AsyncWriteExt, net::TcpListener, process::Command};
+use tokio::{net::TcpListener, process::Command};
+
+mod support;
 
 async fn invoke(arguments: &[&str], password: &[u8]) -> io::Result<Output> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rusterisk-cli"))
+    let child = Command::new(env!("CARGO_BIN_EXE_rusterisk-cli"))
         .args(arguments)
         .env_remove("REQUEST_METHOD")
         .env("HTTP_PROXY", "http://127.0.0.1:0")
         .env("NO_PROXY", "")
         .kill_on_drop(true)
-        .stdin(Stdio::piped())
+        .stdin(support::password_input(password)?)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let mut input = child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("missing stdin"))?;
-    input.write_all(password).await?;
-    drop(input);
     tokio::time::timeout(Duration::from_secs(5), child.wait_with_output()).await?
 }
 

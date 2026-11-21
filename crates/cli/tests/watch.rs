@@ -5,7 +5,9 @@ use std::{
     process::{Output, Stdio},
     time::Duration,
 };
-use tokio::{io::AsyncWriteExt, net::TcpListener, process::Command};
+use tokio::{net::TcpListener, process::Command};
+
+mod support;
 
 async fn run(body: &'static str, json: bool) -> io::Result<Output> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -39,18 +41,12 @@ async fn run(body: &'static str, json: bool) -> io::Result<Output> {
     if json {
         command.arg("--json");
     }
-    let mut child = command
-        .stdin(Stdio::piped())
+    let child = command
+        .stdin(support::password_input(b"secret\n")?)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("missing stdin"))?;
-    stdin.write_all(b"secret\n").await?;
-    drop(stdin);
     tokio::select! {
         out=tokio::time::timeout(Duration::from_secs(5),child.wait_with_output())=>out?,
         stopped = axum::serve(listener,app)=>Err(io::Error::other(format!("server stopped: {stopped:?}"))),

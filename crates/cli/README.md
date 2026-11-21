@@ -1,6 +1,6 @@
 # Rusterisk CLI
 
-Use `rusterisk-cli` to check connectivity, inspect calls and endpoints, or reload configuration on a running Rusterisk server.
+Use `rusterisk-cli` to inspect calls, watch signaling, diagnose routes, and test returned audio on a running Rusterisk server.
 
 Install a published release from crates.io with Cargo.
 
@@ -29,7 +29,7 @@ A completed reload prints `Configuration reloaded.`.
 
 ## Inspect calls and endpoints
 
-Use a read-only ARI account for inspection.
+Use a read-only Asterisk REST Interface (ARI) account for inspection.
 The `status` command reports the server version and startup time.
 The `endpoints` command lists configured routes and `endpoint TECH/RESOURCE` selects one route.
 The `channels` command lists active call legs and `channel ID` selects one leg.
@@ -41,11 +41,12 @@ rusterisk-cli endpoint PJSIP/desk --json --server https://pbx.example.org --user
 rusterisk-cli channels --json --server https://pbx.example.org --username reader --password-stdin < password.txt
 ```
 
-With `--json`, list commands return an array and a lookup returns an object.
+With `--json`, a list command returns an array.
+A lookup returns a JSON object.
 An empty array indicates a successful inspection with no matching resources.
 Server status includes `version` and `startup_time`.
 Endpoint objects include `technology`, `resource`, `routing_state`, `registration`, and `channel_ids`.
-The [ARI endpoint model](https://github.com/asterisk/asterisk/blob/22.9.0/rest-api/api-docs/endpoints.json) reports routing availability, so registration is `unknown` for static and dynamic contacts.
+Registration is `unknown` for static and dynamic contacts because the [Asterisk endpoint model](https://github.com/asterisk/asterisk/blob/22.9.0/rest-api/api-docs/endpoints.json) reports routing availability.
 Each channel object has `kind` set to `call_leg` and includes `id`, `name`, `state`, `creationtime`, and `bridge_ids`.
 A failed request writes a diagnostic to standard error and exits unsuccessfully.
 
@@ -53,7 +54,7 @@ A failed request writes a diagnostic to standard error and exits unsuccessfully.
 
 Use `watch channel ID` to follow one channel from its initial snapshot through hangup.
 Use `watch endpoint TECH/RESOURCE` to follow changes to a route and its call legs until interrupted.
-The read-only observer runs independently of the Stasis application controlling the call.
+The telephone app keeps control of the call through Stasis while the observer watches.
 
 ```sh
 rusterisk-cli watch channel inbound-42 --json --profile lab --password-stdin < password.txt
@@ -62,11 +63,11 @@ rusterisk-cli watch channel inbound-42 --json --profile lab --password-stdin < p
 Each line of JSON contains a timestamp and a `type` of `snapshot`, `event`, or `gap`.
 Channel generations distinguish calls that reuse an identifier.
 A gap reports a lost connection or missed records and exits unsuccessfully.
-Start another watch to obtain a fresh snapshot.
+Start another watch to get a fresh snapshot.
 
 ## Diagnose routing and media
 
-Use `doctor extension CONTEXT NUMBER` to follow the matched priorities and find destinations, a Stasis application, and active call legs.
+Use `doctor extension CONTEXT NUMBER` to follow the matched priorities and find destinations, a Stasis app, and active call legs.
 Routes that depend on per-call variables can remain unresolved.
 Use `doctor channel ID` to inspect signaling, hold, and the change in received and sent packet counts over a half-second sample.
 The result includes the elapsed interval, the available observations, and a specific next check.
@@ -81,7 +82,7 @@ rusterisk-cli doctor channel inbound-42 --json --profile lab --password-stdin < 
 ## Verify a test call
 
 Select a configured endpoint that answers and echoes received audio.
-The command places one call with a private Stasis application and a new synthetic signal.
+The command places one call with a private Stasis app and a new synthetic signal.
 Use a write-capable account for the probe.
 
 ```sh
@@ -89,14 +90,14 @@ rusterisk-cli test-call PJSIP/echo --deadline 10 --json --profile lab --password
 ```
 
 The deadline accepts 1 through 120 seconds and defaults to 10 seconds.
-The result reports `accepted`, `answered`, and `signal_verified` separately.
+The fields `accepted`, `answered`, and `signal_verified` identify the stage the call reached.
 The command succeeds when the receiver verifies the current call's returned signal.
 A busy response, no answer, silence, or a different signal produces an unsuccessful exit with the observed outcome.
 The server releases the probe when the request disconnects or the deadline expires.
 
 ## Named servers
 
-Store server origins and usernames in `rusterisk/profiles.json` under the [XDG configuration directory](https://specifications.freedesktop.org/basedir/latest/).
+Store server origins and usernames in `rusterisk/profiles.json` under the [user configuration directory](https://specifications.freedesktop.org/basedir/latest/).
 An absolute `XDG_CONFIG_HOME` selects the directory.
 The default is `$HOME/.config` on Unix and `%APPDATA%` on Windows.
 
