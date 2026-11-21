@@ -23,6 +23,7 @@ mod survivor_shutdown;
 struct Dialog {
     answer: Response,
     callee: Request,
+    callee_peer: SocketAddr,
     caller_media: SocketAddr,
     callee_media: SocketAddr,
 }
@@ -34,6 +35,7 @@ async fn connect(
     invitation: Invitation<'_>,
     media_ports: &mpsc::Sender<SocketAddr>,
 ) -> Result<Dialog, ControlError> {
+    let dialed = invitation.extension;
     start_invitation(
         &caller.signal,
         target,
@@ -42,8 +44,13 @@ async fn connect(
         invitation,
     )
     .await?;
-    let (callee_media, callee_dialog, expected_ack) =
-        answer_dialog_at(&callee.signal, callee.contact()?, callee.media()?).await?;
+    let (callee_media, callee_dialog, expected_ack) = answer_dialog_at(
+        &callee.signal,
+        callee.contact()?,
+        callee.media()?,
+        Some(dialed),
+    )
+    .await?;
     media_ports.try_send(callee_media).map_err(failure)?;
     let answer = final_response(&caller.signal).await?;
     if answer.status_code.code() != 200 {
@@ -80,6 +87,7 @@ async fn connect(
     Ok(Dialog {
         answer,
         callee,
+        callee_peer: expected_ack.peer(),
         caller_media,
         callee_media,
     })
@@ -232,6 +240,7 @@ async fn exercise(
         .accepted(&first.signal, target)
         .await
         .map_err(|error| failure(format!("attended REFER acceptance: {error}")))?;
+    let consultation_peer = consultation.callee_peer;
     let consultation_dialog = consultation.callee;
     let mut consultation = TransferSignals::new(&consultation.answer, consultation_requests)?;
     let source_ended = async {
@@ -283,14 +292,14 @@ async fn exercise(
     }
     println!("Observed attended transfer event={:?}", source.event()?);
     match operation {
-        Exercise::Consultation | Exercise::Transfer | Exercise::RetireSource => Ok(()),
-        Exercise::PeerEnded(Survivor::Bob) => {
+        Exercise::Consultation | Exercise::Transfer => Ok(()),
+        Exercise::RetireSource | Exercise::PeerEnded(Survivor::Bob) => {
             survivor_shutdown::end(
                 &bob,
                 &initial.callee,
                 &charlie,
                 &consultation_dialog,
-                targets,
+                [target, consultation_peer],
             )
             .await
         }
@@ -300,7 +309,7 @@ async fn exercise(
                 &consultation_dialog,
                 &bob,
                 &initial.callee,
-                [consultation_target, target],
+                [consultation_target, initial.callee_peer],
             )
             .await
         }
@@ -323,7 +332,7 @@ async fn native_on(operation: Exercise, layout: CallListeners) -> Result<(), Con
         "[app]\ntype=user\npassword=test-password\n",
         &sip,
         "",
-        "[internal]\nexten => 100,1,Dial(PJSIP/bob,5)\nsame => n,Hangup()\nexten => 200,1,Dial(PJSIP/charlie,5)\nsame => n,Hangup()\n",
+        "[internal]\nexten => 100,1,Dial(PJSIP/${EXTEN}@bob,5)\nsame => n,Hangup()\nexten => 200,1,Dial(PJSIP/${EXTEN}@charlie,5)\nsame => n,Hangup()\n",
     ).map_err(failure)?;
     if matches!(layout, CallListeners::Separate) {
         let mut transport = config
@@ -393,6 +402,27 @@ async fn native_on(operation: Exercise, layout: CallListeners) -> Result<(), Con
         ],
     ));
     let mut result = finish(worker, Duration::from_secs(8)).await;
+    if result.is_ok() && matches!(operation, Exercise::RetireSource | Exercise::PeerEnded(_)) {
+        let idle = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut tick = tokio::time::interval(Duration::from_millis(20));
+            loop {
+                tick.tick().await;
+                let channels = controller
+                    .execute(
+                        super::credentials()?,
+                        None,
+                        rusterisk_server::Action::ListChannels,
+                    )
+                    .await?;
+                if channels.body == Some(serde_json::json!([])) {
+                    return Ok(());
+                }
+            }
+        })
+        .await
+        .map_err(|_| ControlError::Invalid("Attended transfer left a live channel"));
+        result = idle.and_then(|observation| observation);
+    }
     controller.shutdown();
     let limit = Duration::from_secs(2);
     let (runner, signaling, hub) = tokio::join!(

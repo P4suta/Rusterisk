@@ -51,16 +51,17 @@ pub(super) async fn run(
     invite_at(&alice.signal, target, alice.contact()?, alice.media()?)
         .await
         .map_err(|error| failure(format!("authenticated invitation: {error}")))?;
-    let (bob_target, _, _) = answer_dialog_at(&bob.signal, bob.contact()?, bob.media()?)
-        .await
-        .map_err(|error| match pending_signal(&alice.signal) {
-            Ok(observed) => failure(format!(
-                "outgoing peer answer: {error}; incoming {observed}"
-            )),
-            Err(observation) => failure(format!(
-                "outgoing peer answer: {error}; observation failed: {observation}"
-            )),
-        })?;
+    let (bob_target, _, _) =
+        answer_dialog_at(&bob.signal, bob.contact()?, bob.media()?, Some("100"))
+            .await
+            .map_err(|error| match pending_signal(&alice.signal) {
+                Ok(observed) => failure(format!(
+                    "outgoing peer answer: {error}; incoming {observed}"
+                )),
+                Err(observation) => failure(format!(
+                    "outgoing peer answer: {error}; observation failed: {observation}"
+                )),
+            })?;
     media_ports.try_send(bob_target).map_err(failure)?;
     let answered = final_response(&alice.signal)
         .await
@@ -126,10 +127,14 @@ pub(super) async fn run(
     .map_err(|error| failure(format!("source dialog departure: {error}")))?;
     let initial_before_answer = observed.received_initial_notify();
     let server_bye_before_answer = observed.received_server_bye();
-    let (charlie_target, _, charlie_acknowledgement) =
-        answer_dialog_at(&charlie.signal, charlie.contact()?, charlie.media()?)
-            .await
-            .map_err(|error| failure(format!("transfer target answer: {error}")))?;
+    let (charlie_target, _, charlie_acknowledgement) = answer_dialog_at(
+        &charlie.signal,
+        charlie.contact()?,
+        charlie.media()?,
+        Some("200"),
+    )
+    .await
+    .map_err(|error| failure(format!("transfer target answer: {error}")))?;
     media_ports.try_send(charlie_target).map_err(failure)?;
     acknowledge(&charlie.signal, &charlie_acknowledgement).await.map_err(|error| failure(format!("{error}; initial_before_answer={initial_before_answer}, server_bye_before_answer={server_bye_before_answer}, event={:?}", observed.event().ok())))?;
     let mut third = AudioPeer {

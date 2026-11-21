@@ -455,9 +455,15 @@ async fn audio(
     tokio::pin!(request);
     let mut first = [0; 2049];
     let mut second = [0; 2049];
-    let result = bounded(async {
-        for _ in 0..256 {
+    let onset = Instant::now() + Duration::from_secs(3);
+    let measurement = Duration::from_millis(u64::from(frames) * 20);
+    let result = tokio::time::timeout_at(onset + measurement, async {
+        let start_timeout = tokio::time::sleep_until(onset);
+        tokio::pin!(start_timeout);
+        let mut measured_packets = 0;
+        while measured_packets < 256 {
             tokio::select! {
+                _ = &mut start_timeout, if window.first.is_none() => return Err(Error::Timeout),
                 result = &mut request, if !repeated && window.total_samples >= 20 * 160 => {
                     result?;
                     repeated = true;
@@ -468,6 +474,7 @@ async fn audio(
                     left.check_source(source)?;
                     let packet = RtpPacket::parse(&first[..size]).map_err(invalid)?;
                     window.observe(&packet, Instant::now())?;
+                    measured_packets += 1;
                 }
                 result = right.socket.data().recv_from(&mut second) => {
                     let (_, source) = result?;
@@ -483,7 +490,9 @@ async fn audio(
         }
         Err(Error::Capacity)
     })
-    .await;
+    .await
+    .map_err(|_| Error::Timeout)
+    .and_then(|result| result);
     if let Err(error) = &result {
         eprintln!(
             "MOH audio comparison failed: phase={phase}, samples={}, total_samples={}, error={error}",
@@ -501,7 +510,8 @@ async fn observe_reference_mute(peers: &[Peer; 2]) -> Result<(), Error> {
     let mut muted_bytes = [0; 2049];
     let mut audible_bytes = [0; 2049];
     let result = bounded(async {
-        for _ in 0..256 {
+        let mut audible_packets = 0;
+        while audible_packets < 256 {
             tokio::select! {
                 biased;
                 result = muted.socket.data().recv_from(&mut muted_bytes) => {
@@ -515,6 +525,7 @@ async fn observe_reference_mute(peers: &[Peer; 2]) -> Result<(), Error> {
                     let now = Instant::now();
                     let packet = RtpPacket::parse(&audible_bytes[..size]).map_err(invalid)?;
                     window.observe(&packet, now)?;
+                    audible_packets += 1;
                     if window.complete(12, now) {
                         return Ok(());
                     }
@@ -570,7 +581,8 @@ async fn exercise(
     let media =
         MediaUri::Sound(SoundId::try_from("rusterisk-position".to_owned()).map_err(invalid)?);
     let options = PlaybackOptions {
-        offset_ms: PlaybackMilliseconds::try_from(7000).map_err(invalid)?,
+        offset_ms: PlaybackMilliseconds::try_from(super::playback_position::INTERRUPTION_OFFSET_MS)
+            .map_err(invalid)?,
         skip_ms: PlaybackMilliseconds::try_from(1000).map_err(invalid)?,
     };
     *playback_lifetime = Lifetime::Requested;
@@ -719,6 +731,91 @@ fn known_packet(sequence: u16, timestamp: u32) -> Result<RtpPacket, Error> {
         &[rusterisk_media::mulaw_encode(1200); 160],
     )
     .map_err(invalid)
+}
+
+#[tokio::test]
+async fn music_start_and_a_full_received_loop_have_separate_deadlines() -> Result<(), Error> {
+    let ip = Ipv4Addr::LOCALHOST;
+    let socket = tokio::net::UdpSocket::bind((ip, 0)).await?;
+    let mut peers = [
+        Peer::new("music", ip.into())?,
+        Peer::new("clock", ip.into())?,
+    ];
+    for peer in &mut peers {
+        peer.destination = Some(socket.local_addr()?);
+    }
+    let measured = peers[0].socket.local_addr()?;
+    let client = Client::new("http://127.0.0.1:1", "app", "test")?;
+    let send = async {
+        let mut tick = tokio::time::interval_at(
+            Instant::now() + Duration::from_millis(2200),
+            Duration::from_millis(20),
+        );
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        for sequence in 0..65 {
+            tick.tick().await;
+            let packet = known_packet(sequence, u32::from(sequence) * 160)?
+                .encode()
+                .map_err(invalid)?;
+            socket.send_to(&packet, measured).await?;
+        }
+        Ok::<_, Error>(())
+    };
+    tokio::try_join!(
+        audio(
+            &client,
+            &peers,
+            ComparisonServer::Asterisk,
+            1200,
+            60,
+            None,
+            "late music start"
+        ),
+        send
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn traffic_on_the_other_route_cannot_exhaust_the_music_measurement() -> Result<(), Error> {
+    let ip = Ipv4Addr::LOCALHOST;
+    let socket = tokio::net::UdpSocket::bind((ip, 0)).await?;
+    let mut peers = [
+        Peer::new("measured", ip.into())?,
+        Peer::new("other", ip.into())?,
+    ];
+    for peer in &mut peers {
+        peer.destination = Some(socket.local_addr()?);
+    }
+    let measured = peers[0].socket.local_addr()?;
+    let other = peers[1].socket.local_addr()?;
+    let client = Client::new("http://127.0.0.1:1", "app", "test")?;
+    let send = async {
+        let mut tick = tokio::time::interval(Duration::from_millis(4));
+        for sequence in 0..270 {
+            tick.tick().await;
+            let packet = known_packet(sequence, u32::from(sequence) * 160)?
+                .encode()
+                .map_err(invalid)?;
+            socket.send_to(&packet, other).await?;
+        }
+        let packet = known_packet(0, 0)?.encode().map_err(invalid)?;
+        socket.send_to(&packet, measured).await?;
+        Ok::<_, Error>(())
+    };
+    tokio::try_join!(
+        audio(
+            &client,
+            &peers,
+            ComparisonServer::Asterisk,
+            1200,
+            1,
+            None,
+            "one measured packet"
+        ),
+        send
+    )?;
+    Ok(())
 }
 
 #[test]

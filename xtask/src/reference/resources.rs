@@ -5,12 +5,7 @@ use super::{
 };
 use crate::process::{CommandSupervisor, ProcessError};
 use serde::Deserialize;
-use std::{
-    io,
-    path::PathBuf,
-    process::Command,
-    time::{Duration, Instant},
-};
+use std::{io, path::PathBuf, process::Command, time::Duration};
 const REFERENCE_IMAGE: &str = "rusterisk-asterisk-reference:22.9.0";
 const OWNERSHIP_LABEL: &str = "io.rusterisk.sipp-comparison";
 pub(super) fn container_id(bytes: &[u8]) -> io::Result<&str> {
@@ -398,55 +393,21 @@ pub(super) fn reference_ready(
     commands: &mut Commands<'_>,
     supervisor: &mut CommandSupervisor,
 ) -> io::Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let mut ready = false;
-        commands
-            .run(
-                docker(&arguments([
-                    "exec",
-                    id,
-                    "/usr/bin/test",
-                    "-S",
-                    "/var/run/asterisk/asterisk.ctl",
-                ])),
-                deadline.saturating_duration_since(Instant::now()),
-                |command, budget| match supervisor.run(command, budget) {
-                    Ok(()) => {
-                        ready = true;
-                        Ok(())
-                    }
-                    Err(ProcessError::Status(status)) if status.code() == Some(1) => Ok(()),
-                    Err(error) => Err(error),
-                },
-            )?
-            .exact(b"")?;
-        if ready {
-            break;
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::other(
-                "comparison Asterisk control socket was not ready",
-            ));
-        }
-        std::thread::sleep(remaining.min(Duration::from_millis(100)));
-    }
     let observed = commands.run(
         docker(&arguments([
             "exec",
             id,
             "/usr/bin/timeout",
             "--kill-after=2s",
-            "10s",
-            "/usr/sbin/asterisk",
-            "-rx",
-            "core waitfullybooted",
+            "90s",
+            "/bin/sh",
+            "-ec",
+            "until test -S /var/run/asterisk/asterisk.ctl; do sleep 0.1; done\nexec /usr/sbin/asterisk -rx 'core waitfullybooted'",
         ])),
-        Duration::from_secs(15),
+        Duration::from_secs(95),
         |command, budget| supervisor.run(command, budget),
     )?;
-    if !observed.text()?.contains("Asterisk has fully booted.\n") {
+    if !boot_confirmed(observed.text()?) {
         return Err(io::Error::other(format!(
             "comparison Asterisk did not finish startup; {}",
             observed.diagnostics()
@@ -455,9 +416,28 @@ pub(super) fn reference_ready(
     Ok(())
 }
 
+fn boot_confirmed(output: &str) -> bool {
+    output
+        .split_inclusive('\n')
+        .any(|line| line == "Asterisk has fully booted.\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_complete_control_reply_confirms_asterisk_boot() {
+        assert!(boot_confirmed("Asterisk has fully booted.\n"));
+        for pending in [
+            "",
+            "Asterisk PBX Core Initializing\n",
+            "Still waiting: Asterisk has fully booted.\n",
+            "Asterisk has fully booted.",
+        ] {
+            assert!(!boot_confirmed(pending), "{pending:?}");
+        }
+    }
 
     #[test]
     fn incomplete_cid_files_recover_the_unique_label_id_and_keep_the_damage() -> io::Result<()> {

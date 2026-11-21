@@ -50,7 +50,7 @@ async fn native_transfer(departure: Departure) -> Result<ObservedTransfer, Contr
         "[app]\ntype=user\npassword=test-password\n",
         &sip,
         "",
-        "[internal]\nexten => 100,1,Dial(PJSIP/bob,5)\nsame => n,Hangup()\nexten => 200,1,Dial(PJSIP/charlie,5)\nsame => n,Hangup()\n[outside]\nexten => 100,1,Hangup()\n",
+        "[internal]\nexten => 100,1,Dial(PJSIP/${EXTEN}@bob,5)\nsame => n,Hangup()\nexten => 200,1,Dial(PJSIP/${EXTEN}@charlie,5)\nsame => n,Hangup()\n[outside]\nexten => 100,1,Hangup()\n",
     ).map_err(failure)?;
     config.rtp.start = 0;
     config.rtp.end = 0;

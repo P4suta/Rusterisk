@@ -315,7 +315,7 @@ async fn audio(left: &mut Peer, right: &mut Peer) -> Result<(), Error> {
         let mut known = [0; 2];
         loop {
             tokio::select! {
-                _instant = clock.tick(), if sent < 30 => {
+                _instant = clock.tick(), if sent < 150 => {
                     left.send(Message::Binary(vec![mulaw_encode(4000); 160].into())).await?;
                     right.send(Message::Binary(vec![mulaw_encode(-7000); 160].into())).await?;
                     sent += 1;
@@ -327,13 +327,55 @@ async fn audio(left: &mut Peer, right: &mut Peer) -> Result<(), Error> {
                     known[1] = if received(message, 4000)? { known[1] + 1 } else { 0 };
                 }
             }
-            if sent == 30 && known.iter().all(|count| *count >= 4) {
+            if sent >= 30 && known.iter().all(|count| *count >= 4) {
                 return Ok(());
             }
         }
     })
     .await
     .map_err(|_| Error::Timeout)?
+}
+
+#[tokio::test]
+async fn gateway_keeps_sending_until_both_delayed_audio_paths_are_observed() -> Result<(), Error> {
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio_tungstenite::{tungstenite::protocol::Role, MaybeTlsStream, WebSocketStream};
+
+    async fn pair() -> Result<(Peer, Peer), Error> {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await?;
+        let (client, (server, _)) = tokio::try_join!(
+            TcpStream::connect(listener.local_addr()?),
+            listener.accept()
+        )?;
+        Ok(tokio::join!(
+            WebSocketStream::from_raw_socket(MaybeTlsStream::Plain(client), Role::Client, None),
+            WebSocketStream::from_raw_socket(MaybeTlsStream::Plain(server), Role::Server, None)
+        ))
+    }
+    let (mut left, mut first) = pair().await?;
+    let (mut right, mut second) = pair().await?;
+    let bridge = async {
+        for frame in 0..44 {
+            let (a, b) = tokio::join!(first.next(), second.next());
+            let a = a.ok_or(Error::Closed)??;
+            let b = b.ok_or(Error::Closed)??;
+            if frame >= 36 {
+                first.send(b).await?;
+                if frame == 39 {
+                    second.send(Message::Binary(vec![0xff; 160].into())).await?;
+                } else {
+                    second.send(a).await?;
+                }
+            }
+        }
+        Ok::<(), Error>(())
+    };
+    tokio::time::timeout(Duration::from_secs(4), async {
+        tokio::try_join!(audio(&mut left, &mut right), bridge)
+    })
+    .await
+    .map_err(|_| Error::Timeout)??;
+    Ok(())
 }
 
 async fn close(peer: &mut Peer) -> Result<(), Error> {
