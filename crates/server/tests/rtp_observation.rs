@@ -7,7 +7,7 @@ use http_body_util::BodyExt;
 use rusterisk_api::ChannelId;
 use rusterisk_config::Config;
 use rusterisk_core::PeerMediaDirection;
-use rusterisk_media::{AudioFormat, Frame, RtpSender};
+use rusterisk_media::{AudioFormat, Frame, Gate, RtpPacket, RtpSender, MAX_PACKET};
 use rusterisk_server::{
     http::router_with_media,
     media::MediaHub,
@@ -106,11 +106,18 @@ async fn a_reader_observes_peer_datagrams_and_a_reused_channel_starts_without_it
                         payload_type: 0,
                         telephone: None,
                     },
-                    PeerMediaDirection::SendReceive,
+                    PeerMediaDirection::SendOnly,
                 )
                 .await
                 .map_err(failure)?;
         }
+        let mut packet = [0; MAX_PACKET];
+        assert!(tokio::time::timeout(
+            Duration::from_millis(65),
+            alice.data().recv_from(&mut packet),
+        )
+        .await
+        .is_err());
         let idle = read(&app, "a", true).await?.1;
         assert_eq!(idle["local"]["source"], "server_rtp");
         assert_eq!(idle["local"]["rxcount"], 0);
@@ -146,6 +153,27 @@ async fn a_reader_observes_peer_datagrams_and_a_reused_channel_starts_without_it
         })
         .await
         .map_err(failure)??;
+        assert!(media
+            .peer_direction(a.clone(), PeerMediaDirection::SendReceive, Gate::Open)
+            .await
+            .map_err(failure)?);
+        let (length, sender) =
+            tokio::time::timeout(Duration::from_secs(2), alice.data().recv_from(&mut packet))
+                .await
+                .map_err(failure)?
+                .map_err(failure)?;
+        assert_eq!(sender, destinations[0]);
+        assert_eq!(
+            RtpPacket::parse(&packet[..length])
+                .map_err(failure)?
+                .payload_type(),
+            0
+        );
+        let sent = read(&app, "a", true).await?.1;
+        assert!(sent["local"]["txcount"]
+            .as_u64()
+            .is_some_and(|count| count >= 1));
+        assert_eq!(sent["local"]["rxcount"], 2);
         controller
             .execute(writer, None, Action::Hangup(a.id.clone()))
             .await?;
@@ -164,7 +192,7 @@ async fn a_reader_observes_peer_datagrams_and_a_reused_channel_starts_without_it
                     payload_type: 0,
                     telephone: None,
                 },
-                PeerMediaDirection::SendReceive,
+                PeerMediaDirection::SendOnly,
             )
             .await
             .map_err(failure)?;
