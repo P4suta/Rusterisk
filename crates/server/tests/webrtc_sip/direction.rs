@@ -187,7 +187,7 @@ fn begin_measurement(
     Ok(tokio::time::Instant::now())
 }
 
-fn validate_samples(frame: &Frame, expected: Option<i32>) -> Result<(), MediaError> {
+fn validate_samples(frame: &Frame, expected: Option<i32>) -> Result<bool, MediaError> {
     let expected =
         expected.ok_or_else(|| MediaError::Transport("Held WebRTC still received audio".into()))?;
     if frame
@@ -195,11 +195,20 @@ fn validate_samples(frame: &Frame, expected: Option<i32>) -> Result<(), MediaErr
         .iter()
         .all(|sample| (i32::from(*sample) - expected).abs() < 300)
     {
-        Ok(())
+        Ok(true)
+    } else if expected != 0
+        && frame
+            .samples()
+            .iter()
+            .all(|sample| i32::from(*sample).abs() < 300)
+    {
+        Ok(false)
     } else {
-        Err(MediaError::Transport(
-            "WebRTC audio does not match the measured direction".into(),
-        ))
+        let minimum = frame.samples().iter().min();
+        let maximum = frame.samples().iter().max();
+        Err(MediaError::Transport(format!(
+            "Expected WebRTC sample {expected}, received range {minimum:?} to {maximum:?}"
+        )))
     }
 }
 
@@ -227,15 +236,13 @@ async fn restricted(
             frame = left.incoming.recv() => {
                 let frame = frame.ok_or(MediaError::UnknownStream)?;
                 if started.elapsed() >= Duration::from_millis(100) {
-                    validate_samples(&frame, left_sample)?;
-                    received[0] += 1;
+                    received[0] += usize::from(validate_samples(&frame, left_sample)?);
                 }
             }
             frame = right.incoming.recv() => {
                 let frame = frame.ok_or(MediaError::UnknownStream)?;
                 if started.elapsed() >= Duration::from_millis(100) {
-                    validate_samples(&frame, Some(right_sample))?;
-                    received[1] += 1;
+                    received[1] += usize::from(validate_samples(&frame, Some(right_sample))?);
                 }
             }
         }
@@ -278,6 +285,19 @@ mod tests {
     use tokio::sync::mpsc::error::TryRecvError;
 
     #[test]
+    fn empty_mixer_ticks_can_separate_received_voice_frames() -> Result<(), MediaError> {
+        let silent = Frame::new(&[0; 960], 48000)?;
+        let voice = Frame::new(&[4000; 960], 48000)?;
+        assert!(validate_samples(&voice, Some(4000))?);
+        assert!(!validate_samples(&silent, Some(4000))?);
+        assert!(validate_samples(&voice, Some(4000))?);
+        assert!(validate_samples(&voice, Some(0)).is_err());
+        assert!(validate_samples(&voice, Some(-7000)).is_err());
+        assert!(validate_samples(&silent, None).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn pcm_queued_before_measurement_cannot_be_counted_as_new_direction_leakage(
     ) -> Result<(), MediaError> {
         for queued in 1..=APPLICATION_FRAME_CAPACITY {
@@ -297,7 +317,9 @@ mod tests {
             for (incoming, expected) in [(&mut left.incoming, None), (&mut right.incoming, Some(0))]
             {
                 match incoming.try_recv() {
-                    Ok(frame) => validate_samples(&frame, expected)?,
+                    Ok(frame) => {
+                        validate_samples(&frame, expected)?;
+                    }
                     Err(TryRecvError::Empty) => {}
                     Err(TryRecvError::Disconnected) => return Err(MediaError::UnknownStream),
                 }
