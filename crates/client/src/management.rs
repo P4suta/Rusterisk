@@ -117,11 +117,78 @@ impl Client {
         }
         Ok(result)
     }
+
+    pub async fn test_call(
+        &self,
+        endpoint: &str,
+        deadline_seconds: u16,
+    ) -> Result<api::test_call::TestCallResult, Error> {
+        if !api::is_valid_resource_id(endpoint) {
+            return Err(Error::Invalid("invalid PJSIP test endpoint"));
+        }
+        if !(1..=api::test_call::MAX_SECONDS).contains(&deadline_seconds) {
+            return Err(Error::Invalid("invalid test call deadline"));
+        }
+        let mut request = self
+            .prepare_management_request(api::ManagementOperation::TestCall, &["PJSIP", endpoint])?
+            .timeout(Duration::from_secs(u64::from(deadline_seconds) + 10))
+            .build()?;
+        request
+            .url_mut()
+            .query_pairs_mut()
+            .append_pair("deadline_seconds", &deadline_seconds.to_string());
+        Self::decode_response(self.http.execute(request).await?).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_call_posts_to_the_nominated_endpoint_with_its_deadline() -> Result<(), Error> {
+        use axum::{extract::OriginalUri, routing::post, Json, Router};
+        use std::future::IntoFuture;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let server = Router::new().route(
+            "/rusterisk/test-calls/PJSIP/echo",
+            post(
+                |uri: OriginalUri, headers: axum::http::HeaderMap| async move {
+                    assert_eq!(uri.0.query(), Some("deadline_seconds=17"));
+                    assert!(headers.contains_key(axum::http::header::AUTHORIZATION));
+                    Json(serde_json::json!({
+                        "channel_id":"probe-42","accepted":true,"answered":true,
+                        "signal_verified":true,"outcome":"verified"
+                    }))
+                },
+            ),
+        );
+        let task = tokio::spawn(axum::serve(listener, server).into_future());
+        let client = Client::new(&format!("http://{address}"), "app", "password")?;
+        let result = client.test_call("echo", 17).await;
+        task.abort();
+        match task.await {
+            Err(error) if error.is_cancelled() => {}
+            Ok(result) => result?,
+            Err(_) => return Err(Error::Closed),
+        }
+        let result = result?;
+        assert_eq!(result.channel_id.as_str(), "probe-42");
+        assert_eq!(result.outcome, api::test_call::TestCallOutcome::Verified);
+        for invalid in [0, api::test_call::MAX_SECONDS + 1] {
+            assert!(matches!(
+                client.test_call("echo", invalid).await,
+                Err(Error::Invalid(_))
+            ));
+        }
+        assert!(matches!(
+            client.test_call("../desk", 10).await,
+            Err(Error::Invalid(_))
+        ));
+        Ok(())
+    }
 
     #[test]
     fn reload_request_overrides_the_inherited_timeout_without_changing_ari_requests(

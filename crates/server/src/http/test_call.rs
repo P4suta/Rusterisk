@@ -139,7 +139,7 @@ async fn start(
         controller
             .authorize(auth.clone(), origin.clone(), false)
             .await?;
-        if technology != "PJSIP" || id(&resource).is_err() || resource.contains('@') {
+        if technology != "PJSIP" || !rusterisk_api::is_valid_resource_id(&resource) {
             return Err(ControlError::Invalid(
                 "Select a configured PJSIP echo endpoint",
             ));

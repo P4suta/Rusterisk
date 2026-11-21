@@ -12,6 +12,7 @@ fn configuration_reload_has_a_separate_closed_management_contract() {
             ManagementOperation::ChannelRtpObservation,
             ManagementOperation::DiagnoseExtension,
             ManagementOperation::DiagnoseChannel,
+            ManagementOperation::TestCall,
         ]
     );
     let operation = ManagementOperation::ReloadConfiguration;
@@ -29,6 +30,30 @@ fn configuration_reload_has_a_separate_closed_management_contract() {
         .iter()
         .all(|entry| entry.id != metadata.id && entry.path != metadata.path));
     assert!(!rusterisk_api::is_known_operation("POST", metadata.path));
+}
+
+#[test]
+fn test_call_contract_carries_the_nominated_endpoint_and_deadline() {
+    let operation = ManagementOperation::TestCall.metadata();
+    assert_eq!(operation.path, rusterisk_api::test_call::PATH);
+    let entry = &openapi()["paths"][operation.path];
+    assert_eq!(entry["servers"][0]["url"], "/");
+    let method = &entry["post"];
+    assert_eq!(method["operationId"], "testCalls.probe");
+    let parameters = &method["parameters"];
+    assert_eq!(parameters[0]["name"], "technology");
+    assert_eq!(parameters[1]["name"], "resource");
+    assert_eq!(parameters[2]["in"], "query");
+    assert_eq!(parameters[2]["name"], "deadline_seconds");
+    let schema = &parameters[2]["schema"];
+    assert_eq!(schema["type"], "integer");
+    assert_eq!(schema["minimum"], 1);
+    assert_eq!(schema["maximum"], rusterisk_api::test_call::MAX_SECONDS);
+    assert_eq!(schema["default"], rusterisk_api::test_call::DEFAULT_SECONDS);
+    assert_eq!(
+        method["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/TestCallResult"
+    );
 }
 
 #[test]
