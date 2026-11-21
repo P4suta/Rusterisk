@@ -38,6 +38,7 @@ pub use swagger::SwaggerError;
 mod ari_route;
 pub mod observation;
 mod rtp_observation;
+pub mod test_call;
 pub use ari_route::{ari_route, is_known_operation, AriRoute};
 pub use rtp_observation::{
     PeerReception, PeerReportSource, RtpObservation, ServerPacketCounts, ServerPacketSource,
@@ -1285,6 +1286,7 @@ pub fn schemas() -> Value {
     let _route_diagnosis = generator.subschema_for::<diagnosis::RouteDiagnosis>();
     let _channel_diagnosis = generator.subschema_for::<diagnosis::ChannelDiagnosis>();
     let _rtp = generator.subschema_for::<RtpObservation>();
+    let _test_call = generator.subschema_for::<test_call::TestCallResult>();
     let _bridge = generator.subschema_for::<Bridge>();
     let _application = generator.subschema_for::<Application>();
     let _filter = generator.subschema_for::<EventFilterRequest>();
@@ -1453,6 +1455,7 @@ pub fn openapi() -> Value {
         let security = json_array([json!({"basicAuth": []})]);
         entry[operation.method.as_str()] = json!({"operationId": operation.id, "parameters": parameters(operation, None), "responses": responses, "security": security});
     }
+    test_call::describe(&mut paths);
     let servers = json_array([json!({"url": "/ari"})]);
     observation::describe(&mut paths);
     json!({"openapi": "3.1.0", "info": {"title": "Rusterisk", "version": env!("CARGO_PKG_VERSION")}, "servers": servers, "paths": paths, "components": {"schemas": schemas(), "securitySchemes": {"basicAuth": {"type": "http", "scheme": "basic"}}}})
