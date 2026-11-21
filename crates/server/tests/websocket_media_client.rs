@@ -49,6 +49,17 @@ async fn received(socket: &mut impl MediaSocket, expected: i32) -> Result<(), Me
     }
 }
 
+async fn received_close(socket: &mut impl MediaSocket) -> Result<(), MediaError> {
+    loop {
+        match socket.receive().await? {
+            Some(SocketMessage::Close) => return socket.flush().await,
+            Some(SocketMessage::Ping(bytes)) => socket.send(SocketMessage::Pong(bytes)).await?,
+            Some(SocketMessage::Binary(_) | SocketMessage::Text(_) | SocketMessage::Pong(_)) => {}
+            None => return Err(MediaError::UnknownStream),
+        }
+    }
+}
+
 #[tokio::test]
 async fn client_and_server_media_connections_exchange_audio_through_one_bridge(
 ) -> Result<(), MediaError> {
@@ -117,6 +128,7 @@ async fn client_and_server_media_connections_exchange_audio_through_one_bridge(
         tokio::try_join!(received(&mut left, -7000), received(&mut right, 4000))?;
         media.release(left_key)?;
         media.release(right_key)?;
+        tokio::try_join!(received_close(&mut left), received_close(&mut right))?;
         Ok::<(), MediaError>(())
     })
     .await
