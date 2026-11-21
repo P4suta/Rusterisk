@@ -20,6 +20,7 @@ mod observation;
 mod recording;
 mod request_body;
 mod rtp_observation;
+mod test_call;
 
 pub fn router(controller: Controller) -> Router {
     with_management(
@@ -46,6 +47,7 @@ pub(crate) fn with_management(
         .merge(configuration::router(controller.clone()))
         .merge(observation::router(controller.clone()))
         .merge(diagnosis::router(controller.clone()))
+        .merge(test_call::router(controller.clone(), media.clone()))
         .merge(rtp_observation::router(controller, media))
 }
 

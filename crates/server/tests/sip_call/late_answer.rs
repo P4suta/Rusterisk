@@ -23,7 +23,7 @@ fn check(condition: bool, reason: &'static str) -> Result<(), ControlError> {
     }
 }
 
-async fn receive(
+pub(super) async fn receive(
     socket: &UdpSocket,
     expected: Method,
 ) -> Result<(Request, SocketAddr), ControlError> {
@@ -45,7 +45,7 @@ async fn receive(
     }
 }
 
-fn reply(
+pub(super) fn reply(
     request: &Request,
     status: &str,
     to: &str,
@@ -61,7 +61,7 @@ fn reply(
     ))
 }
 
-fn cancellation(invite: &Request, cancel: &Request) -> Result<(), ControlError> {
+pub(super) fn cancellation(invite: &Request, cancel: &Request) -> Result<(), ControlError> {
     let sequence = cancel
         .cseq_header()
         .map_err(failure)?
@@ -88,7 +88,7 @@ fn cancellation(invite: &Request, cancel: &Request) -> Result<(), ControlError> 
     )
 }
 
-fn teardown(ack: &Request, bye: &Request) -> Result<(), ControlError> {
+pub(super) fn teardown(ack: &Request, bye: &Request) -> Result<(), ControlError> {
     let accepted = ack
         .cseq_header()
         .map_err(failure)?

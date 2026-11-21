@@ -78,6 +78,22 @@ rusterisk-cli doctor extension home 201 --profile lab --password-stdin < passwor
 rusterisk-cli doctor channel inbound-42 --json --profile lab --password-stdin < password.txt
 ```
 
+## Verify a test call
+
+Select a configured endpoint that answers and echoes received audio.
+The command places one call with a private Stasis application and a new synthetic signal.
+Use a write-capable account for the probe.
+
+```sh
+rusterisk-cli test-call PJSIP/echo --deadline 10 --json --profile lab --password-stdin < password.txt
+```
+
+The deadline accepts 1 through 120 seconds and defaults to 10 seconds.
+The result reports `accepted`, `answered`, and `signal_verified` separately.
+The command succeeds when the receiver verifies the current call's returned signal.
+A busy response, no answer, silence, or a different signal produces an unsuccessful exit with the observed outcome.
+The server releases the probe when the request disconnects or the deadline expires.
+
 ## Named servers
 
 Store server origins and usernames in `rusterisk/profiles.json` under the [XDG configuration directory](https://specifications.freedesktop.org/basedir/latest/).
