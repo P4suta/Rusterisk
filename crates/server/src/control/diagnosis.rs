@@ -3,12 +3,20 @@ use rusterisk_api::{
     diagnosis::{ChannelDiagnosis, Disposition, RouteDiagnosis, RouteStep},
     ChannelId,
 };
-use rusterisk_config::Application;
+use rusterisk_config::{expand_variables, Application, ExpansionError};
 use std::collections::BTreeSet;
 
-fn resolve(value: &str, extension: &str) -> Option<String> {
-    let result = value.replace("${EXTEN}", extension);
-    (!result.contains("${")).then_some(result)
+#[derive(Debug)]
+struct ExpansionLimit;
+
+fn resolve(value: &str, extension: &str) -> Result<Option<String>, ExpansionLimit> {
+    match expand_variables(value, |name| {
+        (name == "EXTEN").then(|| extension.to_owned()).ok_or(())
+    }) {
+        Ok(value) => Ok((!value.contains("${")).then_some(value)),
+        Err(ExpansionError::Capacity) => Err(ExpansionLimit),
+        Err(ExpansionError::Syntax(_) | ExpansionError::Resolve(())) => Ok(None),
+    }
 }
 
 impl Control {
@@ -51,10 +59,6 @@ impl Control {
             })
             .map(|(id, _)| id.clone())
             .collect();
-        let mut site = context.clone();
-        let mut number = extension.clone();
-        let mut priority = 1;
-        let mut seen = BTreeSet::new();
         let mut result = RouteDiagnosis {
             context,
             extension,
@@ -64,7 +68,16 @@ impl Control {
             application: None,
             destinations: Vec::new(),
         };
-        result.disposition = loop {
+        result.disposition = self.trace_route(&mut result).unwrap_or(Disposition::Limit);
+        result
+    }
+
+    fn trace_route(&self, result: &mut RouteDiagnosis) -> Result<Disposition, ExpansionLimit> {
+        let mut site = result.context.clone();
+        let mut number = result.extension.clone();
+        let mut priority = 1;
+        let mut seen = BTreeSet::new();
+        Ok(loop {
             let Some(index) = self.dialplan_program.position(&site, &number, priority) else {
                 break if result.steps.is_empty() {
                     Disposition::Missing
@@ -98,12 +111,12 @@ impl Control {
             });
             match &step.application {
                 Application::Stasis { application, .. } => {
-                    result.application = resolve(application, &number);
+                    result.application = resolve(application, &number)?;
                     break Disposition::Stasis;
                 }
                 Application::Dial { destinations, .. } => {
                     for destination in destinations {
-                        let target = resolve(destination, &number);
+                        let target = resolve(destination, &number)?;
                         let endpoint = target
                             .as_deref()
                             .and_then(|target| endpoint_resource(target).ok());
@@ -116,12 +129,12 @@ impl Control {
                     extension,
                     priority: next,
                 } => {
-                    let Some(next_site) = resolve(context.as_deref().unwrap_or(&site), &number)
+                    let Some(next_site) = resolve(context.as_deref().unwrap_or(&site), &number)?
                     else {
                         break Disposition::Dynamic;
                     };
                     let Some(next_number) =
-                        resolve(extension.as_deref().unwrap_or(&number), &number)
+                        resolve(extension.as_deref().unwrap_or(&number), &number)?
                     else {
                         break Disposition::Dynamic;
                     };
@@ -141,7 +154,27 @@ impl Control {
                     priority = next;
                 }
             }
-        };
-        result
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_route_values_respect_the_dialplan_expansion_boundary() -> Result<(), ExpansionLimit> {
+        let limit = "7".repeat(4096);
+        assert_eq!(
+            resolve("${EXTEN}", &limit)?.as_deref(),
+            Some(limit.as_str())
+        );
+        assert!(resolve("x${EXTEN}", &limit).is_err());
+        assert!(resolve("${CALLERID(num)}", "201")?.is_none());
+        assert_eq!(
+            resolve("PJSIP/${EXTEN}", "201")?.as_deref(),
+            Some("PJSIP/201")
+        );
+        Ok(())
     }
 }
