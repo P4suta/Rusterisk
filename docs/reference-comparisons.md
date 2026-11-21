@@ -35,6 +35,7 @@ Temporary runtime directories have bounded memory filesystems.
 Docker assigns an unused HTTP port on `127.0.0.1`.
 The scenario uses synthetic credentials.
 The container stops after ten minutes even if the client runner disappears.
+Docker has 90 seconds to start the container and 90 seconds to remove it.
 The runner waits up to 90 seconds for the control socket and the `core waitfullybooted` reply under one deadline.
 The test command has a five-minute deadline.
 The runner collects reference logs after a test failure and removes its container after every result.

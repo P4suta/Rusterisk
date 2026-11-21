@@ -257,7 +257,7 @@ impl Reference {
             let inspection = commands.last_output();
             commands.run(
                 docker(&arguments(["rm", "--force", &id])),
-                Duration::from_secs(30),
+                Interop::CONTAINER_LIFECYCLE,
                 |command, budget| supervisor.run_cleanup(command, budget),
             )?;
             let removal = commands.last_output();
