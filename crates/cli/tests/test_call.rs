@@ -10,7 +10,9 @@ use std::{
     process::{Output, Stdio},
     time::Duration,
 };
-use tokio::{io::AsyncWriteExt, net::TcpListener, process::Command};
+use tokio::{net::TcpListener, process::Command};
+
+mod support;
 
 async fn endpoint(
     State(result): State<Value>,
@@ -27,7 +29,7 @@ async fn probe(outcome: &str, answered: bool, verified: bool) -> io::Result<Outp
         .route("/rusterisk/test-calls/PJSIP/echo", post(endpoint))
         .with_state(result);
     let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rusterisk-cli"))
+    let child = Command::new(env!("CARGO_BIN_EXE_rusterisk-cli"))
         .args([
             "test-call",
             "PJSIP/echo",
@@ -40,17 +42,11 @@ async fn probe(outcome: &str, answered: bool, verified: bool) -> io::Result<Outp
             "test",
             "--password-stdin",
         ])
-        .stdin(Stdio::piped())
+        .stdin(support::password_input(b"secret\n")?)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
-    let mut input = child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("missing stdin"))?;
-    input.write_all(b"secret\n").await?;
-    drop(input);
     tokio::select! {out=tokio::time::timeout(Duration::from_secs(5),child.wait_with_output())=>out?,stopped=axum::serve(listener,app)=>Err(io::Error::other(format!("fixture stopped: {stopped:?}")))}
 }
 #[tokio::test]

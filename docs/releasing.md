@@ -35,7 +35,7 @@ mise x -- just security
 ## Verify a candidate
 
 Freeze the source commit before building the [server archives](server-distribution.md) and the [remote CLI](../crates/cli/README.md).
-Verify the CLI archive by installing its contents in a temporary directory and running the installed command.
+Verify the CLI archive by running its packaged tests, installing the command in a temporary directory, and checking its version.
 
 ```sh
 mise x -- just distribution-cli-check

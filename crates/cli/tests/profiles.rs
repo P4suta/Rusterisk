@@ -10,7 +10,9 @@ use std::{
     process::{Output, Stdio},
     time::Duration,
 };
-use tokio::{io::AsyncWriteExt, net::TcpListener, process::Command};
+use tokio::{net::TcpListener, process::Command};
+
+mod support;
 
 #[tokio::test]
 async fn ambiguous_profiles_and_extra_credentials_report_no_private_input() -> io::Result<()> {
@@ -33,20 +35,14 @@ async fn ambiguous_profiles_and_extra_credentials_report_no_private_input() -> i
 }
 
 async fn invoke(config: &Path, arguments: &[&str], password: &[u8]) -> io::Result<Output> {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_rusterisk-cli"))
+    let child = Command::new(env!("CARGO_BIN_EXE_rusterisk-cli"))
         .env("XDG_CONFIG_HOME", config)
         .args(arguments)
         .kill_on_drop(true)
-        .stdin(Stdio::piped())
+        .stdin(support::password_input(password)?)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let mut input = child
-        .stdin
-        .take()
-        .ok_or_else(|| io::Error::other("missing stdin"))?;
-    input.write_all(password).await?;
-    drop(input);
     tokio::time::timeout(Duration::from_secs(5), child.wait_with_output()).await?
 }
 
