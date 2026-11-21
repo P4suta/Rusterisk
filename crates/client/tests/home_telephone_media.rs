@@ -4,6 +4,14 @@ mod native_server;
 mod scenario;
 
 #[tokio::test]
+#[ignore = "Requires the isolated Asterisk 22.9.0 reference."]
+async fn gateway_media_on_the_reference() -> Result<(), rusterisk_client::Error> {
+    let address = std::env::var("RUSTERISK_REFERENCE_URL")
+        .map_err(|_| rusterisk_client::Error::Invalid("reference URL is required"))?;
+    scenario::compare(&address).await
+}
+
+#[tokio::test]
 async fn gateway_media_without_a_subprotocol_offer_exchanges_received_audio(
 ) -> Result<(), rusterisk_client::Error> {
     use rusterisk_client::Error;

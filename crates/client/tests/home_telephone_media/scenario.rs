@@ -495,7 +495,7 @@ impl Fixture {
     async fn cleanup(&mut self) -> Result<(), Error> {
         let mut result = Ok(());
         for peer in self.media.iter_mut().flatten() {
-            result = combine(result, close(peer).await);
+            result = combine(result, phase(close(peer).await, "media close"));
         }
         for channel in &self.channels {
             result = combine(
@@ -507,7 +507,10 @@ impl Fixture {
         }
         result = combine(
             result,
-            retired(&mut self.events, &self.channels, self.started).await,
+            phase(
+                retired(&mut self.events, &self.channels, self.started).await,
+                "channel retirement",
+            ),
         );
         result = combine(
             result,
@@ -515,15 +518,20 @@ impl Fixture {
                 .command(Method::DELETE, &["bridges", &self.bridge], &[])
                 .await,
         );
-        combine(result, close(&mut self.events).await)
+        combine(result, phase(close(&mut self.events).await, "event close"))
     }
 }
 
 pub async fn compare(address: &str) -> Result<(), Error> {
     let mut fixture = Fixture::new(address).await?;
-    let result = tokio::time::timeout(Duration::from_secs(10), fixture.run())
-        .await
-        .map_err(|_| Error::Timeout)
-        .and_then(|result| result);
-    combine(result, fixture.cleanup().await)
+    let result = phase(
+        tokio::time::timeout(Duration::from_secs(10), fixture.run())
+            .await
+            .map_err(|_| Error::Timeout),
+        "call deadline",
+    )
+    .and_then(|result| result);
+    combine(result, fixture.cleanup().await)?;
+    println!("Home-telephone media and cleanup passed for {address}.");
+    Ok(())
 }
