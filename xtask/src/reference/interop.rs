@@ -1,5 +1,5 @@
 use super::{step, valid_identity, ReferenceError, Step};
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 mod sipp;
 pub use sipp::SippAdapter;
 
@@ -96,6 +96,8 @@ pub fn published_address(output: &str) -> Result<SocketAddr, ReferenceError> {
 }
 
 impl Interop {
+    pub(super) const CONTAINER_LIFECYCLE: Duration = Duration::from_secs(90);
+
     pub fn new(identity: &str, configuration: &str) -> Result<Self, ReferenceError> {
         if !valid_identity(identity) {
             return Err(ReferenceError::InvalidIdentity);
@@ -187,7 +189,7 @@ impl Interop {
                 "-C",
                 "/etc/asterisk/asterisk.conf",
             ],
-            30,
+            Self::CONTAINER_LIFECYCLE.as_secs(),
         );
         match (self.internal_network.as_ref(), callback) {
             (Some(_), _) => start.arguments.insert(1, "--pull=never".into()),
@@ -233,13 +235,26 @@ impl Interop {
     }
 
     pub fn cleanup(&self) -> Step {
-        step(&["rm", "--force", &self.name], 30)
+        step(
+            &["rm", "--force", &self.name],
+            Self::CONTAINER_LIFECYCLE.as_secs(),
+        )
     }
 }
 
 #[cfg(all(test, unix))]
 mod browser_tests {
     use super::*;
+
+    #[test]
+    fn reference_container_lifecycle_has_its_own_host_deadline() -> Result<(), ReferenceError> {
+        let plan = Interop::new("fixture", "/workspace/asterisk")?;
+        let lifecycle = std::time::Duration::from_secs(90);
+        assert_eq!(plan.start().budget, lifecycle);
+        assert_eq!(plan.cleanup().budget, lifecycle);
+        assert_eq!(plan.port().budget, std::time::Duration::from_secs(10));
+        Ok(())
+    }
 
     #[test]
     fn reference_start_uses_a_sip_uri_hostname() -> Result<(), ReferenceError> {

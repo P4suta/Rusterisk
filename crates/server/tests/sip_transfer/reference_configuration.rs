@@ -152,7 +152,7 @@ impl Configuration {
     ) -> Result<(), ControlError> {
         let sip = format!("[global]\ntype=global\nendpoint_identifier_order=auth_username,username,ip\n[udp]\ntype=transport\nprotocol=udp\nbind=0.0.0.0:5060\n[auth]\ntype=auth\nauth_type=userpass\nusername=phone\npassword=test-password\nsupported_algorithms_uas=MD5\n[dynamic]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=dynamic\ncontext=internal\nidentify_by=auth_username\ndisallow=all\nallow=ulaw\ndirect_media=no\nallow_transfer=yes\nrefer_blind_progress=yes\n[spoofed]\ntype=endpoint\ntransport=udp\nauth=auth\naors=dynamic\ncontext=outside\nidentify_by=auth_username\ndisallow=all\nallow=ulaw\ndirect_media=no\n[bob-aor]\ntype=aor\ncontact=sip:bob@{bob}\n[transfer-bob]\ntype=endpoint\ntransport=udp\naors=bob-aor\ndisallow=all\nallow=ulaw\ndirect_media=no\n[charlie-aor]\ntype=aor\ncontact=sip:charlie@{charlie}\n[transfer-charlie]\ntype=endpoint\ntransport=udp\naors=charlie-aor\ndisallow=all\nallow=ulaw\ndirect_media=no\n");
         replace(&self.root.join(SIP_FIXTURE), sip.as_bytes()).await?;
-        replace(&self.root.join(DIALPLAN_FIXTURE), b"[internal]\nexten => 100,1,Dial(PJSIP/transfer-bob,5)\nsame => n,Hangup()\nexten => 200,1,Dial(PJSIP/transfer-charlie,5)\nsame => n,Hangup()\n[outside]\nexten => 100,1,Hangup()\n").await?;
+        replace(&self.root.join(DIALPLAN_FIXTURE), b"[internal]\nexten => 100,1,Dial(PJSIP/${EXTEN}@transfer-bob,5)\nsame => n,Hangup()\nexten => 200,1,Dial(PJSIP/${EXTEN}@transfer-charlie,5)\nsame => n,Hangup()\n[outside]\nexten => 100,1,Hangup()\n").await?;
         self.reload().await
     }
 
@@ -217,7 +217,14 @@ impl Configuration {
                 });
             result = combine(result, deleted);
         }
-        let completed = tokio::time::timeout(Duration::from_secs(2), async {
+        combine(result, self.wait_for_channels(previous).await)
+    }
+
+    pub(super) async fn wait_for_channels(
+        &self,
+        previous: &BTreeSet<ChannelId>,
+    ) -> Result<(), ControlError> {
+        tokio::time::timeout(Duration::from_secs(2), async {
             let mut tick = tokio::time::interval(Duration::from_millis(20));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             for _ in 0..128 {
@@ -234,8 +241,6 @@ impl Configuration {
             Err(ControlError::Capacity)
         })
         .await
-        .map_err(failure)
-        .and_then(|result| result);
-        combine(result, completed)
+        .map_err(failure)?
     }
 }

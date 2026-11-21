@@ -239,6 +239,7 @@ impl Control {
         let bridge = |id| self.event_source(ResourceKind::Bridge, id, ended);
         match kind {
             EventKind::ChannelCreated { channel: value }
+            | EventKind::ChannelDialplan { channel: value, .. }
             | EventKind::ChannelStateChange { channel: value }
             | EventKind::ChannelCallerId { channel: value, .. }
             | EventKind::ChannelDestroyed { channel: value, .. }
@@ -273,6 +274,7 @@ impl Control {
             | EventKind::RecordingFinished { .. }
             | EventKind::RecordingFailed { .. } => [None, None],
             EventKind::StasisStart { .. }
+            | EventKind::Published(_)
             | EventKind::StasisEnd { .. }
             | EventKind::ApplicationMoveFailed { .. }
             | EventKind::ApplicationReplaced { .. } => [None, None],

@@ -18,6 +18,7 @@ Stored recordings support listing, metadata, copying, deletion, and streamed `au
 The ping endpoint returns a `pong` response.
 App queries report subscribed apps and their channel and bridge resources.
 Event filters support partial updates, rejection precedence, and reset through an empty request.
+The Rust client preserves the name and JSON fields of [published events without native models](adr/preserve-published-events-without-native-models.md).
 Explicit subscriptions observe channels, bridges, configured endpoints, or all resources of one kind.
 Endpoint technology subscriptions also observe their channels.
 All-endpoint subscriptions report endpoint state changes.
@@ -34,6 +35,13 @@ Mismatched supplied origins return `403`.
 Native clients can omit the header and still require authentication.
 
 Known operations without working adapters return `501`.
+Bridge creation accepts mixing and proxy media.
+Requesting a holding or video bridge returns `501` before creation.
+Adding a member with `role`, `mute=true`, `absorbDTMF=true`, or `inhibitConnectedLineUpdates=true` returns `501` before membership changes.
+Origination options that need another channel or a codec selection, dialplan labels, and bridge playback or recording format overrides return `501` when requested.
+The Asterisk REST Interface (ARI) selects a literal path segment before a resource identifier in the same position.
+For example, `DELETE /ari/channels/create` returns `405` with `Allow: OPTIONS,POST`.
+Unknown routes return `404`, and `OPTIONS` reports the methods for the selected resource.
 Channel redirection still uses that response.
 Sound queries list configured wave files by sound identifier, language, and format.
 Channel and bridge playback resolve sound identifiers within the configured library and preserve each request's language.
@@ -52,7 +60,8 @@ A zero `skipms` selects the default step.
 Paused and stopping playbacks reject position changes.
 Queued restart preserves the original request.
 The same Rust client compares channel and bridge position changes with Asterisk 22.9.0 using received audio.
-The comparison also checks an initial seven-second offset, one-second position changes, paused-state rejection, resume, stop, and completion events.
+The comparison starts at 22 seconds and moves in seven-second steps through distinct sounds.
+It also checks paused-state rejection, resume, stop, and completion events.
 Restart returns to the beginning even when the request supplied an initial offset.
 Media lists remain unsupported.
 Live recording duration statistics remain absent.
@@ -96,6 +105,7 @@ The [transfer profile](blind-transfer.md) records remaining authorization, topol
 Legacy hold through an unspecified connection address remains pending.
 External media supports bidirectional unicast datagrams with numeric destinations and `ulaw` or `alaw` formats.
 Creation returns bound transport variables after socket admission.
+An external channel can leave Stasis through `POST /ari/channels/{channelId}/continue` and enter a configured extension.
 Stasis participation and received audio remain independent milestones.
 The Rust client exposes typed external datagram targets and bounded bridge membership operations.
 AudioSocket supports client connections with numeric destinations, binary session identifiers, and 8 kHz signed linear audio through `format=slin`.
@@ -141,9 +151,9 @@ The local `just check` gate covers formatting, source policy, Rust 1.89 core tes
 The local `just security` gate checks advisories, dependency policy, licenses, sources, and secrets.
 The private historical JavaScript fixture uses a [scoped dependency assessment](legacy-client-dependency-scope.md) that reports its known advisories and rejects unreviewed changes.
 Datagram tests compare received audio through actual sockets and bridges, including peer hold, resume, and mixed packet durations.
-The SDK cancellation test uses a software SIP peer that answers after receiving `CANCEL`.
+The SDK cancellation test uses a Session Initiation Protocol (SIP) peer that answers after receiving `CANCEL`.
 It checks the `ACK` and `BYE` exchange and requires another `ACK` for a retransmitted answer.
-It verifies the cancelled outcome, the absence of an active channel, and the release of the RTP and RTCP ports.
+It verifies the cancelled outcome, the absence of an active channel, and the release of both media ports.
 The local `just interop` gate compares bridge lifecycle, endpoint resources, routing availability, app subscriptions, external channel admission, and resource errors with Asterisk 22.9.0.
 Both servers bridge known external audio samples in both directions with `PCMU` and `PCMA`.
 AudioSocket comparisons also check session identifiers and exact received samples through both servers.

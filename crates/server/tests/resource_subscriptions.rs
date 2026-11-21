@@ -48,6 +48,60 @@ fn incoming(id: &ChannelId) -> IncomingCall {
 }
 
 #[tokio::test]
+async fn dialplan_observers_receive_the_executed_applications_and_expanded_arguments(
+) -> Result<(), ControlError> {
+    let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "", "",
+        "[internal]\nexten => 100,1,Goto(destination,${EXTEN},2)\n[destination]\nexten => 100,2,Stasis(observer,${EXTEN})\n").map_err(failure)?;
+    let (controller, runner, _effects) = Controller::new(config, 4);
+    let task = tokio::spawn(runner.run());
+    let result = async {
+        let credentials = Credentials::new("app".into(), "test-password".into())?;
+        let mut observer = controller
+            .subscribe(credentials, None, "observer".into())
+            .await?;
+        let response = router(controller.clone())
+            .oneshot(request("POST", "channel:")?)
+            .await
+            .map_err(failure)?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let id = ChannelId::try_from("incoming".to_owned())?;
+        controller
+            .incoming(IncomingCall {
+                target: IncomingTarget::Dialplan,
+                ..incoming(&id)
+            })
+            .await?;
+        for (name, arguments, context, priority) in [
+            ("Goto", "destination,100,2", "internal", 1),
+            ("Stasis", "observer,100", "destination", 2),
+        ] {
+            let value = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let event = observer.events.recv().await.ok_or(ControlError::Capacity)?;
+                    assert!(
+                        !matches!(event.kind, EventKind::StasisStart { .. }),
+                        "StasisStart preceded the subscribed ChannelDialplan"
+                    );
+                    if event.kind.event_type() == "ChannelDialplan" {
+                        return serde_json::to_value(event).map_err(ControlError::from);
+                    }
+                }
+            })
+            .await
+            .map_err(failure)??;
+            assert_eq!(value["dialplan_app"], name);
+            assert_eq!(value["dialplan_app_data"], arguments);
+            assert_eq!(value["channel"]["dialplan"]["context"], context);
+            assert_eq!(value["channel"]["dialplan"]["priority"], priority);
+        }
+        Ok(())
+    }
+    .await;
+    controller.shutdown();
+    result.and(task.await.map_err(failure)?)
+}
+
+#[tokio::test]
 async fn endpoint_observers_receive_availability_and_specific_endpoint_channels(
 ) -> Result<(), ControlError> {
     let configuration = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[dynamic]\ntype=aor\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=dynamic\nallow=ulaw\n", "", "").map_err(failure)?;

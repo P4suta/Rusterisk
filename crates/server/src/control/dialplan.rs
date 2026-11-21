@@ -9,6 +9,7 @@ use rusterisk_core::{
 
 pub(super) struct DialplanFrame {
     program: Dialplan,
+    extension: String,
     machine: Option<DialplanMachine>,
     answer: Option<AnswerProgress>,
     pub(super) dial: Option<super::dial::DialBranches>,
@@ -45,6 +46,7 @@ impl DialplanFrame {
     pub(super) fn dormant(program: Dialplan) -> Self {
         Self {
             program,
+            extension: String::new(),
             machine: None,
             answer: None,
             dial: None,
@@ -59,16 +61,6 @@ fn core_error(error: DialplanError) -> ControlError {
         DialplanError::Clock => ControlError::Adapter("Dialplan timer overflow".into()),
         DialplanError::Capacity => ControlError::Capacity,
     }
-}
-
-fn position(program: &Dialplan, context: &str, extension: &str, priority: u16) -> Option<u16> {
-    program
-        .steps
-        .iter()
-        .position(|step| {
-            step.context == context && step.extension == extension && step.priority == priority
-        })
-        .and_then(|index| u16::try_from(index).ok())
 }
 
 impl Control {
@@ -194,7 +186,8 @@ impl Control {
             .dialplan
             .as_ref()
             .ok_or(ControlError::Conflict("Dialplan is executing"))?;
-        let destination = position(&frame.program, context, extension, rank);
+        let destination = frame.program.position(context, extension, rank);
+        let extension = extension.to_owned();
         let next_machine = if let Some(mut machine) = frame.machine {
             let DialplanState::Awaiting { position, token } = machine.state() else {
                 return Err(ControlError::Conflict("Dialplan is not waiting in Stasis"));
@@ -261,6 +254,7 @@ impl Control {
             .as_mut()
             .ok_or(ControlError::Conflict("Dialplan is executing"))?;
         frame.machine = next_machine;
+        frame.extension = extension;
         frame.answer = None;
         outcome.event(
             &application_name,
@@ -297,18 +291,19 @@ impl Control {
             return Err(ControlError::Conflict("Dialplan already started"));
         }
         let location = &entry.snapshot.dialplan;
-        let index = position(
-            &program,
-            &location.context,
-            &location.exten,
-            u16::try_from(location.priority)
-                .map_err(|_| ControlError::Invalid("Invalid dialplan priority"))?,
-        )
-        .ok_or(ControlError::NotFound("Extension not found"))?;
+        let index = program
+            .position(
+                &location.context,
+                &location.exten,
+                u16::try_from(location.priority)
+                    .map_err(|_| ControlError::Invalid("Invalid dialplan priority"))?,
+            )
+            .ok_or(ControlError::NotFound("Extension not found"))?;
         let length = u16::try_from(program.steps.len()).map_err(|_| ControlError::Capacity)?;
         let machine = DialplanMachine::new(key.generation, index, length).map_err(core_error)?;
         entry.dialplan = Some(DialplanFrame {
             program,
+            extension: location.exten.clone(),
             machine: Some(machine),
             answer: None,
             dial: None,
@@ -490,6 +485,14 @@ impl Control {
                 Application::Goto { .. } => DialplanInstruction::Goto,
                 Application::Hangup => DialplanInstruction::Hangup,
             };
+            let entry = self
+                .channels
+                .get_mut(&key.id)
+                .ok_or(ControlError::NotFound("Channel not found"))?;
+            entry.snapshot.dialplan.context.clone_from(&step.context);
+            entry.snapshot.dialplan.exten.clone_from(&frame.extension);
+            entry.snapshot.dialplan.priority = i32::from(step.priority);
+            let mut jump_extension = None;
             let next = match &step.application {
                 Application::Goto {
                     context,
@@ -498,8 +501,10 @@ impl Control {
                 } => {
                     let context = self.expand(key, context.as_deref().unwrap_or(&step.context))?;
                     let extension =
-                        self.expand(key, extension.as_deref().unwrap_or(&step.extension))?;
-                    position(&frame.program, &context, &extension, *priority)
+                        self.expand(key, extension.as_deref().unwrap_or(&frame.extension))?;
+                    let next = frame.program.position(&context, &extension, *priority);
+                    jump_extension = Some(extension);
+                    next
                 }
                 Application::NoOp(_)
                 | Application::Set { .. }
@@ -509,7 +514,9 @@ impl Control {
                 | Application::Playback(_)
                 | Application::Wait(_)
                 | Application::Hangup => step.priority.checked_add(1).and_then(|priority| {
-                    position(&frame.program, &step.context, &step.extension, priority)
+                    frame
+                        .program
+                        .position(&step.context, &frame.extension, priority)
                 }),
             };
             let execution = match machine
@@ -523,21 +530,23 @@ impl Control {
                     return Ok(());
                 }
             };
-            let entry = self
-                .channels
-                .get_mut(&key.id)
-                .ok_or(ControlError::NotFound("Channel not found"))?;
-            entry.snapshot.dialplan.context = step.context;
-            entry.snapshot.dialplan.exten = step.extension;
-            entry.snapshot.dialplan.priority = i32::from(step.priority);
+            if let Some(extension) = jump_extension {
+                frame.extension = extension;
+            }
             match step.application {
                 Application::NoOp(value) => {
                     let data = self.expand(key, &value)?;
-                    self.set_dialplan_location(key, "NoOp", data)?;
+                    self.set_dialplan_location(key, "NoOp", data, timestamp, outcome)?;
                 }
                 Application::Set { variable, value } => {
                     let value = self.expand(key, &value)?;
-                    self.set_dialplan_location(key, "Set", format!("{variable}={value}"))?;
+                    self.set_dialplan_location(
+                        key,
+                        "Set",
+                        format!("{variable}={value}"),
+                        timestamp,
+                        outcome,
+                    )?;
                     outcome.append(self.set_variable(
                         &key.id,
                         variable,
@@ -547,7 +556,7 @@ impl Control {
                     )?);
                 }
                 Application::Answer => {
-                    self.set_dialplan_location(key, "Answer", String::new())?;
+                    self.set_dialplan_location(key, "Answer", String::new(), timestamp, outcome)?;
                     let entry = self
                         .channels
                         .get(&key.id)
@@ -563,18 +572,23 @@ impl Control {
                     extension,
                     priority,
                 } => {
-                    self.set_dialplan_location(
-                        key,
-                        "Goto",
-                        format!(
-                            "{},{},{priority}",
-                            context.unwrap_or_default(),
-                            extension.unwrap_or_default()
-                        ),
-                    )?;
+                    let arguments = context
+                        .into_iter()
+                        .chain(extension)
+                        .chain(std::iter::once(priority.to_string()))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let data = self.expand(key, &arguments)?;
+                    self.set_dialplan_location(key, "Goto", data, timestamp, outcome)?;
                 }
                 Application::Wait(duration) => {
-                    self.set_dialplan_location(key, "Wait", duration.argument().to_owned())?;
+                    self.set_dialplan_location(
+                        key,
+                        "Wait",
+                        duration.argument().to_owned(),
+                        timestamp,
+                        outcome,
+                    )?;
                     machine.tick(now);
                     continue;
                 }
@@ -595,7 +609,14 @@ impl Control {
                     if arguments.len() > 32 || arguments.iter().any(|value| value.len() > 256) {
                         return Err(ControlError::Capacity);
                     }
-                    self.set_dialplan_location(key, "Stasis", expanded.clone())?;
+                    self.set_dialplan_location(
+                        key,
+                        "Stasis",
+                        expanded.clone(),
+                        timestamp,
+                        outcome,
+                    )?;
+                    self.route_resource_events(outcome);
                     let entry = self
                         .channels
                         .get_mut(&key.id)
@@ -626,6 +647,7 @@ impl Control {
                         .insert("STASISSTATUS".into(), "FAILED".into());
                 }
                 Application::Hangup => {
+                    self.set_dialplan_location(key, "Hangup", String::new(), timestamp, outcome)?;
                     outcome.append(self.end(&key.id, timestamp, 16)?);
                     return Ok(());
                 }
@@ -638,7 +660,7 @@ impl Control {
                         Some(timeout) => format!("{destinations},{timeout}"),
                         None => destinations.clone(),
                     };
-                    self.set_dialplan_location(key, "Dial", data)?;
+                    self.set_dialplan_location(key, "Dial", data, timestamp, outcome)?;
                     match self.begin_dial(
                         key,
                         execution.token,
@@ -668,7 +690,7 @@ impl Control {
                 }
                 Application::Playback(name) => {
                     let name = self.expand(key, &name)?;
-                    self.set_dialplan_location(key, "Playback", name.clone())?;
+                    self.set_dialplan_location(key, "Playback", name.clone(), timestamp, outcome)?;
                     let entry = self
                         .channels
                         .get(&key.id)
@@ -702,6 +724,8 @@ impl Control {
         key: &CallKey,
         name: &str,
         data: String,
+        timestamp: &str,
+        outcome: &mut Outcome,
     ) -> Result<(), ControlError> {
         let entry = self
             .channels
@@ -709,6 +733,16 @@ impl Control {
             .ok_or(ControlError::NotFound("Channel not found"))?;
         entry.snapshot.dialplan.app_name = name.into();
         entry.snapshot.dialplan.app_data = data;
+        if !self.resource_subscriptions.is_empty() {
+            outcome.notice(
+                timestamp,
+                &EventKind::ChannelDialplan {
+                    channel: entry.snapshot.clone(),
+                    dialplan_app: entry.snapshot.dialplan.app_name.clone(),
+                    dialplan_app_data: entry.snapshot.dialplan.app_data.clone(),
+                },
+            );
+        }
         Ok(())
     }
 }

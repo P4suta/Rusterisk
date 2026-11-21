@@ -265,7 +265,11 @@ impl NativeCallProfile {
         bindings: Option<&BoundNativeProfiles>,
         endpoint: &str,
     ) -> Result<Self, ControlError> {
-        let media = NativeMediaProfile::requested(config, endpoint)?;
+        let dial = rusterisk_sip::DialResource::parse(endpoint)
+            .map_err(|_| ControlError::Invalid("Invalid PJSIP dial resource"))?;
+        let media = NativeMediaProfile::requested(config, dial.endpoint())?;
+        let sip = OutboundProfile::for_resource(config, dial)
+            .map_err(|error| ControlError::Adapter(error.to_string()))?;
         let listener = match bindings {
             Some(bindings) => {
                 NativeListenerProfile::Bound(bindings.find(&media.transport)?.clone())
@@ -274,8 +278,7 @@ impl NativeCallProfile {
         };
         Ok(Self {
             endpoint: endpoint.into(),
-            sip: OutboundProfile::capture(config, endpoint)
-                .map_err(|error| ControlError::Adapter(error.to_string()))?,
+            sip,
             media,
             listener,
         })

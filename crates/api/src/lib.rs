@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 mod event_filter;
 mod event_source;
+mod published_event;
+pub use published_event::PublishedEvent;
 mod external_rtp;
 mod external_stream;
 pub use external_stream::{AudioSocketTarget, InvalidAudioSocketSession, InvalidAudioSocketTarget};
@@ -31,6 +33,9 @@ pub use recording_options::{
 };
 pub use recording_policy::{InvalidRecordingIfExists, RecordingIfExists};
 pub use swagger::SwaggerError;
+
+mod ari_route;
+pub use ari_route::{ari_route, is_known_operation, AriRoute};
 
 pub const REFERENCE_VERSION: &str = "22.9.0";
 
@@ -300,6 +305,11 @@ pub enum EventKind {
     ChannelStateChange {
         channel: Channel,
     },
+    ChannelDialplan {
+        channel: Channel,
+        dialplan_app: String,
+        dialplan_app_data: String,
+    },
     ChannelCallerId {
         caller_presentation: i32,
         caller_presentation_txt: String,
@@ -392,6 +402,9 @@ pub enum EventKind {
         channel: Channel,
         userevent: std::collections::BTreeMap<String, String>,
     },
+    #[serde(untagged)]
+    #[schemars(skip, !untagged)]
+    Published(PublishedEvent),
 }
 
 impl EventKind {
@@ -402,6 +415,7 @@ impl EventKind {
             Self::StasisEnd { .. } => "StasisEnd",
             Self::ChannelCreated { .. } => "ChannelCreated",
             Self::ChannelStateChange { .. } => "ChannelStateChange",
+            Self::ChannelDialplan { .. } => "ChannelDialplan",
             Self::ChannelCallerId { .. } => "ChannelCallerId",
             Self::ChannelDestroyed { .. } => "ChannelDestroyed",
             Self::ChannelHangupRequest { .. } => "ChannelHangupRequest",
@@ -423,6 +437,7 @@ impl EventKind {
             Self::ApplicationMoveFailed { .. } => "ApplicationMoveFailed",
             Self::Dial { .. } => "Dial",
             Self::ChannelUserevent { .. } => "ChannelUserevent",
+            Self::Published(event) => event.event_type(),
         }
     }
 }
@@ -499,7 +514,49 @@ pub enum ParameterKind {
     Filter,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnavailableParameterKind {
+    String,
+    Boolean,
+}
+
+impl From<UnavailableParameterKind> for ParameterKind {
+    fn from(kind: UnavailableParameterKind) -> Self {
+        match kind {
+            UnavailableParameterKind::String => Self::String,
+            UnavailableParameterKind::Boolean => Self::Boolean,
+        }
+    }
+}
+
 impl Operation {
+    pub fn unavailable_parameters(&self) -> &'static [(&'static str, UnavailableParameterKind)] {
+        use UnavailableParameterKind::{Boolean, String};
+        match self.id {
+            "channels.originate" | "channels.originateWithId" => &[
+                ("label", String),
+                ("otherChannelId", String),
+                ("originator", String),
+                ("formats", String),
+            ],
+            "channels.create" => &[
+                ("otherChannelId", String),
+                ("originator", String),
+                ("formats", String),
+            ],
+            "channels.continue" => &[("label", String)],
+            "bridges.addChannel" => &[
+                ("absorbDTMF", Boolean),
+                ("mute", Boolean),
+                ("inhibitConnectedLineUpdates", Boolean),
+                ("role", String),
+            ],
+            "bridges.play" | "bridges.playWithId" => &[("announcer_format", String)],
+            "bridges.record" => &[("recorder_format", String)],
+            _ => &[],
+        }
+    }
+
     pub fn parameter_kind(&self, name: &str) -> Option<ParameterKind> {
         if !self
             .parameters
@@ -560,32 +617,6 @@ macro_rules! operation {
     ($id:literal, $name:literal, $method:ident, $path:literal, $response:literal, [$($parameter:literal),*], $status:literal) => {
         Operation { id: $id, nickname: $name, method: Method::$method, path: $path, response: $response, parameters: &[$($parameter),*], success_status: $status }
     };
-}
-
-const UNSUPPORTED_OPERATIONS: &[Operation] = &[
-    operation!(
-        "channels.snoopChannel",
-        "snoopChannel",
-        Post,
-        "/channels/{channelId}/snoop",
-        "Channel",
-        ["app!", "spy", "whisper", "appArgs", "snoopId"]
-    ),
-    operation!(
-        "channels.snoopChannelWithId",
-        "snoopChannelWithId",
-        Post,
-        "/channels/{channelId}/snoop/{snoopId}",
-        "Channel",
-        ["app!", "spy", "whisper", "appArgs"]
-    ),
-];
-
-pub fn is_known_operation(method: &str, path: &str) -> bool {
-    OPERATIONS
-        .iter()
-        .chain(UNSUPPORTED_OPERATIONS)
-        .any(|operation| operation.matches(method, path))
 }
 
 pub const OPERATIONS: &[Operation] = &[
@@ -873,7 +904,7 @@ pub const OPERATIONS: &[Operation] = &[
         Post,
         "/bridges/{bridgeId}/addChannel",
         "void",
-        ["channel!", "role"]
+        ["channel!"]
     ),
     operation!(
         "bridges.removeChannel",
@@ -907,7 +938,15 @@ pub const OPERATIONS: &[Operation] = &[
         Post,
         "/bridges/{bridgeId}/record",
         "LiveRecording",
-        ["name!", "format!", "maxDurationSeconds", "ifExists"],
+        [
+            "name!",
+            "format!",
+            "maxDurationSeconds",
+            "maxSilenceSeconds",
+            "ifExists",
+            "beep",
+            "terminateOn"
+        ],
         201
     ),
     operation!(
@@ -1234,12 +1273,20 @@ fn path_parameters(path: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-fn parameter_schema(name: &str, kind: ParameterKind) -> Value {
+fn parameter_schema(operation: &Operation, name: &str, kind: ParameterKind) -> Value {
     match name {
         "only" => {
             json!({"type": "array", "items": schemars::schema_for!(InfoSection).to_value(), "maxItems": 32})
         }
         "ifExists" => schemars::schema_for!(RecordingIfExists).to_value(),
+        "priority"
+            if matches!(
+                operation.id,
+                "channels.originate" | "channels.originateWithId"
+            ) =>
+        {
+            json!({"type": "integer", "format": "int64"})
+        }
         "offsetms" | "skipms" => json!({
             "type": "integer", "format": "int32", "minimum": 0, "maximum": i32::MAX,
             "default": if name == "offsetms" { 0 } else { 3000 },
@@ -1250,7 +1297,7 @@ fn parameter_schema(name: &str, kind: ParameterKind) -> Value {
         "terminateOn" => schemars::schema_for!(RecordingTermination).to_value(),
         _ => match kind {
             ParameterKind::String => json!({"type": "string"}),
-            ParameterKind::Integer => json!({"type": "integer", "format": "int64"}),
+            ParameterKind::Integer => json!({"type": "integer", "format": "int32"}),
             ParameterKind::Boolean => json!({"type": "boolean"}),
             ParameterKind::StringList => {
                 json!({"type": "array", "items": {"type": "string"}, "maxItems": 32})
@@ -1273,10 +1320,17 @@ fn parameters(operation: &Operation, format: Option<DiscoveryFormat>) -> Vec<Val
         let location = if matches!(name, "variables" | "filter") { "body" } else { location };
         let parameter_kind = operation.parameter_kind(name).unwrap_or(ParameterKind::String);
         let multiple = parameter_kind == ParameterKind::StringList;
-        let schema = parameter_schema(name, parameter_kind);
+        let schema = parameter_schema(operation, name, parameter_kind);
         if let Some(format) = format {
+            let required = required && !(format == DiscoveryFormat::Asterisk
+                && location == "path" && operation.resource() == "endpoints");
             let kind = if multiple && format == DiscoveryFormat::Asterisk { "string" } else { schema["type"].as_str().unwrap_or("string") };
-            let data_type = if name == "variables" { "containers" } else if kind == "integer" && format == DiscoveryFormat::Asterisk { "int" } else { kind };
+            let data_type = match (name, kind, format) {
+                ("variables", _, _) => "containers",
+                (_, "integer", DiscoveryFormat::Asterisk) if schema["format"] == "int64" => "long",
+                (_, "integer", DiscoveryFormat::Asterisk) => "int",
+                _ => kind,
+            };
             let mut parameter = json!({"name": name, "paramType": location, "required": required, "allowMultiple": multiple, "dataType": data_type, "type": kind, "description": name});
             for field in ["format", "minimum", "maximum", "items", "maxItems"] {
                 if let Some(value) = schema.get(field) { parameter[field] = value.clone(); }
@@ -1330,7 +1384,7 @@ pub fn openapi() -> Value {
                     let name = name.trim_end_matches('!');
                     operation
                         .parameter_kind(name)
-                        .map(|kind| (name.to_owned(), parameter_schema(name, kind)))
+                        .map(|kind| (name.to_owned(), parameter_schema(operation, name, kind)))
                 })
                 .collect();
             entry[operation.method.as_str()]["requestBody"] = json!({"content": {"application/json": {"schema": {"type": "object", "properties": properties}}}});

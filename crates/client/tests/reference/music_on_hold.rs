@@ -244,7 +244,10 @@ impl Resources {
             );
             cleanup = combine(
                 cleanup,
-                missing(bounded(client.playback(&self.playback)).await),
+                super::playback_position::removed(&self.playback, || {
+                    client.playback(&self.playback)
+                })
+                .await,
             );
         }
         for peer in &mut self.peers {
@@ -364,10 +367,18 @@ impl AudioWindow {
                 ComparisonServer::Rusterisk => previous_samples,
                 ComparisonServer::Asterisk => samples,
             };
-            let consecutive = ssrc == packet.ssrc() && expected_sequence == packet.sequence();
+            let sequence_distance = packet.sequence().wrapping_sub(sequence);
+            let same_source = ssrc == packet.ssrc();
+            let consecutive = same_source && sequence_distance == 1;
             let elapsed_samples = packet.timestamp().wrapping_sub(timestamp);
             let continuous = consecutive && elapsed_samples == step;
-            restart = consecutive
+            let reference_packet_loss = matches!(self.server, ComparisonServer::Asterisk)
+                && same_source
+                && (2..(1 << 15)).contains(&sequence_distance)
+                && previous_samples == 160
+                && samples == 160
+                && elapsed_samples == u32::from(sequence_distance) * 160;
+            let presentation_gap = consecutive
                 && elapsed_samples < (1_u32 << 31)
                 && elapsed_samples
                     .checked_sub(step)
@@ -375,6 +386,7 @@ impl AudioWindow {
                         ComparisonServer::Rusterisk => gap != 0 && gap.is_multiple_of(160),
                         ComparisonServer::Asterisk => gap >= 160,
                     });
+            restart = presentation_gap || reference_packet_loss;
             if !continuous && !restart {
                 eprintln!(
                     "MOH RTP clock mismatch: previous=(ssrc={ssrc}, sequence={sequence}, timestamp={timestamp}, samples={previous_samples}), expected=(ssrc={ssrc}, sequence={expected_sequence}, timestamp={}), observed=(ssrc={}, sequence={}, timestamp={}, samples={samples})",
@@ -455,9 +467,15 @@ async fn audio(
     tokio::pin!(request);
     let mut first = [0; 2049];
     let mut second = [0; 2049];
-    let result = bounded(async {
-        for _ in 0..256 {
+    let onset = Instant::now() + Duration::from_secs(3);
+    let measurement = Duration::from_millis(u64::from(frames) * 20);
+    let result = tokio::time::timeout_at(onset + measurement, async {
+        let start_timeout = tokio::time::sleep_until(onset);
+        tokio::pin!(start_timeout);
+        let mut measured_packets = 0;
+        while measured_packets < 256 {
             tokio::select! {
+                _ = &mut start_timeout, if window.first.is_none() => return Err(Error::Timeout),
                 result = &mut request, if !repeated && window.total_samples >= 20 * 160 => {
                     result?;
                     repeated = true;
@@ -468,6 +486,7 @@ async fn audio(
                     left.check_source(source)?;
                     let packet = RtpPacket::parse(&first[..size]).map_err(invalid)?;
                     window.observe(&packet, Instant::now())?;
+                    measured_packets += 1;
                 }
                 result = right.socket.data().recv_from(&mut second) => {
                     let (_, source) = result?;
@@ -483,7 +502,9 @@ async fn audio(
         }
         Err(Error::Capacity)
     })
-    .await;
+    .await
+    .map_err(|_| Error::Timeout)
+    .and_then(|result| result);
     if let Err(error) = &result {
         eprintln!(
             "MOH audio comparison failed: phase={phase}, samples={}, total_samples={}, error={error}",
@@ -501,7 +522,8 @@ async fn observe_reference_mute(peers: &[Peer; 2]) -> Result<(), Error> {
     let mut muted_bytes = [0; 2049];
     let mut audible_bytes = [0; 2049];
     let result = bounded(async {
-        for _ in 0..256 {
+        let mut audible_packets = 0;
+        while audible_packets < 256 {
             tokio::select! {
                 biased;
                 result = muted.socket.data().recv_from(&mut muted_bytes) => {
@@ -515,6 +537,7 @@ async fn observe_reference_mute(peers: &[Peer; 2]) -> Result<(), Error> {
                     let now = Instant::now();
                     let packet = RtpPacket::parse(&audible_bytes[..size]).map_err(invalid)?;
                     window.observe(&packet, now)?;
+                    audible_packets += 1;
                     if window.complete(12, now) {
                         return Ok(());
                     }
@@ -570,7 +593,8 @@ async fn exercise(
     let media =
         MediaUri::Sound(SoundId::try_from("rusterisk-position".to_owned()).map_err(invalid)?);
     let options = PlaybackOptions {
-        offset_ms: PlaybackMilliseconds::try_from(7000).map_err(invalid)?,
+        offset_ms: PlaybackMilliseconds::try_from(super::playback_position::INTERRUPTION_OFFSET_MS)
+            .map_err(invalid)?,
         skip_ms: PlaybackMilliseconds::try_from(1000).map_err(invalid)?,
     };
     *playback_lifetime = Lifetime::Requested;
@@ -583,7 +607,7 @@ async fn exercise(
     )?;
     receive(2000, 12, None, "ordinary playback interrupts music").await?;
     observed(session, Wanted::Finished(playback_id)).await?;
-    missing(bounded(client.playback(playback_id)).await)?;
+    super::playback_position::removed(playback_id, || client.playback(playback_id)).await?;
     *playback_lifetime = Lifetime::Released;
     match server {
         ComparisonServer::Rusterisk => {
@@ -721,6 +745,91 @@ fn known_packet(sequence: u16, timestamp: u32) -> Result<RtpPacket, Error> {
     .map_err(invalid)
 }
 
+#[tokio::test]
+async fn music_start_and_a_full_received_loop_have_separate_deadlines() -> Result<(), Error> {
+    let ip = Ipv4Addr::LOCALHOST;
+    let socket = tokio::net::UdpSocket::bind((ip, 0)).await?;
+    let mut peers = [
+        Peer::new("music", ip.into())?,
+        Peer::new("clock", ip.into())?,
+    ];
+    for peer in &mut peers {
+        peer.destination = Some(socket.local_addr()?);
+    }
+    let measured = peers[0].socket.local_addr()?;
+    let client = Client::new("http://127.0.0.1:1", "app", "test")?;
+    let send = async {
+        let mut tick = tokio::time::interval_at(
+            Instant::now() + Duration::from_millis(2200),
+            Duration::from_millis(20),
+        );
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        for sequence in 0..65 {
+            tick.tick().await;
+            let packet = known_packet(sequence, u32::from(sequence) * 160)?
+                .encode()
+                .map_err(invalid)?;
+            socket.send_to(&packet, measured).await?;
+        }
+        Ok::<_, Error>(())
+    };
+    tokio::try_join!(
+        audio(
+            &client,
+            &peers,
+            ComparisonServer::Asterisk,
+            1200,
+            60,
+            None,
+            "late music start"
+        ),
+        send
+    )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn traffic_on_the_other_route_cannot_exhaust_the_music_measurement() -> Result<(), Error> {
+    let ip = Ipv4Addr::LOCALHOST;
+    let socket = tokio::net::UdpSocket::bind((ip, 0)).await?;
+    let mut peers = [
+        Peer::new("measured", ip.into())?,
+        Peer::new("other", ip.into())?,
+    ];
+    for peer in &mut peers {
+        peer.destination = Some(socket.local_addr()?);
+    }
+    let measured = peers[0].socket.local_addr()?;
+    let other = peers[1].socket.local_addr()?;
+    let client = Client::new("http://127.0.0.1:1", "app", "test")?;
+    let send = async {
+        let mut tick = tokio::time::interval(Duration::from_millis(4));
+        for sequence in 0..270 {
+            tick.tick().await;
+            let packet = known_packet(sequence, u32::from(sequence) * 160)?
+                .encode()
+                .map_err(invalid)?;
+            socket.send_to(&packet, other).await?;
+        }
+        let packet = known_packet(0, 0)?.encode().map_err(invalid)?;
+        socket.send_to(&packet, measured).await?;
+        Ok::<_, Error>(())
+    };
+    tokio::try_join!(
+        audio(
+            &client,
+            &peers,
+            ComparisonServer::Asterisk,
+            1200,
+            1,
+            None,
+            "one measured packet"
+        ),
+        send
+    )?;
+    Ok(())
+}
+
 #[test]
 fn short_pcmu_payloads_contribute_only_their_received_samples() -> Result<(), Error> {
     let start = Instant::now();
@@ -754,6 +863,50 @@ fn short_pcmu_payloads_contribute_only_their_received_samples() -> Result<(), Er
             matches!(other.observe(&short, start), Err(Error::Invalid(_))),
             "A PCMU timestamp was accepted under the wrong clock",
         )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn lost_reference_datagrams_require_a_new_received_audio_window() -> Result<(), Error> {
+    let start = Instant::now();
+    let resumed = start + Duration::from_millis(660);
+    for (sequence, timestamp) in [(41133_u16, 1549571544_u32), (65520, u32::MAX - 1600)] {
+        let first = known_packet(sequence, timestamp)?;
+        let next_sequence = sequence.wrapping_add(33);
+        let next_timestamp = timestamp.wrapping_add(33 * 160);
+        let next = known_packet(next_sequence, next_timestamp)?;
+        let mut reference = AudioWindow::new(1200, ComparisonServer::Asterisk);
+        reference.observe(&first, start)?;
+        reference.observe(&next, resumed)?;
+        assert_eq!((reference.samples, reference.total_samples), (160, 320));
+        assert!(!reference.complete(2, resumed));
+        let following = known_packet(
+            next_sequence.wrapping_add(1),
+            next_timestamp.wrapping_add(160),
+        )?;
+        reference.observe(&following, resumed + Duration::from_millis(20))?;
+        assert!(reference.complete(2, resumed + Duration::from_millis(20)));
+
+        for (server, second) in [
+            (ComparisonServer::Rusterisk, next),
+            (
+                ComparisonServer::Asterisk,
+                known_packet(next_sequence, next_timestamp.wrapping_sub(1))?,
+            ),
+            (
+                ComparisonServer::Asterisk,
+                known_packet(sequence, timestamp)?,
+            ),
+            (
+                ComparisonServer::Asterisk,
+                known_packet(sequence.wrapping_sub(1), timestamp.wrapping_sub(160))?,
+            ),
+        ] {
+            let mut window = AudioWindow::new(1200, server);
+            window.observe(&first, start)?;
+            assert!(window.observe(&second, resumed).is_err());
+        }
     }
     Ok(())
 }

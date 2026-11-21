@@ -3,6 +3,52 @@ use rusterisk_api::{
 };
 use rusterisk_server::{Action, Control, ControlError, Effect, Milestone, Signal};
 
+#[test]
+fn an_admitted_external_channel_can_continue_in_its_starting_dialplan() -> Result<(), ControlError>
+{
+    let dialplan = rusterisk_config::Dialplan::parse(
+        "[office]\nexten => _X.,1,Stasis(calls,matched,${EXTEN})",
+    )
+    .map_err(|error| ControlError::Adapter(error.to_string()))?;
+    let mut control = Control::with_dialplan(4, dialplan);
+    control.subscribe("calls")?;
+    control.apply(create()?, "created", 0)?;
+    let key = control.key(&id()?)?;
+    control.signal(
+        Signal::ExternalRtpAdmitted {
+            key: key.clone(),
+            result: Ok("127.0.0.1:10000"
+                .parse()
+                .map_err(|_| ControlError::Unsupported)?),
+        },
+        "admitted",
+    )?;
+    control.signal(
+        Signal::Milestone {
+            key,
+            milestone: Milestone::Answered,
+        },
+        "answered",
+    )?;
+    let left = control.apply(
+        Action::Continue {
+            channel: id()?,
+            context: Some("office".into()),
+            extension: Some("123".into()),
+            priority: Some(1),
+        },
+        "leaving",
+        1,
+    )?;
+    assert!(left
+        .events
+        .iter()
+        .any(|event| matches!(event.kind, EventKind::StasisEnd { .. })));
+    let resumed = control.tick_dialplans(2, "resumed")?;
+    assert!(resumed.events.iter().any(|event| matches!(&event.kind, EventKind::StasisStart { args, channel } if args == &["matched", "123"] && channel.dialplan.exten == "123")));
+    Ok(())
+}
+
 fn id() -> Result<ChannelId, ControlError> {
     Ok(ChannelId::try_from("external".to_owned())?)
 }

@@ -855,6 +855,7 @@ impl Calls {
                 (channel, None, Some(CallCompletion::Ended))
             }
             api::EventKind::ChannelCreated { channel }
+            | api::EventKind::ChannelDialplan { channel, .. }
             | api::EventKind::ApplicationMoveFailed { channel, .. }
             | api::EventKind::ChannelCallerId { channel, .. }
             | api::EventKind::ChannelHangupRequest { channel, .. }
@@ -874,6 +875,7 @@ impl Calls {
             | api::EventKind::RecordingFinished { .. }
             | api::EventKind::RecordingFailed { .. }
             | api::EventKind::ApplicationReplaced { .. }
+            | api::EventKind::Published(_)
             | api::EventKind::Dial { .. } => return Ok(()),
         };
         if completion.is_some() {

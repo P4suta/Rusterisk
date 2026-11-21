@@ -81,6 +81,55 @@ enum Target {
     Bridge,
 }
 
+async fn send_recording_input(peers: &[(SocketPair, SocketAddr)]) -> Result<(), Error> {
+    let mut inputs = [
+        (
+            RtpSender::new(AudioFormat::Pcmu, 0, [80; 10]).map_err(invalid)?,
+            4000,
+        ),
+        (
+            RtpSender::new(AudioFormat::Pcmu, 0, [81; 10]).map_err(invalid)?,
+            -7000,
+        ),
+    ];
+    let mut tick = tokio::time::interval(Duration::from_millis(20));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut send_frame = async || {
+        tick.tick().await;
+        for ((peer, destination), (sender, sample)) in peers.iter().zip(&mut inputs) {
+            let bytes = sender
+                .packet(Frame::new(&[*sample; 160], 8000).map_err(invalid)?)
+                .map_err(invalid)?
+                .encode()
+                .map_err(invalid)?;
+            peer.data().send_to(&bytes, *destination).await?;
+        }
+        Ok::<(), Error>(())
+    };
+    if let [(left, _), (right, _)] = peers {
+        let ready = async {
+            tokio::try_join!(
+                crate::received_audio::received(left, StaticRtpCodec::Pcmu, -7000),
+                crate::received_audio::received(right, StaticRtpCodec::Pcmu, 4000)
+            )
+        };
+        let send = async {
+            for _ in 0..150 {
+                send_frame().await?;
+            }
+            Err(Error::Timeout)
+        };
+        tokio::select! {
+            result = ready => { result?; }
+            result = send => return result,
+        }
+    }
+    for _ in 0..20 {
+        send_frame().await?;
+    }
+    Ok(())
+}
+
 pub async fn compare(
     client: &Client,
     session: &mut Session,
@@ -109,11 +158,7 @@ pub async fn compare(
                 .await?;
             let destination = destination(channel)?;
             observed(session, Observation::Stasis(&id)).await?;
-            peers.push((
-                peer,
-                destination,
-                RtpSender::new(AudioFormat::Pcmu, 0, [80 + index as u8; 10]).map_err(invalid)?,
-            ));
+            peers.push((peer, destination));
             ids.push(id);
         }
         let accepted = match target {
@@ -148,20 +193,7 @@ pub async fn compare(
             return Err(Error::Invalid("recording admission response"));
         }
         observed(session, Observation::RecordingStarted(&recording)).await?;
-        let mut tick = tokio::time::interval(Duration::from_millis(20));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        for _ in 0..20 {
-            tick.tick().await;
-            for (index, (peer, destination, sender)) in peers.iter_mut().enumerate() {
-                let sample = if index == 0 { 4000 } else { -7000 };
-                let bytes = sender
-                    .packet(Frame::new(&[sample; 160], 8000).map_err(invalid)?)
-                    .map_err(invalid)?
-                    .encode()
-                    .map_err(invalid)?;
-                peer.data().send_to(&bytes, *destination).await?;
-            }
-        }
+        send_recording_input(&peers).await?;
         client.stop_recording(&recording).await?;
         observed(session, Observation::RecordingFinished(&recording)).await?;
         let mut audio = Vec::with_capacity(16 * 1024);
@@ -173,9 +205,10 @@ pub async fn compare(
             Target::Bridge => -3000,
         };
         if !super::wave::contains(&audio, expected)? {
-            return Err(Error::Invalid(
-                "stored recording lacks sustained received audio",
-            ));
+            return Err(invalid(format!(
+                "{label} recording lacks sustained received audio: expected {expected}, {} WAV bytes",
+                audio.len()
+            )));
         }
         client.delete_stored_recording(&recording).await?;
         for id in &ids {
@@ -188,5 +221,39 @@ pub async fn compare(
             client.destroy_bridge(&recording).await?;
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn bridge_input_continues_after_both_media_paths_deliver_audio() -> Result<(), Error> {
+    let bind = || SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0);
+    let left = bind()?;
+    let right = bind()?;
+    let peers = [
+        (bind()?, left.local_addr()?),
+        (bind()?, right.local_addr()?),
+    ];
+    let bridge = async {
+        let mut first = [0; 2048];
+        let mut second = [0; 2048];
+        for frame in 0..54 {
+            let ((a, sender_a), (b, sender_b)) = tokio::try_join!(
+                left.data().recv_from(&mut first),
+                right.data().recv_from(&mut second)
+            )?;
+            if frame >= 24 {
+                left.data().send_to(&second[..b], sender_a).await?;
+            }
+            if frame >= 48 {
+                right.data().send_to(&first[..a], sender_b).await?;
+            }
+        }
+        Ok::<(), Error>(())
+    };
+    tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::try_join!(send_recording_input(&peers), bridge)
+    })
+    .await
+    .map_err(|_| Error::Timeout)??;
     Ok(())
 }

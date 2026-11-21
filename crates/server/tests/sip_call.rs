@@ -94,6 +94,7 @@ async fn answer_dialog(
         signal,
         signal.local_addr().map_err(failure)?,
         audio.local_addr().map_err(failure)?,
+        None,
     )
     .await
     .map(|(media, ack, _identity)| (media, ack))
@@ -103,7 +104,10 @@ async fn answer_dialog_at(
     signal: &UdpSocket,
     contact: SocketAddr,
     audio: SocketAddr,
+    expected_user: Option<&str>,
 ) -> Result<(SocketAddr, String, AckIdentity), ControlError> {
+    use rsipstack::sip::headers::untyped::ToTypedHeader;
+
     let mut bytes = [0; 16385];
     let (size, peer) = tokio::time::timeout(Duration::from_secs(2), signal.recv_from(&mut bytes))
         .await
@@ -113,6 +117,13 @@ async fn answer_dialog_at(
         SipMessage::Request(request) => request,
         SipMessage::Response(_) => return Err(ControlError::Invalid("Expected an invitation")),
     };
+    if let Some(user) = expected_user {
+        assert_eq!(
+            request.uri.auth.as_ref().map(|auth| auth.user.as_str()),
+            Some(user),
+            "INVITE Request-URI"
+        );
+    }
     let tagged_to = format!(
         "{};tag=phone",
         request.to_header().map_err(failure)?.value()
@@ -130,7 +141,13 @@ async fn answer_dialog_at(
         .await
         .map_err(failure)?;
     let branch = BranchNamespace::random()?.branch(0);
-    let ack = format!("ACK sip:rusterisk@{peer} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch={branch};rport\r\nFrom: {};tag=phone\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", signal.local_addr().map_err(failure)?, request.to_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value());
+    let remote = request
+        .contact_header()
+        .map_err(failure)?
+        .typed()
+        .map_err(failure)?
+        .uri;
+    let ack = format!("ACK {remote} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch={branch};rport\r\nFrom: {};tag=phone\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", signal.local_addr().map_err(failure)?, request.to_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value());
     Ok((offered.remote, ack, acknowledgement))
 }
 
@@ -511,14 +528,14 @@ async fn control_requests_establish_two_sip_calls_and_bridge_received_audio(
         let mut events = controller
             .subscribe(credentials()?, None, "app".into())
             .await?;
-        for name in ["alice", "bob"] {
+        for (name, destination) in [("alice", "alice"), ("bob", "+15550123@bob")] {
             controller
                 .execute(
                     credentials()?,
                     None,
                     Action::Originate {
                         id: id(name)?,
-                        endpoint: format!("PJSIP/{name}"),
+                        endpoint: format!("PJSIP/{destination}"),
                         app: "app".into(),
                         args: Vec::new(),
                         caller: "100".into(),
@@ -527,6 +544,19 @@ async fn control_requests_establish_two_sip_calls_and_bridge_received_audio(
                 )
                 .await?;
         }
+        let mut packet = [0; 4096];
+        let (size, _) = tokio::time::timeout(Duration::from_secs(2), bob.peek_from(&mut packet))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
+        let SipMessage::Request(invite) = SipMessage::try_from(&packet[..size]).map_err(failure)?
+        else {
+            return Err(ControlError::Invalid("Expected carrier invitation"));
+        };
+        assert_eq!(
+            invite.uri.to_string(),
+            format!("sip:+15550123@{}", bob.local_addr().map_err(failure)?)
+        );
         let (alice_target, bob_target) =
             tokio::try_join!(answer(&alice, &alice_audio), answer(&bob, &bob_audio))?;
         let mut answered = BTreeSet::new();
@@ -784,7 +814,7 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
         "[app]\ntype=user\npassword=test-password\n",
         &sip,
         "",
-        "[internal]\nexten => 100,1,NoOp(start)\nsame => n,Set(LABEL=root-${EXTEN}-${CALLERID(num)})\nsame => n,Wait(0)\nsame => n,Stasis(app,${LABEL})\n",
+        "[internal]\nexten => _.,1,NoOp(start)\nsame => n,Set(LABEL=root-${EXTEN}-${CALLERID(num)})\nsame => n,Wait(0)\nsame => n,Stasis(app,${LABEL})\n",
     )
     .map_err(failure)?;
     let mut config = config;

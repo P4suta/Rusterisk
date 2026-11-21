@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
+mod dialplan_pattern;
 mod digest_algorithms;
 mod expansion;
 mod ini_comments;
@@ -200,6 +201,14 @@ fn valid_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"_-./".contains(&byte))
 }
 
+fn parse_flag(value: &str) -> Option<bool> {
+    match value {
+        "yes" | "true" | "1" => Some(true),
+        "no" | "false" | "0" => Some(false),
+        _ => None,
+    }
+}
+
 impl Section {
     fn position(&self, key: &str) -> usize {
         self.options.get(key).map_or(self.line, |(line, _)| *line)
@@ -229,16 +238,11 @@ impl Section {
     }
 
     fn flag(&self, file: &str, key: &str, default: bool) -> Result<bool, ConfigError> {
-        match self.value(key) {
-            None => Ok(default),
-            Some("yes" | "true" | "1") => Ok(true),
-            Some("no" | "false" | "0") => Ok(false),
-            Some(_) => Err(ConfigError::at(
-                file,
-                self.position(key),
-                format!("{key} must be yes or no"),
-            )),
-        }
+        self.value(key).map_or(Ok(default), |value| {
+            parse_flag(value).ok_or_else(|| {
+                ConfigError::at(file, self.position(key), format!("{key} must be yes or no"))
+            })
+        })
     }
 
     fn number<T: std::str::FromStr>(
@@ -552,7 +556,14 @@ impl Config {
         };
         for section in Ini::parse("ari.conf", ari)?.sections {
             if section.name == "general" {
-                section.check("ari.conf", &["enabled", "allowed_origins"])?;
+                section.check("ari.conf", &["enabled", "allowed_origins", "pretty"])?;
+                if section.flag("ari.conf", "pretty", false)? {
+                    return Err(ConfigError::at(
+                        "ari.conf",
+                        section.position("pretty"),
+                        "pretty output is unsupported",
+                    ));
+                }
                 if !section.flag("ari.conf", "enabled", true)? {
                     return Err(ConfigError::at(
                         "ari.conf",
@@ -1155,6 +1166,21 @@ impl Dialplan {
             if context.is_empty() {
                 return Err(error("instruction outside a context"));
             }
+            if context == "general" {
+                let (key, value) = line
+                    .split_once('=')
+                    .ok_or_else(|| error("expected option=value"))?;
+                match (key.trim(), parse_flag(value.trim())) {
+                    ("static", Some(_)) | ("writeprotect", Some(true)) => continue,
+                    ("writeprotect", Some(false)) => {
+                        return Err(error("saving the dialplan is unsupported"))
+                    }
+                    ("static" | "writeprotect", None) => {
+                        return Err(error("option must be yes or no"))
+                    }
+                    _ => return Err(error("unsupported general dialplan option")),
+                }
+            }
             let (key, value) = line
                 .split_once("=>")
                 .ok_or_else(|| error("expected exten => or same =>"))?;
@@ -1164,6 +1190,9 @@ impl Dialplan {
                         .split_once(',')
                         .ok_or_else(|| error("missing extension priority"))?;
                     extension = name.trim().into();
+                    if !dialplan_pattern::valid(&extension) {
+                        return Err(error("invalid extension pattern"));
+                    }
                     priority = 0;
                     tail
                 }
@@ -1191,9 +1220,9 @@ impl Dialplan {
                 .strip_suffix(')')
                 .ok_or_else(|| error("unclosed application"))?;
             validate_expansion(arguments).map_err(error)?;
-            let application = match name {
-                "NoOp" => Application::NoOp(arguments.into()),
-                "Set" => {
+            let application = match name.to_ascii_lowercase().as_str() {
+                "noop" => Application::NoOp(arguments.into()),
+                "set" => {
                     let (variable, value) = arguments
                         .split_once('=')
                         .ok_or_else(|| error("Set requires a variable and value"))?;
@@ -1205,13 +1234,13 @@ impl Dialplan {
                         value: value.into(),
                     }
                 }
-                "Answer" if arguments.is_empty() => Application::Answer,
-                "Hangup" if arguments.is_empty() => Application::Hangup,
-                "Playback" if valid_name(arguments) => Application::Playback(arguments.into()),
-                "Wait" => Application::Wait(
+                "answer" if arguments.is_empty() => Application::Answer,
+                "hangup" if arguments.is_empty() => Application::Hangup,
+                "playback" if valid_name(arguments) => Application::Playback(arguments.into()),
+                "wait" => Application::Wait(
                     WaitDuration::parse(arguments).map_err(|reason| error(&reason.to_string()))?,
                 ),
-                "Stasis" => {
+                "stasis" => {
                     let mut parts = arguments.split(',');
                     let name = parts.next().unwrap_or("");
                     if !valid_name(name) {
@@ -1222,7 +1251,7 @@ impl Dialplan {
                         arguments: parts.map(String::from).collect(),
                     }
                 }
-                "Dial" => {
+                "dial" => {
                     let mut parts = arguments.split(',');
                     let destinations: Vec<String> = parts
                         .next()
@@ -1247,7 +1276,7 @@ impl Dialplan {
                         timeout,
                     }
                 }
-                "Goto" => {
+                "goto" => {
                     let parts: Vec<&str> = arguments.split(',').collect();
                     let (context, extension, rank) = match parts.as_slice() {
                         [rank] => (None, None, *rank),

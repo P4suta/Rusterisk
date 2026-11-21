@@ -42,9 +42,11 @@ async fn started(
                 | EventKind::StasisEnd { .. }
                 | EventKind::ChannelCreated { .. }
                 | EventKind::ChannelStateChange { .. }
+                | EventKind::ChannelDialplan { .. }
                 | EventKind::ChannelDestroyed { .. }
                 | EventKind::ChannelVarset { .. } => {}
                 EventKind::ChannelCallerId { .. }
+                | EventKind::Published(_)
                 | EventKind::ChannelHangupRequest { .. }
                 | EventKind::ChannelEnteredBridge { .. }
                 | EventKind::ChannelLeftBridge { .. }

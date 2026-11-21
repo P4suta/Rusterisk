@@ -1,8 +1,9 @@
+pub(super) use crate::received_audio::received;
 use rusterisk_client::{
     api::{Channel, ChannelId, EventKind, ExternalRtpTarget, StaticRtpCodec},
     Client, Error, Session,
 };
-use rusterisk_media::{alaw_decode, mulaw_decode, AudioFormat, Frame, RtpPacket, RtpSender};
+use rusterisk_media::{AudioFormat, Frame, RtpSender};
 use rusterisk_server::rtp::SocketPair;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -47,43 +48,6 @@ fn local(channel: Channel) -> Result<SocketAddr, Error> {
         return Err(Error::Invalid("transport variables"));
     }
     Ok(SocketAddr::new(ip, port))
-}
-
-pub(super) async fn received(
-    peer: &SocketPair,
-    codec: StaticRtpCodec,
-    expected: i32,
-) -> Result<(), Error> {
-    let mut packets = 0;
-    let mut last = None;
-    let result = tokio::time::timeout(Duration::from_secs(3), async {
-        let mut bytes = [0; 2049];
-        for _ in 0..150 {
-            let (size, source) = peer.data().recv_from(&mut bytes).await?;
-            let packet = RtpPacket::parse(&bytes[..size]).map_err(invalid)?;
-            packets += 1;
-            last = Some((source, packet.payload().len()));
-            if packet.payload().len() == 160
-                && packet.payload().iter().all(|byte| {
-                    let sample = match codec {
-                        StaticRtpCodec::Pcmu => mulaw_decode(*byte),
-                        StaticRtpCodec::Pcma => alaw_decode(*byte),
-                    };
-                    (i32::from(sample) - expected).abs() < 300
-                })
-            {
-                return Ok(());
-            }
-        }
-        Err(Error::Invalid("expected received audio"))
-    })
-    .await
-    .map_err(|_| Error::Timeout)
-    .and_then(|result| result);
-    if result.is_err() {
-        eprintln!("external audio receive failed: codec={codec:?}, expected={expected}, packets={packets}, last={last:?}");
-    }
-    result
 }
 
 pub(super) fn local_media_ip(server_ip: Ipv4Addr) -> Result<IpAddr, Error> {

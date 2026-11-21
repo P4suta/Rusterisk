@@ -5,12 +5,7 @@ use super::{
 };
 use crate::process::{CommandSupervisor, ProcessError};
 use serde::Deserialize;
-use std::{
-    io,
-    path::PathBuf,
-    process::Command,
-    time::{Duration, Instant},
-};
+use std::{io, path::PathBuf, process::Command, time::Duration};
 const REFERENCE_IMAGE: &str = "rusterisk-asterisk-reference:22.9.0";
 const OWNERSHIP_LABEL: &str = "io.rusterisk.sipp-comparison";
 pub(super) fn container_id(bytes: &[u8]) -> io::Result<&str> {
@@ -74,6 +69,21 @@ pub(super) fn validate_reference_ownership(
 struct Located {
     id: Option<String>,
     damage: Option<io::Error>,
+}
+
+fn lookup_after_launch(
+    mut lookup: impl FnMut() -> io::Result<Vec<u8>>,
+    mut wait: impl FnMut(Duration),
+) -> io::Result<Vec<u8>> {
+    let mut ids = lookup()?;
+    for _ in 0..3 {
+        if !ids.is_empty() {
+            break;
+        }
+        wait(Duration::from_secs(10));
+        ids = lookup()?;
+    }
+    Ok(ids)
 }
 
 fn locate_container(
@@ -208,7 +218,7 @@ impl Reference {
         supervisor: &mut CommandSupervisor,
     ) -> io::Result<Located> {
         let filter = format!("label={OWNERSHIP_LABEL}={}", self.owner);
-        locate_container(read(&self.cidfile, 65), self.attempted, || {
+        let lookup = || {
             let observed = commands.run(
                 docker(&arguments([
                     "container",
@@ -225,6 +235,9 @@ impl Reference {
             )?;
             observed.text()?;
             Ok(observed.stdout)
+        };
+        locate_container(read(&self.cidfile, 65), self.attempted, || {
+            lookup_after_launch(lookup, std::thread::sleep)
         })
     }
 
@@ -244,7 +257,7 @@ impl Reference {
             let inspection = commands.last_output();
             commands.run(
                 docker(&arguments(["rm", "--force", &id])),
-                Duration::from_secs(30),
+                Interop::CONTAINER_LIFECYCLE,
                 |command, budget| supervisor.run_cleanup(command, budget),
             )?;
             let removal = commands.last_output();
@@ -398,55 +411,21 @@ pub(super) fn reference_ready(
     commands: &mut Commands<'_>,
     supervisor: &mut CommandSupervisor,
 ) -> io::Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let mut ready = false;
-        commands
-            .run(
-                docker(&arguments([
-                    "exec",
-                    id,
-                    "/usr/bin/test",
-                    "-S",
-                    "/var/run/asterisk/asterisk.ctl",
-                ])),
-                deadline.saturating_duration_since(Instant::now()),
-                |command, budget| match supervisor.run(command, budget) {
-                    Ok(()) => {
-                        ready = true;
-                        Ok(())
-                    }
-                    Err(ProcessError::Status(status)) if status.code() == Some(1) => Ok(()),
-                    Err(error) => Err(error),
-                },
-            )?
-            .exact(b"")?;
-        if ready {
-            break;
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::other(
-                "comparison Asterisk control socket was not ready",
-            ));
-        }
-        std::thread::sleep(remaining.min(Duration::from_millis(100)));
-    }
     let observed = commands.run(
         docker(&arguments([
             "exec",
             id,
             "/usr/bin/timeout",
             "--kill-after=2s",
-            "10s",
-            "/usr/sbin/asterisk",
-            "-rx",
-            "core waitfullybooted",
+            "90s",
+            "/bin/sh",
+            "-ec",
+            "until test -S /var/run/asterisk/asterisk.ctl; do sleep 0.1; done\nexec /usr/sbin/asterisk -rx 'core waitfullybooted'",
         ])),
-        Duration::from_secs(15),
+        Duration::from_secs(95),
         |command, budget| supervisor.run(command, budget),
     )?;
-    if !observed.text()?.contains("Asterisk has fully booted.\n") {
+    if !boot_confirmed(observed.text()?) {
         return Err(io::Error::other(format!(
             "comparison Asterisk did not finish startup; {}",
             observed.diagnostics()
@@ -455,9 +434,56 @@ pub(super) fn reference_ready(
     Ok(())
 }
 
+fn boot_confirmed(output: &str) -> bool {
+    output
+        .split_inclusive('\n')
+        .any(|line| line == "Asterisk has fully booted.\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_complete_control_reply_confirms_asterisk_boot() {
+        assert!(boot_confirmed("Asterisk has fully booted.\n"));
+        for pending in [
+            "",
+            "Asterisk PBX Core Initializing\n",
+            "Still waiting: Asterisk has fully booted.\n",
+            "Asterisk has fully booted.",
+        ] {
+            assert!(!boot_confirmed(pending), "{pending:?}");
+        }
+    }
+
+    #[test]
+    fn a_delayed_docker_creation_stays_visible_to_cleanup() -> io::Result<()> {
+        let id = "a".repeat(64).into_bytes();
+        let mut observations = [Vec::new(), Vec::new(), id.clone()].into_iter();
+        let mut waits = 0;
+        let found = lookup_after_launch(
+            || {
+                observations
+                    .next()
+                    .ok_or_else(|| io::Error::other("lookup after discovery"))
+            },
+            |_| waits += 1,
+        )?;
+        assert_eq!(found, id);
+        assert_eq!(waits, 2);
+        let mut reads = 0;
+        let absent = lookup_after_launch(
+            || {
+                reads += 1;
+                Ok(Vec::new())
+            },
+            |_| {},
+        )?;
+        assert!(absent.is_empty());
+        assert_eq!(reads, 4);
+        Ok(())
+    }
 
     #[test]
     fn incomplete_cid_files_recover_the_unique_label_id_and_keep_the_damage() -> io::Result<()> {

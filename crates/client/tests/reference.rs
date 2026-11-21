@@ -6,6 +6,10 @@ use rusterisk_client::{
     Client, Error,
 };
 use std::{net::Ipv4Addr, time::Duration};
+#[path = "reference/ari_routes.rs"]
+mod ari_routes;
+#[path = "reference/dialplan_routes.rs"]
+mod dialplan_routes;
 #[path = "reference/external_audio.rs"]
 mod external_audio;
 #[path = "reference/external_opus.rs"]
@@ -22,6 +26,8 @@ mod home_telephone_media;
 mod music_on_hold;
 #[path = "reference/playback_position.rs"]
 mod playback_position;
+#[path = "support/received_audio.rs"]
+mod received_audio;
 #[path = "reference/recording_audio.rs"]
 mod recording_audio;
 #[path = "reference/request_bodies.rs"]
@@ -335,11 +341,11 @@ async fn compare_resources(
     outgoing.configure_reference(&reference_address).await?;
     let mut configuration = rusterisk_config::Config::parse(
         "[general]\nbindaddr=127.0.0.1\n",
-        "[app]\ntype=user\npassword=test-password\n",
+        include_str!("../../../tests/interop/asterisk/ari.conf"),
         &include_str!("../../../tests/interop/asterisk/pjsip.conf")
             .replace("0.0.0.0:5060", "127.0.0.1:0"),
         "",
-        "",
+        include_str!("../../../tests/interop/asterisk/extensions.conf"),
     )
     .map_err(|_| Error::Invalid("reference configuration"))?
     .with_websocket_configuration("", &outgoing.configuration("127.0.0.1"))
@@ -352,6 +358,7 @@ async fn compare_resources(
     let address = fixture.address();
     let actual = fixture.client();
     let result = async {
+        ari_routes::compare(&format!("http://{address}"), &reference_address).await?;
         server_info::compare(
             actual,
             &format!("http://{address}"),
@@ -482,6 +489,8 @@ async fn compare_resources(
         );
         compare_external_admission(actual, &mut actual_session, app.as_str()).await?;
         compare_external_admission(&reference, &mut reference_session, app.as_str()).await?;
+        dialplan_routes::compare(&reference, &mut reference_session, app.as_str()).await?;
+        dialplan_routes::compare(actual, &mut actual_session, app.as_str()).await?;
         request_bodies::originate_with_id(actual, &format!("http://{address}"), app.as_str())
             .await?;
         request_bodies::originate_with_id(&reference, &reference_address, app.as_str()).await?;

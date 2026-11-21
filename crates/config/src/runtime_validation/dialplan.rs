@@ -79,6 +79,9 @@ pub(super) fn validate(program: &Dialplan) -> Result<(), ConfigError> {
             return Err(invalid(FILE, "invalid dialplan context or priority"));
         }
         value(FILE, "extension", &step.extension)?;
+        if !crate::dialplan_pattern::valid(&step.extension) {
+            return Err(invalid(FILE, "invalid extension pattern"));
+        }
         if !seen.insert((
             step.context.as_str(),
             step.extension.as_str(),

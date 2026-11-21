@@ -1,11 +1,33 @@
 use crate::ControlError;
-use rusterisk_api::{Operation, ParameterKind};
+use rusterisk_api::{Operation, ParameterKind, UnavailableParameterKind};
 use serde_json::Value;
 use std::{borrow::Cow, collections::BTreeMap};
 
 pub(super) struct Fields<'a> {
     pub parameters: Cow<'a, BTreeMap<String, String>>,
     pub variables: BTreeMap<String, String>,
+}
+
+impl Fields<'_> {
+    fn require_available(self, operation: Option<&Operation>) -> Result<Self, ControlError> {
+        if let Some(operation) = operation {
+            for &(name, kind) in operation.unavailable_parameters() {
+                let Some(value) = self.parameters.get(name) else {
+                    continue;
+                };
+                let requested = match kind {
+                    UnavailableParameterKind::Boolean => ["yes", "true", "y", "t", "on", "1"]
+                        .iter()
+                        .any(|flag| value.eq_ignore_ascii_case(flag)),
+                    UnavailableParameterKind::String => !value.is_empty(),
+                };
+                if requested {
+                    return Err(ControlError::Unsupported);
+                }
+            }
+        }
+        Ok(self)
+    }
 }
 
 fn text(value: &str) -> Result<String, ControlError> {
@@ -59,7 +81,7 @@ pub(super) fn decode<'a>(
         variables: BTreeMap::new(),
     };
     if body.is_empty() {
-        return Ok(fields);
+        return fields.require_available(operation);
     }
     if body.len() > 16384 {
         return Err(ControlError::Invalid("JSON body too long"));
@@ -76,7 +98,13 @@ pub(super) fn decode<'a>(
         return Ok(fields);
     };
     for (name, value) in object {
-        let Some(kind) = operation.parameter_kind(name) else {
+        let Some(kind) = operation.parameter_kind(name).or_else(|| {
+            operation
+                .unavailable_parameters()
+                .iter()
+                .find(|(unavailable, _)| unavailable == name)
+                .map(|(_, kind)| ParameterKind::from(*kind))
+        }) else {
             continue;
         };
         let decoded = match kind {
@@ -118,7 +146,7 @@ pub(super) fn decode<'a>(
     if fields.parameters.len() > 32 {
         return Err(ControlError::Invalid("Too many query parameters"));
     }
-    Ok(fields)
+    fields.require_available(Some(operation))
 }
 
 #[cfg(test)]
@@ -186,6 +214,70 @@ mod tests {
             br#"{"channel":["first",42]}"#,
         ] {
             assert!(decode(&query, Some(operation("bridges.addChannel")?), body).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn published_options_without_adapters_reject_query_and_json_before_dispatch(
+    ) -> Result<(), ControlError> {
+        for (id, names) in [
+            (
+                "channels.originate",
+                &["label", "otherChannelId", "originator", "formats"][..],
+            ),
+            (
+                "channels.originateWithId",
+                &["label", "otherChannelId", "originator", "formats"],
+            ),
+            (
+                "channels.create",
+                &["otherChannelId", "originator", "formats"],
+            ),
+            ("channels.continue", &["label"]),
+            (
+                "bridges.addChannel",
+                &["absorbDTMF", "mute", "inhibitConnectedLineUpdates", "role"],
+            ),
+            ("bridges.play", &["announcer_format"]),
+            ("bridges.playWithId", &["announcer_format"]),
+            ("bridges.record", &["recorder_format"]),
+        ] {
+            let op = Some(operation(id)?);
+            for name in names {
+                let is_flag = id == "bridges.addChannel" && *name != "role";
+                let value = if is_flag {
+                    Value::Bool(true)
+                } else {
+                    Value::String("selected".into())
+                };
+                let query = BTreeMap::from([(
+                    name.to_string(),
+                    if is_flag { "yes" } else { "selected" }.to_owned(),
+                )]);
+                let json = serde_json::to_vec(&serde_json::json!({(*name): value}))?;
+                assert!(
+                    matches!(decode(&query, op, &[]), Err(ControlError::Unsupported)),
+                    "{id} {name} query"
+                );
+                assert!(
+                    matches!(
+                        decode(&BTreeMap::new(), op, &json),
+                        Err(ControlError::Unsupported)
+                    ),
+                    "{id} {name} body"
+                );
+                let neutral = if is_flag {
+                    Value::Bool(false)
+                } else {
+                    Value::String(String::new())
+                };
+                let json = serde_json::to_vec(&serde_json::json!({(*name): neutral}))?;
+                assert!(
+                    decode(&query, op, &json).is_ok(),
+                    "{id} {name} body precedence"
+                );
+            }
         }
         Ok(())
     }

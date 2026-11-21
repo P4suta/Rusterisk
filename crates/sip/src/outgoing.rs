@@ -11,7 +11,7 @@ mod forked;
 mod profile;
 pub use forked::ForkTeardownFailure;
 pub(crate) use forked::Forks;
-pub use profile::{OutboundProfile, PreparedOutbound};
+pub use profile::{DialResource, OutboundProfile, PreparedOutbound};
 use profile::{RouteSelection, SelectedOutbound};
 
 pub struct Outbound {
@@ -733,7 +733,7 @@ impl Engine {
             transaction_deadline,
             now,
         } = validated;
-        if outbound.endpoint != selected.profile.endpoint.name {
+        if DialResource::parse(&outbound.endpoint)? != selected.profile.dial_resource() {
             return Err(SipError::InvalidPacket);
         }
         let route = selected.route(&self.contacts, resolved_peer, flow, now)?;

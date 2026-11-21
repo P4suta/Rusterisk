@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
+mod answer;
 mod call_lifetime;
 mod endpoint_queries;
 #[cfg(test)]
@@ -65,6 +66,12 @@ impl Credentials {
 }
 
 enum Request {
+    Answer {
+        credentials: Credentials,
+        origin: Option<String>,
+        channel: rusterisk_api::ChannelId,
+        reply: oneshot::Sender<Result<Outcome, ControlError>>,
+    },
     BindWebSocketProfiles(crate::signaling::PreparedWebSocketProfiles),
     TakeWebSocketProfile {
         key: CallKey,
@@ -186,6 +193,7 @@ pub struct Runner {
     stored_jobs: JoinSet<()>,
     recording_admissions: BTreeMap<rusterisk_core::MediaTaskToken, recording_admission::Pending>,
     external_admissions: BTreeMap<CallKey, external_admission::Pending>,
+    answers: BTreeMap<CallKey, answer::Pending>,
     media_leases: BTreeMap<CallKey, mpsc::Receiver<()>>,
     call_lifetimes: BTreeMap<CallKey, mpsc::Receiver<()>>,
 }
@@ -275,6 +283,7 @@ impl Controller {
                 stored_jobs: JoinSet::new(),
                 recording_admissions: BTreeMap::new(),
                 external_admissions: BTreeMap::new(),
+                answers: BTreeMap::new(),
                 media_leases: BTreeMap::new(),
                 call_lifetimes: BTreeMap::new(),
             },
@@ -550,6 +559,14 @@ impl Runner {
 
     fn request(&mut self, request: Request, now_ms: u64) -> Result<(), ControlError> {
         match request {
+            Request::Answer {
+                credentials,
+                origin,
+                channel,
+                reply,
+            } => {
+                self.request_answer(credentials, origin, channel, reply, now_ms);
+            }
             Request::BindWebSocketProfiles(profiles) => {
                 self.control.bind_websocket_profiles(profiles)?
             }
@@ -848,11 +865,11 @@ impl Runner {
     ) -> Result<(CallKey, Outcome), ControlError> {
         let dialplan = matches!(&call.target, crate::IncomingTarget::Dialplan);
         if dialplan
-            && !self.config.dialplan.steps.iter().any(|step| {
-                step.context == call.context
-                    && step.extension == call.extension
-                    && step.priority == 1
-            })
+            && self
+                .config
+                .dialplan
+                .position(&call.context, &call.extension, 1)
+                .is_none()
         {
             return Err(ControlError::NotFound("Extension not found"));
         }
@@ -900,6 +917,7 @@ impl Runner {
             self.publish(&mut outcome)?;
         }
         self.expire_recording_admissions(now)?;
+        self.finish_answers(now);
         self.expire_external_admissions(now)?;
         self.expire_media_connections(now)?;
         Ok(())
@@ -943,7 +961,12 @@ impl Runner {
                     }
                 }
                 changed = self.shutdown.changed() => { if changed.is_err() || *self.shutdown.borrow() { break; } }
-                signal = self.signals.recv(), if self.pending_effects.is_empty() => { if let Some(signal) = signal { self.apply_signal(signal, u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?; } else { break; } }
+                signal = self.signals.recv(), if self.pending_effects.is_empty() => {
+                    let Some(signal) = signal else { break; };
+                    let now = u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?;
+                    self.apply_signal(signal, now)?;
+                    self.finish_answers(now);
+                }
                 request = self.requests.recv() => {
                     if let Some(request) = request { self.request(request, u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?; } else { break; }
                 }
@@ -982,6 +1005,7 @@ impl Runner {
         self.call_lifetimes.clear();
         self.close_recording_admissions();
         self.close_external_admissions();
+        self.answers.clear();
         let result = self
             .control
             .shutdown(&timestamp())

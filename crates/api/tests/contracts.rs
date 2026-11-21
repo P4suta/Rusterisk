@@ -1,6 +1,25 @@
 use rusterisk_api::{openapi, swagger, ChannelId, Event, EventKind, OPERATIONS};
 
 #[test]
+fn dialplan_events_preserve_the_application_and_expanded_arguments() -> Result<(), serde_json::Error>
+{
+    let channel = serde_json::json!({
+        "id":"incoming", "name":"PJSIP/phone", "state":"Up", "accountcode":"",
+        "caller":{"name":"","number":""}, "connected":{"name":"","number":""},
+        "dialplan":{"context":"office","exten":"123","priority":1,"app_name":"Stasis","app_data":"calls,123"},
+        "creationtime":"now", "language":"en"
+    });
+    let value = serde_json::json!({
+        "type":"ChannelDialplan", "application":"calls", "timestamp":"now",
+        "channel":channel, "dialplan_app":"Stasis", "dialplan_app_data":"calls,123"
+    });
+    let event: Event = serde_json::from_value(value.clone())?;
+    assert_eq!(event.kind.event_type(), "ChannelDialplan");
+    assert_eq!(serde_json::to_value(event)?, value);
+    Ok(())
+}
+
+#[test]
 fn channel_snapshots_preserve_optional_transport_variables() -> Result<(), serde_json::Error> {
     let value: serde_json::Value = serde_json::from_str(
         r#"{"id":"external","name":"UnicastRTP/peer","state":"Up","accountcode":"","caller":{"name":"","number":""},"connected":{"name":"","number":""},"dialplan":{"context":"default","exten":"s","priority":1,"app_name":"Stasis","app_data":"calls"},"creationtime":"now","language":"en","channelvars":{"UNICASTRTP_LOCAL_ADDRESS":"127.0.0.1","UNICASTRTP_LOCAL_PORT":"10000"}}"#,

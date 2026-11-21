@@ -100,7 +100,12 @@ pub(super) async fn compare() -> Result<(), ControlError> {
             )),
         );
     }
-    result = combine(result, configuration.end_channels(&previous).await);
+    if result.is_ok() {
+        result = configuration.wait_for_channels(&previous).await;
+    }
+    if result.is_err() {
+        result = combine(result, configuration.end_channels(&previous).await);
+    }
     result = combine(result, configuration.restore().await);
     let mut rebound = Vec::with_capacity(12);
     for address in addresses {
