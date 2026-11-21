@@ -9,6 +9,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 mod answer;
 mod call_lifetime;
+mod diagnosis;
 mod endpoint_queries;
 #[cfg(test)]
 mod endpoint_queries_tests;
@@ -19,6 +20,7 @@ mod observation;
 pub(crate) use observation::{Filter as WatchFilter, Target as WatchTarget};
 mod native_start;
 mod observed_channel;
+pub(crate) use diagnosis::Target as DiagnosisTarget;
 mod recording_admission;
 mod reload;
 pub(crate) use reload::load_startup_configuration;
@@ -74,6 +76,12 @@ enum Request {
         origin: Option<String>,
         target: WatchTarget,
         reply: oneshot::Sender<Result<observation::Observation, ControlError>>,
+    },
+    Diagnose {
+        credentials: Credentials,
+        origin: Option<String>,
+        target: DiagnosisTarget,
+        reply: oneshot::Sender<Result<serde_json::Value, ControlError>>,
     },
     ObservedChannel {
         credentials: Credentials,
@@ -589,6 +597,19 @@ impl Runner {
                     .is_err()
                 {
                     tracing::debug!("Call observer disconnected during setup");
+                }
+            }
+            Request::Diagnose {
+                credentials,
+                origin,
+                target,
+                reply,
+            } => {
+                let result = self
+                    .authorize(&credentials, origin.as_deref(), true)
+                    .and_then(|()| self.diagnose(target));
+                if reply.send(result).is_err() {
+                    tracing::debug!("Diagnosis requester disconnected");
                 }
             }
             Request::ObservedChannel {

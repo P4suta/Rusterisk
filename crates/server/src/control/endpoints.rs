@@ -46,6 +46,22 @@ impl Default for Endpoints {
 }
 
 impl Endpoints {
+    pub(super) fn diagnose(&self, resource: Option<&str>) -> rusterisk_api::diagnosis::Destination {
+        use rusterisk_api::diagnosis::{Destination, Registration};
+        let route = resource.and_then(|resource| self.routes.get(resource));
+        Destination {
+            endpoint: resource.map(str::to_owned),
+            static_contact: route.map(|r| r.static_contact),
+            registration: route.map_or(Registration::Unknown, |r| match r.contact {
+                ContactPresence::Present => Registration::Present,
+                ContactPresence::Absent => Registration::Absent,
+            }),
+            available: route
+                .map(|r| r.static_contact || r.contact == ContactPresence::Present)
+                .or(resource.map(|_| false)),
+        }
+    }
+
     pub(super) fn configured(config: &Config) -> Self {
         let routes: BTreeMap<_, _> = config
             .endpoints
