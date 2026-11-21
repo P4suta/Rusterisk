@@ -491,9 +491,7 @@ impl Control {
             return Err(ControlError::Capacity);
         }
         for destination in &destinations {
-            let endpoint = destination
-                .strip_prefix("PJSIP/")
-                .ok_or(ControlError::Unsupported)?;
+            let endpoint = super::endpoint_resource(destination)?;
             ChannelId::try_from(endpoint.to_owned())?;
         }
         let count = u8::try_from(destinations.len()).map_err(|_| ControlError::Capacity)?;
@@ -525,10 +523,7 @@ impl Control {
                     break;
                 }
             }
-            let resource = endpoint
-                .strip_prefix("PJSIP/")
-                .ok_or(ControlError::Invalid("Invalid endpoint technology"))?
-                .to_owned();
+            let resource = super::endpoint_resource(endpoint)?.to_owned();
             let key = selected.ok_or(ControlError::Capacity)?;
             let capsule = self.native_capsule(&key, settings_generation, endpoint)?;
             planned.push((key, endpoint, resource, capsule));

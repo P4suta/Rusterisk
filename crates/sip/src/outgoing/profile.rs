@@ -11,9 +11,42 @@ const MAX_VALUE_BYTES: usize = 4096;
 const MAX_REFERENCES: usize = 4096;
 const MAX_CREDENTIALS: usize = 8;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct DialResource<'a> {
+    endpoint: &'a str,
+    user: Option<&'a str>,
+}
+
+impl<'a> DialResource<'a> {
+    pub fn parse(resource: &'a str) -> Result<Self, SipError> {
+        let (user, endpoint) = match resource.split_once('@') {
+            Some((user, endpoint))
+                if !user.is_empty()
+                    && user.len() <= 128
+                    && user
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"+*-#._".contains(&byte)) =>
+            {
+                (Some(user), endpoint)
+            }
+            Some(_) => return Err(SipError::InvalidPacket),
+            None => (None, resource),
+        };
+        if endpoint.is_empty() || endpoint.len() > 128 || endpoint.contains('@') {
+            return Err(SipError::InvalidPacket);
+        }
+        Ok(Self { endpoint, user })
+    }
+
+    pub fn endpoint(self) -> &'a str {
+        self.endpoint
+    }
+}
+
 #[derive(Clone)]
 pub struct OutboundProfile {
     pub(super) endpoint: Endpoint,
+    user: Option<String>,
     pub(super) transport: Transport,
     pub(super) credentials: Vec<Auth>,
     pub(super) authority: ReferAuthority,
@@ -71,11 +104,15 @@ impl OutboundProfile {
         Ok(self)
     }
 
-    pub fn capture(config: &Config, endpoint: &str) -> Result<Self, SipError> {
+    pub fn capture(config: &Config, resource: &str) -> Result<Self, SipError> {
+        Self::for_resource(config, DialResource::parse(resource)?)
+    }
+
+    pub fn for_resource(config: &Config, dial: DialResource<'_>) -> Result<Self, SipError> {
         let endpoint = config
             .endpoints
             .iter()
-            .find(|candidate| candidate.name == endpoint)
+            .find(|candidate| candidate.name == dial.endpoint)
             .ok_or(SipError::InvalidPacket)?;
         let transport = config
             .transports
@@ -110,11 +147,19 @@ impl OutboundProfile {
             .transpose()?;
         Ok(Self {
             endpoint: endpoint.clone(),
+            user: dial.user.map(str::to_owned),
             transport: transport.clone(),
             credentials,
             authority: ReferAuthority::configured_peer(endpoint),
             contact,
         })
+    }
+
+    pub(super) fn dial_resource(&self) -> DialResource<'_> {
+        DialResource {
+            endpoint: &self.endpoint.name,
+            user: self.user.as_deref(),
+        }
     }
 
     pub(super) fn select(
@@ -127,7 +172,7 @@ impl OutboundProfile {
             RouteSelection::RegisteredFirst => contacts.best(&self.endpoint.aors, now),
             RouteSelection::Static => None,
         };
-        let (uri, route) = match registered {
+        let (mut uri, route) = match registered {
             Some(binding) => (
                 binding.contact.uri().clone(),
                 SelectedRoute::Registered(binding.identity()),
@@ -137,6 +182,12 @@ impl OutboundProfile {
                 SelectedRoute::Static,
             ),
         };
+        if let Some(user) = &self.user {
+            uri.auth = Some(rsipstack::sip::Auth {
+                user: user.clone(),
+                password: None,
+            });
+        }
         let security = UriSecurity::target(self.transport.protocol, &uri)?;
         Ok(SelectedOutbound {
             profile: self,

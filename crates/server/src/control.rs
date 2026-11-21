@@ -778,6 +778,15 @@ impl ChannelEntry {
     }
 }
 
+fn endpoint_resource(destination: &str) -> Result<&str, ControlError> {
+    let resource = destination
+        .strip_prefix("PJSIP/")
+        .ok_or(ControlError::Unsupported)?;
+    rusterisk_sip::DialResource::parse(resource)
+        .map(rusterisk_sip::DialResource::endpoint)
+        .map_err(|_| ControlError::Invalid("Invalid PJSIP dial resource"))
+}
+
 fn validate_variable(name: &str) -> Result<(), ControlError> {
     if name.is_empty() || name.len() > 128 {
         return Err(ControlError::Invalid("Invalid variable name"));
@@ -1408,10 +1417,7 @@ impl Control {
                     ));
                 }
                 let generation = self.generation()?;
-                let endpoint_resource = endpoint
-                    .strip_prefix("PJSIP/")
-                    .ok_or(ControlError::Invalid("Invalid endpoint technology"))?
-                    .to_owned();
+                let endpoint_resource = endpoint_resource(&endpoint)?.to_owned();
                 let deadline = now_ms
                     .checked_add(u64::from(timeout) * 1000)
                     .ok_or(ControlError::Capacity)?;

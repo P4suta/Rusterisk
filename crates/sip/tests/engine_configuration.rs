@@ -493,6 +493,47 @@ fn publication_preserves_inbound_settlement_and_applies_new_initial_admission_se
 }
 
 #[test]
+fn qualified_numbers_keep_the_registered_contact_and_flow() -> Result<(), SipError> {
+    let config = configuration(Protocol::Tcp, false)?;
+    let mut engine = Engine::new(config.clone(), [47; 32]).with_transport(Protocol::Tcp);
+    let flow = StreamFlowId::new(31)?;
+    let (registered, _) = admitted(
+        &mut engine,
+        Protocol::Tcp,
+        Method::Register,
+        "dialed-user",
+        flow,
+        0,
+    )?;
+    assert_eq!(status(&registered)?, 200);
+    let mut call = outbound("carrier")?;
+    call.endpoint = "+15550100@phone".into();
+    let profile = OutboundProfile::capture(&config, &call.endpoint)?;
+    let mut changed = outbound("changed")?;
+    changed.endpoint = "5550123@phone".into();
+    let prepared = engine.prepare_outbound(profile.clone(), 2)?;
+    assert!(engine
+        .originate_prepared_on_flow(changed, prepared, None, None, flow, 2)
+        .is_err());
+    let prepared = engine.prepare_outbound(profile, 2)?;
+    let output = engine.originate_prepared_on_flow(call, prepared, None, None, flow, 2)?;
+    routed(&output, flow);
+    assert_eq!(
+        request(&first(&output)?.bytes)?.uri.to_string(),
+        rsipstack::sip::Uri::try_from(REGISTERED.replace("registered@", "+15550100@"))?.to_string()
+    );
+    for invalid in [
+        "@phone",
+        "number@",
+        "name@phone@elsewhere",
+        "bad user@phone",
+    ] {
+        assert!(OutboundProfile::capture(&config, invalid).is_err());
+    }
+    Ok(())
+}
+
+#[test]
 fn publication_keeps_registered_preparations_outgoing_credentials_and_retained_fork_acks(
 ) -> Result<(), SipError> {
     for protocol in [Protocol::Tcp, Protocol::Tls] {
