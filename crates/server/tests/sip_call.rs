@@ -30,6 +30,8 @@ use std::time::Duration;
 mod early_music;
 #[path = "sip_call/late_answer.rs"]
 mod late_answer;
+#[path = "sip_call/test_probe.rs"]
+mod test_probe;
 use tokio::net::UdpSocket;
 use tower::ServiceExt;
 

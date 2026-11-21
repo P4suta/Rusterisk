@@ -17,6 +17,9 @@ const HELP: &str = concat!(
     "  watch channel ID        Follow one call leg until it ends.\n",
     "  watch endpoint TECH/RESOURCE  Follow an endpoint and its call legs.\n",
     "\n",
+    "  test-call PJSIP/NAME    Call a nominated echo endpoint and verify returned audio.\n",
+    "  --deadline SECONDS      Bound a test call to 1 through 120 seconds.\n",
+    "\n",
     "  --json          Print inspection results as JSON or watch records as NDJSON.\n",
     "  -h, --help      Print usage.\n",
     "  -V, --version   Print the version.\n",
@@ -92,6 +95,7 @@ fn execute(arguments: impl Iterator<Item = OsString>) -> Result<(), UsageError> 
                 | "profiles"
                 | "watch"
                 | "doctor"
+                | "test-call"
         ) && arguments
             .peek()
             .is_some_and(|option| option == "-h" || option == "--help")
@@ -100,6 +104,26 @@ fn execute(arguments: impl Iterator<Item = OsString>) -> Result<(), UsageError> 
         return Ok(());
     }
     let command = match name {
+        "test-call" => {
+            let selected = target(&mut arguments)?;
+            let resource = selected
+                .strip_prefix("PJSIP/")
+                .filter(|r| segment(r) && !r.contains('@'))
+                .ok_or_else(|| (2, "Select a configured PJSIP echo endpoint".to_owned()))?;
+            let (deadline, remote) = test_options(arguments)?;
+            let (options, json) = RemoteOptions::parse_with_output(remote.into_iter())
+                .map_err(|error| (2, error.to_string()))?;
+            let (message, verified) = rusterisk_cli::test_call(&options, resource, deadline, json)
+                .map_err(|e| (e.exit_status(), e.to_string()))?;
+            println!("{message}");
+            if !verified {
+                return Err((
+                    1,
+                    "The test call did not verify the returned signal".to_owned(),
+                ));
+            }
+            return Ok(());
+        }
         "profiles" => {
             if arguments.next().is_some() {
                 return Err((2, "The profiles command takes no arguments".to_owned()));
@@ -187,4 +211,37 @@ fn main() -> ExitCode {
             ExitCode::from(status)
         }
     }
+}
+
+fn test_options(
+    mut args: impl Iterator<Item = OsString>,
+) -> Result<(u16, Vec<OsString>), UsageError> {
+    let mut deadline = None;
+    let mut remote = Vec::new();
+    while let Some(arg) = args.next() {
+        if arg == "--deadline" {
+            if deadline.is_some() {
+                return Err((2, "Duplicate test call deadline".to_owned()));
+            }
+            let value = target(&mut args)?
+                .parse::<u16>()
+                .ok()
+                .filter(|v| (1..=120).contains(v))
+                .ok_or_else(|| (2, "Supply a deadline of 1 to 120 seconds".to_owned()))?;
+            deadline = Some(value);
+        } else {
+            let value = matches!(arg.to_str(), Some("--server" | "--username" | "--profile"));
+            remote.push(arg);
+            if value {
+                remote.push(
+                    args.next()
+                        .ok_or_else(|| (2, "Missing remote option value".to_owned()))?,
+                );
+            }
+            if remote.len() > 12 {
+                return Err((2, "Too many test call options".to_owned()));
+            }
+        }
+    }
+    Ok((deadline.unwrap_or(10), remote))
 }
