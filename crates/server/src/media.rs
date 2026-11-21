@@ -11,6 +11,8 @@ use tokio::task::JoinSet;
 #[cfg(test)]
 mod admission_tests;
 mod measurements;
+mod probe;
+pub(crate) use probe::Progress as ProbeProgress;
 mod playback;
 mod recording;
 mod streams;
@@ -75,6 +77,10 @@ impl AttachmentReceipt {
 }
 
 enum Command {
+    Probe {
+        key: CallKey,
+        challenge: probe::Challenge,
+    },
     Measurements {
         key: CallKey,
         reply: oneshot::Sender<Option<(String, crate::rtp::Measurements)>>,
@@ -589,6 +595,7 @@ pub struct MediaHub {
     dropped: u64,
     recordings: Recordings,
     playbacks: Playbacks,
+    probes: BTreeMap<CallKey, probe::Challenge>,
 }
 
 impl MediaHub {
@@ -633,6 +640,7 @@ impl MediaHub {
                 dropped: 0,
                 recordings: Recordings::new(),
                 playbacks: Playbacks::new(),
+                probes: BTreeMap::new(),
             },
             events,
         )
@@ -645,6 +653,7 @@ impl MediaHub {
     }
 
     fn remove(&mut self, key: &CallKey) -> Result<(), MediaError> {
+        self.probes.remove(key);
         self.recordings.release(key);
         self.playbacks.release(key);
         if let Some(port) = self.ports.remove(key) {
@@ -693,6 +702,11 @@ impl MediaHub {
     fn command(&mut self, command: Command) -> Result<(), MediaError> {
         self.remember_music();
         match command {
+            Command::Probe { key, challenge } => {
+                if self.probes.len() < self.capacity && !challenge.closed() {
+                    self.probes.entry(key).or_insert(challenge);
+                }
+            }
             Command::Measurements { key, reply } => {
                 let sample = self
                     .ports
@@ -948,6 +962,7 @@ impl MediaHub {
     }
 
     fn tick(&mut self) -> Result<(), MediaError> {
+        self.probes.retain(|_, challenge| !challenge.closed());
         for (key, port) in &mut self.ports {
             if port
                 .connection_lease
@@ -1005,6 +1020,9 @@ impl MediaHub {
             for _ in 0..3 {
                 match port.incoming.try_recv() {
                     Ok(frame) => {
+                        if let Some(challenge) = self.probes.get_mut(key) {
+                            challenge.receive(&frame)?;
+                        }
                         self.recordings.channel(key, frame);
                         match self.mixer.push(key, frame) {
                             Ok(()) => {
@@ -1045,6 +1063,10 @@ impl MediaHub {
         self.recordings.bridges(&audio.bridges)?;
         for (key, frame) in audio.channels {
             let port = self.ports.get(&key).ok_or(MediaError::UnknownStream)?;
+            let frame = match (self.probes.get_mut(&key), port.generated_audio_gate) {
+                (Some(probe), Gate::Open | Gate::IncomingMuted) => probe.transmit()?,
+                _ => frame,
+            };
             match port.outgoing.try_send(frame) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => self.dropped += 1,

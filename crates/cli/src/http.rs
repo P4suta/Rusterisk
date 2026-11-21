@@ -136,6 +136,28 @@ impl<'a> Remote<'a> {
         .map_err(|_| Error::Response("Timed out opening the observation stream"))?
     }
 
+    pub(super) async fn post_test_call<T: DeserializeOwned>(
+        &self,
+        endpoint: &str,
+        seconds: u16,
+    ) -> Result<T, Error> {
+        let mut request = self
+            .builder(
+                Method::POST,
+                &["rusterisk", "test-calls", "PJSIP", endpoint],
+            )?
+            .timeout(Duration::from_secs(u64::from(seconds) + 10))
+            .build()?;
+        request
+            .url_mut()
+            .query_pairs_mut()
+            .append_pair("deadline_seconds", &seconds.to_string());
+        let response = self.client.execute(request).await?;
+        let response = self.check_status(response, StatusCode::OK).await?;
+        serde_json::from_slice(&body(response).await?)
+            .map_err(|_| Error::Response("Invalid test call result"))
+    }
+
     async fn check_status(
         &self,
         response: reqwest::Response,

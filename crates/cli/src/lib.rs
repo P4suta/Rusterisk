@@ -4,8 +4,10 @@ pub use doctor::Doctor;
 mod inspection;
 mod options;
 mod profiles;
+mod test_call;
 mod watch;
 pub use profiles::profile_names;
+pub use test_call::test_call;
 pub use watch::Watch;
 
 pub use inspection::Inspection;
