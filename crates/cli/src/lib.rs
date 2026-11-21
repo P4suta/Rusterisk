@@ -1,6 +1,8 @@
 mod http;
+mod inspection;
 mod options;
 
+pub use inspection::Inspection;
 pub use options::{OptionError, RemoteOptions};
 use std::io::{self, IsTerminal, Read};
 
@@ -74,16 +76,30 @@ fn password(input: impl Read) -> Result<String, Error> {
     String::from_utf8(bytes).map_err(|_| Error::Input("The password must be valid UTF-8"))
 }
 
-pub fn run(operation: Operation, options: &RemoteOptions) -> Result<&'static str, Error> {
+fn session(options: &RemoteOptions) -> Result<(tokio::runtime::Runtime, http::Remote<'_>), Error> {
     let input = io::stdin();
     if input.is_terminal() {
         return Err(Error::Input("Use --password-stdin with a pipe or file"));
     }
     let password = password(input.lock())?;
-    tokio::runtime::Builder::new_current_thread()
+    let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(4)
         .build()
-        .map_err(Error::Runtime)?
-        .block_on(http::request(operation, options, &password))
+        .map_err(Error::Runtime)?;
+    Ok((runtime, http::Remote::new(options, password)?))
+}
+
+pub fn run(operation: Operation, options: &RemoteOptions) -> Result<&'static str, Error> {
+    let (runtime, remote) = session(options)?;
+    runtime.block_on(remote.control(operation))
+}
+
+pub fn inspect(
+    operation: &Inspection,
+    options: &RemoteOptions,
+    json: bool,
+) -> Result<String, Error> {
+    let (runtime, remote) = session(options)?;
+    runtime.block_on(operation.read(&remote, json))
 }

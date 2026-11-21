@@ -1,6 +1,6 @@
 use crate::{Error, Operation, RemoteOptions};
 use reqwest::{Method, StatusCode};
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 use std::time::Duration;
 use url::{Host, Url};
 
@@ -60,64 +60,102 @@ struct Ping {
     asterisk_id: String,
 }
 
-pub(super) async fn request(
-    operation: Operation,
-    options: &RemoteOptions,
-    password: &str,
-) -> Result<&'static str, Error> {
-    let mut url = origin(&options.server)?;
-    if options.username.is_empty() || options.username.len() > 128 || options.username.contains(':')
-    {
-        return Err(Error::ConnectionSettings("Invalid username"));
+pub(super) struct Remote<'a> {
+    origin: Url,
+    client: reqwest::Client,
+    username: &'a str,
+    password: String,
+}
+
+impl<'a> Remote<'a> {
+    pub(super) fn new(options: &'a RemoteOptions, password: String) -> Result<Self, Error> {
+        let origin = origin(&options.server)?;
+        if options.username.is_empty()
+            || options.username.len() > 128
+            || options.username.contains(':')
+        {
+            return Err(Error::ConnectionSettings("Invalid username"));
+        }
+        let builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
+            .connect_timeout(Duration::from_secs(5));
+        let client = if origin.scheme() == "http" {
+            builder.no_proxy()
+        } else {
+            builder
+        }
+        .build()?;
+        Ok(Self {
+            origin,
+            client,
+            username: &options.username,
+            password,
+        })
     }
-    let (method, path, timeout, expected) = match operation {
-        Operation::Ping => (Method::GET, "/ari/asterisk/ping", 10, StatusCode::OK),
-        Operation::Reload => (
-            Method::POST,
-            "/rusterisk/configuration/reload",
-            35,
-            StatusCode::NO_CONTENT,
-        ),
-    };
-    url.set_path(path);
-    let builder = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(timeout));
-    let builder = if url.scheme() == "http" {
-        builder.no_proxy()
-    } else {
-        builder
-    };
-    let client = builder.build()?;
-    let response = client
-        .request(method, url)
-        .basic_auth(&options.username, Some(password))
-        .send()
-        .await?;
-    let status = response.status();
-    if status != expected {
-        let message = serde_json::from_slice::<Problem>(&body(response).await?)
-            .ok()
-            .map(|problem| problem.message)
-            .filter(|message| {
-                !message.is_empty()
-                    && !message.contains(password)
-                    && !message.chars().any(char::is_control)
-            })
-            .unwrap_or_else(|| "Unexpected server response".to_owned());
-        return Err(Error::Remote(status, message));
+
+    async fn request(
+        &self,
+        method: Method,
+        path: &[&str],
+        expected: StatusCode,
+        timeout: Duration,
+    ) -> Result<reqwest::Response, Error> {
+        let mut url = self.origin.clone();
+        url.path_segments_mut()
+            .map_err(|_| Error::ConnectionSettings("Invalid server origin"))?
+            .clear()
+            .extend(path);
+        let response = self
+            .client
+            .request(method, url)
+            .basic_auth(self.username, Some(&self.password))
+            .timeout(timeout)
+            .send()
+            .await?;
+        let status = response.status();
+        if status != expected {
+            let message = serde_json::from_slice::<Problem>(&body(response).await?)
+                .ok()
+                .map(|problem| problem.message)
+                .filter(|message| {
+                    !message.is_empty()
+                        && !message.contains(&self.password)
+                        && !message.chars().any(char::is_control)
+                })
+                .unwrap_or_else(|| "Unexpected server response".to_owned());
+            return Err(Error::Remote(status, message));
+        }
+        Ok(response)
     }
-    match operation {
-        Operation::Reload => Ok("Configuration reloaded."),
-        Operation::Ping => {
-            let ping: Ping = serde_json::from_slice(&body(response).await?)
-                .map_err(|_| Error::Response("Invalid ARI ping response"))?;
-            if ping.ping != "pong" || ping.timestamp.is_empty() || ping.asterisk_id.is_empty() {
-                return Err(Error::Response("Invalid ARI ping response"));
+
+    pub(super) async fn get<T: DeserializeOwned>(&self, path: &[&str]) -> Result<T, Error> {
+        let response = self
+            .request(Method::GET, path, StatusCode::OK, Duration::from_secs(10))
+            .await?;
+        serde_json::from_slice(&body(response).await?)
+            .map_err(|_| Error::Response("Invalid ARI response"))
+    }
+
+    pub(super) async fn control(&self, operation: Operation) -> Result<&'static str, Error> {
+        match operation {
+            Operation::Reload => {
+                self.request(
+                    Method::POST,
+                    &["rusterisk", "configuration", "reload"],
+                    StatusCode::NO_CONTENT,
+                    Duration::from_secs(35),
+                )
+                .await?;
+                Ok("Configuration reloaded.")
             }
-            Ok("pong")
+            Operation::Ping => {
+                let ping: Ping = self.get(&["ari", "asterisk", "ping"]).await?;
+                if ping.ping != "pong" || ping.timestamp.is_empty() || ping.asterisk_id.is_empty() {
+                    return Err(Error::Response("Invalid ARI ping response"));
+                }
+                Ok("pong")
+            }
         }
     }
 }

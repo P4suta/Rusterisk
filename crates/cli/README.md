@@ -1,6 +1,6 @@
 # Rusterisk CLI
 
-Use `rusterisk-cli` to check connectivity or reload configuration on a running Rusterisk server.
+Use `rusterisk-cli` to check connectivity, inspect calls and endpoints, or reload configuration on a running Rusterisk server.
 
 Install a published release from crates.io with Cargo.
 
@@ -26,3 +26,25 @@ Use HTTPS for remote servers.
 Plain HTTP is available on loopback addresses.
 A successful ping prints `pong`.
 A completed reload prints `Configuration reloaded.`.
+
+## Inspect calls and endpoints
+
+Use a read-only ARI account for inspection.
+The `status` command reports the server version and startup time.
+The `endpoints` command lists configured routes and `endpoint TECH/RESOURCE` selects one route.
+The `channels` command lists active call legs and `channel ID` selects one leg.
+Each leg includes the identifiers of bridges that listed the channel during the inspection.
+Channel and bridge reads can observe different moments during a call.
+
+```sh
+rusterisk-cli endpoint PJSIP/desk --json --server https://pbx.example.org --username reader --password-stdin < password.txt
+rusterisk-cli channels --json --server https://pbx.example.org --username reader --password-stdin < password.txt
+```
+
+With `--json`, list commands return an array and a lookup returns an object.
+An empty array indicates a successful inspection with no matching resources.
+Server status includes `version` and `startup_time`.
+Endpoint objects include `technology`, `resource`, `routing_state`, `registration`, and `channel_ids`.
+The [ARI endpoint model](https://github.com/asterisk/asterisk/blob/22.9.0/rest-api/api-docs/endpoints.json) reports routing availability, so registration is `unknown` for static and dynamic contacts.
+Each channel object has `kind` set to `call_leg` and includes `id`, `name`, `state`, `creationtime`, and `bridge_ids`.
+A failed request writes a diagnostic to standard error and exits unsuccessfully.
