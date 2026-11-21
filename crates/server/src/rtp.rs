@@ -150,10 +150,22 @@ struct TelephoneTransport {
 
 struct SentSource {
     first_sequence: u16,
-    sent: u64,
+    last_sequence: u64,
     report: SourceReport,
     rate: u32,
     sampled: tokio::time::Instant,
+}
+
+impl SentSource {
+    fn covers_reported_sequence(&self, sequence: u32) -> bool {
+        let sequence = u64::from(sequence);
+        let earliest = if sequence < u64::from(self.first_sequence) {
+            sequence + (1 << 16)
+        } else {
+            sequence
+        };
+        earliest <= self.last_sequence
+    }
 }
 
 fn record(
@@ -174,7 +186,7 @@ fn record(
         }
         SentSource {
             first_sequence: packet.sequence(),
-            sent: 0,
+            last_sequence: u64::from(packet.sequence()),
             report: SourceReport {
                 ssrc: packet.ssrc(),
                 timestamp,
@@ -186,7 +198,8 @@ fn record(
         }
     };
     source.report.timestamp = timestamp;
-    source.sent = source.sent.saturating_add(1);
+    let advance = packet.sequence().wrapping_sub(source.last_sequence as u16);
+    source.last_sequence = source.last_sequence.saturating_add(u64::from(advance));
     source.report.packets = source.report.packets.wrapping_add(1);
     source.report.octets = source
         .report
@@ -287,11 +300,7 @@ impl RtpLink {
     fn received_control(&self, bytes: &[u8], sources: &[SentSource]) -> Result<(), MediaError> {
         let report = rusterisk_media::reception_report(bytes, |ssrc, sequence| {
             sources.iter().any(|source| {
-                source.report.ssrc == ssrc
-                    && u64::from((sequence as u16).wrapping_sub(source.first_sequence))
-                        < source.sent
-                    && u64::from(sequence)
-                        < u64::from(source.first_sequence).saturating_add(source.sent)
+                source.report.ssrc == ssrc && source.covers_reported_sequence(sequence)
             })
         })?;
         if let Some(report) = report {

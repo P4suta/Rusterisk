@@ -15,6 +15,31 @@ fn key() -> Result<CallKey, MediaError> {
     })
 }
 
+#[tokio::test]
+async fn measurement_reply_preserves_the_capture_time_and_counts() -> Result<(), MediaError> {
+    let (_handle, mut hub, _notices) = MediaHub::new(4);
+    let key = key()?;
+    let (sender, reader) = watch::channel(crate::rtp::Measurements::default());
+    let (mut port, _channels) =
+        Port::new(PeerMediaDirection::SendReceive, DigitSupport::Unsupported);
+    port.measurements = Some(reader);
+    hub.install_link(key.clone(), port, Gate::Open)?;
+    sender.send_modify(|sample| sample.local.rxcount = 7);
+    let (reply, response) = oneshot::channel();
+    let before = crate::utc_timestamps::now_millis();
+    hub.command(Command::Measurements { key, reply })?;
+    let after = crate::utc_timestamps::now_millis();
+    sender.send_modify(|sample| sample.local.rxcount = 8);
+    hub.close().await?;
+    let (captured, sample) = response
+        .await
+        .map_err(failure)?
+        .ok_or(MediaError::UnknownStream)?;
+    assert!((before..=after).contains(&captured));
+    assert_eq!(sample.local.rxcount, 7);
+    Ok(())
+}
+
 fn datagram(hub: &mut MediaHub, key: CallKey, peer: &SocketPair) -> Result<(), MediaError> {
     hub.attach(
         key,
