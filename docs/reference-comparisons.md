@@ -90,6 +90,8 @@ After channel playback interrupts hold music, the [channel contract](https://doc
 The comparison receives silence from Rusterisk until an explicit start.
 On a bridged external media channel, Asterisk 22.9.0 resumes hold music when channel playback ends.
 The comparison checks the resumed audio and then stops it explicitly.
+Asterisk publishes the final playback state before removing the playback from its [resource container](https://github.com/asterisk/asterisk/blob/22.9.0/res/res_stasis_playback.c).
+After receiving `PlaybackFinished`, the client checks that the matching terminal snapshot disappears within three seconds.
 
 Recording comparisons use the Rust client to start channel and bridge recordings on each server.
 For bridge recordings, both peers must receive the opposite input before the measured interval starts.

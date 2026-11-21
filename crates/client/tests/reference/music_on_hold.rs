@@ -244,7 +244,10 @@ impl Resources {
             );
             cleanup = combine(
                 cleanup,
-                missing(bounded(client.playback(&self.playback)).await),
+                super::playback_position::removed(&self.playback, || {
+                    client.playback(&self.playback)
+                })
+                .await,
             );
         }
         for peer in &mut self.peers {
@@ -604,7 +607,7 @@ async fn exercise(
     )?;
     receive(2000, 12, None, "ordinary playback interrupts music").await?;
     observed(session, Wanted::Finished(playback_id)).await?;
-    missing(bounded(client.playback(playback_id)).await)?;
+    super::playback_position::removed(playback_id, || client.playback(playback_id)).await?;
     *playback_lifetime = Lifetime::Released;
     match server {
         ComparisonServer::Rusterisk => {

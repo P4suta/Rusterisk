@@ -1,7 +1,7 @@
 use rusterisk_client::{
     api::{
-        ChannelId, EventKind, EventSource, ExternalRtpTarget, MediaUri, PlaybackMilliseconds,
-        PlaybackOptions, PlaybackState, SoundId, StaticRtpCodec,
+        ChannelId, EventKind, EventSource, ExternalRtpTarget, MediaUri, Playback,
+        PlaybackMilliseconds, PlaybackOptions, PlaybackState, SoundId, StaticRtpCodec,
     },
     Client, Error, Session,
 };
@@ -17,6 +17,30 @@ use std::{
 const SEEK_START_MS: u32 = 22_000;
 const SEEK_STEP_MS: u32 = 7000;
 pub(super) const INTERRUPTION_OFFSET_MS: u32 = 24_000;
+
+pub(super) async fn removed<F: std::future::Future<Output = Result<Playback, Error>>>(
+    id: &ChannelId,
+    mut lookup: impl FnMut() -> F,
+) -> Result<(), Error> {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            match lookup().await {
+                Err(Error::Api { status: 404, .. }) => return Ok(()),
+                Err(error) => return Err(error),
+                Ok(snapshot) if snapshot.id == *id && snapshot.state == PlaybackState::Done => {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                Ok(_) => {
+                    return Err(Error::Invalid(
+                        "finished playback identity or state changed",
+                    ))
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|_| Error::Invalid("finished playback removal deadline"))?
+}
 
 pub fn prepare(root: &Path) -> Result<(), Error> {
     let directory = root.join("sounds/en");
@@ -283,11 +307,7 @@ pub async fn compare(
             received(&peer, 4000, "resume").await?;
             client.stop_playback(&playback).await?;
             observed(session, Observation::Finished(&playback)).await?;
-            match client.playback(&playback).await {
-                Err(Error::Api { status: 404, .. }) => {}
-                Err(error) => return Err(error),
-                Ok(_) => return Err(Error::Invalid("finished playback is still live")),
-            }
+            removed(&playback, || client.playback(&playback)).await?;
             let options = PlaybackOptions {
                 offset_ms: PlaybackMilliseconds::try_from(SEEK_START_MS)
                     .map_err(|_| Error::Invalid("playback fixture offset"))?,
@@ -319,7 +339,8 @@ pub async fn compare(
             client.restart_playback(&playback).await?;
             received(&peer, 4000, "custom restart").await?;
             client.stop_playback(&playback).await?;
-            observed(session, Observation::Finished(&playback)).await
+            observed(session, Observation::Finished(&playback)).await?;
+            removed(&playback, || client.playback(&playback)).await
         }
         .await;
         let cleanup = match client.stop_playback(&playback).await {
@@ -349,6 +370,52 @@ pub async fn compare(
 mod tests {
     use rusterisk_client::Error;
     use rusterisk_media::{mulaw_encode, RtpPacket};
+
+    #[tokio::test]
+    async fn a_finished_playback_must_disappear_after_its_terminal_snapshot() -> Result<(), Error> {
+        use rusterisk_client::api::{ApiError, ChannelId, Playback, PlaybackState};
+        let id = ChannelId::try_from("completed".to_owned())?;
+        let snapshot = Playback {
+            id: id.clone(),
+            media_uri: "sound:hello".into(),
+            target_uri: "channel:caller".into(),
+            next_media_uri: None,
+            language: "en".into(),
+            state: PlaybackState::Done,
+        };
+        let response = |status| Error::Api {
+            status,
+            message: ApiError {
+                message: "playback lookup".into(),
+            },
+        };
+        let mut replies = [Ok(snapshot.clone()), Err(response(404))].into_iter();
+        super::removed(&id, || {
+            std::future::ready(replies.next().unwrap_or(Err(Error::Closed)))
+        })
+        .await?;
+        assert!(replies.next().is_none());
+        let wrong = ChannelId::try_from("different".to_owned())?;
+        assert!(
+            super::removed(&wrong, || std::future::ready(Ok(snapshot.clone())))
+                .await
+                .is_err()
+        );
+        let playing = Playback {
+            state: PlaybackState::Playing,
+            ..snapshot
+        };
+        assert!(
+            super::removed(&id, || std::future::ready(Ok(playing.clone())))
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            super::removed(&id, || std::future::ready(Err(response(503)))).await,
+            Err(Error::Api { status: 503, .. })
+        ));
+        Ok(())
+    }
 
     #[test]
     fn custom_seeks_have_distinct_audio_through_the_receive_deadline() -> Result<(), Error> {
