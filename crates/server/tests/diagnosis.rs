@@ -35,6 +35,24 @@ async fn read(app: &Router, path: &str) -> Result<Value, ControlError> {
     )?)
 }
 
+async fn read_after_signal(
+    app: &Router,
+    path: &str,
+    applied: impl Fn(&Value) -> bool,
+) -> Result<Value, ControlError> {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let observed = read(app, path).await?;
+            if applied(&observed) {
+                return Ok(observed);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| ControlError::Adapter(format!("Signal did not reach {path}")))?
+}
+
 #[tokio::test]
 async fn diagnosis_follows_dialplan_and_live_call_identity_with_read_only_credentials(
 ) -> Result<(), ControlError> {
@@ -69,6 +87,12 @@ async fn diagnosis_follows_dialplan_and_live_call_identity_with_read_only_creden
                     milestone: Milestone::Answered,
                 })
                 .await?;
+            read_after_signal(
+                &app,
+                &format!("/rusterisk/diagnostics/channels/{name}"),
+                |channel| channel["state"] == "Up",
+            )
+            .await?;
             if name == "first-leg" {
                 controller
                     .execute(owner.clone(), None, Action::Hold(key.id))
@@ -79,9 +103,9 @@ async fn diagnosis_follows_dialplan_and_live_call_identity_with_read_only_creden
             resource: "mobile".into(),
             generation: 1,
         };
-        for presence in [
-            rusterisk_core::ContactPresence::Present,
-            rusterisk_core::ContactPresence::Absent,
+        for (presence, expected) in [
+            (rusterisk_core::ContactPresence::Present, "present"),
+            (rusterisk_core::ContactPresence::Absent, "absent"),
         ] {
             controller
                 .signal(Signal::EndpointContact {
@@ -89,6 +113,12 @@ async fn diagnosis_follows_dialplan_and_live_call_identity_with_read_only_creden
                     presence,
                 })
                 .await?;
+            read_after_signal(
+                &app,
+                "/rusterisk/diagnostics/extensions/home/234",
+                |route| route["destinations"][1]["registration"] == expected,
+            )
+            .await?;
         }
         assert_eq!(
             read(&app, "/rusterisk/diagnostics/extensions/home/999").await?["disposition"],
@@ -124,7 +154,12 @@ async fn diagnosis_follows_dialplan_and_live_call_identity_with_read_only_creden
                 direction: rusterisk_core::PeerMediaDirection::SendOnly,
             })
             .await?;
-        let remote_hold = read(&app, "/rusterisk/diagnostics/channels/second-leg").await?;
+        let remote_hold = read_after_signal(
+            &app,
+            "/rusterisk/diagnostics/channels/second-leg",
+            |channel| channel["hold_source"] == "peer",
+        )
+        .await?;
         assert_eq!(remote_hold["held"], true);
         assert_eq!(remote_hold["hold_source"], "peer");
         Ok(())
