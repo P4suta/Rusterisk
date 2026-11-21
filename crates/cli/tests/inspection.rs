@@ -24,6 +24,12 @@ fn fixture(
         return (StatusCode::FORBIDDEN, "");
     }
     let body = match uri.path() {
+        "/rusterisk/diagnostics/channels/leg-a" => {
+            r#"{"id":"leg-a","generation":8,"creationtime":"t1","endpoint":"desk","state":"Up","held":true}"#
+        }
+        "/rusterisk/diagnostics/extensions/home/201" => {
+            r#"{"context":"home","extension":"201","steps":[{"context":"home","pattern":"201","priority":1,"operation":"Stasis"}],"disposition":"stasis","application":"phone","destinations":[],"channels":["leg-a","leg-b"]}"#
+        }
         "/ari/asterisk/info" => {
             r#"{"system":{"version":"22.9.0"},"status":{"startup_time":"2026-11-21T04:25:00Z"}}"#
         }
@@ -49,14 +55,21 @@ fn fixture(
     (StatusCode::OK, body)
 }
 
-async fn inspect(arguments: &[&str], empty: bool) -> io::Result<Output> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let server = format!("http://{}", listener.local_addr()?);
-    let router = Router::new().fallback(get(
+fn resources(empty: bool) -> Router {
+    Router::new().fallback(get(
         move |method: Method, uri: Uri, headers: HeaderMap| async move {
             fixture(method, &uri, &headers, empty)
         },
-    ));
+    ))
+}
+
+async fn inspect(arguments: &[&str], empty: bool) -> io::Result<Output> {
+    inspect_with(arguments, resources(empty)).await
+}
+
+async fn inspect_with(arguments: &[&str], router: Router) -> io::Result<Output> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let server = format!("http://{}", listener.local_addr()?);
     let mut process = Command::new(env!("CARGO_BIN_EXE_rusterisk-cli"));
     process
         .args(arguments)
@@ -135,5 +148,65 @@ async fn inspection_counts_legs_and_correlates_bridge_membership() -> io::Result
     assert!(lines
         .lines()
         .any(|line| line.contains("Call leg") && line.contains("leg-b") && line.contains("mix")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn doctor_keeps_signaling_when_media_measurements_are_unavailable() -> io::Result<()> {
+    let value = document(&["doctor", "channel", "leg-a", "--json"], false).await?;
+    assert_eq!(value["state"], "Up");
+    assert_eq!(value["held"], true);
+    assert_eq!(value["traffic"]["observation"], "unavailable");
+    assert!(value["next_check"].as_str().is_some_and(|s| !s.is_empty()));
+    let route = document(&["doctor", "extension", "home", "201", "--json"], false).await?;
+    assert_eq!(route["application"], "phone");
+    assert_eq!(route["channels"].as_array().map(Vec::len), Some(2));
+    let terminal = inspect(&["doctor", "extension", "home", "201"], false).await?;
+    assert!(terminal.status.success());
+    let output = String::from_utf8_lossy(&terminal.stdout);
+    assert!(output.contains("phone") && output.contains("leg-b"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn either_packet_read_can_be_unavailable_while_authentication_errors_remain_fatal(
+) -> io::Result<()> {
+    for (first_succeeds, status) in [
+        (false, StatusCode::SERVICE_UNAVAILABLE),
+        (true, StatusCode::SERVICE_UNAVAILABLE),
+        (false, StatusCode::UNAUTHORIZED),
+        (true, StatusCode::FORBIDDEN),
+    ] {
+        let (first, _reader) = tokio::sync::watch::channel(first_succeeds);
+        let app = resources(false).route("/rusterisk/channels/leg-a/rtp-statistics", get(move || {
+            let available = first.send_replace(false);
+            async move {
+                if available {
+                    (StatusCode::OK, r#"{"channel_id":"leg-a","creationtime":"t1","generation":8,"observed_at":"2026-11-21T10:00:00.000Z","local":{"source":"server_rtp","rxcount":2,"txcount":3}}"#)
+                } else {
+                    (status, "{}")
+                }
+            }
+        }));
+        let out = inspect_with(&["doctor", "channel", "leg-a", "--json"], app).await?;
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let value: Value = serde_json::from_slice(&out.stdout)?;
+            assert_eq!(value["state"], "Up");
+            assert_eq!(value["held"], true);
+            assert_eq!(value["endpoint"], "desk");
+            assert_eq!(value["traffic"]["observation"], "unavailable");
+            assert!(value["traffic"]["received"].is_null());
+            assert!(value["traffic"]["sent"].is_null());
+        } else {
+            assert!(!out.status.success());
+            assert!(out.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&out.stderr).contains(status.as_str()));
+        }
+    }
     Ok(())
 }

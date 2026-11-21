@@ -64,6 +64,20 @@ Channel generations distinguish calls that reuse an identifier.
 A gap reports a lost connection or missed records and exits unsuccessfully.
 Start another watch to obtain a fresh snapshot.
 
+## Diagnose routing and media
+
+Use `doctor extension CONTEXT NUMBER` to follow the matched priorities and find destinations, a Stasis application, and active call legs.
+Routes that depend on per-call variables can remain unresolved.
+Use `doctor channel ID` to inspect signaling, hold, and the change in received and sent packet counts over a half-second sample.
+The result includes the elapsed interval, the available observations, and a specific next check.
+A server without packet statistics can still report signaling.
+Verifying received audio requires a receiver that checks the signal.
+
+```sh
+rusterisk-cli doctor extension home 201 --profile lab --password-stdin < password.txt
+rusterisk-cli doctor channel inbound-42 --json --profile lab --password-stdin < password.txt
+```
+
 ## Named servers
 
 Store server origins and usernames in `rusterisk/profiles.json` under the [XDG configuration directory](https://specifications.freedesktop.org/basedir/latest/).

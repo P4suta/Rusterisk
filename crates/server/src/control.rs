@@ -13,6 +13,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 mod attended;
 mod call_pairs;
+mod diagnosis;
 mod dial;
 mod dialplan;
 mod endpoints;
