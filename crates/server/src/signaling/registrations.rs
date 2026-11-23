@@ -20,9 +20,10 @@ use rusterisk_sip::{
 use std::{
     net::SocketAddr,
     num::{NonZeroU32, NonZeroU64},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 mod candidates;
 mod peer_waits;
 mod publication;

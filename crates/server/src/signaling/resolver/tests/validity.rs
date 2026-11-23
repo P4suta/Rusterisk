@@ -17,9 +17,10 @@ use rusterisk_config::Protocol;
 use rusterisk_sip::StaticTarget;
 use std::{
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::net::UdpSocket;
+use tokio::time::Instant;
 
 #[derive(Clone, Copy)]
 enum Family {

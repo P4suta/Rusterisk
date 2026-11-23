@@ -125,7 +125,7 @@ async fn released_or_previous_configuration_keys_cannot_cache_or_transmit_comple
             signaling.registration_completed(completed, 1001)?;
             if signaling
                 .resolution_cache
-                .get(&target, std::time::Instant::now())
+                .get(&target, tokio::time::Instant::now())
                 .is_some()
                 || !matches!(
                     signaling.registrations.clients[0].state,
