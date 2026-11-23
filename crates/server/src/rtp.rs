@@ -225,6 +225,13 @@ async fn send(socket: &UdpSocket, bytes: &[u8], peer: SocketAddr) -> Result<(), 
     Ok(())
 }
 
+async fn send_control(socket: &UdpSocket, bytes: &[u8], peer: SocketAddr, stats: &mut LinkStats) {
+    if let Err(error) = send(socket, bytes, peer).await {
+        stats.dropped += 1;
+        tracing::debug!(%error, "control report delivery failed");
+    }
+}
+
 fn report_delay(initial: bool) -> Result<Duration, MediaError> {
     let mut entropy = [0; 2];
     getrandom::fill(&mut entropy).map_err(failure)?;
@@ -442,7 +449,7 @@ impl RtpLink {
                     if !sources.is_empty() {
                         let (reports, ntp) = reports(&sources)?;
                         let bytes = rusterisk_media::sender_reports(&reports, ntp, "rusterisk")?;
-                        send(&self.sockets.control, &bytes, control_peer).await?;
+                        send_control(&self.sockets.control, &bytes, control_peer, &mut stats).await;
                     }
                     report_at = tokio::time::Instant::now() + report_delay(false)?;
                 }
@@ -451,7 +458,7 @@ impl RtpLink {
         if !sources.is_empty() {
             let (reports, ntp) = reports(&sources)?;
             let bytes = rusterisk_media::goodbye_reports(&reports, ntp, "rusterisk")?;
-            send(&self.sockets.control, &bytes, control_peer).await?;
+            send_control(&self.sockets.control, &bytes, control_peer, &mut stats).await;
         }
         Ok(stats)
     }
