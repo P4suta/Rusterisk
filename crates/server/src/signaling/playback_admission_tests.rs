@@ -149,7 +149,8 @@ async fn serve_until_completion(
     playback: &ChannelId,
 ) -> Result<(), ControlError> {
     let (stop, mut stopped) = watch::channel(false);
-    let mut serving = std::pin::pin!(signaling.serve(&mut stopped, std::time::Instant::now()));
+    let clock = signaling.controller.clock();
+    let mut serving = std::pin::pin!(signaling.serve(&mut stopped, clock));
     let completed = async {
         for _ in 0..64 {
             let event = events.recv().await.ok_or(ControlError::Capacity)?;

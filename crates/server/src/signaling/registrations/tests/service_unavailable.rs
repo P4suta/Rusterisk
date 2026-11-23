@@ -17,9 +17,10 @@ use rusterisk_sip::StaticTarget;
 use sha2::{Digest, Sha256};
 use std::{
     net::{Ipv4Addr, SocketAddr},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use tokio::net::UdpSocket;
+use tokio::time::Instant;
 #[path = "service_unavailable/exhaustion.rs"]
 mod exhaustion;
 #[path = "service_unavailable/persistent_wait.rs"]

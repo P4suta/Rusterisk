@@ -11,11 +11,9 @@ use hickory_resolver::{
 use rusterisk_api::ChannelId;
 use rusterisk_config::{Config, Protocol};
 use rusterisk_sip::StaticTarget;
-use std::{
-    net::Ipv4Addr,
-    time::{Duration, Instant},
-};
+use std::{net::Ipv4Addr, time::Duration};
 use tokio::net::{TcpListener, UdpSocket};
+use tokio::time::Instant;
 mod authentication;
 mod capacity;
 mod starting_profile;

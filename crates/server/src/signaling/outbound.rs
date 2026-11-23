@@ -10,8 +10,9 @@ use super::{
 use crate::{runner::CallLease, CallKey, ControlError, Controller, Signal};
 use rusterisk_config::Protocol;
 use rusterisk_sip::{Destination, PreparedOutbound};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 #[cfg(test)]
 mod tests;

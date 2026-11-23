@@ -1,14 +1,17 @@
+use crate::clock::Clock;
 use crate::storage::{StoragePort, WorkerError};
 use crate::{Action, CallKey, Control, ControlError, Effect, IncomingCall, Outcome, Signal};
 use rusterisk_api::{Event, EventKind};
 use rusterisk_config::Config;
 use std::collections::{BTreeMap, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 mod answer;
 mod call_lifetime;
+#[cfg(test)]
+mod clock_tests;
 mod diagnosis;
 mod endpoint_queries;
 #[cfg(test)]
@@ -191,6 +194,7 @@ struct Session {
 
 #[derive(Clone)]
 pub struct Controller {
+    clock: Clock,
     requests: mpsc::Sender<Request>,
     signals: mpsc::Sender<Signal>,
     shutdown: watch::Sender<bool>,
@@ -199,6 +203,7 @@ pub struct Controller {
 }
 
 pub struct Runner {
+    clock: Clock,
     observations: tokio::sync::broadcast::Sender<rusterisk_api::observation::WatchRecord>,
     control: Control,
     config: Config,
@@ -281,8 +286,10 @@ impl Controller {
         let (reload_requests, reload_receiver) = mpsc::channel(1);
         let (directory_reload_requests, directory_reload_receiver) = mpsc::channel(1);
         let control = Control::with_configuration(capacity, &config);
+        let clock = Clock::start();
         (
             Self {
+                clock,
                 requests,
                 signals,
                 shutdown: shutdown.clone(),
@@ -290,6 +297,7 @@ impl Controller {
                 directory_reload_requests,
             },
             Runner {
+                clock,
                 control,
                 config,
                 requests: request_receiver,
@@ -314,6 +322,10 @@ impl Controller {
             },
             effect_receiver,
         )
+    }
+
+    pub(crate) fn clock(&self) -> Clock {
+        self.clock
     }
 
     pub fn shutdown(&self) {
@@ -996,7 +1008,6 @@ impl Runner {
 
     async fn serve(&mut self) -> Result<(), ControlError> {
         let effect_sender = self.effects.clone();
-        let started = Instant::now();
         let mut tick = tokio::time::interval(Duration::from_millis(100));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -1034,15 +1045,15 @@ impl Runner {
                 changed = self.shutdown.changed() => { if changed.is_err() || *self.shutdown.borrow() { break; } }
                 signal = self.signals.recv(), if self.pending_effects.is_empty() => {
                     let Some(signal) = signal else { break; };
-                    let now = u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?;
+                    let now = self.clock.now_ms()?;
                     self.apply_signal(signal, now)?;
                     self.finish_answers(now);
                 }
                 request = self.requests.recv() => {
-                    if let Some(request) = request { self.request(request, u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?; } else { break; }
+                    if let Some(request) = request { self.request(request, self.clock.now_ms()?)?; } else { break; }
                 }
                 _instant = tick.tick() => {
-                    self.tick(u64::try_from(started.elapsed().as_millis()).map_err(|_| ControlError::Capacity)?)?;
+                    self.tick(self.clock.now_ms()?)?;
                 }
             }
         }

@@ -5,7 +5,6 @@ use crate::{
     CallKey, ControlError, Signal,
 };
 use rusterisk_sip::{Session, SessionSecurity, WebRtcDescription};
-use std::time::Instant;
 
 impl Signaling {
     pub(super) fn incoming_answer(
@@ -92,7 +91,7 @@ impl Signaling {
                     advertised,
                     description.as_str(),
                     &[offered.codec],
-                    Instant::now(),
+                    tokio::time::Instant::now().into_std(),
                 )
                 .map_err(failure)?;
                 let description = WebRtcDescription::parse(&answer).map_err(failure)?;
