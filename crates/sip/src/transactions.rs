@@ -189,6 +189,22 @@ impl Transactions {
         });
     }
 
+    pub(super) fn len(&self) -> usize {
+        self.requests.len()
+    }
+
+    pub(super) fn wake(&self) -> rusterisk_core::Wake {
+        use rusterisk_core::Wake;
+        self.requests.values().fold(Wake::Idle, |wake, pending| {
+            let wake = wake.earliest(Wake::At(pending.expires));
+            if matches!(pending.retry, Retry::Reliable) {
+                wake
+            } else {
+                wake.earliest(Wake::At(pending.next))
+            }
+        })
+    }
+
     pub fn expire(&mut self, now: u64) -> Vec<NotificationReceipt> {
         let expired: Vec<_> = self
             .requests

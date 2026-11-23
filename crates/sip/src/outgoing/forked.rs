@@ -50,6 +50,20 @@ enum Retention<'a> {
 }
 
 impl Forks {
+    pub(crate) fn len(&self) -> usize {
+        self.entries.iter().flatten().count()
+    }
+
+    pub(crate) fn wake(&self) -> rusterisk_core::Wake {
+        use rusterisk_core::Wake;
+        self.entries
+            .iter()
+            .flatten()
+            .fold(Wake::Idle, |wake, retained| {
+                wake.earliest(Wake::At(retained.until))
+            })
+    }
+
     pub(super) fn expire(&mut self, now: u64) -> Result<(), SipError> {
         for entry in &mut self.entries {
             if let Some(retained) = entry.as_ref().filter(|retained| retained.until <= now) {

@@ -1437,3 +1437,7 @@ fn sending_info_uses_the_existing_dialog_and_retries_without_ending_the_call(
 }
 #[path = "identity/forked_answers.rs"]
 mod forked_answers;
+#[path = "support/twins.rs"]
+mod twins;
+#[path = "identity/wake_twins.rs"]
+mod wake_twins;
