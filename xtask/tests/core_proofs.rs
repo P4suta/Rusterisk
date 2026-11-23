@@ -21,6 +21,27 @@ const PAIR_HARNESSES: [&str; 2] = [
     "proofs::owned_pair_departures_stay_with_the_current_bridge_and_generations",
     "proofs::owned_pair_release_is_absorbing",
 ];
+const WAKE_HARNESSES: [&str; 4] = [
+    "proofs::dialplan_waits_change_only_at_their_wake",
+    "proofs::dial_forks_change_only_at_their_wake",
+    "proofs::answers_change_only_at_their_wake",
+    "proofs::digit_sequences_change_only_at_their_wake",
+];
+
+#[test]
+fn the_native_plan_selects_every_wake_contract() -> Result<(), ProofError> {
+    let plan = CoreProofPlan::new("fixture", "/project/core", "/project/results", IMAGE)?;
+    for harness in WAKE_HARNESSES {
+        assert!(
+            plan.run()
+                .arguments
+                .iter()
+                .any(|argument| argument == harness),
+            "{harness}"
+        );
+    }
+    Ok(())
+}
 
 #[test]
 fn the_native_plan_selects_every_owned_pair_contract() -> Result<(), ProofError> {
@@ -165,6 +186,7 @@ fn results_without_the_attended_contracts_are_rejected() -> Result<(), ProofErro
         result["harness_id"].as_str().is_some_and(|name| {
             !ATTENDED_HARNESSES.contains(&name)
                 && !PAIR_HARNESSES.contains(&name)
+                && !WAKE_HARNESSES.contains(&name)
                 && !name.starts_with("proofs::settings_")
         })
     });
@@ -185,7 +207,9 @@ fn results_without_owned_pair_contracts_are_rejected() -> Result<(), ProofError>
         .ok_or(ProofError::Results)?;
     results.retain(|result| {
         result["harness_id"].as_str().is_some_and(|name| {
-            !PAIR_HARNESSES.contains(&name) && !name.starts_with("proofs::settings_")
+            !PAIR_HARNESSES.contains(&name)
+                && !WAKE_HARNESSES.contains(&name)
+                && !name.starts_with("proofs::settings_")
         })
     });
     let count = results.len();
@@ -193,6 +217,26 @@ fn results_without_owned_pair_contracts_are_rejected() -> Result<(), ProofError>
         prior["verification_results"]["summary"][field] = serde_json::json!(count);
     }
     assert_eq!(count, 12);
+    assert!(validate_results(&serde_json::to_vec(&prior).map_err(ProofError::Json)?).is_err());
+    Ok(())
+}
+
+#[test]
+fn results_without_the_wake_contracts_are_rejected() -> Result<(), ProofError> {
+    let mut prior = complete();
+    let results = prior["verification_results"]["results"]
+        .as_array_mut()
+        .ok_or(ProofError::Results)?;
+    results.retain(|result| {
+        result["harness_id"]
+            .as_str()
+            .is_some_and(|name| !WAKE_HARNESSES.contains(&name))
+    });
+    let count = results.len();
+    for field in ["total_harnesses", "executed", "successful"] {
+        prior["verification_results"]["summary"][field] = serde_json::json!(count);
+    }
+    assert_eq!(count, 18);
     assert!(validate_results(&serde_json::to_vec(&prior).map_err(ProofError::Json)?).is_err());
     Ok(())
 }
@@ -208,6 +252,7 @@ fn results_for_only_the_original_six_contracts_are_rejected() -> Result<(), Proo
             !TRANSFER_HARNESSES.contains(&name)
                 && !ATTENDED_HARNESSES.contains(&name)
                 && !PAIR_HARNESSES.contains(&name)
+                && !WAKE_HARNESSES.contains(&name)
                 && !name.starts_with("proofs::settings_")
         })
     });
