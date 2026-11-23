@@ -3,6 +3,7 @@ use crate::storage::{StoragePort, WorkerError};
 use crate::{Action, CallKey, Control, ControlError, Effect, IncomingCall, Outcome, Signal};
 use rusterisk_api::{Event, EventKind};
 use rusterisk_config::Config;
+use rusterisk_core::Wake;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 use subtle::ConstantTimeEq;
@@ -12,6 +13,10 @@ mod answer;
 mod call_lifetime;
 #[cfg(test)]
 mod clock_tests;
+mod closure;
+use closure::ClosureNotice;
+#[cfg(test)]
+mod deadline_tests;
 mod diagnosis;
 mod endpoint_queries;
 #[cfg(test)]
@@ -171,14 +176,9 @@ enum Request {
         kind: SubscriptionKind,
         reply: oneshot::Sender<Result<u64, ControlError>>,
     },
-    Unsubscribe {
-        application: String,
-        token: u64,
-    },
 }
 
 struct Subscriber {
-    token: u64,
     events: mpsc::Sender<Event>,
 }
 
@@ -195,6 +195,7 @@ struct Session {
 #[derive(Clone)]
 pub struct Controller {
     clock: Clock,
+    closures: mpsc::Sender<()>,
     requests: mpsc::Sender<Request>,
     signals: mpsc::Sender<Signal>,
     shutdown: watch::Sender<bool>,
@@ -204,6 +205,7 @@ pub struct Controller {
 
 pub struct Runner {
     clock: Clock,
+    closed: mpsc::Receiver<()>,
     observations: tokio::sync::broadcast::Sender<rusterisk_api::observation::WatchRecord>,
     control: Control,
     config: Config,
@@ -231,24 +233,8 @@ pub struct Subscription {
     pub application: String,
     pub token: u64,
     pub events: mpsc::Receiver<Event>,
-    controller: Controller,
     _lifetime: mpsc::Sender<()>,
-}
-
-impl Drop for Subscription {
-    fn drop(&mut self) {
-        if self
-            .controller
-            .requests
-            .try_send(Request::Unsubscribe {
-                application: self.application.clone(),
-                token: self.token,
-            })
-            .is_err()
-        {
-            tracing::debug!(application = %self.application, "subscription cleanup deferred to the control task");
-        }
-    }
+    _closure: ClosureNotice,
 }
 
 async fn receive<T>(
@@ -287,9 +273,11 @@ impl Controller {
         let (directory_reload_requests, directory_reload_receiver) = mpsc::channel(1);
         let control = Control::with_configuration(capacity, &config);
         let clock = Clock::start();
+        let (closures, closed) = mpsc::channel(closure::CAPACITY);
         (
             Self {
                 clock,
+                closures,
                 requests,
                 signals,
                 shutdown: shutdown.clone(),
@@ -298,6 +286,7 @@ impl Controller {
             },
             Runner {
                 clock,
+                closed,
                 control,
                 config,
                 requests: request_receiver,
@@ -435,6 +424,7 @@ impl Controller {
         application: String,
         kind: SubscriptionKind,
     ) -> Result<Subscription, ControlError> {
+        let closure = ClosureNotice::reserve(&self.closures)?;
         let (events, receiver) = mpsc::channel(64);
         let (lifetime, lifetime_receiver) = mpsc::channel(1);
         let (reply, response) = oneshot::channel();
@@ -454,8 +444,8 @@ impl Controller {
             application,
             token,
             events: receiver,
-            controller: self.clone(),
             _lifetime: lifetime,
+            _closure: closure,
         })
     }
 }
@@ -905,7 +895,7 @@ impl Runner {
                         self.sessions.insert(token, Session { lifetime, kind });
                         if let Some(previous) = self
                             .subscribers
-                            .insert(application.clone(), Subscriber { token, events })
+                            .insert(application.clone(), Subscriber { events })
                         {
                             if previous
                                 .events
@@ -923,18 +913,6 @@ impl Runner {
                     });
                 if reply.send(result).is_err() {
                     tracing::debug!("event subscriber disconnected");
-                }
-            }
-            Request::Unsubscribe { application, token } => {
-                self.sessions.remove(&token);
-                if self
-                    .subscribers
-                    .get(&application)
-                    .is_some_and(|subscriber| subscriber.token == token)
-                {
-                    self.subscribers.remove(&application);
-                    let mut outcome = self.control.unsubscribe(&application, &timestamp())?;
-                    self.publish(&mut outcome)?;
                 }
             }
         }
@@ -978,7 +956,33 @@ impl Runner {
         Ok((key, outcome))
     }
 
-    fn tick(&mut self, now: u64) -> Result<(), ControlError> {
+    fn wake(&self) -> Result<Wake, ControlError> {
+        let mut wake = self.control.expiry_wake();
+        if self.pending_effects.is_empty() && !self.admissions_paused() {
+            wake = wake.earliest(self.control.dialplan_wake());
+        }
+        if let Some(deadline) = self.reload_deadline() {
+            wake = wake.earliest(Wake::At(self.clock.at(deadline)?));
+        }
+        let admissions = self
+            .recording_admissions
+            .values()
+            .map(recording_admission::Pending::deadline)
+            .chain(
+                self.external_admissions
+                    .values()
+                    .map(external_admission::Pending::deadline),
+            );
+        for deadline in admissions {
+            wake = wake.earliest(Wake::At(deadline));
+        }
+        for pending in self.answers.values() {
+            wake = wake.earliest(pending.wake());
+        }
+        Ok(wake)
+    }
+
+    fn settle(&mut self, now: u64) -> Result<(), ControlError> {
         self.tick_reload()?;
         self.sessions
             .retain(|_, session| !session.lifetime.is_closed());
@@ -1008,9 +1012,15 @@ impl Runner {
 
     async fn serve(&mut self) -> Result<(), ControlError> {
         let effect_sender = self.effects.clone();
-        let mut tick = tokio::time::interval(Duration::from_millis(100));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut parked = None;
+        let mut closures_open = true;
         loop {
+            let wake = self.wake()?;
+            let timer = if parked == Some(wake) {
+                Wake::Idle
+            } else {
+                wake
+            };
             tokio::select! {
                 loaded = self.reload.loaders.join_next(), if !self.reload.loaders.is_empty() => {
                     self.loading_completed(loaded.ok_or(ControlError::Conflict("Settings loading task missing"))?)?;
@@ -1047,15 +1057,19 @@ impl Runner {
                     let Some(signal) = signal else { break; };
                     let now = self.clock.now_ms()?;
                     self.apply_signal(signal, now)?;
-                    self.finish_answers(now);
                 }
                 request = self.requests.recv() => {
                     if let Some(request) = request { self.request(request, self.clock.now_ms()?)?; } else { break; }
                 }
-                _instant = tick.tick() => {
-                    self.tick(self.clock.now_ms()?)?;
-                }
+                closure = self.closed.recv(), if closures_open => { closures_open = closure.is_some(); }
+                () = self.clock.reached(timer) => {}
             }
+            let now = self.clock.now_ms()?;
+            let before = self.wake()?;
+            self.settle(now)?;
+            let after = self.wake()?;
+            parked =
+                (after == before && matches!(after, Wake::At(at) if at <= now)).then_some(after);
         }
         Ok(())
     }

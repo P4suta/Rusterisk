@@ -390,6 +390,10 @@ impl Runner {
         self.control.configuration_generation()
     }
 
+    pub(super) fn reload_deadline(&self) -> Option<Instant> {
+        self.reload.pending.as_ref().map(|pending| pending.deadline)
+    }
+
     pub(super) fn admissions_paused(&self) -> bool {
         self.reload
             .pending

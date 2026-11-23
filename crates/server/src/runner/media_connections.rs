@@ -1,10 +1,11 @@
-use super::{receive, timestamp, Controller, Request, Runner, MAX_PENDING_EFFECTS};
+use super::{receive, timestamp, ClosureNotice, Controller, Request, Runner, MAX_PENDING_EFFECTS};
 use crate::{media_websocket::MediaLinkOptions, CallKey, ControlError, Signal};
 use rusterisk_api::ChannelId;
 use tokio::sync::{mpsc, oneshot};
 
 pub struct MediaConnectionLease {
     lifetime: mpsc::Sender<()>,
+    _closure: ClosureNotice,
 }
 
 impl MediaConnectionLease {
@@ -25,6 +26,7 @@ impl Controller {
         connection_id: ChannelId,
         origin: Option<String>,
     ) -> Result<ClaimedMediaConnection, ControlError> {
+        let closure = ClosureNotice::reserve(&self.closures)?;
         let (sender, lifetime) = mpsc::channel(1);
         let (reply, response) = oneshot::channel();
         self.requests
@@ -39,7 +41,10 @@ impl Controller {
         Ok(ClaimedMediaConnection {
             key,
             options,
-            lease: MediaConnectionLease { lifetime: sender },
+            lease: MediaConnectionLease {
+                lifetime: sender,
+                _closure: closure,
+            },
         })
     }
 }

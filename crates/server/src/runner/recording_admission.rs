@@ -23,6 +23,10 @@ impl Pending {
             deadline,
         }
     }
+
+    pub(super) fn deadline(&self) -> u64 {
+        self.deadline
+    }
 }
 
 impl Runner {
@@ -301,8 +305,8 @@ mod tests {
         drop(receiver);
         runner
             .subscribers
-            .insert("calls".into(), Subscriber { token: 1, events });
-        runner.tick(6000)?;
+            .insert("calls".into(), Subscriber { events });
+        runner.settle(6000)?;
         assert!(runner.pending_effects.len() <= super::super::MAX_PENDING_EFFECTS);
         assert!(runner.recording_admissions.len() < 64);
         assert_eq!(

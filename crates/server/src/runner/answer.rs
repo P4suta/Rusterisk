@@ -1,6 +1,7 @@
 use super::{receive, timestamp, Controller, Credentials, Request, Runner};
 use crate::{Action, ControlError, Outcome};
 use rusterisk_api::{ChannelId, ChannelState};
+use rusterisk_core::Wake;
 use std::collections::VecDeque;
 use tokio::sync::oneshot;
 
@@ -12,6 +13,16 @@ mod tests;
 pub(super) struct Pending {
     deadline: u64,
     replies: VecDeque<(u64, Reply)>,
+}
+
+impl Pending {
+    pub(super) fn wake(&self) -> Wake {
+        self.replies
+            .iter()
+            .fold(Wake::At(self.deadline), |wake, (deadline, _)| {
+                wake.earliest(Wake::At(*deadline))
+            })
+    }
 }
 
 impl Controller {
