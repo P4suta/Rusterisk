@@ -55,10 +55,16 @@ fn a_transfer_subscription_changes_only_at_its_reported_wakes() -> Result<(), Si
     assert_eq!(notification.body, b"SIP/2.0 180 Ringing\r\n");
     let acknowledged = receipt(&notification, 200)?;
     twins.apply(|engine, now| engine.receive(&acknowledged, fixture.peer, now))?;
+    let bye = fixture.packet("BYE", 4, "")?;
+    let hung_up = twins.apply(|engine, now| engine.receive(&bye, fixture.peer, now))?;
+    assert!(status(&hung_up, 200));
+    twins.advance(100_000)?;
+    assert_eq!(twins.retained().incoming, 1);
     let output = twins.advance(680_000)?;
     assert!(!notifies(&output)?.is_empty());
     assert!(ended(&output));
     assert_eq!(twins.retained().refers, 0);
+    assert_eq!(twins.retained().incoming, 0);
     assert!(twins.skipped() > 679_000);
     Ok(())
 }
