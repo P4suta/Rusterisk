@@ -397,6 +397,10 @@ impl Runner {
         let Some(pending) = &self.reload.pending else {
             return Ok(Wake::Idle);
         };
+        // A step ends at this deadline through its own timeout, and its result decides the outcome.
+        if !self.reload.steps.is_empty() {
+            return Ok(Wake::Idle);
+        }
         let cleanup = matches!(
             pending.phase,
             Phase::Cancelling | Phase::Aborting | Phase::Draining

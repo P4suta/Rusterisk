@@ -175,6 +175,33 @@ async fn a_cancelled_started_loader_keeps_admission_busy_until_it_is_reaped(
 }
 
 #[tokio::test(start_paused = true)]
+async fn an_acknowledgement_step_reports_no_wake_beside_its_own_timeout() -> Result<(), ControlError>
+{
+    let config = configuration("starting-password", STARTING_ORIGIN)?;
+    let (_controller, mut runner, _effects) = Controller::new(config, 1);
+    let (reply, _caller) = oneshot::channel();
+    runner.reload.pending = Some(super::Pending {
+        reply,
+        key: None,
+        phase: super::Phase::Staging,
+        deadline: Instant::now() + Duration::from_secs(10),
+        barrier: false,
+        reserved: false,
+        failure: None,
+    });
+    assert_eq!(runner.wake()?, Wake::At(10_000));
+    runner
+        .reload
+        .steps
+        .spawn(std::future::pending::<super::Step>());
+    assert_eq!(runner.wake()?, Wake::Idle);
+    runner.reload.steps.abort_all();
+    while runner.reload.steps.join_next().await.is_some() {}
+    assert_eq!(runner.wake()?, Wake::At(10_000));
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_cancelled_load_reports_no_wake_while_its_loader_runs() -> Result<(), ControlError> {
     let inputs = Inputs::new()?;
     let result = async {
