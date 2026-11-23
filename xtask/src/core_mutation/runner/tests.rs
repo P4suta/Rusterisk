@@ -18,7 +18,7 @@ fn mutation_uses_the_authoritative_source_manifest_and_test_inventory() -> io::R
         let captured = CapturedCoreMutation::read(&fixture.root).map_err(io::Error::other)?;
         assert_eq!(captured.targets(), shared.targets());
         assert_eq!(captured.tests(), shared.tests());
-        assert_eq!(captured.targets().len(), 24);
+        assert_eq!(captured.targets().len(), 25);
         assert_eq!(captured.tests().len(), ASSURANCE_TEST_COUNT);
         let plan = crate::core_mutation::plan(IMAGE).map_err(io::Error::other)?;
         for phase in PHASES {
