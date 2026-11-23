@@ -71,6 +71,37 @@ async fn registrations_that_fall_due_together_leave_one_interval_apart() -> Resu
 }
 
 #[tokio::test(start_paused = true)]
+async fn a_signaling_task_sleeps_until_a_registration_falls_due() -> Result<(), ControlError> {
+    let registrar = registrar()?;
+    let peer = registrar.local_addr().map_err(failure)?.to_string();
+    let config = config(&[peer.as_str()], 0)?;
+    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (media, _hub, notices) = MediaHub::new(16);
+    let mut signaling =
+        Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let (_stopper, mut stop) = watch::channel(false);
+    let mut polls = 0_u32;
+    {
+        let mut serving = std::pin::pin!(signaling.serve(&mut stop, controller.clock()));
+        let counted = std::future::poll_fn(|context| {
+            polls += 1;
+            serving.as_mut().poll(context)
+        });
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep(Duration::from_millis(999)) => {}
+            served = counted => return Err(failure(format!("the signaling task stopped: {served:?}"))),
+        }
+    }
+    assert_eq!(
+        polls, 1,
+        "the signaling task woke before its registration fell due"
+    );
+    assert_eq!(requests(std::slice::from_ref(&registrar)), 0);
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_signaling_task_without_pending_work_takes_no_turn_for_an_hour(
 ) -> Result<(), ControlError> {
     let config = config(&[], 0)?;

@@ -977,9 +977,14 @@ impl Signaling {
         let retiring = self.registrations.retiring.len();
         let served = self.registration_turn(now).await?;
         let acted = served || self.registrations.retiring.len() < retiring;
+        let due = matches!(reported, Wake::At(at) if at <= now);
         assert!(
-            !acted || matches!(reported, Wake::At(at) if at <= now),
+            !acted || due,
             "a registration turn acted at {now} ms before its reported wake {reported:?}"
+        );
+        assert!(
+            acted || !due,
+            "the reported wake {reported:?} was due at {now} ms and its turn did nothing"
         );
         Ok(())
     }
