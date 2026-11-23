@@ -67,4 +67,13 @@ mod tests {
         overdue.settled(Wake::At(500), Wake::At(500), 40);
         assert_eq!(overdue.timer(Wake::At(500)), Wake::At(500));
     }
+
+    #[test]
+    fn a_due_wake_that_the_settle_changed_runs_without_a_delay() {
+        let mut overdue = Overdue::default();
+        overdue.settled(Wake::At(10), Wake::At(20), 50);
+        assert_eq!(overdue.timer(Wake::At(20)), Wake::At(20));
+        overdue.settled(Wake::At(900), DUE, 50);
+        assert_eq!(overdue.timer(DUE), DUE);
+    }
 }

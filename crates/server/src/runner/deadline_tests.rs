@@ -261,31 +261,93 @@ async fn an_abandoned_reload_requester_wakes_the_runner() -> Result<(), ControlE
     Ok(())
 }
 
+fn external_media(
+    reply: oneshot::Sender<Result<crate::Outcome, ControlError>>,
+) -> Result<Request, ControlError> {
+    Ok(Request::Apply {
+        credentials: credentials()?,
+        origin: None,
+        action: Action::ExternalRtp {
+            id: ChannelId::try_from("external".to_owned())?,
+            app: "app".into(),
+            target: ExternalRtpTarget::new(
+                "127.0.0.1:12000".parse().map_err(failure)?,
+                StaticRtpCodec::Pcmu,
+            )
+            .map_err(failure)?,
+            data: String::new(),
+        },
+        variables: Default::default(),
+        reply,
+    })
+}
+
+#[tokio::test(start_paused = true)]
+async fn work_that_backpressure_defers_retries_at_the_former_interval() -> Result<(), ControlError>
+{
+    let (_controller, mut runner, mut effects) = Controller::new(configuration()?, 4);
+    runner.control.subscribe("app")?;
+    let (reply, mut response) = oneshot::channel();
+    runner.request(external_media(reply)?, 0)?;
+    let Ok(Effect::ConnectExternalRtp { key, .. }) = effects.try_recv() else {
+        return Err(failure("the external media request reached no adapter"));
+    };
+    runner.control.signal(
+        Signal::Terminated {
+            key: key.clone(),
+            cause: 16,
+        },
+        "later",
+    )?;
+    while runner
+        .effects
+        .try_send(Effect::Release { key: key.clone() })
+        .is_ok()
+    {}
+    while runner.pending_effects.len() < super::MAX_PENDING_EFFECTS {
+        runner
+            .pending_effects
+            .push_back(Effect::Release { key: key.clone() });
+    }
+    let mut polls = 0_u32;
+    let mut serving = std::pin::pin!(runner.serve());
+    {
+        let counted = std::future::poll_fn(|context| {
+            polls += 1;
+            if polls > 1000 {
+                return std::task::Poll::Ready(Err(failure(
+                    "the runner spun on work that it could not consume",
+                )));
+            }
+            serving.as_mut().poll(context)
+        });
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep(Duration::from_secs(1)) => {}
+            served = counted => return Err(failure(format!("the runner stopped: {served:?}"))),
+        }
+    }
+    assert!(
+        (9..=12).contains(&polls),
+        "{polls} turns in one second of deferred work"
+    );
+    assert!(response.try_recv().is_err());
+    while effects.try_recv().is_ok() {}
+    progress(&mut serving).await?;
+    assert!(matches!(
+        response.try_recv(),
+        Ok(Err(ControlError::Conflict(_)))
+    ));
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_external_admission_reports_its_deadline_and_falls_due_when_its_channel_ends(
 ) -> Result<(), ControlError> {
     let (_controller, mut runner, mut effects) = Controller::new(configuration()?, 4);
     runner.control.subscribe("app")?;
     let (reply, mut response) = oneshot::channel();
-    runner.request(
-        Request::Apply {
-            credentials: credentials()?,
-            origin: None,
-            action: Action::ExternalRtp {
-                id: ChannelId::try_from("external".to_owned())?,
-                app: "app".into(),
-                target: ExternalRtpTarget::new(
-                    "127.0.0.1:12000".parse().map_err(failure)?,
-                    StaticRtpCodec::Pcmu,
-                )
-                .map_err(failure)?,
-                data: String::new(),
-            },
-            variables: Default::default(),
-            reply,
-        },
-        100,
-    )?;
+    runner.request(external_media(reply)?, 100)?;
     let Ok(Effect::ConnectExternalRtp { key, .. }) = effects.try_recv() else {
         return Err(failure("the external media request reached no adapter"));
     };

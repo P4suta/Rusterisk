@@ -198,6 +198,8 @@ async fn an_acknowledgement_step_reports_no_wake_beside_its_own_timeout() -> Res
     runner.reload.steps.abort_all();
     while runner.reload.steps.join_next().await.is_some() {}
     assert_eq!(runner.wake()?, Wake::At(10_000));
+    runner.reload.pending()?.phase = super::Phase::Cancelling;
+    assert_eq!(runner.wake()?, Wake::At(10_000));
     Ok(())
 }
 
