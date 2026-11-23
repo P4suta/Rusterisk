@@ -13,6 +13,9 @@ use rusterisk_sip::{
 };
 use std::net::SocketAddr;
 
+#[path = "registration_bindings/contact_replacement.rs"]
+mod contact_replacement;
+
 struct Registrar {
     engine: Engine,
     serial: u32,
