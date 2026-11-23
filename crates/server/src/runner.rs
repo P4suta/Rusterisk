@@ -28,7 +28,7 @@ mod observation;
 pub(crate) use observation::{Filter as WatchFilter, Target as WatchTarget};
 mod native_start;
 mod observed_channel;
-mod overdue;
+
 pub(crate) use diagnosis::Target as DiagnosisTarget;
 mod recording_admission;
 mod reload;
@@ -51,6 +51,7 @@ struct StorageServices {
 }
 
 const MAX_PENDING_EFFECTS: usize = 64 * 3 + 1;
+const OVERDUE_RETRY_MS: u64 = 100;
 
 enum Admission {
     Recording {
@@ -974,14 +975,14 @@ impl Runner {
             wake = wake.earliest(if self.control.has_channel(key) {
                 Wake::At(pending.deadline())
             } else {
-                overdue::DUE
+                crate::overdue::DUE
             });
         }
         for (key, pending) in &self.answers {
             wake = wake.earliest(if self.answer_waits(key) {
                 pending.wake()
             } else {
-                overdue::DUE
+                crate::overdue::DUE
             });
         }
         Ok(wake)
@@ -1017,7 +1018,7 @@ impl Runner {
 
     async fn serve(&mut self) -> Result<(), ControlError> {
         let effect_sender = self.effects.clone();
-        let mut overdue = overdue::Overdue::default();
+        let mut overdue = crate::overdue::Overdue::every(OVERDUE_RETRY_MS);
         let mut closures_open = true;
         loop {
             let timer = overdue.timer(self.wake()?);

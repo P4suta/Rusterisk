@@ -7,14 +7,14 @@ use crate::{
 };
 use rusterisk_api::{ChannelId, MediaUri};
 use rusterisk_config::{Config, Dtmf};
-use rusterisk_core::{AudioGate, DtmfCommand, MediaTaskToken, PeerMediaDirection};
+use rusterisk_core::{AudioGate, DtmfCommand, MediaTaskToken, PeerMediaDirection, Wake};
 use rusterisk_media::{AudioTarget, Gate};
 use rusterisk_sip::{
     Datagram, DatagramOrigin, Engine, Outbound, Output, RejectReason, SipEvent, StreamFlowId,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
-use std::time::Duration;
+
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 mod attended;
@@ -81,6 +81,26 @@ impl DigitDelivery {
             Self::Signaling(queue) => Some(queue),
         }
     }
+
+    fn wake(&self) -> Wake {
+        match self {
+            Self::Media => Wake::Idle,
+            Self::Signaling(queue) => queue
+                .front()
+                .map_or(Wake::Idle, |command| command.sequence.wake()),
+        }
+    }
+}
+
+// Outbound registrations leave at most one packet per interval when more than one is due.
+const REGISTRATION_INTERVAL_MS: u64 = 20;
+
+fn due(wake: Wake, now: u64) -> bool {
+    match wake {
+        Wake::Now => true,
+        Wake::At(at) => at <= now,
+        Wake::Idle => false,
+    }
 }
 struct Received {
     listener: usize,
@@ -109,6 +129,7 @@ pub struct Signaling {
     listeners: Vec<Listener>,
     network: transport::Network,
     registrations: registrations::Registrations,
+    registration_paced: u64,
     native_pending: BTreeMap<CallKey, outbound::Pending>,
     native_jobs: JoinSet<outbound::Completion>,
     resolver: Result<resolver::DestinationResolver, ControlError>,
@@ -210,6 +231,7 @@ impl Signaling {
             listeners,
             network,
             registrations,
+            registration_paced: 0,
             native_pending: BTreeMap::new(),
             native_jobs: JoinSet::new(),
             resolver: resolver::DestinationResolver::system(),
@@ -1267,6 +1289,35 @@ impl Signaling {
         }
     }
 
+    fn wake(&self, now: u64) -> Wake {
+        let engines = self.listeners.iter().fold(Wake::Idle, |wake, listener| {
+            wake.earliest(listener.engine.wake())
+        });
+        let digits = self
+            .calls
+            .values()
+            .fold(engines, |wake, call| wake.earliest(call.digits.wake()));
+        digits.earliest(match self.registration_wake(now) {
+            Wake::At(at) => Wake::At(at.max(self.registration_paced)),
+            Wake::Now => Wake::At(self.registration_paced),
+            Wake::Idle => Wake::Idle,
+        })
+    }
+
+    async fn turn(&mut self, now: u64) -> Result<(), ControlError> {
+        for listener in 0..self.listeners.len() {
+            if due(self.listeners[listener].engine.wake(), now) {
+                let output = self.listeners[listener].engine.tick(now).map_err(failure)?;
+                self.output(listener, output, now).await?;
+            }
+        }
+        self.digit_tick(now).await?;
+        if now >= self.registration_paced && self.registration_turn(now).await? {
+            self.registration_paced = now.saturating_add(REGISTRATION_INTERVAL_MS);
+        }
+        Ok(())
+    }
+
     async fn digit_tick(&mut self, now: u64) -> Result<(), ControlError> {
         let keys: Vec<_> = self.calls.keys().cloned().collect();
         for key in keys {
@@ -1315,13 +1366,13 @@ impl Signaling {
         stop: &mut watch::Receiver<bool>,
         clock: Clock,
     ) -> Result<(), ControlError> {
-        let mut tick = tokio::time::interval(Duration::from_millis(20));
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut overdue = crate::overdue::Overdue::every(REGISTRATION_INTERVAL_MS);
         let publication_stopped = stop.clone();
         loop {
             if *stop.borrow() {
                 break;
             }
+            let timer = overdue.timer(self.wake(clock.now_ms()?));
             let (prepared, commands) = match &mut self.publication {
                 Some(publication) => (
                     Some(&mut publication.receiver.prepared),
@@ -1440,14 +1491,11 @@ impl Signaling {
                     let now = clock.now_ms()?;
                     self.registration_completed(completed, now)?;
                 },
-                _instant = tick.tick() => {
+                () = clock.reached(timer) => {
                     let now = clock.now_ms()?;
-                    for listener in 0..self.listeners.len() {
-                        let output = self.listeners[listener].engine.tick(now).map_err(failure)?;
-                        self.output(listener, output, now).await?;
-                    }
-                    self.digit_tick(now).await?;
-                    self.registration_tick(now).await?;
+                    let before = self.wake(now);
+                    self.turn(now).await?;
+                    overdue.settled(before, self.wake(now), now);
                 }
             }
         }
