@@ -6,15 +6,17 @@ use tokio::time::Instant;
 #[cfg(test)]
 mod tests;
 
+const SLOTS: usize = 64;
+
 pub(crate) struct ResolutionCache {
-    entries: [Option<ResolvedTarget>; 64],
+    entries: Vec<Option<ResolvedTarget>>,
     cursor: u8,
 }
 
 impl Default for ResolutionCache {
     fn default() -> Self {
         Self {
-            entries: [const { None }; 64],
+            entries: std::iter::repeat_with(|| None).take(SLOTS).collect(),
             cursor: 0,
         }
     }
@@ -61,7 +63,7 @@ impl ResolutionCache {
             .or_else(|| self.entries.iter().position(Option::is_none))
             .unwrap_or(usize::from(self.cursor));
         *self.entries.get_mut(index).ok_or(ControlError::Capacity)? = Some(result);
-        self.cursor = u8::try_from((index + 1) % 64).map_err(|_| ControlError::Capacity)?;
+        self.cursor = u8::try_from((index + 1) % SLOTS).map_err(|_| ControlError::Capacity)?;
         Ok(())
     }
 }
