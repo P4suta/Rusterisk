@@ -164,3 +164,20 @@ fn registered_contact_targets_preserve_browser_identity_and_physical_routing(
     assert_eq!(engine.registered_peer("phone", 4002), None);
     Ok(())
 }
+
+#[path = "support/twins.rs"]
+mod twins;
+
+#[test]
+fn a_registered_contact_ends_only_at_its_reported_wake() -> Result<(), SipError> {
+    let mut twins = twins::Twins::new(|| Ok(Engine::new(config("udp")?, [7; 32])))?;
+    let registered =
+        twins.apply(|engine, now| register(engine, 1, now, 60).map(|(output, _)| output))?;
+    presence(&registered, ContactPresence::Present);
+    assert_eq!(twins.retained().contacts, 1);
+    let output = twins.advance(70_000)?;
+    presence(&output, ContactPresence::Absent);
+    assert_eq!(twins.retained(), rusterisk_sip::Retained::default());
+    assert!(twins.skipped() > 69_990);
+    Ok(())
+}

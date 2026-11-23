@@ -10,6 +10,10 @@ mod delivery;
 mod replacement;
 #[path = "refer_dialog/support.rs"]
 mod support;
+#[path = "support/twins.rs"]
+mod twins;
+#[path = "refer_dialog/wake_twins.rs"]
+mod wake_twins;
 use support::{notifies, receipt, refer, status, Fixture};
 
 #[test]

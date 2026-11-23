@@ -1,5 +1,6 @@
 use super::{answered, authenticated_invite, config, incoming_id, outbound, provisional};
 use crate::twins::Twins;
+use rusterisk_core::Wake;
 use rusterisk_sip::{Engine, RejectReason, Retained, SipError, SipEvent};
 
 fn calling() -> Result<Engine, SipError> {
@@ -117,5 +118,30 @@ fn a_ringing_call_that_times_out_changes_only_at_its_reported_wakes() -> Result<
     twins.apply(|engine, now| engine.receive(&late, "127.0.0.1:5061".parse()?, now))?;
     twins.advance(110_000)?;
     assert_eq!(twins.retained(), rusterisk_sip::Retained::default());
+    Ok(())
+}
+
+#[test]
+fn an_engine_driven_by_its_wakes_passes_each_instant_within_two_turns() -> Result<(), SipError> {
+    let mut engine = calling()?;
+    engine.originate(outbound(), 0)?;
+    let mut now = 0;
+    let mut instants = 0;
+    while let Wake::At(at) = engine.wake() {
+        now = now.max(at);
+        engine.tick(now)?;
+        if matches!(engine.wake(), Wake::At(again) if again <= now) {
+            engine.tick(now)?;
+        }
+        assert!(
+            !matches!(engine.wake(), Wake::At(again) if again <= now),
+            "the wake stayed at {now} ms after two turns"
+        );
+        instants += 1;
+        assert!(instants < 64, "the engine never ran out of wakes");
+    }
+    assert_eq!(engine.wake(), Wake::Idle);
+    assert_eq!(engine.retained(), Retained::default());
+    assert_eq!(now, 32_000);
     Ok(())
 }
