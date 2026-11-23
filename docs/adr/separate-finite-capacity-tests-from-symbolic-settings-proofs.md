@@ -18,7 +18,7 @@ Exercise 65 generations, every slot, and absent generations in unit tests throug
 Reject a foreign reference by its domain identifier before searching local slots.
 Compile symbolic settings proofs with the two slots required by their current and retired generations.
 Use Kani for arbitrary owners, reference counts, and transition results through the same operations.
-Keep eighteen harnesses, exact result validation, Kissat 4.0.1, container scratch, and existing limits.
+Keep twenty-two harnesses, exact result validation, Kissat 4.0.1, container scratch, and existing limits.
 
 ## Alternatives
 
@@ -33,4 +33,4 @@ Reconsider when capacity becomes dynamic or stable contracts remove the scan pro
 ## Confirmation
 
 Core tests must compare the modeled state and reuse all 64 retired slots.
-The Kani result must contain eighteen exact successes.
+The Kani result must contain twenty-two exact successes.

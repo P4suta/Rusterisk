@@ -1,4 +1,4 @@
-use crate::DtmfDigit;
+use crate::{DtmfDigit, Wake};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DtmfError {
@@ -101,8 +101,25 @@ impl DtmfSequence {
             .all(|digit| events & (1 << digit.event()) != 0)
     }
 
+    #[cfg(kani)]
+    pub(crate) fn unchanged_from(&self, earlier: &Self) -> bool {
+        self.len == earlier.len
+            && self.index == earlier.index
+            && self.timing == earlier.timing
+            && self.phase == earlier.phase
+            && self.digits[..self.len] == earlier.digits[..earlier.len]
+    }
+
     pub const fn finished(&self) -> bool {
         matches!(self.phase, Phase::Ended)
+    }
+
+    pub const fn wake(&self) -> Wake {
+        match self.phase {
+            Phase::Pending => Wake::Now,
+            Phase::Waiting(deadline) | Phase::Completing(deadline) => Wake::At(deadline),
+            Phase::Ended => Wake::Idle,
+        }
     }
 
     pub fn advance(&mut self, now: u64) -> Result<Option<DtmfTone>, DtmfError> {
