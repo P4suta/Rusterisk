@@ -1,5 +1,9 @@
-use super::{answered, authenticated_invite, config, incoming_id, outbound, provisional};
+use super::{
+    answered, authenticated_invite, challenge_invite, config, incoming_id, outbound, provisional,
+    request,
+};
 use crate::twins::Twins;
+use rsipstack::sip::{HeadersExt, SipMessage};
 use rusterisk_core::Wake;
 use rusterisk_sip::{Engine, RejectReason, Retained, SipError, SipEvent};
 
@@ -123,25 +127,158 @@ fn a_ringing_call_that_times_out_changes_only_at_its_reported_wakes() -> Result<
 
 #[test]
 fn an_engine_driven_by_its_wakes_passes_each_instant_within_two_turns() -> Result<(), SipError> {
-    let mut engine = calling()?;
-    engine.originate(outbound(), 0)?;
-    let mut now = 0;
-    let mut instants = 0;
-    while let Wake::At(at) = engine.wake() {
-        now = now.max(at);
-        engine.tick(now)?;
-        if matches!(engine.wake(), Wake::At(again) if again <= now) {
+    for (timeout, repeated) in [(30_000, 0), (500, 1)] {
+        let mut engine = calling()?;
+        let mut call = outbound();
+        call.timeout_ms = Some(timeout);
+        engine.originate(call, 0)?;
+        let mut now = 0;
+        let mut instants = 0;
+        let mut repeats = 0;
+        while let Wake::At(at) = engine.wake() {
+            now = now.max(at);
             engine.tick(now)?;
+            if matches!(engine.wake(), Wake::At(again) if again <= now) {
+                let resent = engine.tick(now)?;
+                assert!(resent.datagrams[0].bytes.starts_with(b"INVITE "));
+                repeats += 1;
+            }
+            assert!(
+                !matches!(engine.wake(), Wake::At(again) if again <= now),
+                "the wake stayed at {now} ms after two turns"
+            );
+            instants += 1;
+            assert!(instants < 64, "the engine never ran out of wakes");
         }
-        assert!(
-            !matches!(engine.wake(), Wake::At(again) if again <= now),
-            "the wake stayed at {now} ms after two turns"
-        );
-        instants += 1;
-        assert!(instants < 64, "the engine never ran out of wakes");
+        assert_eq!(engine.wake(), Wake::Idle);
+        assert_eq!(engine.retained(), Retained::default());
+        assert_eq!(now, 32_000);
+        assert_eq!(repeats, repeated);
     }
-    assert_eq!(engine.wake(), Wake::Idle);
-    assert_eq!(engine.retained(), Retained::default());
-    assert_eq!(now, 32_000);
+    Ok(())
+}
+
+fn authenticating() -> Result<Engine, SipError> {
+    let mut config = config()?;
+    config.aors[0].contact = Some("sip:phone@127.0.0.1:5061".into());
+    config.endpoints[0].outbound_auth.push("a".into());
+    Ok(Engine::new(config, [9; 32]))
+}
+
+fn dialed(twins: &mut Twins, timeout: Option<u64>) -> Result<Vec<u8>, SipError> {
+    let mut invited = twins.apply(|engine, now| {
+        let mut call = outbound();
+        call.timeout_ms = timeout;
+        engine.originate(call, now)
+    })?;
+    Ok(invited.datagrams.remove(0).bytes)
+}
+
+fn ended(output: &rusterisk_sip::Output, expected: u16) -> bool {
+    output
+        .events
+        .iter()
+        .any(|event| matches!(event, SipEvent::Ended { cause, .. } if *cause == expected))
+}
+
+#[test]
+fn a_call_whose_resend_meets_its_deadline_changes_only_at_its_reported_wakes(
+) -> Result<(), SipError> {
+    let mut twins = Twins::new(calling)?;
+    dialed(&mut twins, Some(500))?;
+    let output = twins.advance(70_000)?;
+    assert!(ended(&output, 19));
+    assert_eq!(twins.retained(), Retained::default());
+    assert!(twins.skipped() > 69_900);
+    Ok(())
+}
+
+#[test]
+fn a_call_cancelled_before_any_response_changes_only_at_its_reported_wakes() -> Result<(), SipError>
+{
+    let mut twins = Twins::new(calling)?;
+    dialed(&mut twins, Some(30_000))?;
+    twins.advance(100)?;
+    let cancelled = twins.apply(|engine, now| engine.cancel("outgoing", 7, now))?;
+    assert!(cancelled.datagrams.is_empty());
+    let output = twins.advance(70_000)?;
+    assert!(output
+        .datagrams
+        .iter()
+        .all(|datagram| datagram.bytes.starts_with(b"INVITE ")));
+    assert!(output.datagrams.len() >= 5);
+    assert_eq!(twins.retained(), Retained::default());
+    assert!(twins.skipped() > 69_900);
+    Ok(())
+}
+
+#[test]
+fn a_challenged_call_changes_only_at_its_reported_wakes() -> Result<(), SipError> {
+    let mut twins = Twins::new(authenticating)?;
+    let invite = dialed(&mut twins, Some(30_000))?;
+    twins.advance(300)?;
+    let challenge = challenge_invite(&invite, false)?;
+    let challenged =
+        twins.apply(|engine, now| engine.receive(&challenge, "127.0.0.1:5061".parse()?, now))?;
+    assert_eq!(challenged.datagrams.len(), 2);
+    assert_eq!(twins.retained().challenges, 1);
+    let output = twins.advance(100_000)?;
+    assert!(ended(&output, 19));
+    assert_eq!(twins.retained(), Retained::default());
+    assert!(twins.skipped() > 99_900);
+    Ok(())
+}
+
+#[test]
+fn a_forked_answer_changes_only_at_its_reported_wakes() -> Result<(), SipError> {
+    let mut twins = Twins::new(calling)?;
+    let invite = dialed(&mut twins, Some(30_000))?;
+    twins.advance(100)?;
+    let answer = answered(&invite)?;
+    twins.apply(|engine, now| engine.receive(&answer, "127.0.0.1:5061".parse()?, now))?;
+    twins.advance(200)?;
+    let other = std::str::from_utf8(&answer)?
+        .replace("tag=callee", "tag=other")
+        .into_bytes();
+    let cleanup =
+        twins.apply(|engine, now| engine.receive(&other, "127.0.0.1:5061".parse()?, now))?;
+    assert_eq!(cleanup.datagrams.len(), 2);
+    assert_eq!(twins.retained().forks, 1);
+    twins.advance(5_000)?;
+    let bye = twins.apply(|engine, now| engine.cancel("outgoing", 7, now))?;
+    assert!(bye.datagrams[0].bytes.starts_with(b"BYE "));
+    twins.advance(120_000)?;
+    assert_eq!(twins.retained(), Retained::default());
+    assert!(twins.skipped() > 119_800);
+    Ok(())
+}
+
+#[test]
+fn an_unacknowledged_direction_update_changes_only_at_its_reported_wakes() -> Result<(), SipError> {
+    let mut twins = Twins::new(calling)?;
+    let wire = dialed(&mut twins, Some(30_000))?;
+    let invite = request(&wire)?;
+    twins.advance(100)?;
+    let answer = answered(&wire)?;
+    twins.apply(|engine, now| engine.receive(&answer, "127.0.0.1:5061".parse()?, now))?;
+    twins.advance(1_000)?;
+    let SipMessage::Response(answer) = SipMessage::try_from(answer.as_slice())? else {
+        return Err(SipError::InvalidPacket);
+    };
+    let body = std::str::from_utf8(&answer.body)?
+        .replace("o=- 1 1 IN", "o=- 1 2 IN")
+        .replace("a=sendrecv", "a=sendonly");
+    let offer = format!("INVITE sip:rusterisk@127.0.0.1:5060 SIP/2.0\r\nVia: SIP/2.0/UDP 127.0.0.1:5061;branch=z9hG4bK-remote-update-1;rport\r\nFrom: {};tag=callee\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 1 INVITE\r\nContact: <sip:phone@127.0.0.1:5061>\r\nMax-Forwards: 70\r\nContent-Type: application/sdp\r\nContent-Length: {}\r\n\r\n{body}", invite.to_header()?.value(), invite.from_header()?.value(), invite.call_id_header()?.value(), body.len());
+    let updated = twins
+        .apply(|engine, now| engine.receive(offer.as_bytes(), "127.0.0.1:5061".parse()?, now))?;
+    assert!(updated.datagrams[0].bytes.starts_with(b"SIP/2.0 200"));
+    let output = twins.advance(120_000)?;
+    assert!(ended(&output, 102));
+    assert!(output
+        .datagrams
+        .iter()
+        .any(|datagram| datagram.bytes.starts_with(b"BYE ")));
+    assert_eq!(twins.retained(), Retained::default());
+    assert!(twins.skipped() > 118_900);
     Ok(())
 }

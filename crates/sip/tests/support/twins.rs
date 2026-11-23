@@ -56,6 +56,23 @@ fn event(event: &SipEvent) -> String {
     }
 }
 
+// Each engine draws its own client nonce, so the comparison leaves out the nonce and the digest that depends on it.
+fn without_client_nonce(packet: &str) -> String {
+    let mut text = packet.to_owned();
+    for field in ["cnonce=\"", "response=\""] {
+        let mut searched = 0;
+        while let Some(found) = text[searched..].find(field) {
+            let start = searched + found + field.len();
+            let end = text[start..]
+                .find('"')
+                .map_or(text.len(), |end| start + end);
+            text.replace_range(start..end, "");
+            searched = start;
+        }
+    }
+    text
+}
+
 fn record(output: &Output) -> Vec<String> {
     output
         .datagrams
@@ -66,7 +83,7 @@ fn record(output: &Output) -> Vec<String> {
                 datagram.peer,
                 datagram.origin(),
                 datagram.flow(),
-                String::from_utf8_lossy(&datagram.bytes)
+                without_client_nonce(&String::from_utf8_lossy(&datagram.bytes))
             )
         })
         .chain(output.events.iter().map(event))
@@ -140,11 +157,19 @@ impl Twins {
                 Wake::Idle => false,
             };
             if due {
+                let before = (self.sparse.wake(), self.sparse.retained());
                 let sparse = self.sparse.tick(self.now)?;
                 assert_eq!(
                     record(&dense),
                     record(&sparse),
                     "a tick diverged at {} ms",
+                    self.now
+                );
+                assert!(
+                    !record(&sparse).is_empty()
+                        || (self.sparse.wake(), self.sparse.retained()) != before,
+                    "the reported wake {:?} was due at {} ms and its tick changed nothing",
+                    before.0,
                     self.now
                 );
             } else {
