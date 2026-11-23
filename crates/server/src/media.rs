@@ -10,6 +10,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
 #[cfg(test)]
 mod admission_tests;
+#[cfg(test)]
+mod frame_timing_tests;
 mod measurements;
 mod probe;
 pub(crate) use probe::Progress as ProbeProgress;
@@ -582,6 +584,38 @@ struct Port {
     connection: Connection,
 }
 
+const FRAME_PERIOD: Duration = Duration::from_millis(20);
+
+enum Turn {
+    Continue,
+    Stop,
+}
+
+struct FrameClock {
+    interval: tokio::time::Interval,
+    running: bool,
+}
+
+impl FrameClock {
+    fn new() -> Self {
+        let mut interval =
+            tokio::time::interval_at(tokio::time::Instant::now() + FRAME_PERIOD, FRAME_PERIOD);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        Self {
+            interval,
+            running: false,
+        }
+    }
+
+    fn follow(&mut self, needed: bool) -> bool {
+        if needed && !self.running {
+            self.interval.reset();
+        }
+        self.running = needed;
+        needed
+    }
+}
+
 pub struct MediaHub {
     capacity: usize,
     commands: mpsc::Receiver<Command>,
@@ -961,6 +995,13 @@ impl MediaHub {
         Ok(())
     }
 
+    fn needs_frames(&self) -> bool {
+        !self.ports.is_empty()
+            || !self.probes.is_empty()
+            || self.playbacks.needs_frames()
+            || self.recordings.needs_frames()
+    }
+
     fn tick(&mut self) -> Result<(), MediaError> {
         self.probes.retain(|_, challenge| !challenge.closed());
         for (key, port) in &mut self.ports {
@@ -1079,45 +1120,55 @@ impl MediaHub {
     }
 
     async fn serve(&mut self, stop: &mut watch::Receiver<bool>) -> Result<(), MediaError> {
-        let period = Duration::from_millis(20);
-        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut frames = FrameClock::new();
         loop {
-            if *stop.borrow() {
-                break;
-            }
-            tokio::select! {
-                changed = stop.changed() => if changed.is_err() || *stop.borrow() { break; },
-                command = self.commands.recv() => match command {
-                    Some(command) => self.command(command)?,
-                    None => break,
-                },
-                attachment = self.websocket.recv() => match attachment {
-                    Some(attachment) => self.websocket_attachment(attachment)?,
-                    None => break,
-                },
-                attachment = self.client_websocket.recv() => match attachment {
-                    Some(attachment) => self.websocket_attachment(attachment)?,
-                    None => break,
-                },
-                attachment = self.webrtc.recv() => match attachment {
-                    Some(attachment) => self.webrtc_attachment(attachment)?,
-                    None => break,
-                },
-                result = self.workers.join_next(), if !self.workers.is_empty() => {
-                    let (key, result) = result.ok_or(MediaError::InvalidRoute)?.map_err(|error| MediaError::Transport(error.to_string()))?;
-                    if self.ports.contains_key(&key) {
-                        self.remove(&key)?;
-                        self.notice(MediaNotice::Stopped { key, result })?;
-                    }
-                }
-                result = self.recordings.workers.join_next(), if !self.recordings.workers.is_empty() => {
-                    result.ok_or(MediaError::InvalidRoute)?.map_err(|error| MediaError::Transport(error.to_string()))?;
-                }
-                _instant = tick.tick() => self.tick()?,
+            match self.turn(stop, &mut frames).await? {
+                Turn::Continue => {}
+                Turn::Stop => return Ok(()),
             }
         }
-        Ok(())
+    }
+
+    async fn turn(
+        &mut self,
+        stop: &mut watch::Receiver<bool>,
+        frames: &mut FrameClock,
+    ) -> Result<Turn, MediaError> {
+        if *stop.borrow() {
+            return Ok(Turn::Stop);
+        }
+        let timed = frames.follow(self.needs_frames());
+        tokio::select! {
+            changed = stop.changed() => if changed.is_err() || *stop.borrow() { return Ok(Turn::Stop); },
+            command = self.commands.recv() => match command {
+                Some(command) => self.command(command)?,
+                None => return Ok(Turn::Stop),
+            },
+            attachment = self.websocket.recv() => match attachment {
+                Some(attachment) => self.websocket_attachment(attachment)?,
+                None => return Ok(Turn::Stop),
+            },
+            attachment = self.client_websocket.recv() => match attachment {
+                Some(attachment) => self.websocket_attachment(attachment)?,
+                None => return Ok(Turn::Stop),
+            },
+            attachment = self.webrtc.recv() => match attachment {
+                Some(attachment) => self.webrtc_attachment(attachment)?,
+                None => return Ok(Turn::Stop),
+            },
+            result = self.workers.join_next(), if !self.workers.is_empty() => {
+                let (key, result) = result.ok_or(MediaError::InvalidRoute)?.map_err(|error| MediaError::Transport(error.to_string()))?;
+                if self.ports.contains_key(&key) {
+                    self.remove(&key)?;
+                    self.notice(MediaNotice::Stopped { key, result })?;
+                }
+            }
+            result = self.recordings.workers.join_next(), if !self.recordings.workers.is_empty() => {
+                result.ok_or(MediaError::InvalidRoute)?.map_err(|error| MediaError::Transport(error.to_string()))?;
+            }
+            _instant = frames.interval.tick(), if timed => self.tick()?,
+        }
+        Ok(Turn::Continue)
     }
 
     async fn close(&mut self) -> Result<(), MediaError> {
