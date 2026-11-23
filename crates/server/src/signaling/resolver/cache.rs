@@ -1,7 +1,7 @@
 use super::ResolvedTarget;
 use crate::ControlError;
 use rusterisk_sip::StaticTarget;
-use std::time::Instant;
+use tokio::time::Instant;
 
 #[cfg(test)]
 mod tests;

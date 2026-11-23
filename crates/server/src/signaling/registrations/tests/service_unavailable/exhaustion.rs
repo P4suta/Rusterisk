@@ -4,8 +4,9 @@ use super::{
     RegistrarUri, Signaling, StaticTarget,
 };
 use crate::signaling::registrations::State;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::net::UdpSocket;
+use tokio::time::Instant;
 
 enum Scenario {
     ExhaustedBudget,
