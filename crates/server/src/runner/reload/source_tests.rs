@@ -1,6 +1,7 @@
 use super::{load_startup_configuration, DirectoryReloadRequest};
 use crate::{ControlError, Controller, Credentials, Runner};
 use rusterisk_config::{Config, ConfigError};
+use rusterisk_core::Wake;
 use std::{future::Future, path::Path, sync::mpsc, time::Duration};
 use tokio::{sync::oneshot, time::Instant};
 
@@ -164,6 +165,45 @@ async fn a_cancelled_started_loader_keeps_admission_busy_until_it_is_reaped(
                 "Reaped cancelled load retained its pending ownership",
             )
         });
+        let cleanup = runner
+            .close_reload(Instant::now() + Duration::from_secs(5))
+            .await;
+        combine(primary, cleanup)
+    }
+    .await;
+    inputs.close(result)
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_cancelled_load_reports_no_wake_while_its_loader_runs() -> Result<(), ControlError> {
+    let inputs = Inputs::new()?;
+    let result = async {
+        let config = configuration("starting-password", STARTING_ORIGIN)?;
+        let (_controller, mut runner, _effects) = Controller::new(config, 1);
+        let (reply, caller) = oneshot::channel();
+        let (started, observed) = oneshot::channel();
+        let (release, waiting) = mpsc::sync_channel(1);
+        runner.reload.begin_loading(
+            inputs.directory.path().to_owned(),
+            reply,
+            gated_load(started, waiting),
+        );
+        let primary = async {
+            entered(observed).await?;
+            require(
+                runner.wake()? == Wake::At(10_000),
+                "A running load reported no preparation deadline",
+            )?;
+            drop(caller);
+            runner.tick_reload()?;
+            require(
+                runner.wake()? == Wake::Idle,
+                "A cancelled load reported a wake that only its running loader can end",
+            )
+        }
+        .await;
+        let primary = combine(primary, release.send(()).map_err(failure));
+        let primary = combine(primary, bounded(reap(&mut runner)).await);
         let cleanup = runner
             .close_reload(Instant::now() + Duration::from_secs(5))
             .await;

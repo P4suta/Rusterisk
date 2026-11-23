@@ -28,6 +28,7 @@ mod observation;
 pub(crate) use observation::{Filter as WatchFilter, Target as WatchTarget};
 mod native_start;
 mod observed_channel;
+mod overdue;
 pub(crate) use diagnosis::Target as DiagnosisTarget;
 mod recording_admission;
 mod reload;
@@ -233,6 +234,7 @@ pub struct Subscription {
     pub application: String,
     pub token: u64,
     pub events: mpsc::Receiver<Event>,
+    _controller: Controller,
     _lifetime: mpsc::Sender<()>,
     _closure: ClosureNotice,
 }
@@ -446,6 +448,7 @@ impl Controller {
             application,
             token,
             events: receiver,
+            _controller: self.clone(),
             _lifetime: lifetime,
             _closure: closure,
         })
@@ -963,23 +966,23 @@ impl Runner {
         if self.pending_effects.is_empty() && !self.admissions_paused() {
             wake = wake.earliest(self.control.dialplan_wake());
         }
-        if let Some(deadline) = self.reload_deadline() {
-            wake = wake.earliest(Wake::At(self.clock.at(deadline)?));
+        wake = wake.earliest(self.reload_wake()?);
+        for pending in self.recording_admissions.values() {
+            wake = wake.earliest(Wake::At(pending.deadline()));
         }
-        let admissions = self
-            .recording_admissions
-            .values()
-            .map(recording_admission::Pending::deadline)
-            .chain(
-                self.external_admissions
-                    .values()
-                    .map(external_admission::Pending::deadline),
-            );
-        for deadline in admissions {
-            wake = wake.earliest(Wake::At(deadline));
+        for (key, pending) in &self.external_admissions {
+            wake = wake.earliest(if self.control.has_channel(key) {
+                Wake::At(pending.deadline())
+            } else {
+                overdue::DUE
+            });
         }
-        for pending in self.answers.values() {
-            wake = wake.earliest(pending.wake());
+        for (key, pending) in &self.answers {
+            wake = wake.earliest(if self.answer_waits(key) {
+                pending.wake()
+            } else {
+                overdue::DUE
+            });
         }
         Ok(wake)
     }
@@ -1014,15 +1017,10 @@ impl Runner {
 
     async fn serve(&mut self) -> Result<(), ControlError> {
         let effect_sender = self.effects.clone();
-        let mut parked = None;
+        let mut overdue = overdue::Overdue::default();
         let mut closures_open = true;
         loop {
-            let wake = self.wake()?;
-            let timer = if parked == Some(wake) {
-                Wake::Idle
-            } else {
-                wake
-            };
+            let timer = overdue.timer(self.wake()?);
             tokio::select! {
                 loaded = self.reload.loaders.join_next(), if !self.reload.loaders.is_empty() => {
                     self.loading_completed(loaded.ok_or(ControlError::Conflict("Settings loading task missing"))?)?;
@@ -1069,9 +1067,7 @@ impl Runner {
             let now = self.clock.now_ms()?;
             let before = self.wake()?;
             self.settle(now)?;
-            let after = self.wake()?;
-            parked =
-                (after == before && matches!(after, Wake::At(at) if at <= now)).then_some(after);
+            overdue.settled(before, self.wake()?, now);
         }
         Ok(())
     }

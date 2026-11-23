@@ -1,6 +1,8 @@
 use super::Request;
-use crate::{Action, ControlError, Controller, Credentials, Effect, IncomingCall, IncomingTarget};
-use rusterisk_api::ChannelId;
+use crate::{
+    Action, ControlError, Controller, Credentials, Effect, IncomingCall, IncomingTarget, Signal,
+};
+use rusterisk_api::{ChannelId, ExternalRtpTarget, StaticRtpCodec};
 use rusterisk_config::Config;
 use rusterisk_core::Wake;
 use std::{future::Future, pin::Pin, time::Duration};
@@ -156,11 +158,98 @@ async fn abandoned<F: Future>(request: F) {
     assert!(pending, "the request ended before its requester left");
 }
 
+fn parked_call() -> Result<IncomingCall, ControlError> {
+    Ok(IncomingCall {
+        id: ChannelId::try_from("parked".to_owned())?,
+        endpoint: "phone".into(),
+        caller: "100".into(),
+        context: "internal".into(),
+        extension: "100".into(),
+        target: IncomingTarget::Stasis {
+            application: "app".into(),
+            arguments: Vec::new(),
+        },
+    })
+}
+
 #[tokio::test(start_paused = true)]
 async fn an_abandoned_request_wakes_the_runner() -> Result<(), ControlError> {
     let (controller, mut runner, _effects) = Controller::new(configuration()?, 4);
-    abandoned(controller.subscribe(credentials()?, None, "app".into())).await;
+    abandoned(controller.incoming(parked_call()?)).await;
     assert!(runner.closed.try_recv().is_ok());
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_dropped_subscription_ends_without_another_event_or_a_timer() -> Result<(), ControlError>
+{
+    let (controller, mut runner, _effects) = Controller::new(configuration()?, 4);
+    {
+        let mut serving = std::pin::pin!(runner.serve());
+        let subscription = tokio::select! {
+            biased;
+            subscription = controller.subscribe(credentials()?, None, "app".into()) => subscription?,
+            served = &mut serving => return Err(failure(format!("the runner stopped: {served:?}"))),
+        };
+        progress(&mut serving).await?;
+        drop(subscription);
+        progress(&mut serving).await?;
+    }
+    assert!(runner.subscribers.is_empty());
+    assert!(runner.sessions.is_empty());
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_subscription_keeps_the_runner_serving_after_its_controller_leaves(
+) -> Result<(), ControlError> {
+    let (controller, mut runner, _effects) = Controller::new(configuration()?, 4);
+    let mut serving = std::pin::pin!(runner.serve());
+    let subscription = tokio::select! {
+        biased;
+        subscription = controller.subscribe(credentials()?, None, "app".into()) => subscription?,
+        served = &mut serving => return Err(failure(format!("the runner stopped: {served:?}"))),
+    };
+    drop(controller);
+    progress(&mut serving).await?;
+    drop(subscription);
+    tokio::time::timeout(Duration::from_secs(1), serving)
+        .await
+        .map_err(failure)?
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_runner_with_a_subscriber_and_a_parked_call_takes_no_turn_for_an_hour(
+) -> Result<(), ControlError> {
+    let (controller, mut runner, _effects) = Controller::new(configuration()?, 4);
+    let mut polls = 0_u32;
+    {
+        let mut serving = std::pin::pin!(runner.serve());
+        let _subscription = tokio::select! {
+            biased;
+            subscription = controller.subscribe(credentials()?, None, "app".into()) => subscription?,
+            served = &mut serving => return Err(failure(format!("the runner stopped: {served:?}"))),
+        };
+        tokio::select! {
+            biased;
+            call = controller.incoming(parked_call()?) => { call?; }
+            served = &mut serving => return Err(failure(format!("the runner stopped: {served:?}"))),
+        }
+        progress(&mut serving).await?;
+        let counted = std::future::poll_fn(|context| {
+            polls += 1;
+            serving.as_mut().poll(context)
+        });
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep(Duration::from_secs(3600)) => {}
+            served = counted => return Err(failure(format!("the runner stopped: {served:?}"))),
+        }
+    }
+    assert_eq!(
+        polls, 1,
+        "a runner with a parked call woke without an event"
+    );
     Ok(())
 }
 
@@ -169,6 +258,48 @@ async fn an_abandoned_reload_requester_wakes_the_runner() -> Result<(), ControlE
     let (controller, mut runner, _effects) = Controller::new(configuration()?, 4);
     abandoned(controller.reload(configuration()?)).await;
     assert!(runner.closed.try_recv().is_ok());
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_external_admission_reports_its_deadline_and_falls_due_when_its_channel_ends(
+) -> Result<(), ControlError> {
+    let (_controller, mut runner, mut effects) = Controller::new(configuration()?, 4);
+    runner.control.subscribe("app")?;
+    let (reply, mut response) = oneshot::channel();
+    runner.request(
+        Request::Apply {
+            credentials: credentials()?,
+            origin: None,
+            action: Action::ExternalRtp {
+                id: ChannelId::try_from("external".to_owned())?,
+                app: "app".into(),
+                target: ExternalRtpTarget::new(
+                    "127.0.0.1:12000".parse().map_err(failure)?,
+                    StaticRtpCodec::Pcmu,
+                )
+                .map_err(failure)?,
+                data: String::new(),
+            },
+            variables: Default::default(),
+            reply,
+        },
+        100,
+    )?;
+    let Ok(Effect::ConnectExternalRtp { key, .. }) = effects.try_recv() else {
+        return Err(failure("the external media request reached no adapter"));
+    };
+    assert_eq!(runner.wake()?, Wake::At(5100));
+    runner
+        .control
+        .signal(Signal::Terminated { key, cause: 16 }, "later")?;
+    assert_eq!(runner.wake()?, Wake::At(0));
+    runner.settle(200)?;
+    assert!(matches!(
+        response.try_recv(),
+        Ok(Err(ControlError::Conflict(_)))
+    ));
+    assert_eq!(runner.wake()?, Wake::Idle);
     Ok(())
 }
 

@@ -8,6 +8,7 @@ use crate::signaling::{NativePreparation, NativePreparedSignaling};
 use crate::storage::StoragePort;
 use crate::{Action, ControlError, Credentials};
 use rusterisk_config::{Config, ConfigError, Reload};
+use rusterisk_core::Wake;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -392,8 +393,18 @@ impl Runner {
         self.control.configuration_generation()
     }
 
-    pub(super) fn reload_deadline(&self) -> Option<Instant> {
-        self.reload.pending.as_ref().map(|pending| pending.deadline)
+    pub(super) fn reload_wake(&self) -> Result<Wake, ControlError> {
+        let Some(pending) = &self.reload.pending else {
+            return Ok(Wake::Idle);
+        };
+        let cleanup = matches!(
+            pending.phase,
+            Phase::Cancelling | Phase::Aborting | Phase::Draining
+        );
+        if cleanup && !self.reload.loaders.is_empty() {
+            return Ok(Wake::Idle);
+        }
+        Ok(Wake::At(self.clock.at(pending.deadline)?))
     }
 
     pub(super) fn admissions_paused(&self) -> bool {

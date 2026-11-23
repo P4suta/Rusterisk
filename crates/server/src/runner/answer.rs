@@ -1,5 +1,5 @@
 use super::{timestamp, Controller, Credentials, Request, Runner};
-use crate::{Action, ControlError, Outcome};
+use crate::{Action, CallKey, Control, ControlError, Outcome};
 use rusterisk_api::{ChannelId, ChannelState};
 use rusterisk_core::Wake;
 use std::collections::VecDeque;
@@ -13,6 +13,15 @@ mod tests;
 pub(super) struct Pending {
     deadline: u64,
     replies: VecDeque<(u64, Reply)>,
+}
+
+fn answered(control: &Control, key: &CallKey) -> Result<bool, ControlError> {
+    if !control.has_channel(key) {
+        return Err(ControlError::NotFound("Channel ended while answering"));
+    }
+    control
+        .channel(&key.id)
+        .map(|channel| channel.state == ChannelState::Up)
 }
 
 impl Pending {
@@ -112,15 +121,13 @@ impl Runner {
         Ok(Some(pending))
     }
 
+    pub(super) fn answer_waits(&self, key: &CallKey) -> bool {
+        answered(&self.control, key) == Ok(false)
+    }
+
     pub(super) fn finish_answers(&mut self, now: u64) {
         self.answers.retain(|key, pending| {
-            let state = if !self.control.has_channel(key) {
-                Err(ControlError::NotFound("Channel ended while answering"))
-            } else {
-                self.control
-                    .channel(&key.id)
-                    .map(|channel| channel.state == ChannelState::Up)
-            };
+            let state = answered(&self.control, key);
             for _ in 0..pending.replies.len() {
                 let Some((deadline, reply)) = pending.replies.pop_front() else {
                     break;
