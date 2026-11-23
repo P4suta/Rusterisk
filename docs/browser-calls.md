@@ -37,6 +37,8 @@ After a refusal, change the browser's microphone permission to permit access, th
 Use the audio player's Play control if automatic playback needs another interaction.
 [Loopback origins](https://www.w3.org/TR/secure-contexts/#is-origin-trustworthy) support local microphone access.
 Remote signaling requires a `wss://` URL and the network settings supplied by the server administrator.
+When a reverse proxy relays signaling to the loopback WebSocket transport, configure the transport's `external_media_address` with an address of a local network interface.
+The server then binds browser media to that address instead of loopback.
 
 `mise x -- just browser-example 3001` selects another local page port.
 Update `allowed_origins` in `ari.conf` to the exact page origin and restart the server before connecting.
