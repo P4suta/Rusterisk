@@ -1,4 +1,4 @@
-use super::{receive, timestamp, ClosureNotice, Controller, Request, Runner, MAX_PENDING_EFFECTS};
+use super::{timestamp, ClosureNotice, Controller, Request, Runner, MAX_PENDING_EFFECTS};
 use crate::{media_websocket::MediaLinkOptions, CallKey, ControlError, Signal};
 use rusterisk_api::ChannelId;
 use tokio::sync::{mpsc, oneshot};
@@ -37,7 +37,7 @@ impl Controller {
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
-        let (key, options) = receive(response).await?;
+        let (key, options) = self.receive(response).await?;
         Ok(ClaimedMediaConnection {
             key,
             options,

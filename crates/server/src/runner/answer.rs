@@ -1,4 +1,4 @@
-use super::{receive, timestamp, Controller, Credentials, Request, Runner};
+use super::{timestamp, Controller, Credentials, Request, Runner};
 use crate::{Action, ControlError, Outcome};
 use rusterisk_api::{ChannelId, ChannelState};
 use rusterisk_core::Wake;
@@ -41,7 +41,7 @@ impl Controller {
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
-        receive(receiver).await
+        self.receive(receiver).await
     }
 }
 

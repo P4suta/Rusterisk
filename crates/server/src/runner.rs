@@ -237,16 +237,19 @@ pub struct Subscription {
     _closure: ClosureNotice,
 }
 
-async fn receive<T>(
-    receiver: oneshot::Receiver<Result<T, ControlError>>,
-) -> Result<T, ControlError> {
-    tokio::time::timeout(Duration::from_secs(5), receiver)
-        .await
-        .map_err(|_| ControlError::Capacity)?
-        .map_err(|_| ControlError::Adapter("Control task stopped".into()))?
-}
-
 impl Controller {
+    async fn receive<T>(
+        &self,
+        receiver: oneshot::Receiver<Result<T, ControlError>>,
+    ) -> Result<T, ControlError> {
+        let mut abandonment = closure::Abandonment::armed(&self.closures);
+        let received = tokio::time::timeout(Duration::from_secs(5), receiver).await;
+        abandonment.settle(received.is_err());
+        received
+            .map_err(|_| ControlError::Capacity)?
+            .map_err(|_| ControlError::Adapter("Control task stopped".into()))?
+    }
+
     pub(crate) fn bind_native_profiles(
         &self,
         profiles: crate::call_profiles::BoundNativeProfiles,
@@ -261,7 +264,7 @@ impl Controller {
         self.requests
             .try_send(Request::Incoming { call, reply })
             .map_err(|_| ControlError::Capacity)?;
-        receive(receiver).await
+        self.receive(receiver).await
     }
 
     pub fn new(config: Config, capacity: usize) -> (Self, Runner, mpsc::Receiver<Effect>) {
@@ -332,7 +335,7 @@ impl Controller {
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
-        receive(receiver).await
+        self.receive(receiver).await
     }
 
     pub fn shutdown_signal(&self) -> watch::Receiver<bool> {
@@ -364,7 +367,7 @@ impl Controller {
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
-        receive(receiver).await
+        self.receive(receiver).await
     }
 
     pub async fn execute(
@@ -394,7 +397,7 @@ impl Controller {
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
-        receive(receiver).await
+        self.receive(receiver).await
     }
 
     pub async fn subscribe(
@@ -439,7 +442,7 @@ impl Controller {
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
-        let token = receive(response).await?;
+        let token = self.receive(response).await?;
         Ok(Subscription {
             application,
             token,

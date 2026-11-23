@@ -1,4 +1,4 @@
-use super::{receive, Controller, Credentials, Request, Runner};
+use super::{Controller, Credentials, Request, Runner};
 use crate::storage::{RecordingFile, StoragePort, WorkerError};
 use crate::{ControlError, Outcome};
 use rusterisk_api::ChannelId;
@@ -102,7 +102,7 @@ impl Controller {
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
-        receive(response).await
+        self.receive(response).await
     }
 }
 
