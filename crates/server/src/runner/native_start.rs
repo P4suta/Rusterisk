@@ -1,4 +1,4 @@
-use super::{receive, Controller, Request, Runner};
+use super::{Controller, Request, Runner};
 use crate::{control::NativeStartCapsule, CallKey, ControlError};
 use rusterisk_core::SettingsGeneration;
 use tokio::sync::oneshot;
@@ -27,7 +27,7 @@ impl Controller {
         tokio::select! {
             biased;
             _changed = stopped.changed() => Err(ControlError::Conflict("Control is stopping")),
-            result = receive(response) => result,
+            result = self.receive(response) => result,
         }
     }
 }

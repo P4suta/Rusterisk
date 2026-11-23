@@ -7,7 +7,7 @@ use rusterisk_core::{
     AudioGate, Call, CallEvent, CallState, ContactPresence, DtmfCommand, DtmfDigit, DtmfError,
     DtmfOutbox, DtmfTiming, DtmfToken, MediaConnection, MediaState, MediaTaskError, MediaTaskToken,
     MediaTasks, MuteDirection, PeerMediaDirection, RecordingControl, StasisApplication,
-    StasisMembership, Transition,
+    StasisMembership, Transition, Wake,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -2324,6 +2324,15 @@ impl Control {
                 Ok(outcome)
             }
         }
+    }
+
+    pub fn expiry_wake(&self) -> Wake {
+        self.channels
+            .values()
+            .filter_map(|entry| entry.deadline)
+            .fold(Wake::Idle, |wake, deadline| {
+                wake.earliest(Wake::At(deadline))
+            })
     }
 
     pub fn expire(&mut self, now_ms: u64, timestamp: &str) -> Result<Outcome, ControlError> {

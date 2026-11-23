@@ -1,4 +1,4 @@
-use super::{receive, Controller, Credentials, Request};
+use super::{Controller, Credentials, Request};
 use crate::{CallKey, ControlError};
 use rusterisk_api::ChannelId;
 use tokio::sync::oneshot;
@@ -19,6 +19,6 @@ impl Controller {
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
-        receive(response).await
+        self.receive(response).await
     }
 }

@@ -1,4 +1,4 @@
-use super::{receive, Controller, Request, Runner};
+use super::{Controller, Request, Runner};
 use crate::{CallKey, ControlError};
 use tokio::sync::{mpsc, oneshot};
 
@@ -31,7 +31,7 @@ impl Controller {
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
-        receive(response).await?;
+        self.receive(response).await?;
         Ok(CallLease { lifetime: sender })
     }
 }

@@ -15,6 +15,10 @@ impl Pending {
     ) -> Self {
         Self { reply, deadline }
     }
+
+    pub(super) fn deadline(&self) -> u64 {
+        self.deadline
+    }
 }
 
 impl Runner {

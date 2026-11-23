@@ -8,6 +8,7 @@ use crate::signaling::{NativePreparation, NativePreparedSignaling};
 use crate::storage::StoragePort;
 use crate::{Action, ControlError, Credentials};
 use rusterisk_config::{Config, ConfigError, Reload};
+use rusterisk_core::Wake;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
@@ -180,15 +181,6 @@ fn respond(reply: oneshot::Sender<Result<(), ControlError>>, result: Result<(), 
     }
 }
 
-async fn reload_response(
-    receiver: oneshot::Receiver<Result<(), ControlError>>,
-) -> Result<(), ControlError> {
-    tokio::time::timeout(RELOAD_BUDGET, receiver)
-        .await
-        .map_err(failure)?
-        .map_err(|_| ControlError::Adapter("Settings coordinator stopped".into()))?
-}
-
 async fn acknowledgement(
     acknowledgement: Result<Acknowledgement, ControlError>,
     deadline: Instant,
@@ -315,6 +307,17 @@ impl ReloadCoordinator {
 }
 
 impl Controller {
+    async fn reload_response(
+        &self,
+        receiver: oneshot::Receiver<Result<(), ControlError>>,
+    ) -> Result<(), ControlError> {
+        self.closures
+            .answered(RELOAD_BUDGET, receiver)
+            .await
+            .map_err(failure)?
+            .map_err(|_| ControlError::Adapter("Settings coordinator stopped".into()))?
+    }
+
     pub async fn reload(&self, replacement: Config) -> Result<(), ControlError> {
         if self.is_stopping() {
             return Err(ControlError::Conflict("Control is stopping"));
@@ -323,7 +326,7 @@ impl Controller {
         self.reload_requests
             .try_send(ReloadRequest { replacement, reply })
             .map_err(|_| ControlError::Capacity)?;
-        reload_response(receiver).await
+        self.reload_response(receiver).await
     }
 
     pub(crate) async fn reload_startup(
@@ -342,7 +345,7 @@ impl Controller {
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
-        reload_response(receiver).await
+        self.reload_response(receiver).await
     }
 }
 
@@ -388,6 +391,24 @@ impl Runner {
 
     pub(crate) fn configuration_generation(&self) -> rusterisk_core::SettingsGeneration {
         self.control.configuration_generation()
+    }
+
+    pub(super) fn reload_wake(&self) -> Result<Wake, ControlError> {
+        let Some(pending) = &self.reload.pending else {
+            return Ok(Wake::Idle);
+        };
+        // A step ends at this deadline through its own timeout, and its result decides the outcome.
+        if !self.reload.steps.is_empty() {
+            return Ok(Wake::Idle);
+        }
+        let cleanup = matches!(
+            pending.phase,
+            Phase::Cancelling | Phase::Aborting | Phase::Draining
+        );
+        if cleanup && !self.reload.loaders.is_empty() {
+            return Ok(Wake::Idle);
+        }
+        Ok(Wake::At(self.clock.at(pending.deadline)?))
     }
 
     pub(super) fn admissions_paused(&self) -> bool {
