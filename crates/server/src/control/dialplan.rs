@@ -4,7 +4,7 @@ use rusterisk_config::{expand_variables, Application, Dialplan, ExpansionError};
 use rusterisk_core::{
     AnswerProgress, AnswerStatus, CallState, DialFailure, DialForkOutcome, DialplanContinuation,
     DialplanDispatch, DialplanError, DialplanInstruction, DialplanMachine, DialplanState,
-    DialplanToken, MediaTaskKind, MediaTaskToken, StasisMembership,
+    DialplanToken, MediaTaskKind, MediaTaskToken, StasisMembership, Wake,
 };
 
 pub(super) struct DialplanFrame {
@@ -14,6 +14,31 @@ pub(super) struct DialplanFrame {
     answer: Option<AnswerProgress>,
     pub(super) dial: Option<super::dial::DialBranches>,
     playback: Option<PlaybackWait>,
+    pace: Pace,
+}
+
+const UNPACED_TURNS: u8 = 4;
+const PACED_TURN_INTERVAL_MS: u64 = 100;
+
+#[derive(Clone, Copy, Default)]
+struct Pace {
+    spent_turns: u8,
+    resume: Option<u64>,
+}
+
+impl Pace {
+    fn after_spent_turn(self, now: u64) -> Self {
+        let spent_turns = self.spent_turns.saturating_add(1);
+        Self {
+            spent_turns,
+            resume: (spent_turns >= UNPACED_TURNS)
+                .then(|| now.saturating_add(PACED_TURN_INTERVAL_MS)),
+        }
+    }
+
+    fn holds(self, now: u64) -> bool {
+        self.resume.is_some_and(|resume| now < resume)
+    }
 }
 
 enum PlaybackWait {
@@ -51,7 +76,26 @@ impl DialplanFrame {
             answer: None,
             dial: None,
             playback: None,
+            pace: Pace::default(),
         }
+    }
+
+    fn wake(&self) -> Wake {
+        let Some(machine) = &self.machine else {
+            return Wake::Idle;
+        };
+        if let Some(resume) = self.pace.resume {
+            return Wake::At(resume);
+        }
+        let dial = self
+            .dial
+            .as_ref()
+            .map_or(Wake::Idle, |dial| dial.fork.wake());
+        let answer = self
+            .answer
+            .as_ref()
+            .map_or(Wake::Idle, AnswerProgress::wake);
+        machine.wake().earliest(dial).earliest(answer)
     }
 }
 
@@ -308,8 +352,16 @@ impl Control {
             answer: None,
             dial: None,
             playback: None,
+            pace: Pace::default(),
         });
         self.advance_dialplan(key, now, timestamp)
+    }
+
+    pub fn dialplan_wake(&self) -> Wake {
+        self.channels
+            .values()
+            .filter_map(|entry| entry.dialplan.as_ref())
+            .fold(Wake::Idle, |wake, frame| wake.earliest(frame.wake()))
     }
 
     pub fn tick_dialplans(&mut self, now: u64, timestamp: &str) -> Result<Outcome, ControlError> {
@@ -317,18 +369,18 @@ impl Control {
             .channels
             .iter_mut()
             .filter_map(|(id, entry)| {
-                entry
-                    .dialplan
-                    .as_mut()
-                    .and_then(|frame| frame.machine.as_mut())
-                    .map(|machine| {
-                        machine.begin_turn();
-                        machine.tick(now);
-                        CallKey {
-                            id: id.clone(),
-                            generation: entry.call.generation(),
-                        }
-                    })
+                let frame = entry.dialplan.as_mut()?;
+                if frame.pace.holds(now) {
+                    return None;
+                }
+                frame.pace.resume = None;
+                let machine = frame.machine.as_mut()?;
+                machine.begin_turn();
+                machine.tick(now);
+                Some(CallKey {
+                    id: id.clone(),
+                    generation: entry.call.generation(),
+                })
             })
             .collect::<Vec<_>>();
         let mut outcome = Outcome::empty();
@@ -372,6 +424,14 @@ impl Control {
         let result = self.execute_dialplan(key, &mut frame, now, timestamp, &mut outcome);
         match result {
             Ok(()) => {
+                let spent = frame
+                    .machine
+                    .is_some_and(|machine| machine.wake() == Wake::Now);
+                frame.pace = if spent {
+                    frame.pace.after_spent_turn(now)
+                } else {
+                    Pace::default()
+                };
                 if let Some(entry) = self.channels.get_mut(&key.id) {
                     entry.dialplan = Some(frame);
                 }

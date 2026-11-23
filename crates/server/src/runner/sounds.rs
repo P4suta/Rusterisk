@@ -1,4 +1,4 @@
-use super::{receive, Controller, Credentials, Request, Runner};
+use super::{Controller, Credentials, Request, Runner};
 use crate::{
     storage::{StoragePort, WorkerError},
     ControlError, Outcome,
@@ -70,7 +70,7 @@ impl Controller {
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
-        receive(response).await
+        self.receive(response).await
     }
 }
 

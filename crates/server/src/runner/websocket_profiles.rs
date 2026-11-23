@@ -1,4 +1,4 @@
-use super::{receive, Controller, Request, Runner};
+use super::{Controller, Request, Runner};
 use crate::control::WebSocketStartCapsule;
 use crate::signaling::{PreparedWebSocketClient, PreparedWebSocketProfiles};
 use crate::{CallKey, ControlError};
@@ -35,7 +35,7 @@ impl Controller {
         tokio::select! {
             biased;
             _changed = stopped.changed() => Err(ControlError::Conflict("Control is stopping")),
-            result = receive(receiver) => result?.into_profile(),
+            result = self.receive(receiver) => result?.into_profile(),
         }
     }
 }
