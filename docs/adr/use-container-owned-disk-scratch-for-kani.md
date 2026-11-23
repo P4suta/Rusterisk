@@ -11,7 +11,7 @@ Four settings harnesses timed out and terminal release exhausted memory under th
 
 ## Decision
 
-Keep all eighteen harnesses, source bytes, assertions, cover goals, unwinding bounds, tool versions, and execution limits.
+Keep all twenty-two harnesses, source bytes, assertions, cover goals, unwinding bounds, tool versions, and execution limits.
 Select bundled [Kissat 4.0.1](https://github.com/model-checking/kani/blob/kani-0.68.0/kani-dependencies) instead of the default CaDiCaL.
 Use a container-specific [anonymous volume](https://docs.docker.com/engine/storage/volumes/#remove-anonymous-volumes) for `/tmp` while preserving the read-only root and source mount.
 Record the solver and scratch mount in retained metadata and check every native harness's resolved solver.
@@ -32,4 +32,4 @@ Reconsider the execution profile if unchanged harnesses still exceed the agreed 
 ## Confirmation
 
 Adapter fixtures must reject a different solver, missing native configuration, altered scratch metadata, and incomplete harness results.
-Native completion of all eighteen harnesses within 2 GiB remains required.
+Native completion of all twenty-two harnesses within 2 GiB remains required.
