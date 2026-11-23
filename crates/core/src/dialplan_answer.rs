@@ -1,4 +1,4 @@
-use crate::{CallState, DialplanError, MediaConnection};
+use crate::{CallState, DialplanError, MediaConnection, Wake};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AnswerStatus {
@@ -30,6 +30,13 @@ impl AnswerProgress {
     pub const fn new() -> Self {
         Self {
             phase: Phase::Answering,
+        }
+    }
+
+    pub const fn wake(&self) -> Wake {
+        match self.phase {
+            Phase::Media { deadline } => Wake::At(deadline),
+            Phase::Answering | Phase::Ready | Phase::Cancelled => Wake::Idle,
         }
     }
 

@@ -1,4 +1,4 @@
-use crate::DtmfDigit;
+use crate::{DtmfDigit, Wake};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DtmfError {
@@ -103,6 +103,14 @@ impl DtmfSequence {
 
     pub const fn finished(&self) -> bool {
         matches!(self.phase, Phase::Ended)
+    }
+
+    pub const fn wake(&self) -> Wake {
+        match self.phase {
+            Phase::Pending => Wake::Now,
+            Phase::Waiting(deadline) | Phase::Completing(deadline) => Wake::At(deadline),
+            Phase::Ended => Wake::Idle,
+        }
     }
 
     pub fn advance(&mut self, now: u64) -> Result<Option<DtmfTone>, DtmfError> {
