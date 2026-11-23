@@ -132,6 +132,10 @@ impl Playbacks {
         })
     }
 
+    pub fn needs_frames(&self) -> bool {
+        !self.entries.is_empty()
+    }
+
     pub fn is_music(&self, target: &AudioTarget<CallKey>) -> bool {
         self.entries
             .values()
