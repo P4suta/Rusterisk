@@ -1,4 +1,4 @@
-use crate::DialplanToken;
+use crate::{DialplanToken, Wake};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialForkError {
@@ -75,6 +75,14 @@ impl DialFork {
 
     pub const fn state(&self) -> DialForkState {
         self.state
+    }
+
+    pub const fn wake(&self) -> Wake {
+        match (self.state, self.deadline) {
+            (DialForkState::Dialing { .. }, Some(deadline)) => Wake::At(deadline),
+            (DialForkState::Dialing { .. }, None)
+            | (DialForkState::Bridged { .. } | DialForkState::Ended, _) => Wake::Idle,
+        }
     }
 
     fn branch(&self, scope: DialplanToken, branch: u8) -> Result<u16, DialForkError> {

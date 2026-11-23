@@ -10,8 +10,9 @@ use rusterisk_config::Protocol;
 use rusterisk_sip::{StaticTarget, TargetHost};
 use std::{
     net::{IpAddr, SocketAddr},
-    time::{Duration, Instant},
+    time::Duration,
 };
+use tokio::time::Instant;
 
 mod cache;
 pub(super) use cache::ResolutionCache;
@@ -221,7 +222,7 @@ impl DestinationResolver {
             }
             Err(error) => return Err(failure(error)),
         };
-        let mut expires = lookup.valid_until();
+        let mut expires = Instant::from_std(lookup.valid_until());
         let mut records = Vec::with_capacity(MAX_CANDIDATES);
         for record in lookup.answers() {
             if let RData::SRV(record) = &record.data {
@@ -285,7 +286,7 @@ impl DestinationResolver {
         if peers.iter().flatten().next().is_none() {
             return Err(ControlError::NotFound("No signaling addresses found"));
         }
-        Ok(lookup.valid_until())
+        Ok(Instant::from_std(lookup.valid_until()))
     }
 }
 

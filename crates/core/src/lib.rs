@@ -22,6 +22,7 @@ mod resource_subscriptions;
 mod settings_lifetimes;
 mod stasis;
 mod transfer;
+mod wake;
 pub use attended_transfer::{AttendedStart, AttendedTransfer};
 pub use dial_failure::DialFailure;
 pub use dial_fork::{DialFork, DialForkDecision, DialForkError, DialForkOutcome, DialForkState};
@@ -53,6 +54,7 @@ pub use transfer::{
     Transfer, TransferDecision, TransferError, TransferOutcome, TransferStart, TransferState,
     TransferToken,
 };
+pub use wake::Wake;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContactPresence {

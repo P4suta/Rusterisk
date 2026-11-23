@@ -109,6 +109,10 @@ path = "../tests/transfer.rs"
 name = "transitions"
 path = "../tests/transitions.rs"
 
+[[test]]
+name = "wake"
+path = "../tests/wake.rs"
+
 [workspace]
 
 [lints.rust]

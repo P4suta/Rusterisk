@@ -1,6 +1,7 @@
 pub mod audiosocket;
 mod call_profiles;
 pub mod cli;
+mod clock;
 mod control;
 mod encryption;
 pub mod http;

@@ -18,10 +18,8 @@ use hickory_resolver::proto::{
 };
 use rusterisk_config::{Protocol, RegistrarUri};
 use rusterisk_sip::StaticTarget;
-use std::{
-    net::Ipv4Addr,
-    time::{Duration, Instant},
-};
+use std::{net::Ipv4Addr, time::Duration};
+use tokio::time::Instant;
 use tokio::{
     net::{TcpListener, TcpSocket, UdpSocket},
     sync::watch,

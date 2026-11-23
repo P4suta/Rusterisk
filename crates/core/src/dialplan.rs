@@ -1,3 +1,5 @@
+use crate::Wake;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DialplanInstruction {
     NoOp,
@@ -107,6 +109,14 @@ impl DialplanMachine {
                 deadline,
             },
             Phase::Ended => DialplanState::Ended,
+        }
+    }
+
+    pub const fn wake(&self) -> Wake {
+        match self.phase {
+            Phase::Ready => Wake::Now,
+            Phase::Waiting { deadline, next: _ } => Wake::At(deadline),
+            Phase::Awaiting { .. } | Phase::Ended => Wake::Idle,
         }
     }
 

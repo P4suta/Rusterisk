@@ -3,7 +3,8 @@ use crate::signaling::resolver::{Cacheability, ResolutionValidity, ResolvedTarge
 use crate::ControlError;
 use rusterisk_config::Protocol;
 use rusterisk_sip::StaticTarget;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tokio::time::Instant;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())

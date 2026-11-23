@@ -10,7 +10,7 @@ use std::{
 };
 
 pub const IMAGE: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-pub const ASSURANCE_TEST_COUNT: usize = 74;
+pub const ASSURANCE_TEST_COUNT: usize = 80;
 pub const PHASES: [Phase; 6] = [
     Phase::MutationInventory,
     Phase::Mutations,

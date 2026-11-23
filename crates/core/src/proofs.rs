@@ -1,10 +1,12 @@
 use crate::{
-    AttendedStart, AttendedTransfer, AudioGate, Call, CallEvent, CallPairDecision, CallPairError,
-    CallPairState, CallState, ConnectionClaim, CoreError, MediaConnection, MediaState,
+    AnswerProgress, AnswerStatus, AttendedStart, AttendedTransfer, AudioGate, Call, CallEvent,
+    CallPairDecision, CallPairError, CallPairState, CallState, ConnectionClaim, CoreError,
+    DialFork, DialForkError, DialForkOutcome, DialplanDispatch, DialplanError, DialplanInstruction,
+    DialplanMachine, DtmfDigit, DtmfError, DtmfSequence, DtmfTiming, MediaConnection, MediaState,
     MediaTaskError, MediaTaskKind, MediaTaskState, MediaTasks, MuteDirection, OwnedCallPair,
     PeerMediaDirection, SettingsError, SettingsLifetimes, StasisApplication, StasisMembership,
     Transfer, TransferDecision, TransferError, TransferOutcome, TransferState, TransferToken,
-    Transition,
+    Transition, Wake,
 };
 
 #[derive(Clone, Copy, kani::Arbitrary)]
@@ -1205,6 +1207,166 @@ fn settings_reference_count_boundaries_preserve_publication() {
     assert_eq!(result, Ok(()));
     kani::cover!(result.is_ok() && references == u64::MAX);
     kani::cover!(result.is_ok() && references < u64::MAX);
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn dialplan_waits_change_only_at_their_wake() {
+    let now: u64 = kani::any();
+    let probe: u64 = kani::any();
+    let duration: u32 = kani::any();
+    let Ok(mut dialplan) = DialplanMachine::new(kani::any(), 0, 2) else {
+        assert!(false, "dialplan construction failed");
+        return;
+    };
+    assert!(dialplan.wake() == Wake::Now);
+    match dialplan.dispatch(DialplanInstruction::Wait(duration), Some(1), now) {
+        Ok(DialplanDispatch::Execute(_)) => {
+            let Wake::At(deadline) = dialplan.wake() else {
+                assert!(false, "a waiting dialplan reported no instant");
+                return;
+            };
+            let waiting = dialplan;
+            if probe < deadline {
+                dialplan.tick(probe);
+                assert!(dialplan == waiting);
+            }
+            dialplan.tick(deadline);
+            assert!(dialplan.wake() == Wake::Now);
+            kani::cover!(probe < deadline);
+            kani::cover!(duration == 0);
+        }
+        Ok(DialplanDispatch::Suspended | DialplanDispatch::Yield | DialplanDispatch::Ended) => {
+            assert!(false, "a ready dialplan refused its first instruction")
+        }
+        Err(error) => assert!(error == DialplanError::Clock),
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn dial_forks_change_only_at_their_wake() {
+    let now: u64 = kani::any();
+    let probe: u64 = kani::any();
+    let Ok(mut scope) = DialplanMachine::new(kani::any(), 0, 1) else {
+        assert!(false, "dialplan construction failed");
+        return;
+    };
+    let Ok(DialplanDispatch::Execute(execution)) =
+        scope.dispatch(DialplanInstruction::Dial, None, now)
+    else {
+        assert!(false, "dial dispatch failed");
+        return;
+    };
+    let timeout: Option<u32> = kani::any();
+    match DialFork::new(execution.token, kani::any(), now, timeout) {
+        Ok(mut fork) => {
+            let dialing = fork;
+            match fork.wake() {
+                Wake::At(deadline) => {
+                    assert!(timeout.is_some());
+                    if probe < deadline {
+                        let decision = fork.tick(probe);
+                        assert!(decision.release == 0);
+                        assert!(decision.outcome == DialForkOutcome::Pending);
+                        assert!(fork == dialing);
+                    }
+                    assert!(fork.tick(deadline).outcome == DialForkOutcome::Continue);
+                    assert!(fork.wake() == Wake::Idle);
+                    kani::cover!(probe < deadline);
+                }
+                Wake::Idle => {
+                    assert!(timeout.is_none());
+                    assert!(fork.tick(probe).release == 0);
+                    assert!(fork == dialing);
+                }
+                Wake::Now => assert!(false, "a dial fork asked for the current turn"),
+            }
+        }
+        Err(error) => {
+            assert!(error == DialForkError::Capacity || error == DialForkError::Clock);
+        }
+    }
+    kani::cover!(timeout.is_none());
+}
+
+#[kani::proof]
+#[kani::unwind(2)]
+fn answers_change_only_at_their_wake() {
+    let now: u64 = kani::any();
+    let probe: u64 = kani::any();
+    let mut answer = AnswerProgress::new();
+    assert!(answer.wake() == Wake::Idle);
+    match answer.observe(now, CallState::Up, MediaConnection::Pending) {
+        Ok(status) => {
+            assert!(status == AnswerStatus::Pending);
+            let Wake::At(deadline) = answer.wake() else {
+                assert!(false, "an answer waiting for media reported no instant");
+                return;
+            };
+            let waiting = answer;
+            if probe < deadline {
+                let observed = answer.observe(probe, CallState::Up, MediaConnection::Pending);
+                assert!(observed == Ok(AnswerStatus::Pending));
+                assert!(answer == waiting);
+            }
+            let observed = answer.observe(deadline, CallState::Up, MediaConnection::Pending);
+            assert!(observed == Ok(AnswerStatus::Ready));
+            assert!(answer.wake() == Wake::Idle);
+            kani::cover!(probe < deadline);
+        }
+        Err(error) => assert!(error == DialplanError::Clock),
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(3)]
+fn digit_sequences_change_only_at_their_wake() {
+    let now: u64 = kani::any();
+    let probe: u64 = kani::any();
+    let before: u32 = kani::any();
+    let Ok(timing) = DtmfTiming::new(before, kani::any(), kani::any(), kani::any()) else {
+        return;
+    };
+    let single: bool = kani::any();
+    let sequence: &[DtmfDigit] = if single {
+        &[DtmfDigit::One]
+    } else {
+        &[DtmfDigit::One, DtmfDigit::Two]
+    };
+    let Ok(mut digits) = DtmfSequence::new(sequence, timing) else {
+        assert!(false, "digit sequence construction failed");
+        return;
+    };
+    assert!(digits.wake() == Wake::Now);
+    match digits.advance(now) {
+        Ok(first) => {
+            assert!(first.is_some() == (before == 0));
+            let completing = single && first.is_some();
+            let Wake::At(deadline) = digits.wake() else {
+                assert!(false, "an armed digit sequence reported no instant");
+                return;
+            };
+            let mut armed = digits;
+            if probe < deadline {
+                assert!(digits.advance(probe) == Ok(None));
+                assert!(digits.unchanged_from(&armed));
+            }
+            let reached = digits.advance(deadline);
+            assert!(reached == armed.advance(deadline));
+            assert!(digits.wake() == armed.wake());
+            assert!(digits.finished() == armed.finished());
+            if completing {
+                assert!(reached == Ok(None));
+                assert!(digits.finished());
+                assert!(digits.wake() == Wake::Idle);
+            }
+            kani::cover!(probe < deadline && completing);
+            kani::cover!(probe < deadline && !completing);
+            kani::cover!(before == 0);
+        }
+        Err(error) => assert!(error == DtmfError::Clock),
+    }
 }
 
 #[kani::proof]
