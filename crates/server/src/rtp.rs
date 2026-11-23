@@ -228,7 +228,7 @@ async fn send(socket: &UdpSocket, bytes: &[u8], peer: SocketAddr) -> Result<(), 
 async fn send_control(socket: &UdpSocket, bytes: &[u8], peer: SocketAddr, stats: &mut LinkStats) {
     if let Err(error) = send(socket, bytes, peer).await {
         stats.dropped += 1;
-        tracing::debug!(%error, "control report delivery failed");
+        tracing::debug!(name: "control_report_dropped", %error, "control report delivery failed");
     }
 }
 
