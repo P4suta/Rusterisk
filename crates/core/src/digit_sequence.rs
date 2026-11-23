@@ -101,6 +101,15 @@ impl DtmfSequence {
             .all(|digit| events & (1 << digit.event()) != 0)
     }
 
+    #[cfg(kani)]
+    pub(crate) fn unchanged_from(&self, earlier: &Self) -> bool {
+        self.len == earlier.len
+            && self.index == earlier.index
+            && self.timing == earlier.timing
+            && self.phase == earlier.phase
+            && self.digits[..self.len] == earlier.digits[..earlier.len]
+    }
+
     pub const fn finished(&self) -> bool {
         matches!(self.phase, Phase::Ended)
     }
