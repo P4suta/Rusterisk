@@ -29,6 +29,8 @@ mod outbound;
 #[cfg(test)]
 mod playback_admission_tests;
 mod publication;
+#[cfg(test)]
+mod state_size_tests;
 pub(crate) use publication::{NativePreparation, NativePreparedSignaling};
 mod recording;
 mod refer_routes;
