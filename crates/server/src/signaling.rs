@@ -1,3 +1,4 @@
+use crate::clock::Clock;
 use crate::media::{MediaNotice, MediaPort};
 use crate::rtp::SocketPair;
 use crate::storage::{PlaybackMedia, StoragePort};
@@ -13,7 +14,7 @@ use rusterisk_sip::{
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 mod attended;
@@ -654,7 +655,7 @@ impl Signaling {
                 sockets,
                 local_rtp,
                 &profile.codecs,
-                Instant::now(),
+                tokio::time::Instant::now().into_std(),
             )
             .map_err(failure)?;
             let description =
@@ -1310,7 +1311,7 @@ impl Signaling {
     async fn serve(
         &mut self,
         stop: &mut watch::Receiver<bool>,
-        started: Instant,
+        clock: Clock,
     ) -> Result<(), ControlError> {
         let mut tick = tokio::time::interval(Duration::from_millis(20));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1333,7 +1334,7 @@ impl Signaling {
                 },
                 command = publication::receive(commands, &publication_stopped) => match command? {
                     Some(command) => {
-                        let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
+                        let now = clock.now_ms()?;
                         self.native_publication(command, now)?;
                     }
                     None => break,
@@ -1341,13 +1342,13 @@ impl Signaling {
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { break; },
                 effect = self.effects.recv() => match effect {
                     Some(effect) => {
-                        let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
+                        let now = clock.now_ms()?;
                         if let Err(error) = self.effect(effect, now).await { if *stop.borrow() { break; } return Err(error); }
                     }
                     None => break,
                 },
                 packet = self.network.next() => {
-                    let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
+                    let now = clock.now_ms()?;
                     match packet? {
                         transport::Input::Upgrade(request) => {
                             let admitting = self.admitting();
@@ -1429,16 +1430,16 @@ impl Signaling {
                 },
                 result = self.native_jobs.join_next(), if !self.native_jobs.is_empty() => {
                     let completed = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
-                    let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
+                    let now = clock.now_ms()?;
                     self.native_completed(completed, now).await?;
                 },
                 result = self.registrations.completed(), if self.registrations.setup_count() > 0 => {
                     let completed = result?.ok_or(ControlError::Capacity)?;
-                    let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
+                    let now = clock.now_ms()?;
                     self.registration_completed(completed, now)?;
                 },
                 _instant = tick.tick() => {
-                    let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
+                    let now = clock.now_ms()?;
                     for listener in 0..self.listeners.len() {
                         let output = self.listeners[listener].engine.tick(now).map_err(failure)?;
                         self.output(listener, output, now).await?;
@@ -1452,9 +1453,9 @@ impl Signaling {
     }
 
     pub async fn run(mut self, mut stop: watch::Receiver<bool>) -> Result<(), ControlError> {
-        let started = Instant::now();
-        let result = self.serve(&mut stop, started).await;
-        let now = u64::try_from(started.elapsed().as_millis()).map_err(failure)?;
+        let clock = self.controller.clock();
+        let result = self.serve(&mut stop, clock).await;
+        let now = clock.now_ms()?;
         let mut cleanup = self.finish_registrations().await;
         cleanup = cleanup::combine(cleanup, self.close_refer_routes(now));
         cleanup = cleanup::combine(cleanup, self.finish_native().await);
