@@ -178,7 +178,7 @@ impl Bindings {
             if expires == 0 {
                 continue;
             }
-            if candidate
+            while candidate
                 .values
                 .iter()
                 .filter(|binding| binding.address == update.address.name)

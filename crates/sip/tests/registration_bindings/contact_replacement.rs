@@ -1,6 +1,35 @@
 use super::{contacts, response, Registrar};
-use rusterisk_sip::SipError;
+use rusterisk_config::Config;
+use rusterisk_sip::{PreparedEngineConfiguration, SipError};
 use std::net::SocketAddr;
+
+fn replacing(limit: u16) -> Result<Config, SipError> {
+    Ok(Config::parse(
+        "[general]\nbindaddr=127.0.0.1\n",
+        "[application]\ntype=user\npassword=sample\n",
+        &format!("[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:5060\n[credential]\ntype=auth\nusername=device\npassword=sample\n[phone]\ntype=aor\nmax_contacts={limit}\nremove_existing=yes\nminimum_expiration=1\nmaximum_expiration=60\ndefault_expiration=30\n[phone]\ntype=endpoint\ntransport=udp\nauth=credential\naors=phone\n"),
+        "",
+        "",
+    )?)
+}
+
+#[test]
+fn a_registration_under_a_lowered_limit_replaces_enough_earlier_contacts() -> Result<(), SipError> {
+    let old: SocketAddr = "127.0.0.1:5100".parse()?;
+    let current: SocketAddr = "127.0.0.1:5101".parse()?;
+    let mut registrar = Registrar::from_config(replacing(2)?);
+    registrar.request(old, "phone", FIRST, Some(30), 0)?;
+    registrar.request(old, "phone", SECOND, Some(10), 2)?;
+    registrar
+        .engine
+        .publish_configuration(PreparedEngineConfiguration::prepare(replacing(1)?)?);
+    let replaced = registrar.request(current, "phone", CURRENT, Some(60), 4)?;
+    assert_eq!(
+        contacts(&replaced)?,
+        bound(&[("sip:current@new.invalid", 60)])
+    );
+    Ok(())
+}
 
 const FIRST: &str = "Contact: <sip:first@old.invalid>\r\n";
 const SECOND: &str = "Contact: <sip:second@old.invalid>\r\n";
