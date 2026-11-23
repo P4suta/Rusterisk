@@ -1328,7 +1328,13 @@ fn digit_sequences_change_only_at_their_wake() {
     let Ok(timing) = DtmfTiming::new(before, kani::any(), kani::any(), kani::any()) else {
         return;
     };
-    let Ok(mut digits) = DtmfSequence::new(&[DtmfDigit::One, DtmfDigit::Two], timing) else {
+    let single: bool = kani::any();
+    let sequence: &[DtmfDigit] = if single {
+        &[DtmfDigit::One]
+    } else {
+        &[DtmfDigit::One, DtmfDigit::Two]
+    };
+    let Ok(mut digits) = DtmfSequence::new(sequence, timing) else {
         assert!(false, "digit sequence construction failed");
         return;
     };
@@ -1336,6 +1342,7 @@ fn digit_sequences_change_only_at_their_wake() {
     match digits.advance(now) {
         Ok(first) => {
             assert!(first.is_some() == (before == 0));
+            let completing = single && first.is_some();
             let Wake::At(deadline) = digits.wake() else {
                 assert!(false, "an armed digit sequence reported no instant");
                 return;
@@ -1344,11 +1351,19 @@ fn digit_sequences_change_only_at_their_wake() {
             if probe < deadline {
                 assert!(digits.advance(probe) == Ok(None));
                 assert!(digits.wake() == Wake::At(deadline));
+                assert!(!digits.finished());
             }
-            assert!(digits.advance(deadline) == armed.advance(deadline));
+            let reached = digits.advance(deadline);
+            assert!(reached == armed.advance(deadline));
             assert!(digits.wake() == armed.wake());
             assert!(digits.finished() == armed.finished());
-            kani::cover!(probe < deadline);
+            if completing {
+                assert!(reached == Ok(None));
+                assert!(digits.finished());
+                assert!(digits.wake() == Wake::Idle);
+            }
+            kani::cover!(probe < deadline && completing);
+            kani::cover!(probe < deadline && !completing);
             kani::cover!(before == 0);
         }
         Err(error) => assert!(error == DtmfError::Clock),
