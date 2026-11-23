@@ -63,6 +63,17 @@ impl Bindings {
             .any(|binding| addresses.contains(&binding.address))
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub(crate) fn wake(&self) -> rusterisk_core::Wake {
+        use rusterisk_core::Wake;
+        self.values.iter().fold(Wake::Idle, |wake, binding| {
+            wake.earliest(Wake::At(binding.expires))
+        })
+    }
+
     pub(crate) fn expire(&mut self, now: u64) {
         self.values.retain(|binding| binding.expires > now);
     }

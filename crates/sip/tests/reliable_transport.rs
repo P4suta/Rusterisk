@@ -64,3 +64,49 @@ fn reliable_failed_invites_wait_for_ack_without_timer_g() -> Result<(), SipError
     assert_eq!(duplicate.datagrams[0].bytes, first.datagrams[0].bytes);
     Ok(())
 }
+
+#[path = "support/twins.rs"]
+mod twins;
+
+fn stream() -> Result<Engine, SipError> {
+    Ok(Engine::new(configuration("tcp")?, [7; 32]).with_transport(Protocol::Tcp))
+}
+
+#[test]
+fn a_reliable_call_changes_only_at_its_reported_wakes() -> Result<(), SipError> {
+    let mut twins = twins::Twins::new(stream)?;
+    twins.apply(|engine, now| {
+        engine.originate(
+            Outbound {
+                id: "stream-call".into(),
+                generation: 1,
+                endpoint: "phone".into(),
+                caller: "100".into(),
+                local_rtp: "127.0.0.1:10000".parse()?,
+                timeout_ms: None,
+            },
+            now,
+        )
+    })?;
+    let output = twins.advance(70_000)?;
+    assert!(output.datagrams.is_empty());
+    assert!(matches!(&output.events[..], [SipEvent::Ended { .. }]));
+    assert_eq!(twins.retained(), rusterisk_sip::Retained::default());
+    assert!(twins.skipped() > 69_990);
+    Ok(())
+}
+
+#[test]
+fn a_reliable_challenge_changes_only_at_its_reported_wakes() -> Result<(), SipError> {
+    let wire = "INVITE sip:100@localhost SIP/2.0\r\nVia: SIP/2.0/TCP 127.0.0.1:5061;branch=z9hG4bK-stream\r\nFrom: <sip:phone@localhost>;tag=phone\r\nTo: <sip:100@localhost>\r\nCall-ID: incoming-stream\r\nCSeq: 1 INVITE\r\nContact: <sip:phone@127.0.0.1:5061;transport=tcp>\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n";
+    let mut twins = twins::Twins::new(stream)?;
+    let challenged = twins
+        .apply(|engine, now| engine.receive(wire.as_bytes(), "127.0.0.1:5061".parse()?, now))?;
+    assert!(challenged.datagrams[0].bytes.starts_with(b"SIP/2.0 401"));
+    assert_eq!(twins.retained().replies, 1);
+    let output = twins.advance(40_000)?;
+    assert!(output.datagrams.is_empty());
+    assert_eq!(twins.retained(), rusterisk_sip::Retained::default());
+    assert!(twins.skipped() > 39_990);
+    Ok(())
+}

@@ -373,7 +373,7 @@ impl Engine {
         if *last == Provisional::Ringing {
             return Ok(Vec::new());
         }
-        if now.saturating_sub(*sent) < 1000 {
+        if now.saturating_sub(*sent) < owners::RINGING_INTERVAL {
             *pending = Some(Provisional::Ringing);
             return Ok(Vec::new());
         }

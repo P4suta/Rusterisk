@@ -876,6 +876,61 @@ impl Engine {
         Ok(Output::response(dialog.route, packet))
     }
 
+    pub(crate) fn outgoing_challenges(&self) -> usize {
+        self.outgoing
+            .values()
+            .map(|dialog| dialog.challenges.len())
+            .sum()
+    }
+
+    pub(crate) fn outgoing_wake(&self) -> rusterisk_core::Wake {
+        use rusterisk_core::Wake;
+        let mut wake = Wake::Idle;
+        for dialog in self.outgoing.values() {
+            for challenge in &dialog.challenges {
+                wake = wake.earliest(Wake::At(challenge.expires));
+            }
+            if let FinalResponse::Acknowledged(response) = &dialog.final_response {
+                wake = wake.earliest(Wake::At(response.expires));
+            }
+            let linger = |expires: u64| {
+                if self.refers.holds(&dialog.id, dialog.generation) {
+                    Wake::Idle
+                } else {
+                    Wake::At(expires)
+                }
+            };
+            let resend = |retry: u64| {
+                if dialog.reliable {
+                    Wake::Idle
+                } else {
+                    Wake::At(retry)
+                }
+            };
+            wake = wake.earliest(match &dialog.state {
+                State::Calling { retry, .. } => Wake::At(
+                    dialog
+                        .deadline
+                        .map_or(dialog.transaction_deadline, |deadline| {
+                            deadline.min(dialog.transaction_deadline)
+                        }),
+                )
+                .earliest(resend(*retry)),
+                State::CancelPending { retry, expires, .. } => {
+                    linger(*expires).earliest(resend(*retry))
+                }
+                State::Proceeding => dialog.deadline.map_or(Wake::Idle, Wake::At),
+                State::Established(media) => media.pending.as_ref().map_or(Wake::Idle, |answer| {
+                    Wake::At(answer.deadline).earliest(Wake::At(answer.retry))
+                }),
+                State::Cancelling { expires }
+                | State::Terminated { expires }
+                | State::RejectedTarget { expires } => linger(*expires),
+            });
+        }
+        wake
+    }
+
     pub fn tick(&mut self, now: u64) -> Result<Output, SipError> {
         let mut output = self.tick_inner(now)?;
         self.expire_contacts(now, &mut output.events);
