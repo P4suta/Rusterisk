@@ -614,6 +614,10 @@ impl Recordings {
         }
     }
 
+    pub fn needs_frames(&self) -> bool {
+        !self.captures.is_empty()
+    }
+
     pub fn reserve(
         &mut self,
         token: MediaTaskToken,
