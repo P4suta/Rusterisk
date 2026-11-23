@@ -26,7 +26,7 @@ impl Controller {
         connection_id: ChannelId,
         origin: Option<String>,
     ) -> Result<ClaimedMediaConnection, ControlError> {
-        let closure = ClosureNotice::reserve(&self.closures)?;
+        let closure = self.closures.notice();
         let (sender, lifetime) = mpsc::channel(1);
         let (reply, response) = oneshot::channel();
         self.requests

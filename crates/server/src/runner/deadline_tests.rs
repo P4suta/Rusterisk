@@ -147,6 +147,31 @@ async fn a_dropped_subscription_ends_without_a_free_request_slot_or_a_timer(
     Ok(())
 }
 
+async fn abandoned<F: Future>(request: F) {
+    let mut request = std::pin::pin!(request);
+    let pending = std::future::poll_fn(|context| {
+        std::task::Poll::Ready(request.as_mut().poll(context).is_pending())
+    })
+    .await;
+    assert!(pending, "the request ended before its requester left");
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_abandoned_request_wakes_the_runner() -> Result<(), ControlError> {
+    let (controller, mut runner, _effects) = Controller::new(configuration()?, 4);
+    abandoned(controller.subscribe(credentials()?, None, "app".into())).await;
+    assert!(runner.closed.try_recv().is_ok());
+    Ok(())
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_abandoned_reload_requester_wakes_the_runner() -> Result<(), ControlError> {
+    let (controller, mut runner, _effects) = Controller::new(configuration()?, 4);
+    abandoned(controller.reload(configuration()?)).await;
+    assert!(runner.closed.try_recv().is_ok());
+    Ok(())
+}
+
 #[tokio::test]
 async fn a_recording_admission_needs_a_wake_at_its_deadline_and_none_after_it(
 ) -> Result<(), ControlError> {

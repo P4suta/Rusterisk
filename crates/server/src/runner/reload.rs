@@ -180,15 +180,6 @@ fn respond(reply: oneshot::Sender<Result<(), ControlError>>, result: Result<(), 
     }
 }
 
-async fn reload_response(
-    receiver: oneshot::Receiver<Result<(), ControlError>>,
-) -> Result<(), ControlError> {
-    tokio::time::timeout(RELOAD_BUDGET, receiver)
-        .await
-        .map_err(failure)?
-        .map_err(|_| ControlError::Adapter("Settings coordinator stopped".into()))?
-}
-
 async fn acknowledgement(
     acknowledgement: Result<Acknowledgement, ControlError>,
     deadline: Instant,
@@ -315,6 +306,17 @@ impl ReloadCoordinator {
 }
 
 impl Controller {
+    async fn reload_response(
+        &self,
+        receiver: oneshot::Receiver<Result<(), ControlError>>,
+    ) -> Result<(), ControlError> {
+        self.closures
+            .answered(RELOAD_BUDGET, receiver)
+            .await
+            .map_err(failure)?
+            .map_err(|_| ControlError::Adapter("Settings coordinator stopped".into()))?
+    }
+
     pub async fn reload(&self, replacement: Config) -> Result<(), ControlError> {
         if self.is_stopping() {
             return Err(ControlError::Conflict("Control is stopping"));
@@ -323,7 +325,7 @@ impl Controller {
         self.reload_requests
             .try_send(ReloadRequest { replacement, reply })
             .map_err(|_| ControlError::Capacity)?;
-        reload_response(receiver).await
+        self.reload_response(receiver).await
     }
 
     pub(crate) async fn reload_startup(
@@ -342,7 +344,7 @@ impl Controller {
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
-        reload_response(receiver).await
+        self.reload_response(receiver).await
     }
 }
 

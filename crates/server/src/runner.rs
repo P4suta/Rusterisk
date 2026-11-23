@@ -14,7 +14,7 @@ mod call_lifetime;
 #[cfg(test)]
 mod clock_tests;
 mod closure;
-use closure::ClosureNotice;
+use closure::{ClosureLatch, ClosureNotice};
 #[cfg(test)]
 mod deadline_tests;
 mod diagnosis;
@@ -195,7 +195,7 @@ struct Session {
 #[derive(Clone)]
 pub struct Controller {
     clock: Clock,
-    closures: mpsc::Sender<()>,
+    closures: ClosureLatch,
     requests: mpsc::Sender<Request>,
     signals: mpsc::Sender<Signal>,
     shutdown: watch::Sender<bool>,
@@ -242,10 +242,9 @@ impl Controller {
         &self,
         receiver: oneshot::Receiver<Result<T, ControlError>>,
     ) -> Result<T, ControlError> {
-        let mut abandonment = closure::Abandonment::armed(&self.closures);
-        let received = tokio::time::timeout(Duration::from_secs(5), receiver).await;
-        abandonment.settle(received.is_err());
-        received
+        self.closures
+            .answered(Duration::from_secs(5), receiver)
+            .await
             .map_err(|_| ControlError::Capacity)?
             .map_err(|_| ControlError::Adapter("Control task stopped".into()))?
     }
@@ -276,7 +275,7 @@ impl Controller {
         let (directory_reload_requests, directory_reload_receiver) = mpsc::channel(1);
         let control = Control::with_configuration(capacity, &config);
         let clock = Clock::start();
-        let (closures, closed) = mpsc::channel(closure::CAPACITY);
+        let (closures, closed) = closure::latch();
         (
             Self {
                 clock,
@@ -427,7 +426,7 @@ impl Controller {
         application: String,
         kind: SubscriptionKind,
     ) -> Result<Subscription, ControlError> {
-        let closure = ClosureNotice::reserve(&self.closures)?;
+        let closure = self.closures.notice();
         let (events, receiver) = mpsc::channel(64);
         let (lifetime, lifetime_receiver) = mpsc::channel(1);
         let (reply, response) = oneshot::channel();
