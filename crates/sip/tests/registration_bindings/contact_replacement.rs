@@ -35,6 +35,13 @@ impl Telephone {
     }
 }
 
+fn bound(entries: &[(&str, u32)]) -> Vec<(String, u32)> {
+    entries
+        .iter()
+        .map(|(uri, expires)| ((*uri).to_owned(), *expires))
+        .collect()
+}
+
 #[test]
 fn a_registration_over_the_limit_replaces_the_earlier_contact_that_expires_soonest(
 ) -> Result<(), SipError> {
@@ -44,10 +51,10 @@ fn a_registration_over_the_limit_replaces_the_earlier_contact_that_expires_soone
         .request(telephone.current, "phone", CURRENT, Some(60), 4)?;
     assert_eq!(
         contacts(&replaced)?,
-        vec![
-            ("sip:first@old.invalid".into(), 30),
-            ("sip:current@new.invalid".into(), 60)
-        ]
+        bound(&[
+            ("sip:first@old.invalid", 30),
+            ("sip:current@new.invalid", 60)
+        ])
     );
     Ok(())
 }
@@ -64,10 +71,10 @@ fn a_contact_that_the_registration_updates_is_never_the_one_replaced() -> Result
     )?;
     assert_eq!(
         contacts(&updated)?,
-        vec![
-            ("sip:second@old.invalid".into(), 5),
-            ("sip:current@new.invalid".into(), 5)
-        ]
+        bound(&[
+            ("sip:second@old.invalid", 5),
+            ("sip:current@new.invalid", 5)
+        ])
     );
     Ok(())
 }
@@ -85,10 +92,10 @@ fn a_registration_that_adds_more_contacts_than_the_limit_changes_nothing() -> Re
     assert_eq!(response(&refused)?.status_code.code(), 403);
     assert_eq!(
         telephone.bindings("phone", 6)?,
-        vec![
-            ("sip:first@old.invalid".into(), 30),
-            ("sip:second@old.invalid".into(), 10)
-        ]
+        bound(&[
+            ("sip:first@old.invalid", 30),
+            ("sip:second@old.invalid", 10)
+        ])
     );
     Ok(())
 }
@@ -104,7 +111,7 @@ fn replacement_leaves_the_contacts_of_another_address_of_record() -> Result<(), 
         .request(telephone.current, "phone", CURRENT, Some(60), 6)?;
     assert_eq!(
         telephone.bindings("backup", 8)?,
-        vec![("sip:first@old.invalid".into(), 20)]
+        bound(&[("sip:first@old.invalid", 20)])
     );
     Ok(())
 }
