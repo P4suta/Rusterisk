@@ -2,6 +2,7 @@ use super::Request;
 use crate::{Action, ControlError, Controller, Credentials, Effect, IncomingCall, IncomingTarget};
 use rusterisk_api::ChannelId;
 use rusterisk_config::Config;
+use rusterisk_core::Wake;
 use std::{future::Future, pin::Pin, time::Duration};
 use tokio::{sync::oneshot, time::Instant};
 
@@ -143,5 +144,47 @@ async fn a_dropped_subscription_ends_without_a_free_request_slot_or_a_timer(
     }
     assert!(runner.subscribers.is_empty());
     assert!(runner.sessions.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_recording_admission_needs_a_wake_at_its_deadline_and_none_after_it(
+) -> Result<(), ControlError> {
+    let (_controller, mut runner, _effects) = Controller::new(configuration()?, 4);
+    assert_eq!(runner.wake()?, Wake::Idle);
+    runner.control.subscribe("app")?;
+    runner.control.apply(
+        Action::CreateBridge {
+            id: ChannelId::try_from("mix".to_owned())?,
+            name: String::new(),
+        },
+        "now",
+        0,
+    )?;
+    let (reply, mut response) = oneshot::channel();
+    runner.request(
+        Request::Apply {
+            credentials: credentials()?,
+            origin: None,
+            action: Action::RecordBridge {
+                bridge: ChannelId::try_from("mix".to_owned())?,
+                name: ChannelId::try_from("saved".to_owned())?,
+                options: Default::default(),
+            },
+            variables: Default::default(),
+            reply,
+        },
+        100,
+    )?;
+    assert_eq!(runner.wake()?, Wake::At(5100));
+    runner.settle(5099)?;
+    assert!(response.try_recv().is_err());
+    assert_eq!(runner.wake()?, Wake::At(5100));
+    runner.settle(5100)?;
+    assert!(matches!(
+        response.try_recv(),
+        Ok(Err(ControlError::Capacity))
+    ));
+    assert_eq!(runner.wake()?, Wake::Idle);
     Ok(())
 }
