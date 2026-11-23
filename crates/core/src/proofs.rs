@@ -1320,7 +1320,7 @@ fn answers_change_only_at_their_wake() {
 }
 
 #[kani::proof]
-#[kani::unwind(2)]
+#[kani::unwind(3)]
 fn digit_sequences_change_only_at_their_wake() {
     let now: u64 = kani::any();
     let probe: u64 = kani::any();
@@ -1350,8 +1350,7 @@ fn digit_sequences_change_only_at_their_wake() {
             let mut armed = digits;
             if probe < deadline {
                 assert!(digits.advance(probe) == Ok(None));
-                assert!(digits.wake() == Wake::At(deadline));
-                assert!(!digits.finished());
+                assert!(digits.unchanged_from(&armed));
             }
             let reached = digits.advance(deadline);
             assert!(reached == armed.advance(deadline));
