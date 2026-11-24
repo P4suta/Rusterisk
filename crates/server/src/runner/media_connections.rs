@@ -65,7 +65,7 @@ impl Runner {
             .is_some_and(|origin| !self.config.origins.contains(origin))
         {
             Err(ControlError::Forbidden)
-        } else if self.media_leases.len() >= 64 || !self.pending_effects.is_empty() {
+        } else if self.media_leases.len() >= 64 || !self.effects_flowing() {
             Err(ControlError::Capacity)
         } else {
             self.control
@@ -91,7 +91,7 @@ impl Runner {
         for key in released {
             let pending_budget =
                 MAX_PENDING_EFFECTS.saturating_sub(self.control.terminal_effect_reserve());
-            let direct = self.pending_effects.is_empty() && self.effect_room() > 0;
+            let direct = self.effects_flowing() && self.effect_room() > 0;
             if !direct && self.pending_effects.len() >= pending_budget {
                 break;
             }

@@ -517,6 +517,15 @@ impl Runner {
         Ok(())
     }
 
+    // Whether a new effect reaches signaling in order now.
+    // The composed turn applies effects in order, and a channel does after the queued ones.
+    fn effects_flowing(&self) -> bool {
+        match &self.effects {
+            Outlet::Channel(_) => self.pending_effects.is_empty(),
+            Outlet::Turn => true,
+        }
+    }
+
     // The effects that control can still emit before its outlet refuses one.
     fn effect_room(&self) -> usize {
         match &self.effects {
@@ -724,7 +733,7 @@ impl Runner {
                     return Ok(());
                 }
                 // Queued effects reach signaling only through a free channel slot.
-                let admitted = if self.pending_effects.is_empty() {
+                let admitted = if self.effects_flowing() {
                     self.incoming_call(call, now_ms)
                 } else {
                     Ok(Err(ControlError::Capacity))
@@ -789,7 +798,7 @@ impl Runner {
                 let result = self
                     .authorize(&credentials, origin.as_deref(), action.read_only())
                     .and_then(|()| {
-                        if (!self.pending_effects.is_empty() && !action.read_only())
+                        if (!self.effects_flowing() && !action.read_only())
                             || (self.admissions_paused() && reload::new_settings(&action))
                             || self.effect_room() < self.control.effect_budget(&action)
                             || (recording
@@ -973,7 +982,7 @@ impl Runner {
 
     pub(crate) fn wake(&self) -> Result<Wake, ControlError> {
         let mut wake = self.control.expiry_wake();
-        if self.pending_effects.is_empty() && !self.admissions_paused() {
+        if self.effects_flowing() && !self.admissions_paused() {
             wake = wake.earliest(self.control.dialplan_wake());
         }
         wake = wake.earliest(self.reload_wake()?);
@@ -1003,7 +1012,7 @@ impl Runner {
             .retain(|_, session| !session.lifetime.is_closed());
         let mut outcome = self.control.expire(now, &timestamp())?;
         self.publish(&mut outcome)?;
-        if self.pending_effects.is_empty() && !self.admissions_paused() {
+        if self.effects_flowing() && !self.admissions_paused() {
             let mut outcome = self.control.tick_dialplans(now, &timestamp())?;
             self.publish(&mut outcome)?;
         }

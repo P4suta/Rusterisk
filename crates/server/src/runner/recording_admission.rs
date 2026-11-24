@@ -143,7 +143,7 @@ impl Runner {
         for token in expired {
             let pending_budget =
                 MAX_PENDING_EFFECTS.saturating_sub(self.control.terminal_effect_reserve());
-            let direct = self.pending_effects.is_empty() && self.effect_room() > 0;
+            let direct = self.effects_flowing() && self.effect_room() > 0;
             if !direct && self.pending_effects.len() >= pending_budget {
                 break;
             }
