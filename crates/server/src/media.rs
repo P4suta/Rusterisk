@@ -147,12 +147,11 @@ enum Command {
     ControlRecording {
         token: MediaTaskToken,
         operation: rusterisk_core::RecordingControl,
-        reply: oneshot::Sender<Result<(), MediaError>>,
     },
     Digits {
         key: CallKey,
         command: RtpDigitCommand,
-        reply: oneshot::Sender<Result<(), MediaError>>,
+        reply: Option<oneshot::Sender<Result<(), MediaError>>>,
     },
     Attach {
         key: CallKey,
@@ -223,18 +222,14 @@ impl MediaPort {
             completed: completion,
         })
     }
-    pub async fn received_digit(
+    pub fn received_digit(
         &self,
         key: CallKey,
         digit: rusterisk_core::DtmfDigit,
     ) -> Result<(), MediaError> {
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            self.commands.send(Command::ReceivedDigit { key, digit }),
-        )
-        .await
-        .map_err(|error| MediaError::Transport(error.to_string()))?
-        .map_err(|_| MediaError::Capacity)
+        self.commands
+            .try_send(Command::ReceivedDigit { key, digit })
+            .map_err(|_| MediaError::Capacity)
     }
 
     pub async fn play(
@@ -398,23 +393,14 @@ impl MediaPort {
             .map_err(|error| MediaError::Transport(error.to_string()))?
     }
 
-    pub async fn control_recording(
+    pub fn control_recording(
         &self,
         token: MediaTaskToken,
         operation: rusterisk_core::RecordingControl,
     ) -> Result<(), MediaError> {
-        let (reply, response) = oneshot::channel();
         self.commands
-            .try_send(Command::ControlRecording {
-                token,
-                operation,
-                reply,
-            })
-            .map_err(|_| MediaError::Capacity)?;
-        tokio::time::timeout(Duration::from_secs(5), response)
-            .await
-            .map_err(|error| MediaError::Transport(error.to_string()))?
-            .map_err(|error| MediaError::Transport(error.to_string()))?
+            .try_send(Command::ControlRecording { token, operation })
+            .map_err(|_| MediaError::Capacity)
     }
 
     pub fn stop_recording(
@@ -434,13 +420,15 @@ impl MediaPort {
         self.send_digits(key, RtpDigitCommand::Tone(tone)).await
     }
 
-    pub async fn send_sequence(
-        &self,
-        key: CallKey,
-        command: DtmfCommand,
-    ) -> Result<(), MediaError> {
-        self.send_digits(key, RtpDigitCommand::Sequence(command))
-            .await
+    // The media task reports a refused sequence as a finished digit command.
+    pub fn send_sequence(&self, key: CallKey, command: DtmfCommand) -> Result<(), MediaError> {
+        self.commands
+            .try_send(Command::Digits {
+                key,
+                command: RtpDigitCommand::Sequence(command),
+                reply: None,
+            })
+            .map_err(|_| MediaError::Capacity)
     }
 
     async fn send_digits(&self, key: CallKey, command: RtpDigitCommand) -> Result<(), MediaError> {
@@ -449,7 +437,7 @@ impl MediaPort {
             .try_send(Command::Digits {
                 key,
                 command,
-                reply,
+                reply: Some(reply),
             })
             .map_err(|_| MediaError::Capacity)?;
         tokio::time::timeout(Duration::from_secs(5), response)
@@ -890,16 +878,9 @@ impl MediaHub {
                 }
             }
             Command::EndRecording { token, mode } => self.recordings.end(token, mode),
-            Command::ControlRecording {
-                token,
-                operation,
-                reply,
-            } => {
-                if !reply.is_closed() {
-                    let result = self.recordings.control(token, operation);
-                    if reply.send(result).is_err() {
-                        tracing::debug!(?token, "recording control receiver disconnected");
-                    }
+            Command::ControlRecording { token, operation } => {
+                if let Err(error) = self.recordings.control(token, operation) {
+                    tracing::warn!(?token, %error, "recording control failed");
                 }
             }
             Command::Digits {
@@ -907,7 +888,11 @@ impl MediaHub {
                 command,
                 reply,
             } => {
-                if !reply.is_closed() {
+                if !reply.as_ref().is_some_and(oneshot::Sender::is_closed) {
+                    let finished = match &command {
+                        RtpDigitCommand::Sequence(command) => Some(command.token),
+                        RtpDigitCommand::Tone(_) => None,
+                    };
                     let result = self
                         .ports
                         .get(&key)
@@ -933,8 +918,22 @@ impl MediaHub {
                                 .try_send(command)
                                 .map_err(|_| MediaError::Capacity)
                         });
-                    if reply.send(result).is_err() {
-                        tracing::debug!(channel = %key.id, generation = key.generation, "tone admission receiver closed");
+                    match (reply, result) {
+                        (Some(reply), result) => {
+                            if reply.send(result).is_err() {
+                                tracing::debug!(channel = %key.id, generation = key.generation, "tone admission receiver closed");
+                            }
+                        }
+                        (None, Ok(())) => {}
+                        // A sender without a reply learns of a refusal as a finished digit command.
+                        (None, Err(error)) => {
+                            tracing::warn!(channel = %key.id, generation = key.generation, %error, "digit command refused");
+                            if let Some(token) = finished {
+                                self.notices
+                                    .try_send(MediaNotice::DtmfFinished { key, token })
+                                    .map_err(|_| MediaError::Capacity)?;
+                            }
+                        }
                     }
                 }
             }
