@@ -1,6 +1,6 @@
 use crate::{
-    alaw_decode, alaw_encode, mulaw_decode, mulaw_encode, Frame, MediaError, OpusCodec, PcmFramer,
-    RtpPacket, MAX_DECODED_SAMPLES, MAX_PACKET, MAX_SAMPLES,
+    alaw_decode, alaw_encode, mulaw_decode, mulaw_encode, EncodedAudio, Frame, MediaError,
+    OpusCodec, PcmFramer, RtpPacket, MAX_DECODED_SAMPLES, MAX_PACKET, MAX_SAMPLES,
 };
 use std::collections::VecDeque;
 
@@ -40,20 +40,10 @@ impl Codec {
         }
     }
 
-    fn encode(&mut self, frame: Frame) -> Result<Vec<u8>, MediaError> {
+    fn encode(&mut self, frame: Frame) -> Result<EncodedAudio, MediaError> {
         match self {
-            Self::Pcmu => Ok(frame
-                .resample(8000)?
-                .samples()
-                .iter()
-                .map(|sample| mulaw_encode(*sample))
-                .collect()),
-            Self::Pcma => Ok(frame
-                .resample(8000)?
-                .samples()
-                .iter()
-                .map(|sample| alaw_encode(*sample))
-                .collect()),
+            Self::Pcmu => EncodedAudio::bytes_of(frame.resample(8000)?.samples(), mulaw_encode),
+            Self::Pcma => EncodedAudio::bytes_of(frame.resample(8000)?.samples(), alaw_encode),
             Self::Opus(codec) => codec.encode(frame),
         }
     }
@@ -238,8 +228,13 @@ impl RtpSender {
     }
 }
 
+// A queued packet, whose payload buffer returns to the receiver after decoding.
 enum Received {
-    Audio(RtpPacket),
+    Audio {
+        sequence: u16,
+        timestamp: u32,
+        payload: Vec<u8>,
+    },
     Signal(u16),
 }
 
@@ -299,8 +294,7 @@ impl FrameAssembly {
 impl Received {
     fn sequence(&self) -> u16 {
         match self {
-            Self::Audio(packet) => packet.sequence(),
-            Self::Signal(sequence) => *sequence,
+            Self::Audio { sequence, .. } | Self::Signal(sequence) => *sequence,
         }
     }
 }
@@ -311,12 +305,18 @@ pub struct RtpReceiver {
     ssrc: Option<u32>,
     next: Option<u16>,
     packets: Vec<Received>,
+    // Payload buffers that decoded packets returned, so that later packets reuse them.
+    spare: Vec<Vec<u8>>,
     assembly: FrameAssembly,
 }
 
 impl RtpReceiver {
     pub fn discard_pending(&mut self) {
-        self.packets.clear();
+        for received in self.packets.drain(..) {
+            if let Received::Audio { payload, .. } = received {
+                self.spare.push(payload);
+            }
+        }
         self.next = None;
         self.assembly.clear();
     }
@@ -331,6 +331,7 @@ impl RtpReceiver {
             ssrc: None,
             next: None,
             packets: Vec::with_capacity(16),
+            spare: Vec::with_capacity(16),
             assembly: FrameAssembly::new(format),
         })
     }
@@ -342,7 +343,17 @@ impl RtpReceiver {
         {
             return Err(MediaError::InvalidPacket);
         }
-        let accepted = self.insert(Received::Audio(packet.clone()))?;
+        let accepted = self.admit(packet.sequence())?;
+        if accepted {
+            let mut payload = self.spare.pop().unwrap_or_default();
+            payload.clear();
+            payload.extend_from_slice(packet.payload());
+            self.packets.push(Received::Audio {
+                sequence: packet.sequence(),
+                timestamp: packet.timestamp(),
+                payload,
+            });
+        }
         if accepted {
             self.ssrc = Some(packet.ssrc());
         }
@@ -353,29 +364,33 @@ impl RtpReceiver {
         if self.ssrc != Some(packet.ssrc()) {
             return Ok(false);
         }
-        self.insert(Received::Signal(packet.sequence()))
+        let accepted = self.admit(packet.sequence())?;
+        if accepted {
+            self.packets.push(Received::Signal(packet.sequence()));
+        }
+        Ok(accepted)
     }
 
-    fn insert(&mut self, packet: Received) -> Result<bool, MediaError> {
-        let mut next = self.next.unwrap_or(packet.sequence());
-        let mut distance = packet.sequence().wrapping_sub(next);
+    // Checks a packet's place in the queue before the caller queues it.
+    fn admit(&mut self, sequence: u16) -> Result<bool, MediaError> {
+        let mut next = self.next.unwrap_or(sequence);
+        let mut distance = sequence.wrapping_sub(next);
         if distance >= 32768
             || self
                 .packets
                 .iter()
-                .any(|stored| stored.sequence() == packet.sequence())
+                .any(|stored| stored.sequence() == sequence)
         {
             return Ok(false);
         }
         if distance >= 16 && self.packets.is_empty() {
-            next = packet.sequence();
+            next = sequence;
             distance = 0;
         }
         if distance >= 16 || self.packets.len() >= 16 {
             return Err(MediaError::Capacity);
         }
         self.next = Some(next);
-        self.packets.push(packet);
         Ok(true)
     }
 
@@ -396,16 +411,20 @@ impl RtpReceiver {
                 return Ok(None);
             };
             match self.packets.remove(index) {
-                Received::Audio(packet) => {
+                Received::Audio {
+                    timestamp, payload, ..
+                } => {
                     let mut samples = [0; MAX_DECODED_SAMPLES];
-                    let decoded = match self.codec.decode(packet.payload(), &mut samples) {
+                    let decoded = self.codec.decode(&payload, &mut samples);
+                    self.spare.push(payload);
+                    let decoded = match decoded {
                         Ok(decoded) => decoded,
                         Err(error) => {
                             self.assembly.clear();
                             return Err(error);
                         }
                     };
-                    self.assembly.push(decoded, packet.timestamp())?;
+                    self.assembly.push(decoded, timestamp)?;
                     if let Some(frame) = self.assembly.ready.pop_front() {
                         return Ok(Some(frame));
                     }

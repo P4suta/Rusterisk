@@ -127,8 +127,8 @@ pub async fn compare(
         while sent < 30 || !received.into_iter().all(|value| value) {
             tokio::select! {
                 _instant = clock.tick(), if sent < 30 => {
-                    left.send(Message::Binary(left_audio.encode(signal(440.0, sent)?).map_err(invalid)?.into())).await?;
-                    right.send(Message::Binary(right_audio.encode(signal(660.0, sent)?).map_err(invalid)?.into())).await?;
+                    left.send(Message::Binary(left_audio.encode(signal(440.0, sent)?).map_err(invalid)?.to_vec().into())).await?;
+                    right.send(Message::Binary(right_audio.encode(signal(660.0, sent)?).map_err(invalid)?.to_vec().into())).await?;
                     sent += 1;
                 }
                 message = left.next() => received[0] |= audio(message, &mut left_audio, 660.0, 440.0)?,

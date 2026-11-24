@@ -81,13 +81,9 @@ fn opus_transmits_a_non_silent_known_signal() -> Result<(), MediaError> {
 #[test]
 fn padded_rtp_header_extensions_keep_the_audio_on_roundtrip() -> Result<(), MediaError> {
     let audio = [0x7f, 0xff, 0x55, 0xd5];
-    for (profile, elements, aligned) in [
-        (
-            0xbede_u16,
-            [0, 0x10, 0x42, 0, 0, 0, 0, 0],
-            [0x10, 0x42, 0, 0],
-        ),
-        (0x1000, [0, 1, 1, 0x42, 0, 0, 0, 0], [1, 1, 0x42, 0]),
+    for (profile, elements) in [
+        (0xbede_u16, [0, 0x10, 0x42, 0, 0, 0, 0, 0]),
+        (0x1000, [0, 1, 1, 0x42, 0, 0, 0, 0]),
     ] {
         let mut wire = Vec::from([0x91, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 4]);
         wire.extend(profile.to_be_bytes());
@@ -96,10 +92,9 @@ fn padded_rtp_header_extensions_keep_the_audio_on_roundtrip() -> Result<(), Medi
         wire.extend(audio);
         let packet = RtpPacket::parse(&wire)?;
         assert_eq!(packet.payload(), audio);
+        // The server never forwards received headers, so encoding writes the fixed header of a sender.
         let encoded = packet.clone().with_marker(true).encode()?;
-        assert_eq!(&encoded[12..18], &wire[12..18]);
-        assert_eq!(&encoded[18..20], &[0, 1]);
-        assert_eq!(&encoded[20..24], &aligned);
+        assert_eq!(&encoded[..12], &[0x80, 0x80, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3]);
         let decoded = RtpPacket::parse(&encoded)?;
         assert!(decoded.marker());
         assert_eq!(decoded.payload(), audio);
@@ -133,7 +128,10 @@ fn secure_rtp_matches_libsrtp_wire_bytes() -> Result<(), MediaError> {
     let plaintext = RtpPacket::new(15, 0x1234, 0xdeca_fbad, 0xcafe_babe, &[0xab; 16])?.encode()?;
     let ciphertext = Srtp::new(&key, &salt)?.encrypt(&plaintext)?;
     assert_eq!(ciphertext.as_ref(), expected);
-    assert_eq!(Srtp::new(&key, &salt)?.decrypt(&expected)?, plaintext);
+    assert_eq!(
+        Srtp::new(&key, &salt)?.decrypt(&expected)?.as_ref(),
+        plaintext.as_ref()
+    );
     Ok(())
 }
 
@@ -143,8 +141,8 @@ fn secure_rtp_authenticates_audio_and_rejects_replay() -> Result<(), MediaError>
     let mut receiver = rusterisk_media::Srtp::new(&[7; 16], &[9; 14])?;
     let packet = RtpPacket::new(0, 42, 160, 99, &[0xff; 160])?.encode()?;
     let encrypted = sender.encrypt(&packet)?;
-    assert_ne!(encrypted, packet);
-    assert_eq!(receiver.decrypt(&encrypted)?, packet);
+    assert_ne!(encrypted.as_ref(), packet.as_ref());
+    assert_eq!(receiver.decrypt(&encrypted)?.as_ref(), packet.as_ref());
     assert!(receiver.decrypt(&encrypted).is_err());
     let mut tampered = encrypted.to_vec();
     tampered[12] ^= 1;
@@ -174,7 +172,7 @@ fn secure_rtp_accepts_sequence_wraparound_and_preserves_replay_protection() -> R
     for sequence in [65534, 65535, 0, 1] {
         let packet = RtpPacket::new(0, sequence, 160, 99, &[0xff; 160])?.encode()?;
         let encrypted = sender.encrypt(&packet)?;
-        assert_eq!(receiver.decrypt(&encrypted)?, packet);
+        assert_eq!(receiver.decrypt(&encrypted)?.as_ref(), packet.as_ref());
         assert!(receiver.decrypt(&encrypted).is_err());
     }
     Ok(())
@@ -194,7 +192,10 @@ fn unauthenticated_streams_consume_no_slots_and_authenticated_streams_are_bounde
     for ssrc in 16..20 {
         let mut sender = rusterisk_media::Srtp::new(&[7; 16], &[9; 14])?;
         let packet = RtpPacket::new(0, 42, 160, ssrc, &[0xff; 160])?.encode()?;
-        assert_eq!(receiver.decrypt(&sender.encrypt(&packet)?)?, packet);
+        assert_eq!(
+            receiver.decrypt(&sender.encrypt(&packet)?)?.as_ref(),
+            packet.as_ref()
+        );
     }
     let mut sender = rusterisk_media::Srtp::new(&[7; 16], &[9; 14])?;
     let packet = RtpPacket::new(0, 42, 160, 20, &[0xff; 160])?.encode()?;
