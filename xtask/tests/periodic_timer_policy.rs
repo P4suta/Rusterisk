@@ -93,6 +93,22 @@ fn rejects_a_timer_constructor_taken_as_a_function_value() -> Result<(), syn::Er
 }
 
 #[test]
+fn rejects_a_function_value_that_a_registration_cannot_count() -> Result<(), syn::Error> {
+    for source in [
+        "fn serve() { let every = tokio::time::interval; let first = every(period()); let second = every(period()); }",
+        "fn serve() { let clocks = periods().map(tokio::time::interval); }",
+        "async fn serve() { tokio::select! { _ = stop() => { let every = tokio::time::interval; } } }",
+    ] {
+        assert_eq!(
+            rules(source, &[timer("serve")])?,
+            ["periodic-timer", "unused-timer"],
+            "{source}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn ignores_a_timer_name_in_a_literal_a_binding_or_a_method() -> Result<(), syn::Error> {
     for source in [
         r#"fn run() { println!("interval(20ms)"); }"#,

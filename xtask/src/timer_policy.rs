@@ -61,6 +61,8 @@ struct Policy<'a> {
     bare: bool,
 }
 
+const HIDDEN: &str = "a function value hides a periodic timer";
+
 fn periodic(name: &syn::Ident) -> bool {
     name == "interval" || name == "interval_at"
 }
@@ -166,8 +168,12 @@ impl Policy<'_> {
                         trees.peek(),
                         Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Parenthesis
                     );
-                    if periodic(&name) && !member && (colons == 2 || self.bare || called) {
-                        self.timer();
+                    if periodic(&name) && !member {
+                        if called {
+                            self.timer();
+                        } else if colons == 2 || self.bare {
+                            self.reject(HIDDEN);
+                        }
                     }
                     colons = 0;
                     member = false;
@@ -221,8 +227,8 @@ impl<'ast> Visit<'ast> for Policy<'_> {
         }
     }
 
-    // A constructor named by its path counts as a call and as a function value.
-    // A bare name counts wherever an import brings the constructor into scope.
+    // A constructor outside call position is a function value, whose calls no registration counts.
+    // A bare name is a constructor only where an import brings it into scope.
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
         let segments = &node.path.segments;
         if segments
@@ -230,19 +236,30 @@ impl<'ast> Visit<'ast> for Policy<'_> {
             .is_some_and(|segment| periodic(&segment.ident))
             && (segments.len() > 1 || self.bare)
         {
-            self.timer();
+            self.reject(HIDDEN);
         }
         visit::visit_expr_path(self, node);
     }
 
-    // A call by a bare name counts even where no import explains the name.
+    // A constructor in call position is one timer, even where no import explains a bare name.
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(function) = &*node.func {
-            if !self.bare && function.path.get_ident().is_some_and(periodic) {
-                self.timer();
+        let constructor = matches!(
+            &*node.func,
+            syn::Expr::Path(function)
+                if function
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| periodic(&segment.ident))
+        );
+        if constructor {
+            self.timer();
+            for argument in &node.args {
+                self.visit_expr(argument);
             }
+        } else {
+            visit::visit_expr_call(self, node);
         }
-        visit::visit_expr_call(self, node);
     }
 
     fn visit_use_rename(&mut self, node: &'ast syn::UseRename) {
