@@ -140,6 +140,9 @@ impl Signaling {
         key: CallKey,
         target: ExternalRtpTarget,
     ) -> Result<(SocketAddr, AttachmentRelease), ControlError> {
+        if !self.owed.is_empty() {
+            return Err(ControlError::Capacity);
+        }
         if self.calls.len()
             + self.external_media.len()
             + self.external_waits()

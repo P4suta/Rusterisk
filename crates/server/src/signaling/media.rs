@@ -96,6 +96,10 @@ impl super::Signaling {
         key: &CallKey,
         session: &Session,
     ) -> Result<AnsweredAttachment, MediaError> {
+        // An attachment that passed owed orders could meet an older release for the same call.
+        if !self.owed.is_empty() {
+            return Err(MediaError::Capacity);
+        }
         let serial = self.next_serial();
         let Some(call) = self.calls.get_mut(key) else {
             return Ok(AnsweredAttachment::Missing);

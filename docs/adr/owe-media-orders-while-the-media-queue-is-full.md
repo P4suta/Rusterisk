@@ -14,7 +14,7 @@ Waiting in the turn would hold every call's signaling behind the media task.
 ## Decision
 
 Keep a refused order in an owed queue, and send later orders behind it.
-Direction changes travel as orders.
+Direction changes travel as orders, and an attachment fails while orders wait.
 Retry pending orders at capacity.
 The task waits for room only while it owes orders, between turns.
 The owed queue holds one more media queue, and the server stops only when the media task stops taking orders.
