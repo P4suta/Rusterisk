@@ -309,7 +309,6 @@ impl Signaling {
         now: u64,
     ) -> Result<(), ControlError> {
         self.prune_refer_routes(listener, now)?;
-        let settings = self.registrations.settings_epoch;
         let mut datagrams = output.datagrams;
         for event in &output.events {
             if let SipEvent::PeerDirection {
@@ -343,6 +342,19 @@ impl Signaling {
         });
         self.transmit(listener, datagrams).await?;
         for event in output.events {
+            self.sip_event(listener, event, now).await?;
+        }
+        Ok(())
+    }
+
+    async fn sip_event(
+        &mut self,
+        listener: usize,
+        event: SipEvent,
+        now: u64,
+    ) -> Result<(), ControlError> {
+        let settings = self.registrations.settings_epoch;
+        {
             match event {
                 SipEvent::AttendedTransferRequested {
                     id,
@@ -382,7 +394,7 @@ impl Signaling {
                             Ok(()) => {}
                             Err(ControlError::Conflict(_) | ControlError::NotFound(_)) => {
                                 tracing::debug!("stale endpoint contact observation rejected");
-                                continue;
+                                return Ok(());
                             }
                             Err(error) => return Err(error),
                         }
