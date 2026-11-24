@@ -8,7 +8,7 @@ Configurations without registrations start no registration work.
 Initial requests follow the [Asterisk 22.9.0 delay](https://github.com/asterisk/asterisk/blob/22.9.0/res/res_pjsip_outbound_registration.c#L2005).
 `max_random_initial_delay=0` still waits one second.
 Positive values select an integer delay from one through `max_random_initial_delay` seconds.
-Round-robin polling emits at most one packet per signaling tick.
+Round-robin selection emits at most one packet per 20 ms.
 Requests to the same physical registrar wait for the preceding transaction's final response or settlement deadline.
 The existing bounded transaction supplies retransmission and a 32-second timeout.
 Shutdown cancels waiting and transmitted clients before releasing the listener.

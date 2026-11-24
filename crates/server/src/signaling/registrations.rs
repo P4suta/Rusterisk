@@ -12,6 +12,7 @@ use peer_waits::{Admission, PeerWaits};
 pub(super) use resolution::ConfigurationLease;
 use resolution::{Completion, ConfigurationLifetime};
 use rusterisk_config::{Auth, Config, Protocol, Registration, MAX_REGISTRATIONS};
+use rusterisk_core::Wake;
 use rusterisk_sip::{
     Datagram, RegistrationAuthentication, RegistrationGrant, RegistrationIdentity,
     RegistrationResponse, RegistrationRetirementReceipt, RegistrationTransaction,
@@ -342,6 +343,66 @@ impl Registrations {
         self.lifetime.generation()
     }
 
+    // The instant from which `select` takes this client while only time passes.
+    // A sibling transaction, a retiring registration, or a setup job ends through an event or its own wake.
+    fn service_at(&self, index: usize, now: u64) -> Option<u64> {
+        let client = self.clients.get(index)?;
+        let allowed = self.transaction_allowed_from(index, client)?;
+        if self
+            .retiring
+            .blocked(&client.target, client.state.peer(), now)
+        {
+            return None;
+        }
+        let at = match &client.state {
+            State::Waiting { at }
+            | State::CandidateWait { at }
+            | State::Registered { refresh_at: at, .. } => {
+                if self.clients.iter().any(|other| {
+                    client.same_registrar(other)
+                        && matches!(
+                            other.state,
+                            State::Ready { .. }
+                                | State::Alternate { .. }
+                                | State::Trying { .. }
+                                | State::Resolving { .. }
+                                | State::Connecting { .. }
+                        )
+                }) {
+                    return None;
+                }
+                *at
+            }
+            State::Ready { at, .. } | State::Alternate { at, .. } | State::Backoff { at, .. } => {
+                if self.clients.iter().any(|other| {
+                    client.same_registrar(other)
+                        && matches!(
+                            other.state,
+                            State::Trying { .. }
+                                | State::Resolving { .. }
+                                | State::Connecting { .. }
+                        )
+                }) {
+                    return None;
+                }
+                *at
+            }
+            State::Trying { transaction, .. } => transaction.next_deadline()?,
+            State::Resolving { .. } | State::Connecting { .. } | State::Stopped => return None,
+        };
+        Some(at.max(allowed))
+    }
+
+    pub(super) fn wake(&self, now: u64, admitting: bool) -> Wake {
+        let retiring = self.retiring.wake();
+        if self.lifetime.lease().is_released() || (!admitting && self.reservation.is_none()) {
+            return retiring;
+        }
+        (0..self.clients.len())
+            .filter_map(|index| self.service_at(index, now))
+            .fold(retiring, |wake, at| wake.earliest(Wake::At(at)))
+    }
+
     fn select(&mut self, now: u64) -> Option<usize> {
         if self.lifetime.lease().is_released() {
             return None;
@@ -349,53 +410,7 @@ impl Registrations {
         for _ in 0..self.clients.len() {
             let index = self.cursor;
             self.cursor = (self.cursor + 1) % self.clients.len();
-            let client = &self.clients[index];
-            if !self.allows_transaction(index, client, now) {
-                continue;
-            }
-            if self
-                .retiring
-                .blocked(&client.target, client.state.peer(), now)
-            {
-                continue;
-            }
-            let due = match &client.state {
-                State::Waiting { at }
-                | State::CandidateWait { at }
-                | State::Registered { refresh_at: at, .. } => {
-                    now >= *at
-                        && !self.clients.iter().any(|other| {
-                            client.same_registrar(other)
-                                && matches!(
-                                    other.state,
-                                    State::Ready { .. }
-                                        | State::Alternate { .. }
-                                        | State::Trying { .. }
-                                        | State::Resolving { .. }
-                                        | State::Connecting { .. }
-                                )
-                        })
-                }
-                State::Ready { at, .. }
-                | State::Alternate { at, .. }
-                | State::Backoff { at, .. } => {
-                    now >= *at
-                        && !self.clients.iter().any(|other| {
-                            client.same_registrar(other)
-                                && matches!(
-                                    other.state,
-                                    State::Trying { .. }
-                                        | State::Resolving { .. }
-                                        | State::Connecting { .. }
-                                )
-                        })
-                }
-                State::Trying { transaction, .. } => transaction
-                    .next_deadline()
-                    .is_some_and(|deadline| now >= deadline),
-                State::Resolving { .. } | State::Connecting { .. } | State::Stopped => false,
-            };
-            if due {
+            if self.service_at(index, now).is_some_and(|at| now >= at) {
                 return Some(index);
             }
         }
@@ -952,14 +967,41 @@ impl Signaling {
         true
     }
 
+    pub(super) fn registration_wake(&self, now: u64) -> Wake {
+        self.registrations.wake(now, self.admitting())
+    }
+
+    #[cfg(test)]
     pub(super) async fn registration_tick(&mut self, now: u64) -> Result<(), ControlError> {
+        let reported = self.registration_wake(now);
+        let retiring = self.registrations.retiring.len();
+        let served = self.registration_turn(now).await?;
+        let acted = served || self.registrations.retiring.len() < retiring;
+        let due = matches!(reported, Wake::At(at) if at <= now);
+        assert!(
+            !acted || due,
+            "a registration turn acted at {now} ms before its reported wake {reported:?}"
+        );
+        assert!(
+            acted || !due,
+            "the reported wake {reported:?} was due at {now} ms and its turn did nothing"
+        );
+        Ok(())
+    }
+
+    pub(super) async fn registration_turn(&mut self, now: u64) -> Result<bool, ControlError> {
         self.registrations.retiring.poll(now)?;
         if !self.admitting() && self.registrations.reservation.is_none() {
-            return Ok(());
+            return Ok(false);
         }
         let Some(index) = self.registrations.select(now) else {
-            return Ok(());
+            return Ok(false);
         };
+        self.registration_service(index, now).await?;
+        Ok(true)
+    }
+
+    async fn registration_service(&mut self, index: usize, now: u64) -> Result<(), ControlError> {
         if matches!(
             self.registrations.clients[index].state,
             State::Waiting { .. }

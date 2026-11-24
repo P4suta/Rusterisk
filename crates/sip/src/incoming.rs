@@ -829,6 +829,41 @@ impl Engine {
         }
     }
 
+    pub(crate) fn incoming_wake(&self) -> rusterisk_core::Wake {
+        use rusterisk_core::Wake;
+        let mut wake = Wake::Idle;
+        for cached in self.cache.values() {
+            if let Some(expires) = cached.expires {
+                wake = wake.earliest(Wake::At(expires));
+            }
+            match &cached.retry {
+                Some(crate::ServerRetry::Provisional { next }) => {
+                    wake = wake.earliest(Wake::At(*next));
+                }
+                Some(crate::ServerRetry::Final { next, .. })
+                    if self.protocol == rusterisk_config::Protocol::Udp =>
+                {
+                    wake = wake.earliest(Wake::At(*next));
+                }
+                Some(crate::ServerRetry::Final { .. }) | None => {}
+            }
+        }
+        for dialog in self.incoming.values() {
+            wake = wake.earliest(match dialog.state {
+                State::AwaitingAck {
+                    retry, deadline, ..
+                } => Wake::At(retry).earliest(Wake::At(deadline)),
+                State::Terminated { expires }
+                    if !self.refers.holds(&dialog.invite.id, dialog.generation) =>
+                {
+                    Wake::At(expires)
+                }
+                State::Established | State::Terminated { .. } => Wake::Idle,
+            });
+        }
+        wake
+    }
+
     pub(crate) fn incoming_tick(&mut self, now: u64) -> Result<Output, SipError> {
         let provisional_next = if self.cache.values().any(|cached| {
             matches!(cached.retry.as_ref(), Some(crate::ServerRetry::Provisional { next }) if *next <= now)

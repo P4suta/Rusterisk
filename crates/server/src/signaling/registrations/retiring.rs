@@ -36,19 +36,32 @@ struct ReservedRetirement {
 }
 
 impl RetirementPlan {
-    pub(super) fn allows(&self, index: usize, client: &Client, now: u64) -> bool {
+    pub(super) fn allowed_from(&self, index: usize, client: &Client) -> Option<u64> {
         let State::Trying { transaction, .. } = &client.state else {
-            return false;
+            return None;
         };
-        self.originals
+        if self
+            .originals
             .get(index)
-            .is_some_and(|identity| *identity == Some(transaction.identity()))
-            && (transaction.expires_at() <= now
-                || self
-                    .slots
-                    .iter()
-                    .flatten()
-                    .any(|entry| entry.index == index && entry.identity == transaction.identity()))
+            .is_none_or(|identity| *identity != Some(transaction.identity()))
+        {
+            return None;
+        }
+        let reserved = self
+            .slots
+            .iter()
+            .flatten()
+            .any(|entry| entry.index == index && entry.identity == transaction.identity());
+        Some(if reserved {
+            0
+        } else {
+            transaction.expires_at()
+        })
+    }
+
+    pub(super) fn allows(&self, index: usize, client: &Client, now: u64) -> bool {
+        self.allowed_from(index, client)
+            .is_some_and(|from| from <= now)
     }
 }
 
@@ -166,6 +179,13 @@ impl Retiring {
             entry.retirement.expires_at() > now
                 && (peer.is_some_and(|peer| peer == entry.route.peer())
                     || same_registrar(&entry.registrar, target))
+        })
+    }
+
+    pub(super) fn wake(&self) -> rusterisk_core::Wake {
+        use rusterisk_core::Wake;
+        self.slots.iter().flatten().fold(Wake::Idle, |wake, entry| {
+            wake.earliest(Wake::At(entry.retirement.expires_at()))
         })
     }
 

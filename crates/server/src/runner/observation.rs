@@ -1,4 +1,4 @@
-use super::{receive, timestamp, Controller, Credentials, Request, Runner};
+use super::{timestamp, Controller, Credentials, Request, Runner};
 use crate::{CallKey, ControlError};
 use rusterisk_api::{
     observation::{WatchEntry, WatchRecord},
@@ -100,7 +100,7 @@ impl Controller {
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
-        receive(response).await
+        self.receive(response).await
     }
 }
 

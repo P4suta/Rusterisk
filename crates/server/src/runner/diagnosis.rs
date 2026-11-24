@@ -1,4 +1,4 @@
-use super::{receive, Controller, Credentials, Request, Runner};
+use super::{Controller, Credentials, Request, Runner};
 use crate::ControlError;
 use rusterisk_api::ChannelId;
 use serde_json::{to_value, Value};
@@ -25,7 +25,7 @@ impl Controller {
                 reply,
             })
             .map_err(|_| ControlError::Capacity)?;
-        receive(response).await
+        self.receive(response).await
     }
 }
 

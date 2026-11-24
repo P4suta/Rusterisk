@@ -1,4 +1,4 @@
-use super::{receive, Controller, Request, Runner};
+use super::{Controller, Request, Runner};
 use crate::{ControlError, Signal};
 use rusterisk_core::{ContactPresence, SettingsGeneration};
 use tokio::sync::oneshot;
@@ -26,7 +26,7 @@ impl Controller {
         tokio::select! {
             biased;
             _changed = stopped.changed() => Err(ControlError::Conflict("Control is stopping")),
-            result = receive(receiver) => result,
+            result = self.receive(receiver) => result,
         }
     }
 }

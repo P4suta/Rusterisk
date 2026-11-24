@@ -4,7 +4,50 @@ use crate::{
 };
 use rusterisk_api::ChannelId;
 use rusterisk_config::Config;
+use rusterisk_core::Wake;
 use tokio::sync::{mpsc, oneshot};
+
+#[test]
+fn a_pending_answer_reports_its_deadline_and_falls_due_when_its_channel_ends(
+) -> Result<(), ControlError> {
+    let mut fixture = Fixture::new()?;
+    assert_eq!(fixture.runner.wake()?, Wake::Idle);
+    let mut waiter = fixture.request(10);
+    assert_eq!(fixture.runner.wake()?, Wake::At(5010));
+    fixture.runner.control.signal(
+        Signal::Terminated {
+            key: fixture.key.clone(),
+            cause: 16,
+        },
+        "later",
+    )?;
+    assert_eq!(fixture.runner.wake()?, Wake::At(0));
+    fixture.runner.settle(20)?;
+    assert!(matches!(
+        waiter.try_recv(),
+        Ok(Err(ControlError::NotFound(_)))
+    ));
+    assert_eq!(fixture.runner.wake()?, Wake::Idle);
+    Ok(())
+}
+
+#[test]
+fn an_answered_channel_makes_its_pending_answer_due() -> Result<(), ControlError> {
+    let mut fixture = Fixture::new()?;
+    let mut waiter = fixture.request(10);
+    fixture.runner.control.signal(
+        Signal::Milestone {
+            key: fixture.key.clone(),
+            milestone: Milestone::Answered,
+        },
+        "later",
+    )?;
+    assert_eq!(fixture.runner.wake()?, Wake::At(0));
+    fixture.runner.settle(20)?;
+    assert!(matches!(waiter.try_recv(), Ok(Ok(_))));
+    assert_eq!(fixture.runner.wake()?, Wake::Idle);
+    Ok(())
+}
 
 struct Fixture {
     runner: Runner,

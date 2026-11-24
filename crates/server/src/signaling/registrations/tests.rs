@@ -5,6 +5,7 @@ mod current_flow;
 mod dns;
 mod generations;
 mod minimum_expiration;
+mod pacing;
 mod peer_waits;
 mod publication_barrier;
 mod retirement;
