@@ -112,6 +112,41 @@ async fn a_g711_leg_stays_within_its_memory_budget() -> Result<(), MediaError> {
     Ok(())
 }
 
+#[tokio::test]
+async fn attaching_a_webrtc_leg_starts_no_task() -> Result<(), MediaError> {
+    let (_handle, mut hub, _notices) = MediaHub::new(4);
+    let sockets = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let local = sockets.local_addr().map_err(failure)?;
+    let offer = crate::webrtc::WebRtcOffer::new(
+        sockets,
+        local,
+        &[rusterisk_config::Codec::Pcmu],
+        std::time::Instant::now(),
+    )?;
+    let sockets = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let local = sockets.local_addr().map_err(failure)?;
+    let (answer, _description) = crate::webrtc::WebRtcSession::answer(
+        sockets,
+        local,
+        offer.description(),
+        &[rusterisk_config::Codec::Pcmu],
+        std::time::Instant::now(),
+    )?;
+    let browser = key("browser")?;
+    hub.attach_webrtc(
+        browser.clone(),
+        answer,
+        PeerMediaDirection::SendReceive,
+        AttachmentMode::Answered,
+    )?;
+    let started = hub.workers.len();
+    let owned = hub.webrtc_legs.contains_key(&browser);
+    hub.close().await?;
+    assert_eq!(started, 0);
+    assert!(owned);
+    Ok(())
+}
+
 // A peer floods a leg, and each turn reads one reorder window of its datagrams.
 #[tokio::test]
 async fn a_leg_reads_at_most_one_window_of_datagrams_in_a_turn() -> Result<(), MediaError> {

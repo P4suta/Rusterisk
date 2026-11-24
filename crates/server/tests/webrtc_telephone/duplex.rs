@@ -2,9 +2,13 @@ use super::{failure, sockets};
 use rusterisk_config::Codec;
 use rusterisk_core::{DtmfDigit, DtmfTone, PeerMediaDirection};
 use rusterisk_media::{Frame, MediaError};
+#[path = "../webrtc_leg/driver.rs"]
+mod webrtc_driver;
+
+use rusterisk_media::MAX_PACKET;
 use rusterisk_server::{
     media_link::{Channels, DigitCommand},
-    webrtc::{WebRtcOffer, WebRtcSession, WebRtcStats},
+    webrtc::{WebRtcLeg, WebRtcOffer, WebRtcSession, WebRtcStats},
 };
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
@@ -134,8 +138,8 @@ async fn exchange(codec: Codec, duration_ms: u32, clock: u32) -> Result<(), Medi
     let (left, right) = sessions(codec, clock)?;
     let (left_channels, mut left_app) = channels();
     let (right_channels, mut right_app) = channels();
-    let left = tokio::spawn(left.run(left_channels));
-    let right = tokio::spawn(right.run(right_channels));
+    let left = tokio::spawn(webrtc_driver::run(left, left_channels));
+    let right = tokio::spawn(webrtc_driver::run(right, right_channels));
     let mut phase = "audio readiness";
     let result = tokio::time::timeout(Duration::from_secs(4), async {
         ready(&mut left_app, &mut right_app).await?;
@@ -211,8 +215,8 @@ async fn received_events_started_during_hold_do_not_complete_after_resume() -> R
     let (left, right) = sessions(Codec::Pcmu, 8000)?;
     let (left_channels, mut left_app) = channels();
     let (right_channels, mut right_app) = channels();
-    let left = tokio::spawn(left.run(left_channels));
-    let right = tokio::spawn(right.run(right_channels));
+    let left = tokio::spawn(webrtc_driver::run(left, left_channels));
+    let right = tokio::spawn(webrtc_driver::run(right, right_channels));
     let result = tokio::time::timeout(Duration::from_secs(4), async {
         ready(&mut left_app, &mut right_app).await?;
         left_app

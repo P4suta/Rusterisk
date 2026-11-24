@@ -3,12 +3,16 @@ use rusterisk_api::{Channel, ChannelId, ChannelState, EventKind};
 use rusterisk_config::{Codec, Config};
 use rusterisk_core::PeerMediaDirection;
 use rusterisk_media::{Frame, MediaError};
+#[path = "webrtc_leg/driver.rs"]
+mod webrtc_driver;
+
+use rusterisk_media::MAX_PACKET;
 use rusterisk_server::{
     media::MediaHub,
     media_link::Channels,
     rtp::SocketPair,
     signaling::Signaling,
-    webrtc::{WebRtcSession, WebRtcStats},
+    webrtc::{WebRtcLeg, WebRtcSession, WebRtcStats},
     Action, Controller, Credentials,
 };
 use std::{
@@ -192,7 +196,7 @@ async fn bridge_calls(
         controller.execute(credentials.clone(), None, Action::AddChannels { bridge: bridge.clone(), channels: ids.clone() }).await.map_err(failure)?;
         for session in sessions {
             let (channels, application) = channels();
-            jobs.push(tokio::spawn(session.run(channels)));
+            jobs.push(tokio::spawn(webrtc_driver::run(session, channels)));
             applications.push(application);
         }
         let [left, right] = applications.as_mut_slice() else { return Err(MediaError::InvalidRoute); };

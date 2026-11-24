@@ -41,6 +41,7 @@ impl RtpLink {
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut scratch = [0; MAX_PACKET + 1];
         let mut tones = Vec::new();
+        let mut finished = Vec::new();
         loop {
             if *self.channels.stop.borrow() || self.channels.incoming.is_closed() {
                 break;
@@ -70,14 +71,14 @@ impl RtpLink {
                 }
                 _instant = tick.tick() => {
                     self.leg.receive(&mut scratch, &mut tones, &mut receipt)?;
-                    let advanced = self.leg.advance(&mut tones)?;
+                    let frame = self.leg.advance(&mut tones, &mut finished)?;
                     for tone in tones.drain(..) {
                         self.channels.digits.try_send(tone).map_err(|_| MediaError::Capacity)?;
                     }
-                    if let Some(token) = advanced.completed {
+                    for token in finished.drain(..) {
                         self.channels.completed.try_send(token).map_err(|_| MediaError::Capacity)?;
                     }
-                    if let Some(frame) = advanced.frame {
+                    if let Some(frame) = frame {
                         if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) = self.channels.incoming.try_send(frame) {
                             break;
                         }

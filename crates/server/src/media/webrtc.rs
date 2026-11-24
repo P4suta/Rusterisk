@@ -89,7 +89,7 @@ impl MediaPort {
 }
 
 impl MediaHub {
-    fn attach_webrtc(
+    pub(super) fn attach_webrtc(
         &mut self,
         key: CallKey,
         session: WebRtcSession,
@@ -101,11 +101,14 @@ impl MediaHub {
             .telephone()
             .map(DigitSupport::Rfc4733)
             .unwrap_or(DigitSupport::Unsupported);
-        let (port, channels) = Port::new(direction, support);
-        self.install_link(key.clone(), port, mode.gate(direction))?;
-        self.spawn_link(key, async move {
-            session.run(channels).await.map(|stats| stats.audio)
-        })
+        let leg = crate::webrtc::WebRtcLeg::new(session, direction)?;
+        self.install_link(
+            key.clone(),
+            Port::owned(direction, support),
+            mode.gate(direction),
+        )?;
+        self.webrtc_legs.insert(key, leg);
+        Ok(())
     }
 
     pub(super) fn webrtc_attachment(&mut self, attachment: Attachment) -> Result<(), MediaError> {

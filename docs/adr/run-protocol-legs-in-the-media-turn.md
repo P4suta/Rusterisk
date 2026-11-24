@@ -12,7 +12,7 @@ Its two frame channels reserved about 124 kilobytes, and audio waited for both c
 
 ## Decision
 
-The media task owns each leg and runs it in its 20 millisecond turn.
+The media task owns each leg and runs it in its 20 millisecond turn, and a WebRTC leg advances its engine there too.
 Every leg first reads what arrived on its non-blocking sockets and hands one frame to the mixer.
 After the mix, each leg sends its frame.
 A leg reads at most 16 datagrams from each socket in a turn.
@@ -26,7 +26,7 @@ Waiting on each socket's readiness wakes the task for every packet.
 ## Consequences
 
 A packet waits up to one turn before the media task reads it.
-WebRTC and stream links keep their tasks until later changes move them.
+Stream links keep their tasks until later changes move them.
 
 ## Confirmation
 

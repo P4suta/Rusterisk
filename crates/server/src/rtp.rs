@@ -502,11 +502,12 @@ impl RtpLeg {
     }
 
     // Advances telephone events, digit commands, and control reports to this turn, and takes the next received frame.
-    pub fn advance(&mut self, tones: &mut Vec<DtmfTone>) -> Result<Advanced, MediaError> {
-        let mut advanced = Advanced {
-            frame: None,
-            completed: None,
-        };
+    pub fn advance(
+        &mut self,
+        tones: &mut Vec<DtmfTone>,
+        finished: &mut Vec<DtmfToken>,
+    ) -> Result<Option<rusterisk_media::Frame>, MediaError> {
+        let mut frame = None;
         if self.active.is_none() && self.telephone.is_some() {
             self.active = self.commands.pop_front();
         }
@@ -557,7 +558,7 @@ impl RtpLeg {
                             }
                             command.sequence = sequence;
                             if sequence.finished() {
-                                advanced.completed = Some(command.token);
+                                finished.push(command.token);
                                 self.active = None;
                             }
                         }
@@ -566,7 +567,7 @@ impl RtpLeg {
             }
         }
         match self.receiver.pop() {
-            Ok(Some(frame)) if self.direction.can_send() => advanced.frame = Some(frame),
+            Ok(Some(received)) if self.direction.can_send() => frame = Some(received),
             Ok(Some(_)) | Ok(None) => {}
             Err(_) => self.stats.dropped += 1,
         }
@@ -578,7 +579,7 @@ impl RtpLeg {
             }
             self.report_at = sampled + report_delay(false)?;
         }
-        Ok(advanced)
+        Ok(frame)
     }
 
     // Sends one mixed frame as the next audio packet.
@@ -624,11 +625,6 @@ impl RtpLeg {
     }
 }
 
-// What one turn of a leg produced for the media task.
-pub struct Advanced {
-    pub frame: Option<rusterisk_media::Frame>,
-    pub completed: Option<DtmfToken>,
-}
 fn reports(sources: &[SentSource]) -> Result<(Vec<SourceReport>, u64), MediaError> {
     let sampled = tokio::time::Instant::now();
     let wall = SystemTime::now()

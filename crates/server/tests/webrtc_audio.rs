@@ -1,10 +1,14 @@
 use rusterisk_config::Codec;
 use rusterisk_core::PeerMediaDirection;
 use rusterisk_media::{Frame, MediaError};
+#[path = "webrtc_leg/driver.rs"]
+mod webrtc_driver;
+
+use rusterisk_media::MAX_PACKET;
 use rusterisk_server::{
     media_link::Channels,
     rtp::SocketPair,
-    webrtc::{WebRtcOffer, WebRtcSession, WebRtcStats},
+    webrtc::{WebRtcLeg, WebRtcOffer, WebRtcSession, WebRtcStats},
 };
 use std::{
     net::Ipv4Addr,
@@ -115,8 +119,8 @@ async fn duplex(
     assert!(!right.is_connected());
     let (left_channels, mut left_app) = channels();
     let (right_channels, mut right_app) = channels();
-    let left = tokio::spawn(left.run(left_channels));
-    let right = tokio::spawn(right.run(right_channels));
+    let left = tokio::spawn(webrtc_driver::run(left, left_channels));
+    let right = tokio::spawn(webrtc_driver::run(right, right_channels));
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         let mut clock = tokio::time::interval(Duration::from_millis(20));
         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -236,8 +240,8 @@ async fn a_mismatched_fingerprint_prevents_authenticated_audio() -> Result<(), M
     let left = offer.accept_answer(&answer)?;
     let (left_channels, mut left_app) = channels();
     let (right_channels, mut right_app) = channels();
-    let left = tokio::spawn(left.run(left_channels));
-    let right = tokio::spawn(right.run(right_channels));
+    let left = tokio::spawn(webrtc_driver::run(left, left_channels));
+    let right = tokio::spawn(webrtc_driver::run(right, right_channels));
     left_app
         .outgoing
         .try_send(signal(440.0, 0)?)
@@ -270,7 +274,7 @@ async fn cancelling_the_ice_exchange_releases_the_reserved_media_ports() -> Resu
     )?;
     let left = offer.accept_answer(&answer)?;
     let (channels, mut application) = channels();
-    let task = tokio::spawn(left.run(channels));
+    let task = tokio::spawn(webrtc_driver::run(left, channels));
     let progress = tokio::time::timeout(Duration::from_secs(1), async {
         for frame in 0..4 {
             application
