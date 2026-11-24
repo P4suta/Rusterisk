@@ -47,10 +47,9 @@ async fn registrations_that_fall_due_together_leave_one_interval_apart() -> Resu
         .map_err(failure)?;
     let peers = peers.iter().map(String::as_str).collect::<Vec<_>>();
     let config = config(&peers, 0)?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let mut signaling =
-        Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let mut signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let (_stopper, mut stop) = watch::channel(false);
     let mut serving = std::pin::pin!(signaling.serve(&mut stop, controller.clock()));
     run(&mut serving, Duration::from_millis(999)).await?;
@@ -75,10 +74,9 @@ async fn a_signaling_task_sleeps_until_a_registration_falls_due() -> Result<(), 
     let registrar = registrar()?;
     let peer = registrar.local_addr().map_err(failure)?.to_string();
     let config = config(&[peer.as_str()], 0)?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let mut signaling =
-        Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let mut signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let (_stopper, mut stop) = watch::channel(false);
     let mut polls = 0_u32;
     {
@@ -105,10 +103,9 @@ async fn a_signaling_task_sleeps_until_a_registration_falls_due() -> Result<(), 
 async fn a_signaling_task_without_pending_work_takes_no_turn_for_an_hour(
 ) -> Result<(), ControlError> {
     let config = config(&[], 0)?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let mut signaling =
-        Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let mut signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let (_stopper, mut stop) = watch::channel(false);
     let mut polls = 0_u32;
     {

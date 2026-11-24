@@ -33,7 +33,7 @@ async fn exercise(data: &Path) -> Result<(), ControlError> {
     let mut server = Server::bind(configuration("starting-password")?, 4, data.to_owned()).await?;
     let controller = server.controller();
     let addresses = (|| Ok::<_, ControlError>((server.local_addr()?, server.sip_listeners()?)))();
-    let generation = server.control.configuration_generation();
+    let generation = server.signaling.configuration_generation();
     let (port, receiver) = PublicationPort::channel();
     server.http = server.http.with_publication(receiver, generation);
     drop(port);
@@ -43,20 +43,23 @@ async fn exercise(data: &Path) -> Result<(), ControlError> {
     let mut caller = Some(caller);
     let (started, observed_start) = oneshot::channel();
     let (release, waiting) = mpsc::sync_channel(1);
-    server.control.begin_loading_for_shutdown_test(
-        data.to_owned(),
-        reply,
-        ControlError::Adapter(PRIMARY.into()),
-        move |_directory| {
-            started.send(()).map_err(|()| {
-                checkpoint_failure("fixture stopped before observing the started loader")
-            })?;
-            waiting
-                .recv_timeout(Duration::from_secs(5))
-                .map_err(checkpoint_failure)?;
-            Ok(replacement)
-        },
-    );
+    server
+        .signaling
+        .control_for_test()
+        .begin_loading_for_shutdown_test(
+            data.to_owned(),
+            reply,
+            ControlError::Adapter(PRIMARY.into()),
+            move |_directory| {
+                started.send(()).map_err(|()| {
+                    checkpoint_failure("fixture stopped before observing the started loader")
+                })?;
+                waiting
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(checkpoint_failure)?;
+                Ok(replacement)
+            },
+        );
     // The loader starts before the server, so that the shutdown cannot cancel it before it runs.
     let started = bounded(async { observed_start.await.map_err(failure) }).await;
     let task = tokio::spawn(server.run());

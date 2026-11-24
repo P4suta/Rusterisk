@@ -22,7 +22,6 @@ mod registered;
 struct Fixture {
     signaling: Option<Signaling>,
     driver: Option<JoinHandle<Result<(), ControlError>>>,
-    runner: JoinHandle<Result<(), ControlError>>,
     media: JoinHandle<Result<(), ControlError>>,
     controller: Controller,
     subscription: Option<Subscription>,
@@ -65,10 +64,10 @@ impl Fixture {
             Ok(prepared) => prepared,
             Err(primary) => return Err(preparation_failure(directory, primary)),
         };
-        let (controller, runner, effects) = Controller::new(config.clone(), 8);
+        let (controller, runner, _effects) = Controller::new(config.clone(), 8);
         let (media, hub, notices) = MediaHub::new(8);
         let signaling =
-            match Signaling::bind(config, controller.clone(), effects, media, notices).await {
+            match Signaling::bind(config, controller.clone(), runner, media, notices).await {
                 Ok(signaling) => signaling,
                 Err(primary) => return Err(preparation_failure(directory, primary)),
             };
@@ -80,12 +79,10 @@ impl Fixture {
             }
         };
         let media_stop = controller.shutdown_signal();
-        let runner = tokio::spawn(runner.run());
         let media = tokio::spawn(async move { hub.run(media_stop).await.map_err(failure) });
         let mut fixture = Self {
             signaling: Some(signaling),
             driver: None,
-            runner,
             media,
             controller,
             subscription: None,
@@ -97,15 +94,18 @@ impl Fixture {
             flows: [None, None],
             directory,
         };
-        let subscribed = tokio::time::timeout(
-            Duration::from_secs(2),
-            fixture
-                .controller
-                .subscribe(credentials, None, "app".into()),
-        )
-        .await
-        .map_err(failure)
-        .and_then(|result| result);
+        let controller = fixture.controller.clone();
+        let subscribed = match fixture.signaling.as_mut() {
+            Some(signaling) => tokio::time::timeout(
+                Duration::from_secs(2),
+                signaling.control_until(controller.subscribe(credentials, None, "app".into())),
+            )
+            .await
+            .map_err(failure)
+            .and_then(|result| result)
+            .and_then(|result| result),
+            None => Err(ControlError::Invalid("TLS fixture driver already started")),
+        };
         match subscribed {
             Ok(subscription) => {
                 fixture.subscription = Some(subscription);
@@ -127,9 +127,14 @@ impl Fixture {
         name: &str,
         server: TlsContext,
     ) -> Result<VerifiedFlow, ControlError> {
+        let controller = self.controller.clone();
+        let signaling = self
+            .signaling
+            .as_mut()
+            .ok_or(ControlError::Invalid("TLS fixture driver already started"))?;
         let call = tokio::time::timeout(
             Duration::from_secs(2),
-            self.controller.incoming(IncomingCall {
+            signaling.control_until(controller.incoming(IncomingCall {
                 id: ChannelId::try_from(name.to_owned())?,
                 endpoint: "phone".into(),
                 caller: "displayed-caller".into(),
@@ -139,18 +144,16 @@ impl Fixture {
                     application: "app".into(),
                     arguments: Vec::new(),
                 },
-            }),
+            })),
         )
         .await
-        .map_err(failure)??;
-        let lease =
-            tokio::time::timeout(Duration::from_secs(2), self.controller.call_lifetime(call))
-                .await
-                .map_err(failure)??;
-        let signaling = self
-            .signaling
-            .as_mut()
-            .ok_or(ControlError::Invalid("TLS fixture driver already started"))?;
+        .map_err(failure)???;
+        let lease = tokio::time::timeout(
+            Duration::from_secs(2),
+            signaling.control_until(controller.call_lifetime(call)),
+        )
+        .await
+        .map_err(failure)???;
         let setup = signaling.network.reserve_setup(0, generation)?;
         let peer = self.peer.local_addr().map_err(failure)?;
         let target =
@@ -300,7 +303,6 @@ impl Fixture {
         let Self {
             signaling,
             driver,
-            runner,
             media,
             controller,
             subscription,
@@ -315,7 +317,7 @@ impl Fixture {
         drop(signaling);
         async move {
             let mut result = result;
-            for task in [driver, Some(runner), Some(media)].into_iter().flatten() {
+            for task in [driver, Some(media)].into_iter().flatten() {
                 result = cleanup::combine(result, join(task).await);
             }
             let remote = peer.local_addr().map_err(failure);

@@ -80,9 +80,9 @@ struct Fixture {
 
 impl Fixture {
     async fn new(config: Config) -> Result<Self, ControlError> {
-        let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+        let (controller, runner, _effects) = Controller::new(config.clone(), 16);
         let (media, _hub, notices) = MediaHub::new(16);
-        let signaling = Signaling::bind(config, controller, effects, media, notices).await?;
+        let signaling = Signaling::bind(config, controller, runner, media, notices).await?;
         let local = signaling.network.local_addr(0)?;
         Ok(Self {
             signaling,

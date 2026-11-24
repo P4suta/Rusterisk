@@ -157,7 +157,7 @@ impl Signaling {
     }
 
     pub(super) async fn recording_completed(
-        &self,
+        &mut self,
         completed: Completion,
     ) -> Result<(), ControlError> {
         let Completion {

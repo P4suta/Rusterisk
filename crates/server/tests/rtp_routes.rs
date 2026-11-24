@@ -143,16 +143,15 @@ async fn bridge_calls(origin: CallOrigin) -> Result<(), ControlError> {
     .map_err(failure)?;
     config.rtp.start = 0;
     config.rtp.end = 0;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let mut target = signaling
         .listeners()?
         .first()
         .ok_or(ControlError::Invalid("Missing SIP listener"))?
         .1;
     target.set_ip(Ipv4Addr::LOCALHOST.into());
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let result = tokio::time::timeout(Duration::from_secs(6), async {
@@ -244,11 +243,9 @@ async fn bridge_calls(origin: CallOrigin) -> Result<(), ControlError> {
     .await
     .map_err(failure);
     controller.shutdown();
-    let runner = runner.await.map_err(failure);
     let signaling = signaling.await.map_err(failure);
     let hub = hub.await.map_err(failure);
     result??;
-    runner??;
     signaling??;
     hub?.map_err(failure)?;
     Ok(())

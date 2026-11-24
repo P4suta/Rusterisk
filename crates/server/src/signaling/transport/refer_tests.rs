@@ -134,9 +134,9 @@ async fn cached_reply_flow(usage: Usage) -> Result<(), ControlError> {
         "[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test\n",
         "[stream]\ntype=transport\nprotocol=tcp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=alice\npassword=password\n[aor]\ntype=aor\ncontact=sip:alice@127.0.0.1:5061;transport=tcp\n[alice]\ntype=endpoint\ntransport=stream\nauth=auth\naors=aor\ncontext=internal\nallow=ulaw\n", "", ""
     ).map_err(failure)?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 8);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 8);
     let (media, _hub, notices) = MediaHub::new(8);
-    let mut signaling = Signaling::bind(config, controller, effects, media, notices).await?;
+    let mut signaling = Signaling::bind(config, controller, runner, media, notices).await?;
     let address = signaling.network.local_addr(0)?;
     let source = CallKey {
         id: ChannelId::try_from("refer-flow".to_owned())?,

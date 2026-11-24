@@ -1,9 +1,10 @@
 use crate::clock::Clock;
 use crate::media::{MediaNotice, MediaNotices, MediaPort, Reservation};
 use crate::rtp::SocketPair;
+use crate::runner::Flow;
 use crate::storage::{PlaybackMedia, StoragePort};
 use crate::{
-    CallKey, ControlError, Controller, Effect, IncomingCall, MediaOwner, Milestone, Signal,
+    CallKey, ControlError, Controller, Effect, IncomingCall, MediaOwner, Milestone, Runner, Signal,
 };
 use rusterisk_api::{ChannelId, MediaUri};
 use rusterisk_config::{Config, Dtmf};
@@ -127,7 +128,8 @@ pub struct Signaling {
     startup_native_profiles: crate::call_profiles::BoundNativeProfiles,
     publication: Option<publication::NativePublication>,
     controller: Controller,
-    effects: mpsc::Receiver<Effect>,
+    // The call decisions that this task applies in the same turn as its signaling.
+    control: Runner,
     media: MediaPort,
     notices: MediaNotices,
     listeners: Vec<Listener>,
@@ -225,14 +227,99 @@ impl Signaling {
         self
     }
 
-    pub(crate) fn native_profiles(&self) -> crate::call_profiles::BoundNativeProfiles {
-        self.native_profiles.clone()
+    pub(crate) fn configuration_generation(&self) -> rusterisk_core::SettingsGeneration {
+        self.control.configuration_generation()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn control_for_test(&mut self) -> &mut Runner {
+        &mut self.control
+    }
+
+    // Serves the call decisions until the future resolves, and leaves their effects queued.
+    #[cfg(test)]
+    pub(crate) async fn control_until<T>(
+        &mut self,
+        future: impl std::future::Future<Output = T>,
+    ) -> Result<T, ControlError> {
+        let mut future = std::pin::pin!(future);
+        loop {
+            tokio::select! {
+                biased;
+                output = &mut future => return Ok(output),
+                input = self.control.next(true) => {
+                    let now = self.controller.clock().now_ms()?;
+                    if self.control.handle(input, now)? == Flow::Stop {
+                        return Err(ControlError::Adapter("Control stopped".into()));
+                    }
+                    self.control.settle(now)?;
+                }
+            }
+        }
+    }
+
+    // Serves the call decisions until one of them queues an effect.
+    #[cfg(test)]
+    pub(crate) async fn next_effect_for_test(&mut self) -> Result<Effect, ControlError> {
+        loop {
+            if let Some(effect) = self.control.take_effect() {
+                return Ok(effect);
+            }
+            let input = self.control.next(true).await;
+            let now = self.controller.clock().now_ms()?;
+            if self.control.handle(input, now)? == Flow::Stop {
+                return Err(ControlError::Adapter("Control stopped".into()));
+            }
+            self.control.settle(now)?;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn queued_effect_for_test(&mut self) -> Option<Effect> {
+        self.control.take_effect()
+    }
+
+    // Waits for a native job and serves the call decisions that the job asks for meanwhile.
+    #[cfg(test)]
+    pub(in crate::signaling) async fn native_job_for_test(
+        &mut self,
+    ) -> Result<Option<Result<outbound::Completion, tokio::task::JoinError>>, ControlError> {
+        loop {
+            tokio::select! {
+                biased;
+                completed = self.native_jobs.join_next() => return Ok(completed),
+                input = self.control.next(true) => {
+                    let now = self.controller.clock().now_ms()?;
+                    if self.control.handle(input, now)? == Flow::Stop {
+                        return Err(ControlError::Adapter("Control stopped".into()));
+                    }
+                    self.control.settle(now)?;
+                }
+            }
+        }
+    }
+
+    // Replaces the call decisions with a configured form of themselves.
+    pub(crate) fn with_control(mut self, update: impl FnOnce(Runner) -> Runner) -> Self {
+        let control = self.control;
+        self.control = update(control);
+        self
+    }
+
+    // Replaces the call decisions with a configured form of themselves, or reports why it failed.
+    pub fn try_with_control(
+        mut self,
+        update: impl FnOnce(Runner) -> Result<Runner, ControlError>,
+    ) -> Result<Self, ControlError> {
+        let control = self.control;
+        self.control = update(control)?;
+        Ok(self)
     }
 
     pub async fn bind(
         mut config: Config,
         controller: Controller,
-        effects: mpsc::Receiver<Effect>,
+        control: Runner,
         media: MediaPort,
         notices: MediaNotices,
     ) -> Result<Self, ControlError> {
@@ -257,15 +344,17 @@ impl Signaling {
                 engine: Engine::new(scoped, seed).with_transport(transport.protocol),
             });
         }
-        controller.bind_native_profiles(native_profiles.clone())?;
-        controller.bind_websocket_profiles(websocket_clients.clone())?;
+        let control = control
+            .compose()
+            .with_native_profiles(native_profiles.clone())?
+            .with_websocket_profiles(websocket_clients.clone())?;
         Ok(Self {
             config,
             startup_native_profiles: native_profiles.clone(),
             native_profiles,
             publication: None,
             controller,
-            effects,
+            control,
             media,
             notices,
             listeners,
@@ -325,9 +414,11 @@ impl Signaling {
         Ok(())
     }
 
-    async fn notify(&self, signal: Signal) -> Result<(), ControlError> {
+    // Applies a signal to the call decisions at once, so that decisions follow the order of their inputs.
+    async fn notify(&mut self, signal: Signal) -> Result<(), ControlError> {
         if !self.controller.is_stopping() {
-            self.controller.signal(signal).await?;
+            let now = self.controller.clock().now_ms()?;
+            self.control.apply_signal(signal, now)?;
         }
         Ok(())
     }
@@ -461,10 +552,10 @@ impl Signaling {
                     presence,
                 } => match settings {
                     Some(settings) => {
+                        let now = self.controller.clock().now_ms()?;
                         match self
-                            .controller
-                            .observe_endpoint(settings, endpoint, presence)
-                            .await
+                            .control
+                            .endpoint_observation(settings, endpoint, presence, now)?
                         {
                             Ok(()) => {}
                             Err(ControlError::Conflict(_) | ControlError::NotFound(_)) => {
@@ -657,7 +748,8 @@ impl Signaling {
                 .session
                 .direction,
         );
-        let key = self.controller.incoming(incoming).await?;
+        let now = self.controller.clock().now_ms()?;
+        let key = self.control.incoming_call(incoming, now)??;
         self.calls.insert(
             key.clone(),
             Active {
@@ -828,9 +920,9 @@ impl Signaling {
                 channel_variables,
             } => {
                 let prepared = self
-                    .controller
-                    .take_websocket_profile(key.clone(), settings)
-                    .await;
+                    .control
+                    .websocket_profile(&key, settings)
+                    .and_then(crate::control::WebSocketStartCapsule::into_profile);
                 let started = match prepared {
                     Ok(prepared) => {
                         self.start_websocket(key.clone(), prepared, options, channel_variables)
@@ -1005,10 +1097,7 @@ impl Signaling {
                 if self.calls.contains_key(&key) || self.native_pending.contains_key(&key) {
                     return Ok(());
                 }
-                let capsule = self
-                    .controller
-                    .take_native_profile(key.clone(), settings)
-                    .await;
+                let capsule = self.control.native_profile(&key, settings);
                 let profile = match capsule {
                     Ok(capsule) => capsule.into_profile(),
                     Err(ControlError::Conflict(_) | ControlError::NotFound(_)) => {
@@ -1138,7 +1227,7 @@ impl Signaling {
     }
 
     async fn music_failed(
-        &self,
+        &mut self,
         owner: MediaOwner,
         token: MediaTaskToken,
         error: ControlError,
@@ -1153,7 +1242,7 @@ impl Signaling {
     }
 
     async fn playback_completed(
-        &self,
+        &mut self,
         (owner, token, result): PlaybackResult,
     ) -> Result<(), ControlError> {
         let completion = match result {
@@ -1434,12 +1523,28 @@ impl Signaling {
         clock: Clock,
     ) -> Result<(), ControlError> {
         let mut overdue = crate::overdue::Overdue::every(REGISTRATION_INTERVAL_MS);
+        let mut decisions = crate::overdue::Overdue::every(crate::runner::OVERDUE_RETRY_MS);
         let publication_stopped = stop.clone();
+        let mut before = self.control.wake()?;
         loop {
             if *stop.borrow() {
                 break;
             }
-            let timer = overdue.timer(self.wake(clock.now_ms()?));
+            // Every input ends with the call decisions settled and their effects applied.
+            // The loop does this before it waits, so an input that continues early still has it.
+            let now = clock.now_ms()?;
+            self.control.settle(now)?;
+            if let Err(error) = self.apply_effects(now).await {
+                if *stop.borrow() {
+                    break;
+                }
+                return Err(error);
+            }
+            decisions.settled(before, self.control.wake()?, now);
+            let timer = overdue
+                .timer(self.wake(clock.now_ms()?))
+                .earliest(decisions.timer(self.control.wake()?));
+            before = self.control.wake()?;
             let (prepared, commands) = match &mut self.publication {
                 Some(publication) => (
                     Some(&mut publication.receiver.prepared),
@@ -1460,12 +1565,9 @@ impl Signaling {
                     None => break,
                 },
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { break; },
-                effect = self.effects.recv() => match effect {
-                    Some(effect) => {
-                        let now = clock.now_ms()?;
-                        if let Err(error) = self.effect(effect, now).await { if *stop.borrow() { break; } return Err(error); }
-                    }
-                    None => break,
+                input = self.control.next(true) => {
+                    let now = clock.now_ms()?;
+                    if self.control.handle(input, now)? == Flow::Stop { break; }
                 },
                 packet = self.network.next() => {
                     let now = clock.now_ms()?;
@@ -1577,11 +1679,24 @@ impl Signaling {
         Ok(())
     }
 
+    // Applies the effects of the call decisions, including the effects that applying them causes.
+    async fn apply_effects(&mut self, now: u64) -> Result<(), ControlError> {
+        while let Some(effect) = self.control.take_effect() {
+            self.effect(effect, now).await?;
+        }
+        Ok(())
+    }
+
     pub async fn run(mut self, mut stop: watch::Receiver<bool>) -> Result<(), ControlError> {
         let clock = self.controller.clock();
         let result = self.serve(&mut stop, clock).await;
+        if let Err(error) = &result {
+            self.control.fail(error);
+        }
+        // The call decisions end first, and the cleanup below ends every call that they leave.
+        let mut cleanup = self.control.close().await;
         let now = clock.now_ms()?;
-        let mut cleanup = self.finish_registrations().await;
+        cleanup = cleanup::combine(cleanup, self.finish_registrations().await);
         cleanup = cleanup::combine(cleanup, self.close_refer_routes(now));
         cleanup = cleanup::combine(cleanup, self.finish_native().await);
         cleanup = cleanup::combine(cleanup, self.finish_streams().await);

@@ -193,11 +193,10 @@ async fn registration_flow(scope: Scope) -> Result<(), ControlError> {
         .first_mut()
         .ok_or(ControlError::Capacity)?
         .client_uri = RegistrationAddress::parse("sip:line@provider.example").map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let stopped = controller.shutdown_signal();
-    let runner = tokio::spawn(runner.run());
     let signaling = tokio::spawn(signaling.run(stopped));
     let result: Result<(), ControlError> = async {
         let initial = receive(&peer).await?;
@@ -221,6 +220,5 @@ async fn registration_flow(scope: Scope) -> Result<(), ControlError> {
     }.await;
     controller.shutdown();
     let signaling_result = finish(signaling).await;
-    let runner_result = finish(runner).await;
-    outcome(result, signaling_result, runner_result)
+    outcome(result, signaling_result)
 }

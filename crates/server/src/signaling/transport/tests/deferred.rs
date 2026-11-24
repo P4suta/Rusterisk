@@ -38,10 +38,10 @@ async fn media_acknowledgements_never_send_old_answers_on_replacement_connection
         "",
     )
     .map_err(failure)?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 8);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 8);
     let (media, hub, notices) = MediaHub::new(8);
     let mut signaling =
-        Signaling::bind(config, controller.clone(), effects, media.clone(), notices).await?;
+        Signaling::bind(config, controller.clone(), runner, media.clone(), notices).await?;
     let key = CallKey {
         id: ChannelId::try_from("deferred-call".to_owned())?,
         generation: 1,
@@ -139,9 +139,9 @@ async fn closed_deferred_answers_suppress_cached_retries_on_replacement_connecti
             "",
         )
         .map_err(failure)?;
-        let (controller, _runner, effects) = Controller::new(config.clone(), 8);
+        let (controller, runner, _effects) = Controller::new(config.clone(), 8);
         let (media, _hub, notices) = MediaHub::new(8);
-        let mut signaling = Signaling::bind(config, controller, effects, media, notices).await?;
+        let mut signaling = Signaling::bind(config, controller, runner, media, notices).await?;
         let key = CallKey {
             id: ChannelId::try_from("closed-deferred-call".to_owned())?,
             generation: 1,

@@ -62,12 +62,11 @@ async fn http_uuid_spelling_survives_stasis_entry_and_preserves_binary_identity(
         "",
     )
     .map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let media_stop = controller.shutdown_signal();
     let signal_stop = controller.shutdown_signal();
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(media_stop));
     let signaling = tokio::spawn(signaling.run(signal_stop));
     let mut peers = Vec::with_capacity(3);
@@ -148,8 +147,8 @@ async fn http_uuid_spelling_survives_stasis_entry_and_preserves_binary_identity(
     }
     .await;
     controller.shutdown();
-    let (runner, signaling, hub) = tokio::join!(finish(runner), finish(signaling), finish(hub));
-    let cleanup = runner.and(signaling).and(hub);
+    let (signaling, hub) = tokio::join!(finish(signaling), finish(hub));
+    let cleanup = signaling.and(hub);
     let observations = match (result, cleanup) {
         (Ok(observations), Ok(())) => observations,
         (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),

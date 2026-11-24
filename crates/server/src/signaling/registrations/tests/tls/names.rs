@@ -85,10 +85,9 @@ async fn registration(identity: Identity, accepted: bool) -> Result<(), ControlE
         .first_mut()
         .ok_or(ControlError::Capacity)?
         .server_uri = RegistrarUri::parse(Protocol::Tls, uri).map_err(failure)?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let mut signaling =
-        Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let mut signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     signaling.resolver = Ok(dns::resolver(&dns)?);
     let local = signaling
         .listeners()?

@@ -16,6 +16,8 @@ mod clock_tests;
 mod closure;
 use closure::{ClosureLatch, ClosureNotice};
 #[cfg(test)]
+mod composed_tests;
+#[cfg(test)]
 mod deadline_tests;
 mod diagnosis;
 mod endpoint_queries;
@@ -53,7 +55,13 @@ struct StorageServices {
 }
 
 const MAX_PENDING_EFFECTS: usize = 64 * 3 + 1;
-const OVERDUE_RETRY_MS: u64 = 100;
+
+// Where control effects go: through a channel to a separate signaling task, or to the turn that composes both.
+enum Outlet {
+    Channel(mpsc::Sender<Effect>),
+    Turn,
+}
+pub(crate) const OVERDUE_RETRY_MS: u64 = 100;
 
 enum Admission {
     Recording {
@@ -107,27 +115,9 @@ enum Request {
         channel: rusterisk_api::ChannelId,
         reply: oneshot::Sender<Result<Outcome, ControlError>>,
     },
-    BindWebSocketProfiles(crate::signaling::PreparedWebSocketProfiles),
-    TakeWebSocketProfile {
-        key: CallKey,
-        settings: rusterisk_core::SettingsGeneration,
-        reply: oneshot::Sender<Result<crate::control::WebSocketStartCapsule, ControlError>>,
-    },
-    ObserveEndpoint {
-        settings: rusterisk_core::SettingsGeneration,
-        endpoint: String,
-        presence: rusterisk_core::ContactPresence,
-        reply: oneshot::Sender<Result<(), ControlError>>,
-    },
     Info {
         only: Option<String>,
         reply: oneshot::Sender<Result<rusterisk_api::AsteriskInfo, ControlError>>,
-    },
-    BindNativeProfiles(crate::call_profiles::BoundNativeProfiles),
-    TakeNativeProfile {
-        key: CallKey,
-        settings: rusterisk_core::SettingsGeneration,
-        reply: oneshot::Sender<Result<crate::control::NativeStartCapsule, ControlError>>,
     },
     Sounds {
         credentials: Credentials,
@@ -216,7 +206,7 @@ pub struct Runner {
     config: Config,
     requests: mpsc::Receiver<Request>,
     signals: mpsc::Receiver<Signal>,
-    effects: mpsc::Sender<Effect>,
+    effects: Outlet,
     pending_effects: VecDeque<Effect>,
     shutdown: watch::Receiver<bool>,
     stop: watch::Sender<bool>,
@@ -255,15 +245,6 @@ impl Controller {
             .map_err(|_| ControlError::Adapter("Control task stopped".into()))?
     }
 
-    pub(crate) fn bind_native_profiles(
-        &self,
-        profiles: crate::call_profiles::BoundNativeProfiles,
-    ) -> Result<(), ControlError> {
-        self.requests
-            .try_send(Request::BindNativeProfiles(profiles))
-            .map_err(|_| ControlError::Capacity)
-    }
-
     pub async fn incoming(&self, call: IncomingCall) -> Result<CallKey, ControlError> {
         let (reply, receiver) = oneshot::channel();
         self.requests
@@ -300,7 +281,7 @@ impl Controller {
                 config,
                 requests: request_receiver,
                 signals: signal_receiver,
-                effects,
+                effects: Outlet::Channel(effects),
                 pending_effects: VecDeque::with_capacity(MAX_PENDING_EFFECTS),
                 shutdown: shutdown_receiver,
                 stop: shutdown,
@@ -536,25 +517,61 @@ impl Runner {
         Ok(())
     }
 
+    // The effects that control can still emit before its outlet refuses one.
+    fn effect_room(&self) -> usize {
+        match &self.effects {
+            Outlet::Channel(sender) => sender.capacity(),
+            Outlet::Turn => MAX_PENDING_EFFECTS.saturating_sub(self.pending_effects.len()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn effect_sender(&self) -> Result<&mpsc::Sender<Effect>, ControlError> {
+        match &self.effects {
+            Outlet::Channel(sender) => Ok(sender),
+            Outlet::Turn => Err(ControlError::Conflict(
+                "A composed control task has no effect channel",
+            )),
+        }
+    }
+
+    // Sends effects to the turn that composes signaling and call decisions.
+    pub(crate) fn compose(mut self) -> Self {
+        self.effects = Outlet::Turn;
+        self
+    }
+
+    // Takes the next effect that the composing turn applies.
+    pub(crate) fn take_effect(&mut self) -> Option<Effect> {
+        self.pending_effects.pop_front()
+    }
+
+    // Marks a failed composed task, as a failed control task marks itself.
+    pub(crate) fn fail(&mut self, error: &ControlError) {
+        self.retain_reload_failure(error);
+        self.stop.send_replace(true);
+    }
+
     fn emit_effect(&mut self, effect: Effect) -> Result<(), ControlError> {
         if let Effect::Release { key } = &effect {
             self.call_lifetimes.remove(key);
         }
-        let effect = if self.pending_effects.is_empty() {
-            match self.effects.try_send(effect) {
-                Ok(()) => return Ok(()),
-                Err(mpsc::error::TrySendError::Full(effect)) => effect,
-                Err(mpsc::error::TrySendError::Closed(_)) if *self.shutdown.borrow() => {
-                    return Ok(())
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    return Err(ControlError::Adapter(
-                        "Signaling effect receiver closed".into(),
-                    ))
+        let effect = match &self.effects {
+            Outlet::Channel(sender) if self.pending_effects.is_empty() => {
+                match sender.try_send(effect) {
+                    Ok(()) => return Ok(()),
+                    Err(mpsc::error::TrySendError::Full(effect)) => effect,
+                    Err(mpsc::error::TrySendError::Closed(_)) if *self.shutdown.borrow() => {
+                        return Ok(())
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        return Err(ControlError::Adapter(
+                            "Signaling effect receiver closed".into(),
+                        ))
+                    }
                 }
             }
-        } else {
-            effect
+            Outlet::Channel(_) | Outlet::Turn => effect,
         };
         if self.pending_effects.len() >= MAX_PENDING_EFFECTS {
             return Err(ControlError::Capacity);
@@ -669,39 +686,11 @@ impl Runner {
             } => {
                 self.request_answer(credentials, origin, channel, reply, now_ms);
             }
-            Request::BindWebSocketProfiles(profiles) => {
-                self.control.bind_websocket_profiles(profiles)?
-            }
-            Request::TakeWebSocketProfile {
-                key,
-                settings,
-                reply,
-            } => {
-                self.websocket_profile_request(key, settings, reply)?;
-            }
-            Request::ObserveEndpoint {
-                settings,
-                endpoint,
-                presence,
-                reply,
-            } => {
-                self.endpoint_observation_request(settings, endpoint, presence, reply, now_ms)?;
-            }
             Request::Info { only, reply } => {
                 let selected = self.control.server_info().selected(only.as_deref());
                 if reply.send(Ok(selected)).is_err() {
                     tracing::debug!("Server info requester disconnected");
                 }
-            }
-            Request::BindNativeProfiles(profiles) => {
-                self.control.bind_native_profiles(profiles)?;
-            }
-            Request::TakeNativeProfile {
-                key,
-                settings,
-                reply,
-            } => {
-                self.native_profile_request(key, settings, reply)?;
             }
             Request::Sounds {
                 credentials,
@@ -802,7 +791,7 @@ impl Runner {
                     .and_then(|()| {
                         if (!self.pending_effects.is_empty() && !action.read_only())
                             || (self.admissions_paused() && reload::new_settings(&action))
-                            || self.effects.capacity() < self.control.effect_budget(&action)
+                            || self.effect_room() < self.control.effect_budget(&action)
                             || (recording
                                 && (self.recording_admissions.len() >= 64
                                     || now_ms.checked_add(5000).is_none()))
@@ -982,7 +971,7 @@ impl Runner {
         Ok((key, outcome))
     }
 
-    fn wake(&self) -> Result<Wake, ControlError> {
+    pub(crate) fn wake(&self) -> Result<Wake, ControlError> {
         let mut wake = self.control.expiry_wake();
         if self.pending_effects.is_empty() && !self.admissions_paused() {
             wake = wake.earliest(self.control.dialplan_wake());
@@ -1008,7 +997,7 @@ impl Runner {
         Ok(wake)
     }
 
-    fn settle(&mut self, now: u64) -> Result<(), ControlError> {
+    pub(crate) fn settle(&mut self, now: u64) -> Result<(), ControlError> {
         self.tick_reload()?;
         self.sessions
             .retain(|_, session| !session.lifetime.is_closed());
@@ -1037,7 +1026,12 @@ impl Runner {
     }
 
     async fn serve(&mut self) -> Result<(), ControlError> {
-        let effect_sender = self.effects.clone();
+        let Outlet::Channel(effect_sender) = &self.effects else {
+            return Err(ControlError::Conflict(
+                "A composed control task runs inside signaling",
+            ));
+        };
+        let effect_sender = effect_sender.clone();
         let clock = self.clock;
         let mut overdue = crate::overdue::Overdue::every(OVERDUE_RETRY_MS);
         loop {
@@ -1066,8 +1060,20 @@ impl Runner {
     }
 
     async fn drain_effects(&mut self, deadline: tokio::time::Instant) -> Result<(), ControlError> {
+        let Outlet::Channel(sender) = &self.effects else {
+            // The composed task ends every remaining call in its own cleanup.
+            if !self.pending_effects.is_empty() {
+                tracing::debug!(
+                    pending = self.pending_effects.len(),
+                    "pending effects end with the composed task"
+                );
+            }
+            self.pending_effects.clear();
+            return Ok(());
+        };
+        let sender = sender.clone();
         while !self.pending_effects.is_empty() {
-            match tokio::time::timeout_at(deadline, self.effects.reserve()).await {
+            match tokio::time::timeout_at(deadline, sender.reserve()).await {
                 Ok(Ok(permit)) => {
                     if let Some(effect) = self.pending_effects.pop_front() {
                         permit.send(effect);
@@ -1087,7 +1093,7 @@ impl Runner {
         Ok(())
     }
 
-    async fn close(&mut self) -> Result<(), ControlError> {
+    pub(crate) async fn close(&mut self) -> Result<(), ControlError> {
         self.media_leases.clear();
         self.call_lifetimes.clear();
         self.close_recording_admissions();

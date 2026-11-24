@@ -146,9 +146,9 @@ async fn verified_tls_registration_authenticates_and_refreshes_on_one_owned_flow
         &identity,
         &identity,
     )?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let local = signaling
         .listeners()?
         .first()
@@ -215,10 +215,9 @@ async fn untrusted_or_name_mismatched_tls_registrars_receive_no_registration_byt
         let registrar = TcpListener::bind("127.0.0.1:0").await.map_err(failure)?;
         let (config, _uri) =
             configuration(registrar.local_addr().map_err(failure)?, &matching, trusted)?;
-        let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+        let (controller, runner, _effects) = Controller::new(config.clone(), 16);
         let (media, _hub, notices) = MediaHub::new(16);
-        let signaling =
-            Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+        let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
         let local = signaling
             .listeners()?
             .first()

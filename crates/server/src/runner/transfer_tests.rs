@@ -208,7 +208,7 @@ async fn a_transfer_survivor_reserves_its_final_notification_before_hangup(
     runner.control.subscribe("calls")?;
     let survivor = prepare(&mut runner, 0)?;
     fill(&mut runner, &survivor, 126)?;
-    assert_eq!(runner.effects.capacity(), 2);
+    assert_eq!(runner.effect_room(), 2);
     assert!(matches!(
         apply(&mut runner, Action::Hangup(survivor.id.clone())),
         Err(ControlError::Capacity)

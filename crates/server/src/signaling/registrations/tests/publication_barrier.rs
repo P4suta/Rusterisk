@@ -73,7 +73,7 @@ async fn published_registrations_wait_for_resume_before_their_first_transaction(
     let registrar = UdpSocket::bind("127.0.0.1:0").await.map_err(failure)?;
     let remote = registrar.local_addr().map_err(failure)?;
     let config = config(&[&remote.to_string()], 0)?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
     let mut lifetimes = SettingsLifetimes::new(92);
     let base = lifetimes.current();
@@ -84,7 +84,7 @@ async fn published_registrations_wait_for_resume_before_their_first_transaction(
         .map_err(|_| ControlError::Capacity)?
         .generation();
     let (port, receiver) = PublicationPort::channel();
-    let mut signaling = Signaling::bind(config.clone(), controller, effects, media, notices)
+    let mut signaling = Signaling::bind(config.clone(), controller, runner, media, notices)
         .await?
         .with_publication(receiver, base);
     let primary = tokio::time::timeout(Duration::from_secs(5), async {

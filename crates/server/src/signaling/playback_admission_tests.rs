@@ -237,13 +237,12 @@ async fn exercise(
         .prepare_music(config.music_on_hold.clone())
         .await
         .map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 2);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 2);
     let runner = runner.with_music(catalog)?;
     let (media, hub, notices) = MediaHub::new(2);
-    let mut signaling =
-        Signaling::bind(config, controller.clone(), effects, media.clone(), notices)
-            .await?
-            .with_storage(storage);
+    let mut signaling = Signaling::bind(config, controller.clone(), runner, media.clone(), notices)
+        .await?
+        .with_storage(storage);
     let listeners = signaling.listeners()?;
     let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
     let sockets = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
@@ -251,14 +250,13 @@ async fn exercise(
     let key_id = id("music-admission")?;
     let playback_id = id("completion-sentinel")?;
     let (release, _) = watch::channel(false);
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let result = tokio::time::timeout(Duration::from_secs(5), async {
-        let mut subscription = controller
-            .subscribe(credentials()?, None, "app".into())
-            .await?;
-        let key = controller
-            .incoming(IncomingCall {
+        let mut subscription = signaling
+            .control_until(controller.subscribe(credentials()?, None, "app".into()))
+            .await??;
+        let key = signaling
+            .control_until(controller.incoming(IncomingCall {
                 id: key_id.clone(),
                 endpoint: "phone".into(),
                 caller: "100".into(),
@@ -268,15 +266,17 @@ async fn exercise(
                     application: "app".into(),
                     arguments: Vec::new(),
                 },
-            })
-            .await?;
+            }))
+            .await??;
         controller
             .signal(Signal::Milestone {
                 key: key.clone(),
                 milestone: Milestone::Answered,
             })
             .await?;
-        answered(&mut subscription.events, &key).await?;
+        signaling
+            .control_until(answered(&mut subscription.events, &key))
+            .await??;
         media
             .attach(
                 key.clone(),
@@ -300,18 +300,18 @@ async fn exercise(
                 direction_reply: None,
             },
         );
-        controller
-            .execute(
+        signaling
+            .control_until(controller.execute(
                 credentials()?,
                 None,
                 Action::CreateBridge {
                     id: id("sentinel")?,
                     name: "sentinel".into(),
                 },
-            )
-            .await?;
-        controller
-            .execute(
+            ))
+            .await??;
+        signaling
+            .control_until(controller.execute(
                 credentials()?,
                 None,
                 Action::PlayBridge {
@@ -321,33 +321,25 @@ async fn exercise(
                     language: None,
                     options: Default::default(),
                 },
-            )
-            .await?;
-        let effect = signaling
-            .effects
-            .recv()
-            .await
-            .ok_or(ControlError::Capacity)?;
+            ))
+            .await??;
+        let effect = signaling.next_effect_for_test().await?;
         let Effect::PlayMedia { owner, token, .. } = effect else {
             return Err(ControlError::Invalid("Expected the sentinel playback"));
         };
         let handles = fill_jobs(&mut signaling, readiness, owner, token, &release).await?;
-        let accepted = controller
-            .execute(
+        let accepted = signaling
+            .control_until(controller.execute(
                 credentials()?,
                 None,
                 Action::StartMusic {
                     channel: key.id.clone(),
                     class: None,
                 },
-            )
-            .await?;
+            ))
+            .await??;
         assert_eq!(accepted.status, 204);
-        let effect = signaling
-            .effects
-            .recv()
-            .await
-            .ok_or(ControlError::Capacity)?;
+        let effect = signaling.next_effect_for_test().await?;
         let Effect::StartMusic {
             key: owner, token, ..
         } = &effect
@@ -363,20 +355,30 @@ async fn exercise(
         } else {
             assert_eq!(signaling.playbacks.len(), 64);
         }
-        let finished =
-            completion_marker(&controller, &mut subscription.events, &key, &playback_id).await?;
+        let finished = signaling
+            .control_until(completion_marker(
+                &controller,
+                &mut subscription.events,
+                &key,
+                &playback_id,
+            ))
+            .await??;
         assert_eq!(finished, 0);
-        let stopped = controller
-            .execute(credentials()?, None, Action::StopMusic(key.id.clone()))
-            .await?;
+        let stopped = signaling
+            .control_until(controller.execute(
+                credentials()?,
+                None,
+                Action::StopMusic(key.id.clone()),
+            ))
+            .await??;
         assert_eq!(stopped.status, 204);
         match readiness {
             Readiness::Completed => {
-                let effect = signaling.effects.try_recv().map_err(|error| {
-                    failure(format!(
-                        "Completed actor tasks blocked accepted music: {error}"
-                    ))
-                })?;
+                let effect = signaling
+                    .queued_effect_for_test()
+                    .ok_or(ControlError::Invalid(
+                        "Completed actor tasks blocked accepted music",
+                    ))?;
                 if let Effect::ControlPlayback { token, operation } = &effect {
                     assert_eq!(*token, music);
                     assert_eq!(*operation, crate::media::PlaybackControl::Stop);
@@ -386,10 +388,7 @@ async fn exercise(
                 signaling.effect(effect, 1).await?;
             }
             Readiness::Live => {
-                assert!(matches!(
-                    signaling.effects.try_recv(),
-                    Err(mpsc::error::TryRecvError::Empty)
-                ));
+                assert!(signaling.queued_effect_for_test().is_none());
                 assert!(handles.iter().all(|handle| !handle.is_finished()));
             }
         }
@@ -421,7 +420,6 @@ async fn exercise(
     result = combine(result, drained);
     result = combine(result, signaling.network.close().await);
     controller.shutdown();
-    result = combine(result, joined(runner).await);
     result = combine(result, joined(hub).await);
     drop(signaling);
     for (_, address) in listeners {

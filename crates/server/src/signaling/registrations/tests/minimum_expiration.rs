@@ -37,9 +37,9 @@ impl Driver {
             .ok_or(ControlError::Capacity)?;
         settings.expiration = expiration;
         settings.server_uri = RegistrarUri::parse(Protocol::Udp, &uri).map_err(failure)?;
-        let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+        let (controller, runner, _effects) = Controller::new(config.clone(), 16);
         let (media, _hub, notices) = MediaHub::new(16);
-        let signaling = Signaling::bind(config, controller, effects, media, notices).await?;
+        let signaling = Signaling::bind(config, controller, runner, media, notices).await?;
         let local = signaling
             .listeners()?
             .first()

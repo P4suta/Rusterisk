@@ -116,10 +116,10 @@ async fn control_cleanup_closes_the_lease_before_a_pending_release_effect_is_del
         .claim_call_lifetime(fixture.key.clone(), receiver, reply);
     receipt.await.map_err(failure)??;
     let lease = CallLease { lifetime };
-    for _ in 0..fixture.runner.effects.capacity() {
+    for _ in 0..fixture.runner.effect_room() {
         fixture
             .runner
-            .effects
+            .effect_sender()?
             .try_send(Effect::Gate {
                 key: fixture.key.clone(),
                 gate: rusterisk_core::AudioGate::Closed,

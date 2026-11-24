@@ -91,23 +91,4 @@ impl Control {
             .take()
             .ok_or(ControlError::Conflict("WebSocket profile already claimed"))
     }
-
-    pub(crate) fn restore_websocket_profile(
-        &mut self,
-        key: &CallKey,
-        generation: SettingsGeneration,
-        capsule: WebSocketStartCapsule,
-    ) -> Result<(), ControlError> {
-        if !capsule.matches(key, generation) {
-            return Err(ControlError::Conflict(
-                "WebSocket capsule generation changed",
-            ));
-        }
-        let entry = self.websocket_entry(key, generation)?;
-        if entry.pending_websocket.is_some() {
-            return Err(ControlError::Conflict("WebSocket profile already pending"));
-        }
-        entry.pending_websocket = Some(capsule);
-        Ok(())
-    }
 }

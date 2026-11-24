@@ -29,14 +29,9 @@ async fn finish(mut task: JoinHandle<Result<(), ControlError>>) -> Result<(), Co
 fn outcome(
     primary: Result<(), ControlError>,
     signaling: Result<(), ControlError>,
-    runner: Result<(), ControlError>,
 ) -> Result<(), ControlError> {
     let mut failures = String::new();
-    for (name, result) in [
-        ("registration", primary),
-        ("signaling cleanup", signaling),
-        ("runner cleanup", runner),
-    ] {
+    for (name, result) in [("registration", primary), ("signaling cleanup", signaling)] {
         if let Err(error) = result {
             if !failures.is_empty() {
                 failures.push_str("; ");
@@ -69,16 +64,15 @@ async fn configured_udp_registration_advertises_the_owned_signaling_address(
     let peer = UdpSocket::bind("127.0.0.1:0").await.map_err(failure)?;
     let remote = peer.local_addr().map_err(failure)?;
     let config = settings(remote)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let local = signaling
         .listeners()?
         .first()
         .ok_or(ControlError::Capacity)?
         .1;
     let stopped = controller.shutdown_signal();
-    let runner = tokio::spawn(runner.run());
     let signaling = tokio::spawn(signaling.run(stopped));
     let result: Result<(), ControlError> = async {
         let mut bytes = [0; 16385];
@@ -141,8 +135,7 @@ async fn configured_udp_registration_advertises_the_owned_signaling_address(
     .await;
     controller.shutdown();
     let signaling_result = finish(signaling).await;
-    let runner_result = finish(runner).await;
-    outcome(result, signaling_result, runner_result)?;
+    outcome(result, signaling_result)?;
     let _rebound = UdpSocket::bind(local).await.map_err(failure)?;
     assert!(
         tokio::time::timeout(Duration::from_millis(50), peer.recv_from(&mut [0; 16385]))
@@ -166,10 +159,10 @@ async fn tls_registration_requires_configured_listener_identity() -> Result<(), 
         .ok_or(ControlError::Capacity)?
         .server_uri =
         RegistrarUri::parse(Protocol::Tls, "sips:127.0.0.1:5071;transport=tcp").map_err(failure)?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
     assert!(matches!(
-        Signaling::bind(config, controller, effects, media, notices).await,
+        Signaling::bind(config, controller, runner, media, notices).await,
         Err(ControlError::Invalid("Encryption configuration missing"))
     ));
     Ok(())
@@ -181,22 +174,20 @@ async fn settings_without_registrations_keep_the_listener_silent_and_release_it_
     let peer = UdpSocket::bind("127.0.0.1:0").await.map_err(failure)?;
     let mut config = settings(peer.local_addr().map_err(failure)?)?;
     config.registrations.clear();
-    let (controller, runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let local = signaling
         .listeners()?
         .first()
         .ok_or(ControlError::Capacity)?
         .1;
     let stopped = controller.shutdown_signal();
-    let runner = tokio::spawn(runner.run());
     let signaling = tokio::spawn(signaling.run(stopped));
     let result =
         tokio::time::timeout(Duration::from_millis(100), peer.recv_from(&mut [0; 16385])).await;
     controller.shutdown();
     let signaling_result = finish(signaling).await;
-    let runner_result = finish(runner).await;
     let primary = if result.is_err() {
         Ok(())
     } else {
@@ -204,7 +195,7 @@ async fn settings_without_registrations_keep_the_listener_silent_and_release_it_
             "Unconfigured registration sent a packet",
         ))
     };
-    outcome(primary, signaling_result, runner_result)?;
+    outcome(primary, signaling_result)?;
     let _rebound = UdpSocket::bind(local).await.map_err(failure)?;
     Ok(())
 }

@@ -300,7 +300,7 @@ async fn work_that_backpressure_defers_retries_at_the_former_interval() -> Resul
         "later",
     )?;
     while runner
-        .effects
+        .effect_sender()?
         .try_send(Effect::Release { key: key.clone() })
         .is_ok()
     {}

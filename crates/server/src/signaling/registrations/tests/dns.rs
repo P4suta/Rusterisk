@@ -89,10 +89,9 @@ async fn registration_resolution_preserves_signaling_progress_and_request_uri_oc
         .first_mut()
         .ok_or(ControlError::Capacity)?
         .server_uri = RegistrarUri::parse(Protocol::Udp, &uri).map_err(failure)?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let mut signaling =
-        Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let mut signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     signaling.resolver = Ok(resolver(&dns)?);
     let local = signaling
         .listeners()?

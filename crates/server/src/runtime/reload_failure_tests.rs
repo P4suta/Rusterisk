@@ -113,7 +113,7 @@ async fn exercise(data: &Path) -> Result<(), ControlError> {
     let replacement = configuration("replacement-password")?;
     let mut server = Server::bind(configuration("starting-password")?, 4, data.to_owned()).await?;
     let controller = server.controller();
-    let generation = server.control.configuration_generation();
+    let generation = server.signaling.configuration_generation();
     let preparation = server.signaling.native_preparation();
     let (http_port, http_receiver) = PublicationPort::channel();
     let (native_port, native_receiver) = PublicationPort::channel();
@@ -122,9 +122,9 @@ async fn exercise(data: &Path) -> Result<(), ControlError> {
     server.signaling = server
         .signaling
         .with_publication(native_receiver, generation);
-    server.control = server
-        .control
-        .with_reload(preparation, http_port.clone(), proxy_port);
+    server.signaling = server
+        .signaling
+        .with_control(|control| control.with_reload(preparation, http_port.clone(), proxy_port));
     let proxy = tokio::spawn(participant(
         native_port.clone(),
         proxy_receiver,

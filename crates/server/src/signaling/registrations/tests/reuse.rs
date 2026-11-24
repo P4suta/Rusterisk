@@ -174,9 +174,9 @@ async fn ready_registrations_keep_the_same_registrar_setup_barrier() -> Result<(
     );
     let mut config = configuration(&uri)?;
     add_registration(&mut config)?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let mut signaling = Signaling::bind(config, controller, effects, media, notices).await?;
+    let mut signaling = Signaling::bind(config, controller, runner, media, notices).await?;
     let primary: Result<(), ControlError> = async {
         signaling.registration_tick(1000).await?;
         let completed =
@@ -235,9 +235,9 @@ async fn initial_tcp_registrations_reuse_an_established_flow_before_connecting(
     );
     let mut config = configuration(&uri)?;
     add_registration(&mut config)?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let local = signaling
         .listeners()?
         .first()

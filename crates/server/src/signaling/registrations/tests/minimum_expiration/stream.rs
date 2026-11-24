@@ -159,9 +159,9 @@ async fn registration(protocol: Protocol) -> Result<(), ControlError> {
         Some(identity) => Some(TlsContext::load(&identity.files).await?),
         None => None,
     };
-    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let local = signaling
         .listeners()?
         .first()

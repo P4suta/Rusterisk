@@ -22,9 +22,9 @@ fn failure(error: impl std::fmt::Display) -> ControlError {
 }
 
 async fn signaling(config: Config, dns: &UdpSocket) -> Result<Signaling, ControlError> {
-    let (controller, _runner, effects) = Controller::new(config.clone(), 64);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 64);
     let (media, _hub, notices) = MediaHub::new(64);
-    let mut signaling = Signaling::bind(config, controller, effects, media, notices).await?;
+    let mut signaling = Signaling::bind(config, controller, runner, media, notices).await?;
     signaling.resolver = Ok(dns::resolver(dns)?);
     Ok(signaling)
 }

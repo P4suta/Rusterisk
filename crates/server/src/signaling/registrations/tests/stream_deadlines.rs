@@ -22,9 +22,9 @@ async fn initiated_registration_waits_for_a_response_beyond_the_accepted_first_m
         registrar.local_addr().map_err(failure)?
     );
     let config = configuration(&uri)?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let mut signaling = Signaling::bind(config, controller, effects, media, notices).await?;
+    let mut signaling = Signaling::bind(config, controller, runner, media, notices).await?;
     let primary: Result<(), ControlError> = async {
         signaling.registration_tick(1000).await?;
         let completed =

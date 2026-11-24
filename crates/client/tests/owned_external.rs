@@ -68,12 +68,11 @@ async fn owned_rtp_and_audio_socket_calls_exchange_received_audio_and_close_thei
         "",
     )
     .map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media.clone(), notices)
+    let signaling = Signaling::bind(config, controller.clone(), runner, media.clone(), notices)
         .await
         .map_err(failure)?;
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let http = tokio::spawn(
@@ -232,7 +231,6 @@ async fn owned_rtp_and_audio_socket_calls_exchange_received_audio_and_close_thei
     .map_err(|_| Error::Timeout)
     .and_then(|result| result);
     controller.shutdown();
-    let result = combine(result, joined(runner).await);
     let result = combine(result, joined(signaling).await);
     let result = combine(result, joined(hub).await);
     http.abort();

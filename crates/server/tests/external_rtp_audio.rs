@@ -130,12 +130,11 @@ async fn external_channels_bridge_received_audio_and_release_both_socket_pairs(
         "",
     )
     .map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let signal_stop = controller.shutdown_signal();
     let media_stop = controller.shutdown_signal();
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(media_stop));
     let signaling = tokio::spawn(signaling.run(signal_stop));
     let result: Result<[SocketAddr; 2], ControlError> = async {
@@ -219,7 +218,6 @@ async fn external_channels_bridge_received_audio_and_release_both_socket_pairs(
     }
     .await;
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     for address in result? {

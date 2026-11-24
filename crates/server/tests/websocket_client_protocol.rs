@@ -44,10 +44,9 @@ async fn refused_protocol(wrong: bool) -> Result<(), ControlError> {
     let http = tokio::spawn(axum::serve(listener, app).into_future());
     let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "", "", "").map_err(failure)?
         .with_websocket_configuration("", &format!("[agent]\ntype=websocket_client\nconnection_type=per_call_config\nuri=ws://{address}/media?token=private-query\nprotocols=media\nusername=private-username\npassword=private-password\nconnection_timeout=500\nreconnect_interval=100\nreconnect_attempts=2\n")).map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
-    let runner = tokio::spawn(runner.run());
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let result = tokio::time::timeout(Duration::from_secs(2), async {
@@ -67,7 +66,6 @@ async fn refused_protocol(wrong: bool) -> Result<(), ControlError> {
         Ok::<(), ControlError>(())
     }).await.map_err(failure);
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     http.abort();

@@ -135,13 +135,11 @@ mod tests {
             "",
         )
         .map_err(failure)?;
-        let (controller, runner, effects) = Controller::new(config.clone(), 4);
+        let (controller, runner, _effects) = Controller::new(config.clone(), 4);
         let (media, hub, notices) = MediaHub::new(4);
-        let signaling =
-            Signaling::bind(config, controller.clone(), effects, media.clone(), notices)
-                .await
-                .map_err(failure)?;
-        let runner = tokio::spawn(runner.run());
+        let signaling = Signaling::bind(config, controller.clone(), runner, media.clone(), notices)
+            .await
+            .map_err(failure)?;
         let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
         let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -189,14 +187,10 @@ mod tests {
         .await
         .map_err(|_| Error::Timeout);
         controller.shutdown();
-        let control_result = runner.await.map_err(failure)?.map_err(failure);
         let signaling_result = signaling.await.map_err(failure)?.map_err(failure);
         let media_result = hub.await.map_err(failure)?.map_err(failure);
         http.abort();
         assert!(http.await.is_err());
-        result?
-            .and(control_result)
-            .and(signaling_result)
-            .and(media_result)
+        result?.and(signaling_result).and(media_result)
     }
 }

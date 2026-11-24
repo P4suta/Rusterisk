@@ -3,8 +3,9 @@ use crate::ControlError;
 use std::future::Future;
 use tokio::sync::watch;
 
-const STATE_BUDGET: usize = 16 * 1024;
-const TASK_BUDGET: usize = 48 * 1024;
+// The composed task holds the call decisions beside the signaling state.
+const STATE_BUDGET: usize = 24 * 1024;
+const TASK_BUDGET: usize = 64 * 1024;
 
 fn future_size<F>(_: fn(Signaling, watch::Receiver<bool>) -> F) -> usize
 where

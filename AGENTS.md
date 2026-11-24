@@ -20,7 +20,7 @@ Use Rust 1.89-compatible language features in that crate and Rust 1.100.0 for de
 The fast gate runs the core tests with the pinned Rust 1.89.0 toolchain.
 Use `mise x -- just core-msrv` to run the Rust 1.89.0 core tests directly.
 Keep network, clock, filesystem, and persistence effects in adapters.
-Serialize control decisions while continuing to receive signaling and media events.
+Compose signaling and call decisions in one task, and receive network and media events between its turns.
 Use bounded channels and fixed-capacity audio frames.
 Every task needs an explicit lifetime and cleanup path.
 Wake each task for an event or the earliest deadline that its state reports.

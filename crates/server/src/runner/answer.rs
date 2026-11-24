@@ -107,7 +107,7 @@ impl Runner {
         if !self.answers.contains_key(&key) {
             if self.answers.len() >= 64
                 || !self.pending_effects.is_empty()
-                || self.effects.capacity() < outcome.effects.len()
+                || self.effect_room() < outcome.effects.len()
             {
                 return Err(ControlError::Capacity);
             }

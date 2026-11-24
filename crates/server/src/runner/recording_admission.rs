@@ -30,7 +30,7 @@ impl Pending {
 }
 
 impl Runner {
-    pub(super) fn apply_signal(&mut self, signal: Signal, now: u64) -> Result<(), ControlError> {
+    pub(crate) fn apply_signal(&mut self, signal: Signal, now: u64) -> Result<(), ControlError> {
         if self.reject_new_transfer(&signal)? {
             return Ok(());
         }
@@ -143,7 +143,7 @@ impl Runner {
         for token in expired {
             let pending_budget =
                 MAX_PENDING_EFFECTS.saturating_sub(self.control.terminal_effect_reserve());
-            let direct = self.pending_effects.is_empty() && self.effects.capacity() > 0;
+            let direct = self.pending_effects.is_empty() && self.effect_room() > 0;
             if !direct && self.pending_effects.len() >= pending_budget {
                 break;
             }
@@ -296,7 +296,7 @@ mod tests {
         }
         for key in keys {
             runner
-                .effects
+                .effect_sender()?
                 .try_send(Effect::Ring { key })
                 .map_err(|_| ControlError::Capacity)?;
         }

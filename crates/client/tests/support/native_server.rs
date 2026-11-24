@@ -54,12 +54,12 @@ pub async fn run(
     .map_err(failure)?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
-    let (controller, runner, effects) = Controller::new(configuration.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(configuration.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
     let signaling = Signaling::bind(
         configuration,
         controller.clone(),
-        effects,
+        runner,
         media.clone(),
         notices,
     )
@@ -68,14 +68,13 @@ pub async fn run(
     let (storage, worker) = StorageWorker::start(root.to_owned())
         .await
         .map_err(failure)?;
-    let runner = match runner.with_storage(storage.clone()) {
-        Ok(runner) => runner,
+    let signaling = match signaling.try_with_control(|runner| runner.with_storage(storage.clone()))
+    {
+        Ok(signaling) => signaling.with_storage(storage),
         Err(primary) => {
             return combine(Err(failure(primary)), worker.close().await.map_err(failure));
         }
     };
-    let signaling = signaling.with_storage(storage);
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let server = tokio::spawn(
@@ -103,7 +102,6 @@ pub async fn run(
     .map_err(|_| Error::Timeout)
     .and_then(|result| result);
     controller.shutdown();
-    let result = combine(result, joined(runner).await);
     let result = combine(result, joined(signaling).await);
     let result = combine(result, joined(hub).await);
     server.abort();

@@ -20,11 +20,10 @@ async fn incoming_media_upgrades_bind_one_channel_and_clean_up_after_disconnect(
 ) -> Result<(), ControlError> {
     let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[general]\nallowed_origins=https://accepted.example\n[app]\ntype=user\npassword=test-password\n", "", "", "").map_err(failure)?
         .with_websocket_configuration("[global]\ncontrol_message_format=json\n", "").map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
     let signaling =
-        Signaling::bind(config, controller.clone(), effects, media.clone(), notices).await?;
-    let runner = tokio::spawn(runner.run());
+        Signaling::bind(config, controller.clone(), runner, media.clone(), notices).await?;
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -76,7 +75,6 @@ async fn incoming_media_upgrades_bind_one_channel_and_clean_up_after_disconnect(
         Ok::<(), ControlError>(())
     }).await.map_err(failure);
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     http.abort();

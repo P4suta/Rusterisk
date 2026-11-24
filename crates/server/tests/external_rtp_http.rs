@@ -40,13 +40,12 @@ async fn external_http_creation_returns_the_bound_transport_and_receives_audio(
 ) -> Result<(), ControlError> {
     let peer = SocketPair::bind(IpAddr::V4(Ipv4Addr::LOCALHOST), 0, 0).map_err(failure)?;
     let configuration = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n[reader]\ntype=user\npassword=test-password\nread_only=yes\n", "", "", "").map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(configuration.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(configuration.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
     let signaling =
-        Signaling::bind(configuration, controller.clone(), effects, media, notices).await?;
+        Signaling::bind(configuration, controller.clone(), runner, media, notices).await?;
     let signal_stop = controller.shutdown_signal();
     let media_stop = controller.shutdown_signal();
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(media_stop));
     let signaling = tokio::spawn(signaling.run(signal_stop));
     let result: Result<SocketAddr, ControlError> = async {
@@ -92,7 +91,6 @@ async fn external_http_creation_returns_the_bound_transport_and_receives_audio(
         Ok(local)
     }.await;
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     let local = result?;

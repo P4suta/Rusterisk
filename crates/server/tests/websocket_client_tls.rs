@@ -30,13 +30,12 @@ async fn exercise(
     .map_err(failure)?
     .with_websocket_configuration("", client)
     .map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     if let Some(path) = remove_trust_after_bind {
         std::fs::remove_file(path).map_err(failure)?;
     }
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let result = tokio::time::timeout(Duration::from_secs(2), async {
@@ -56,7 +55,6 @@ async fn exercise(
         Ok::<(), ControlError>(())
     }).await.map_err(failure);
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     result?

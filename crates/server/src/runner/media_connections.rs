@@ -91,7 +91,7 @@ impl Runner {
         for key in released {
             let pending_budget =
                 MAX_PENDING_EFFECTS.saturating_sub(self.control.terminal_effect_reserve());
-            let direct = self.pending_effects.is_empty() && self.effects.capacity() > 0;
+            let direct = self.pending_effects.is_empty() && self.effect_room() > 0;
             if !direct && self.pending_effects.len() >= pending_budget {
                 break;
             }
