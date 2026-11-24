@@ -202,12 +202,15 @@ fn fill(runner: &mut Runner, key: &CallKey, count: usize) -> Result<(), ControlE
 }
 
 #[tokio::test]
+// One turn fills all but two places for effects, and the survivor's hangup needs three.
 async fn a_transfer_survivor_reserves_its_final_notification_before_hangup(
 ) -> Result<(), ControlError> {
-    let (_controller, mut runner, mut effects) = Controller::new(configuration()?, 64);
+    let (_controller, runner, _effects) = Controller::new(configuration()?, 64);
+    let mut runner = runner.compose();
     runner.control.subscribe("calls")?;
     let survivor = prepare(&mut runner, 0)?;
-    fill(&mut runner, &survivor, 126)?;
+    let filled = super::TURN_EFFECTS - 2;
+    fill(&mut runner, &survivor, filled)?;
     assert_eq!(runner.effect_room(), 2);
     assert!(matches!(
         apply(&mut runner, Action::Hangup(survivor.id.clone())),
@@ -215,32 +218,24 @@ async fn a_transfer_survivor_reserves_its_final_notification_before_hangup(
     ));
     assert!(runner.control.channel(&survivor.id).is_ok());
     assert_eq!(runner.control.terminal_effect_reserve(), 3);
-    assert!(matches!(
-        effects.try_recv().map_err(failure)?,
-        Effect::Gate { .. }
-    ));
+    assert!(matches!(runner.take_effect(), Some(Effect::Gate { .. })));
     apply(&mut runner, Action::Hangup(survivor.id.clone()))?;
     assert!(runner.control.channel(&survivor.id).is_err());
-    for _ in 0..125 {
-        assert!(matches!(
-            effects.try_recv().map_err(failure)?,
-            Effect::Gate { .. }
-        ));
+    for _ in 1..filled {
+        assert!(matches!(runner.take_effect(), Some(Effect::Gate { .. })));
     }
     assert!(matches!(
-        effects.try_recv().map_err(failure)?,
-        Effect::ReferProgress {
+        runner.take_effect(),
+        Some(Effect::ReferProgress {
             progress: ReferProgress::Failed(ReferFailure::Cancelled),
             ..
-        }
+        })
     ));
     assert!(
-        matches!(effects.try_recv().map_err(failure)?, Effect::Bridge { channels, .. } if channels.is_empty())
+        matches!(runner.take_effect(), Some(Effect::Bridge { channels, .. }) if channels.is_empty())
     );
-    assert!(
-        matches!(effects.try_recv().map_err(failure)?, Effect::Release { key } if key == survivor)
-    );
-    assert!(effects.is_empty());
+    assert!(matches!(runner.take_effect(), Some(Effect::Release { key }) if key == survivor));
+    assert!(runner.take_effect().is_none());
     assert_eq!(runner.control.terminal_effect_reserve(), 0);
     runner.close().await
 }

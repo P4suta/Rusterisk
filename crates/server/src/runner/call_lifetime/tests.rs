@@ -116,17 +116,16 @@ async fn control_cleanup_closes_the_lease_before_a_pending_release_effect_is_del
         .claim_call_lifetime(fixture.key.clone(), receiver, reply);
     receipt.await.map_err(failure)??;
     let lease = CallLease { lifetime };
-    for _ in 0..fixture.runner.effect_room() {
-        fixture
-            .runner
-            .effect_sender()?
-            .try_send(Effect::Gate {
-                key: fixture.key.clone(),
-                gate: rusterisk_core::AudioGate::Closed,
-                generated_audio_gate: rusterisk_core::AudioGate::Closed,
-            })
-            .map_err(failure)?;
-    }
+    while fixture
+        .runner
+        .effect_sender()?
+        .try_send(Effect::Gate {
+            key: fixture.key.clone(),
+            gate: rusterisk_core::AudioGate::Closed,
+            generated_audio_gate: rusterisk_core::AudioGate::Closed,
+        })
+        .is_ok()
+    {}
     let mut outcome = fixture.runner.control.apply(
         Action::Hangup(fixture.key.id.clone()),
         "2026-11-16T00:00:00.000+0000",

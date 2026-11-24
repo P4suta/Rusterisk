@@ -1,5 +1,6 @@
 use crate::{
-    CallKey, ControlError, Controller, Effect, IncomingCall, IncomingTarget, Milestone, Signal,
+    Action, CallKey, ControlError, Controller, Credentials, Effect, IncomingCall, IncomingTarget,
+    Milestone, Signal,
 };
 use rusterisk_api::ChannelId;
 use rusterisk_config::Config;
@@ -116,5 +117,105 @@ fn a_dialplan_step_falls_due_while_the_effects_of_its_turn_still_wait() -> Resul
         released |= matches!(effect, Effect::Release { key } if key == waiting);
     }
     assert!(released, "the dialplan step waited for the queued effects");
+    Ok(())
+}
+
+// The control loop that runs alone hands a turn's effects to its channel before the next input.
+// A request behind a full channel waits for room, as it waits for a composed turn to end.
+#[tokio::test]
+async fn a_control_loop_alone_delivers_waiting_effects_before_the_next_request(
+) -> Result<(), ControlError> {
+    let (controller, mut runner, mut effects) = Controller::new(configuration()?, 4);
+    let filler = CallKey {
+        id: ChannelId::try_from("filler".to_owned())?,
+        generation: 1,
+    };
+    let mut filled = 0_usize;
+    while runner
+        .effect_sender()?
+        .try_send(Effect::Release {
+            key: filler.clone(),
+        })
+        .is_ok()
+    {
+        filled += 1;
+    }
+    runner.pending_effects.push_back(Effect::Release {
+        key: filler.clone(),
+    });
+    let running = tokio::spawn(runner.run());
+    let credentials = Credentials::new("app".into(), "test".into())?;
+    let requested = tokio::spawn({
+        let controller = controller.clone();
+        async move {
+            controller
+                .execute(
+                    credentials,
+                    None,
+                    Action::CreateBridge {
+                        id: ChannelId::try_from("held".to_owned())?,
+                        name: "held".into(),
+                    },
+                )
+                .await
+        }
+    });
+    // The request reaches the loop while the effects still wait.
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    let mut delivered = 0_usize;
+    while delivered <= filled {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), effects.recv()).await {
+            Ok(Some(Effect::Release { key })) if key == filler => delivered += 1,
+            Ok(other) => return Err(failure(format!("unexpected effect {other:?}"))),
+            Err(elapsed) => return Err(failure(elapsed)),
+        }
+    }
+    let created = tokio::time::timeout(std::time::Duration::from_secs(2), requested)
+        .await
+        .map_err(failure)?
+        .map_err(failure)?;
+    controller.shutdown();
+    let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), running)
+        .await
+        .map_err(failure)?
+        .map_err(failure)?;
+    assert!(created.is_ok(), "{created:?}");
+    stopped
+}
+
+// A caller that keeps the effect receiver without reading it still sees the loop stop.
+#[tokio::test(start_paused = true)]
+async fn a_control_loop_alone_stops_while_its_effects_wait_for_a_reader() -> Result<(), ControlError>
+{
+    let (controller, mut runner, _effects) = Controller::new(configuration()?, 4);
+    let filler = CallKey {
+        id: ChannelId::try_from("filler".to_owned())?,
+        generation: 1,
+    };
+    while runner
+        .effect_sender()?
+        .try_send(Effect::Release {
+            key: filler.clone(),
+        })
+        .is_ok()
+    {}
+    runner
+        .pending_effects
+        .push_back(Effect::Release { key: filler });
+    let running = tokio::spawn(runner.run());
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    controller.shutdown();
+    let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), running)
+        .await
+        .map_err(|_| ControlError::Invalid("The control loop kept waiting for a reader"))?
+        .map_err(failure)?;
+    assert!(
+        matches!(stopped, Err(ControlError::Adapter(_))),
+        "{stopped:?}"
+    );
     Ok(())
 }

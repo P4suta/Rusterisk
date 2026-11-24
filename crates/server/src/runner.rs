@@ -26,6 +26,8 @@ mod endpoint_queries_tests;
 mod external_admission;
 mod history;
 mod input;
+#[cfg(test)]
+mod turn_capacity_tests;
 pub(crate) use input::Flow;
 mod media_connections;
 mod observation;
@@ -54,7 +56,10 @@ struct StorageServices {
     history: HistoryRecorder,
 }
 
-const MAX_PENDING_EFFECTS: usize = 64 * 3 + 1;
+// Ordinary work may queue this many effects in one turn.
+const TURN_EFFECTS: usize = 128;
+// Terminal cleanup of every call fits behind a turn that ordinary work filled.
+const MAX_PENDING_EFFECTS: usize = TURN_EFFECTS + 64 * 3 + 1;
 
 // Where control effects go: through a channel to a separate signaling task, or to the turn that composes both.
 enum Outlet {
@@ -517,21 +522,14 @@ impl Runner {
         Ok(())
     }
 
-    // Whether a new effect reaches signaling in order now.
-    // The composed turn applies effects in order, and a channel does after the queued ones.
-    fn effects_flowing(&self) -> bool {
-        match &self.effects {
-            Outlet::Channel(_) => self.pending_effects.is_empty(),
-            Outlet::Turn => true,
-        }
+    // The effects that ordinary work can still queue in this turn.
+    fn effect_room(&self) -> usize {
+        TURN_EFFECTS.saturating_sub(self.pending_effects.len())
     }
 
-    // The effects that control can still emit before its outlet refuses one.
-    fn effect_room(&self) -> usize {
-        match &self.effects {
-            Outlet::Channel(sender) => sender.capacity(),
-            Outlet::Turn => MAX_PENDING_EFFECTS.saturating_sub(self.pending_effects.len()),
-        }
+    // Whether this turn's effects still fit the ordinary tier, so that none waits in the terminal reserve.
+    fn effects_flowing(&self) -> bool {
+        self.pending_effects.len() <= TURN_EFFECTS
     }
 
     #[cfg(test)]
@@ -637,7 +635,7 @@ impl Runner {
         call: IncomingCall,
         now_ms: u64,
     ) -> Result<Result<CallKey, ControlError>, ControlError> {
-        if self.admissions_paused() {
+        if self.admissions_paused() || !self.effects_flowing() {
             return Ok(Err(ControlError::Capacity));
         }
         match self.admit_incoming(call, now_ms) {
@@ -740,13 +738,7 @@ impl Runner {
                 if reply.is_closed() {
                     return Ok(());
                 }
-                // Queued effects reach signaling only through a free channel slot.
-                let admitted = if self.effects_flowing() {
-                    self.incoming_call(call, now_ms)
-                } else {
-                    Ok(Err(ControlError::Capacity))
-                };
-                let result = match admitted {
+                let result = match self.incoming_call(call, now_ms) {
                     Ok(result) => result,
                     Err(error) => {
                         if reply.send(Err(error.clone())).is_err() {
@@ -1051,27 +1043,46 @@ impl Runner {
         let effect_sender = effect_sender.clone();
         let clock = self.clock;
         let mut overdue = crate::overdue::Overdue::every(OVERDUE_RETRY_MS);
+        let mut before = self.wake()?;
         loop {
-            let timer = overdue.timer(self.wake()?);
-            // A signal waits while effects wait, so that its effects follow theirs.
-            let flushing = !self.pending_effects.is_empty();
-            tokio::select! {
-                permit = effect_sender.reserve(), if flushing => {
-                    match permit {
-                        Ok(permit) => if let Some(effect) = self.pending_effects.pop_front() { permit.send(effect); },
-                        Err(_) if *self.shutdown.borrow() => break,
-                        Err(error) => return Err(ControlError::Adapter(error.to_string())),
+            // Every input ends with its decisions settled and its effects handed over, as in the composed task.
+            let now = clock.now_ms()?;
+            self.settle(now)?;
+            // A stop ends the hand-over, and the cleanup hands over what remains.
+            while !self.pending_effects.is_empty() && !*self.shutdown.borrow() {
+                tokio::select! {
+                    permit = effect_sender.reserve() => match permit {
+                        Ok(permit) => {
+                            if let Some(effect) = self.pending_effects.pop_front() {
+                                permit.send(effect);
+                            }
+                        }
+                        Err(_) if *self.shutdown.borrow() => return Ok(()),
+                        Err(_) => {
+                            return Err(ControlError::Adapter(
+                                "Signaling effect receiver closed".into(),
+                            ))
+                        }
+                    },
+                    changed = self.shutdown.changed() => {
+                        if changed.is_err() {
+                            return Ok(());
+                        }
                     }
                 }
-                input = self.next(!flushing) => {
+            }
+            if *self.shutdown.borrow() {
+                return Ok(());
+            }
+            overdue.settled(before, self.wake()?, now);
+            let timer = overdue.timer(self.wake()?);
+            before = self.wake()?;
+            tokio::select! {
+                input = self.next() => {
                     if self.handle(input, clock.now_ms()?)? == Flow::Stop { break; }
                 }
                 () = clock.reached(timer) => {}
             }
-            let now = self.clock.now_ms()?;
-            let before = self.wake()?;
-            self.settle(now)?;
-            overdue.settled(before, self.wake()?, now);
         }
         Ok(())
     }

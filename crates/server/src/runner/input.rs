@@ -25,9 +25,9 @@ pub(crate) enum Flow {
 }
 
 impl Runner {
-    // Waits for the next input, and reads a signal only when the caller accepts one.
+    // Waits for the next input.
     // Every branch is cancel-safe, and nothing awaits after the first input arrives.
-    pub(crate) async fn next(&mut self, signals: bool) -> Input {
+    pub(crate) async fn next(&mut self) -> Input {
         let Self {
             reload,
             stored_jobs,
@@ -67,7 +67,7 @@ impl Runner {
             result = stored_jobs.join_next(), if !stored_jobs.is_empty() => Kind::Stored(result),
             result = history_jobs.join_next(), if !history_jobs.is_empty() => Kind::History(result),
             changed = shutdown.changed() => if changed.is_err() || *shutdown.borrow() { Kind::Stopped } else { Kind::Unchanged },
-            signal = signal_queue.recv(), if signals => Kind::Signal(signal),
+            signal = signal_queue.recv() => Kind::Signal(signal),
             request = requests.recv() => Kind::Request(request),
             closure = closed.recv(), if *closures_open => Kind::Closure(closure),
         };

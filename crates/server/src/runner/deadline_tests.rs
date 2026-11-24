@@ -283,7 +283,8 @@ fn external_media(
 }
 
 #[tokio::test(start_paused = true)]
-async fn work_that_backpressure_defers_retries_at_the_former_interval() -> Result<(), ControlError>
+// A turn that starts full defers due work, which runs at the bounded retry after the effects leave.
+async fn work_that_a_full_turn_defers_retries_at_the_bounded_interval() -> Result<(), ControlError>
 {
     let (_controller, mut runner, mut effects) = Controller::new(configuration()?, 4);
     runner.control.subscribe("app")?;
@@ -309,35 +310,21 @@ async fn work_that_backpressure_defers_retries_at_the_former_interval() -> Resul
             .pending_effects
             .push_back(Effect::Release { key: key.clone() });
     }
-    let mut polls = 0_u32;
+    let started = tokio::time::Instant::now();
     let mut serving = std::pin::pin!(runner.serve());
-    {
-        let counted = std::future::poll_fn(|context| {
-            polls += 1;
-            if polls > 1000 {
-                return std::task::Poll::Ready(Err(failure(
-                    "the runner spun on work that it could not consume",
-                )));
+    let answered = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            tokio::select! {
+                served = &mut serving => return Err(failure(format!("the runner stopped: {served:?}"))),
+                effect = effects.recv() => { effect.ok_or(ControlError::Capacity)?; }
+                result = &mut response => return result.map_err(failure),
             }
-            serving.as_mut().poll(context)
-        });
-        tokio::select! {
-            biased;
-            () = tokio::time::sleep(Duration::from_secs(1)) => {}
-            served = counted => return Err(failure(format!("the runner stopped: {served:?}"))),
         }
-    }
-    assert!(
-        (9..=12).contains(&polls),
-        "{polls} turns in one second of deferred work"
-    );
-    assert!(response.try_recv().is_err());
-    while effects.try_recv().is_ok() {}
-    progress(&mut serving).await?;
-    assert!(matches!(
-        response.try_recv(),
-        Ok(Err(ControlError::Conflict(_)))
-    ));
+    })
+    .await
+    .map_err(failure)??;
+    assert!(matches!(answered, Err(ControlError::Conflict(_))));
+    assert!(started.elapsed() <= Duration::from_millis(super::OVERDUE_RETRY_MS));
     Ok(())
 }
 
