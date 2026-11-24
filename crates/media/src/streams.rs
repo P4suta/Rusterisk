@@ -238,54 +238,65 @@ enum Received {
     Signal(u16),
 }
 
+// The whole frames that a receiver holds ready for playout.
+const READY_FRAMES: usize = 10;
+
 struct FrameAssembly {
-    partial: [i16; MAX_SAMPLES],
-    filled: usize,
+    // Decoded samples in arrival order: whole frames first, then at most one partial frame.
+    samples: VecDeque<i16>,
+    frame_len: usize,
     rate: u32,
     timestamp: Option<u32>,
-    ready: VecDeque<Frame>,
 }
 
 impl FrameAssembly {
     fn new(format: AudioFormat) -> Self {
+        let rate = format.rate();
+        let frame_len = rate as usize / 50;
         Self {
-            partial: [0; MAX_SAMPLES],
-            filled: 0,
-            rate: format.rate(),
+            samples: VecDeque::with_capacity((READY_FRAMES + 1) * frame_len),
+            frame_len,
+            rate,
             timestamp: None,
-            ready: VecDeque::with_capacity(10),
         }
     }
 
     fn clear(&mut self) {
-        self.filled = 0;
+        self.samples.clear();
         self.timestamp = None;
-        self.ready.clear();
+    }
+
+    fn reserved_bytes(&self) -> usize {
+        self.samples.capacity() * std::mem::size_of::<i16>()
+    }
+
+    // Takes the oldest whole frame.
+    fn pop(&mut self) -> Result<Option<Frame>, MediaError> {
+        if self.samples.len() < self.frame_len {
+            return Ok(None);
+        }
+        let mut frame = [0; MAX_SAMPLES];
+        for (slot, sample) in frame.iter_mut().zip(self.samples.drain(..self.frame_len)) {
+            *slot = sample;
+        }
+        Frame::new(&frame[..self.frame_len], self.rate).map(Some)
     }
 
     fn push(&mut self, audio: DecodedAudio<'_>, timestamp: u32) -> Result<(), MediaError> {
         if audio.rate != self.rate {
             return Err(MediaError::InvalidFrame);
         }
-        let frame_len = self.rate as usize / 50;
-        let filled = if self.timestamp == Some(timestamp) {
-            self.filled
-        } else {
-            0
-        };
-        if self.ready.len() + (filled + audio.samples.len()) / frame_len > 10 {
+        // A gap in the timestamps drops the partial frame and keeps the whole ones.
+        if self.timestamp != Some(timestamp) {
+            let whole = self.samples.len() - self.samples.len() % self.frame_len;
+            self.samples.truncate(whole);
+        }
+        let ready = self.samples.len() / self.frame_len;
+        let partial = self.samples.len() % self.frame_len;
+        if ready + (partial + audio.samples.len()) / self.frame_len > READY_FRAMES {
             return Err(MediaError::Capacity);
         }
-        self.filled = filled;
-        for sample in audio.samples {
-            self.partial[self.filled] = *sample;
-            self.filled += 1;
-            if self.filled == frame_len {
-                self.ready
-                    .push_back(Frame::new(&self.partial[..frame_len], self.rate)?);
-                self.filled = 0;
-            }
-        }
+        self.samples.extend(audio.samples.iter().copied());
         self.timestamp = Some(timestamp.wrapping_add(audio.samples.len() as u32));
         Ok(())
     }
@@ -319,6 +330,14 @@ impl RtpReceiver {
         }
         self.next = None;
         self.assembly.clear();
+    }
+
+    // The heap memory that the receiver reserves, which a footprint test bounds.
+    pub fn reserved_bytes(&self) -> usize {
+        self.packets.capacity() * std::mem::size_of::<Received>()
+            + self.spare.capacity() * std::mem::size_of::<Vec<u8>>()
+            + self.spare.iter().map(Vec::capacity).sum::<usize>()
+            + self.assembly.reserved_bytes()
     }
 
     pub fn new(format: AudioFormat, payload_type: u8) -> Result<Self, MediaError> {
@@ -395,7 +414,7 @@ impl RtpReceiver {
     }
 
     pub fn pop(&mut self) -> Result<Option<Frame>, MediaError> {
-        if let Some(frame) = self.assembly.ready.pop_front() {
+        if let Some(frame) = self.assembly.pop()? {
             return Ok(Some(frame));
         }
         while !self.packets.is_empty() {
@@ -425,7 +444,7 @@ impl RtpReceiver {
                         }
                     };
                     self.assembly.push(decoded, timestamp)?;
-                    if let Some(frame) = self.assembly.ready.pop_front() {
+                    if let Some(frame) = self.assembly.pop()? {
                         return Ok(Some(frame));
                     }
                 }
