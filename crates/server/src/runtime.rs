@@ -11,6 +11,8 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 #[cfg(test)]
+mod idle_tests;
+#[cfg(test)]
 #[path = "runtime/reload_failure_tests.rs"]
 mod reload_failure_tests;
 
