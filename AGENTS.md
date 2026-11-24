@@ -23,6 +23,8 @@ Keep network, clock, filesystem, and persistence effects in adapters.
 Serialize control decisions while continuing to receive signaling and media events.
 Use bounded channels and fixed-capacity audio frames.
 Every task needs an explicit lifetime and cleanup path.
+Wake each task for an event or the earliest deadline that its state reports.
+Register every periodic timer in `api/policy-exceptions.toml` with its function, reason, and architecture decision.
 
 Use concrete types, generics, exhaustive enums, moved ownership, and borrows.
 Reject dynamic dispatch, `Box`, `Arc`, `Rc`, `RefCell`, and shared domain locks in project code.

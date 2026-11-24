@@ -16,7 +16,7 @@ Wake a task for an event or its earliest deadline.
 Each state machine reports the earliest deadline it can act on as a pure value.
 Find the earliest one after every turn and sleep until it.
 Resume budgeted work in the same turn or at a stated pacing deadline.
-Keep the media clock as the single periodic timer while media exists.
+Allow a periodic timer only for media pacing and connection heartbeats, each registered.
 
 ## Alternatives
 
@@ -33,3 +33,4 @@ Reconsider the scan if the channel limit grows.
 Tests and bounded proofs must show that advancing before a reported deadline changes nothing.
 A differential test must match an engine driven every millisecond with one driven at its deadlines.
 A [paused-time](https://docs.rs/tokio/latest/tokio/time/fn.pause.html) test must count zero loop turns in an idle hour.
+The source policy must reject an unregistered periodic timer.

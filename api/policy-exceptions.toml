@@ -46,3 +46,57 @@ item = "sip_client_configuration"
 lint = "clippy::disallowed_types"
 adr = "docs/adr/verify-sip-domains-with-an-immutable-library-callback.md"
 rationale = "Share only immutable SIP certificate trust through the fixed verifier API."
+
+[[timers]]
+path = "crates/server/src/media.rs"
+item = "new"
+adr = "docs/adr/wake-each-task-at-its-earliest-deadline.md"
+rationale = "Pace mixer frames while a call needs frame timing."
+
+[[timers]]
+path = "crates/server/src/rtp.rs"
+item = "serve"
+adr = "docs/adr/wake-each-task-at-its-earliest-deadline.md"
+rationale = "Pace one RTP link until the media task owns datagram links."
+
+[[timers]]
+path = "crates/server/src/webrtc/link.rs"
+item = "serve"
+adr = "docs/adr/wake-each-task-at-its-earliest-deadline.md"
+rationale = "Pace one WebRTC link until the media task owns datagram links."
+
+[[timers]]
+path = "crates/server/src/media_websocket/link.rs"
+item = "serve"
+adr = "docs/adr/wake-each-task-at-its-earliest-deadline.md"
+rationale = "Pace one WebSocket media link while its stream is open."
+
+[[timers]]
+path = "crates/server/src/audiosocket.rs"
+item = "serve"
+adr = "docs/adr/wake-each-task-at-its-earliest-deadline.md"
+rationale = "Pace one AudioSocket link while its stream is open."
+
+[[timers]]
+path = "crates/server/src/signaling/transport/websocket.rs"
+item = "connection"
+adr = "docs/adr/wake-each-task-at-its-earliest-deadline.md"
+rationale = "Send the heartbeat of one signaling WebSocket connection."
+
+[[timers]]
+path = "crates/server/src/websocket.rs"
+item = "events"
+adr = "docs/adr/wake-each-task-at-its-earliest-deadline.md"
+rationale = "Send the heartbeat of one event WebSocket connection."
+
+[[timers]]
+path = "crates/client/src/session.rs"
+item = "run"
+adr = "docs/adr/wake-each-task-at-its-earliest-deadline.md"
+rationale = "Send the heartbeat of the event connection."
+
+[[timers]]
+path = "crates/client/src/session.rs"
+item = "run"
+adr = "docs/adr/wake-each-task-at-its-earliest-deadline.md"
+rationale = "Check call lifetimes until the session reports them as events."

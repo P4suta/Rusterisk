@@ -17,6 +17,7 @@ pub mod reference;
 pub mod regular_archive;
 pub mod release_check;
 pub mod server_distribution;
+pub mod timer_policy;
 pub const WORKSPACE_FORMAT_CHECK: &[&str] = &["fmt", "--", "--check"];
 mod sip_domain_policy;
 mod tls_client_policy;
@@ -85,6 +86,8 @@ pub struct Exception {
 #[serde(deny_unknown_fields)]
 pub struct Exceptions {
     pub exceptions: Vec<Exception>,
+    #[serde(default)]
+    pub timers: Vec<timer_policy::Timer>,
 }
 
 pub fn inspect_with_exceptions(
