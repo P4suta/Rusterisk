@@ -1,5 +1,12 @@
-use super::{ControlReception, LinkStats, RtpChannels, RtpLink, RtpSession, SocketPair};
+#[path = "../../tests/rtp_leg/driver.rs"]
+mod driver;
+
+use super::{
+    ControlReception, LinkStats, Measurements, RtpChannels, RtpLeg, RtpSession, SocketPair,
+};
+use driver::RtpLink;
 use rusterisk_core::PeerMediaDirection;
+use rusterisk_media::MAX_PACKET;
 use rusterisk_media::{mulaw_decode, AudioFormat, Frame, MediaError, RtpPacket, RtpSender};
 use std::{
     net::{Ipv4Addr, SocketAddr},
@@ -83,11 +90,11 @@ async fn fixed_audio_frames_keep_their_sample_clock_across_transport_scheduling_
 ) -> Result<(), MediaError> {
     let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
     let mut fixture = fixture(&peer)?;
-    fixture.link.sender = RtpSender::new(AudioFormat::Pcmu, 0, [255; 10])?;
+    fixture.link.leg.sender = RtpSender::new(AudioFormat::Pcmu, 0, [255; 10])?;
     let frame = Frame::new(&[4000; 160], 8000)?;
-    let first = fixture.link.audio_packet(frame, 0)?;
+    let first = fixture.link.leg.audio_packet(frame, 0)?;
     for (index, now) in [21, 39, 61, 80, 101].into_iter().enumerate() {
-        let packet = fixture.link.audio_packet(frame, now)?;
+        let packet = fixture.link.leg.audio_packet(frame, now)?;
         assert_eq!(packet.ssrc(), first.ssrc());
         assert_eq!(
             packet.sequence(),
@@ -98,7 +105,7 @@ async fn fixed_audio_frames_keep_their_sample_clock_across_transport_scheduling_
             first.timestamp().wrapping_add(160 * (index as u32 + 1))
         );
     }
-    let resumed = fixture.link.audio_packet(frame, 1001)?;
+    let resumed = fixture.link.leg.audio_packet(frame, 1001)?;
     assert_eq!(resumed.timestamp(), first.timestamp().wrapping_add(8000));
     Ok(())
 }
@@ -109,25 +116,26 @@ async fn rejected_audio_frames_and_clock_inputs_do_not_advance_output_packets(
     let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
     let mut fixture = fixture(&peer)?;
     let frame = Frame::new(&[4000; 160], 8000)?;
-    let first = fixture.link.audio_packet(frame, 0)?;
+    let first = fixture.link.leg.audio_packet(frame, 0)?;
     assert!(matches!(
         fixture
             .link
+            .leg
             .audio_packet(Frame::new(&[4000; 80], 8000)?, 20),
         Err(MediaError::InvalidFrame)
     ));
-    let next = fixture.link.audio_packet(frame, 20)?;
+    let next = fixture.link.leg.audio_packet(frame, 20)?;
     assert_eq!(next.sequence(), first.sequence().wrapping_add(1));
     assert_eq!(next.timestamp(), first.timestamp().wrapping_add(160));
     assert!(matches!(
-        fixture.link.audio_packet(frame, 19),
+        fixture.link.leg.audio_packet(frame, 19),
         Err(MediaError::Transport(_))
     ));
     assert!(matches!(
-        fixture.link.audio_packet(frame, u64::MAX),
+        fixture.link.leg.audio_packet(frame, u64::MAX),
         Err(MediaError::Capacity)
     ));
-    let next = fixture.link.audio_packet(frame, 40)?;
+    let next = fixture.link.leg.audio_packet(frame, 40)?;
     assert_eq!(next.sequence(), first.sequence().wrapping_add(2));
     assert_eq!(next.timestamp(), first.timestamp().wrapping_add(320));
     Ok(())
@@ -257,8 +265,7 @@ enum ReceiptFailure {
 async fn reception_reports_cover_transmitted_sequences_across_gaps_and_rollover(
 ) -> Result<(), MediaError> {
     let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
-    let Fixture { link, .. } = fixture(&peer)?;
-    let mut sources = Vec::new();
+    let Fixture { mut link, .. } = fixture(&peer)?;
     let ssrc = 22_u32;
     let mut report = [0_u8; 32];
     report[..8].copy_from_slice(&[0x81, 201, 0, 7, 0, 0, 0, 21]);
@@ -270,22 +277,28 @@ async fn reception_reports_cover_transmitted_sequences_across_gaps_and_rollover(
         (3, 3, 131075),
     ] {
         let packet = RtpPacket::new(0, sequence, 0, ssrc, &[0; 160])?;
-        super::record(&mut sources, &packet, 8000, 0, tokio::time::Instant::now())?;
+        super::record(
+            &mut link.leg.sources,
+            &packet,
+            8000,
+            0,
+            tokio::time::Instant::now(),
+        )?;
         report[16..20].copy_from_slice(&accepted.to_be_bytes());
-        link.received_control(&report, &sources)?;
-        let latest = || {
-            link.measurements
-                .borrow()
+        link.leg.received_control(&report)?;
+        let latest = |link: &RtpLink| {
+            link.leg
+                .measurements()
                 .peer
                 .as_ref()
                 .map(|peer| peer.extended_highest_sequence)
         };
-        assert_eq!(latest(), Some(accepted));
+        assert_eq!(latest(&link), Some(accepted));
         report[16..20].copy_from_slice(&rejected.to_be_bytes());
-        link.received_control(&report, &sources)?;
-        assert_eq!(latest(), Some(accepted));
+        link.leg.received_control(&report)?;
+        assert_eq!(latest(&link), Some(accepted));
     }
-    let (reports, _) = super::reports(&sources)?;
+    let (reports, _) = super::reports(&link.leg.sources)?;
     assert_eq!(reports[0].packets, 4);
     assert_eq!(reports[0].octets, 640);
     Ok(())
@@ -304,7 +317,7 @@ async fn live_counts_follow_peer_datagrams_and_bind_reception_reports_to_the_sen
         stop,
         _direction,
     } = fixture(&peer)?;
-    let mut observations = link.observations();
+    let mut observations = link.measurements.subscribe();
     assert_eq!(observations.borrow().local.rxcount, 0);
     assert_eq!(observations.borrow().local.txcount, 0);
     assert!(observations.borrow().peer.is_none());
@@ -487,7 +500,7 @@ async fn failed_control_reports_leave_the_audio_stream_running() -> Result<(), M
         .send_to(&[0], peer.control_addr().map_err(failure)?)
         .await
         .is_err());
-    phone.link.sockets.control = other_family;
+    phone.link.leg.control = other_family.into_std().map_err(failure)?;
     let (observer, mut dropped) = watch::channel(0);
     let subscriber = tracing_subscriber::registry().with(DroppedReports(observer));
     let task = tokio::spawn(phone.link.run().with_subscriber(subscriber));

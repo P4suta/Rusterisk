@@ -1,6 +1,6 @@
 use super::{
-    AudioSocketLink, Connection, DigitSupport, Gate, MediaError, MediaHub, PeerMediaDirection,
-    Port, RtpChannels,
+    AudioSocketLink, Connection, DigitSupport, Gate, Io, MediaError, MediaHub, PeerMediaDirection,
+    Port, RtpChannels, TaskIo,
 };
 use crate::media_websocket::{MediaLinkOptions, MediaSocket, WebSocketMediaLink};
 use crate::CallKey;
@@ -31,26 +31,16 @@ impl Port {
         let (direction, directed) = watch::channel(initial_direction);
         (
             Self {
-                worker: None,
-                measurements: None,
-                connection_lease: None,
-                answers: None,
-                incoming: input,
-                digits: digit_input,
-                outgoing,
-                commands,
-                completed: completions,
-                digit_support,
-                stop,
-                direction,
-                generated_audio_gate: match initial_direction {
-                    PeerMediaDirection::SendReceive => Gate::Open,
-                    PeerMediaDirection::SendOnly => Gate::OutgoingMuted,
-                    PeerMediaDirection::ReceiveOnly => Gate::IncomingMuted,
-                    PeerMediaDirection::Inactive => Gate::Closed,
-                },
-                saved_music: None,
-                connection: Connection::Waiting,
+                io: Io::Task(TaskIo {
+                    incoming: input,
+                    digits: digit_input,
+                    outgoing,
+                    commands,
+                    completed: completions,
+                    stop,
+                    direction,
+                }),
+                ..Self::owned(initial_direction, digit_support)
             },
             RtpChannels {
                 incoming,
@@ -62,6 +52,28 @@ impl Port {
                 direction: directed,
             },
         )
+    }
+
+    // A port for a leg that the media task runs in its own turn.
+    pub(super) fn owned(
+        initial_direction: PeerMediaDirection,
+        digit_support: DigitSupport,
+    ) -> Self {
+        Self {
+            worker: None,
+            connection_lease: None,
+            answers: None,
+            io: Io::Owned,
+            digit_support,
+            generated_audio_gate: match initial_direction {
+                PeerMediaDirection::SendReceive => Gate::Open,
+                PeerMediaDirection::SendOnly => Gate::OutgoingMuted,
+                PeerMediaDirection::ReceiveOnly => Gate::IncomingMuted,
+                PeerMediaDirection::Inactive => Gate::Closed,
+            },
+            saved_music: None,
+            connection: Connection::Waiting,
+        }
     }
 }
 

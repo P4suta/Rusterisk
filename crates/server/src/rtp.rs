@@ -1,13 +1,15 @@
 pub use crate::media_link::{Channels as RtpChannels, DigitCommand as RtpDigitCommand, LinkStats};
+use rusterisk_core::{DtmfToken, DtmfTone, PeerMediaDirection};
 use rusterisk_media::{
     AudioFormat, MediaError, RtpPacket, RtpReceiver, RtpSender, SourceReport, TelephoneFormat,
     TelephoneReceiver, TelephoneSender, MAX_PACKET,
 };
+use std::collections::VecDeque;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, watch};
+use tokio::time::Instant;
 #[cfg(test)]
 mod control_tests;
 
@@ -83,6 +85,11 @@ impl SocketPair {
     pub fn control(&self) -> &UdpSocket {
         &self.control
     }
+
+    // Takes the sockets out of the runtime's reactor, for a leg that reads them without waiting.
+    fn into_std(self) -> io::Result<(std::net::UdpSocket, std::net::UdpSocket)> {
+        Ok((self.data.into_std()?, self.control.into_std()?))
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -93,21 +100,35 @@ pub struct RtpSession {
     pub telephone: Option<TelephoneFormat>,
 }
 
-pub struct RtpLink {
-    measurements: watch::Sender<Measurements>,
-    sockets: SocketPair,
+// The datagrams that a leg reads from each socket in one turn, which bounds a flood's share of the turn.
+const TURN_DATAGRAMS: usize = 16;
+// The digit commands that wait behind the one that a leg sends.
+const DIGIT_COMMANDS: usize = 8;
+
+// A Real-time Transport Protocol leg that the media task runs in its own turn.
+pub struct RtpLeg {
+    measurements: Measurements,
+    data: std::net::UdpSocket,
+    control: std::net::UdpSocket,
+    control_peer: SocketAddr,
     session: RtpSession,
-    channels: RtpChannels,
     receiver: RtpReceiver,
     sender: RtpSender,
     presentation: Option<PresentationClock>,
     telephone: Option<TelephoneTransport>,
+    direction: PeerMediaDirection,
+    started: Instant,
+    report_at: Instant,
+    sources: Vec<SentSource>,
+    active: Option<RtpDigitCommand>,
+    commands: VecDeque<RtpDigitCommand>,
+    stats: LinkStats,
 }
 
 #[derive(Default, Clone)]
-pub(crate) struct Measurements {
-    pub(crate) local: rusterisk_api::ServerPacketCounts,
-    pub(crate) peer: Option<rusterisk_api::PeerReception>,
+pub struct Measurements {
+    pub local: rusterisk_api::ServerPacketCounts,
+    pub peer: Option<rusterisk_api::PeerReception>,
 }
 
 #[derive(Clone, Copy)]
@@ -137,7 +158,7 @@ impl PresentationClock {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ControlReception {
+pub enum ControlReception {
     Accepted,
     Rejected,
 }
@@ -214,21 +235,48 @@ fn failure(error: impl std::fmt::Display) -> MediaError {
     MediaError::Transport(error.to_string())
 }
 
-async fn send(socket: &UdpSocket, bytes: &[u8], peer: SocketAddr) -> Result<(), MediaError> {
-    let sent = tokio::time::timeout(Duration::from_millis(20), socket.send_to(bytes, peer))
-        .await
-        .map_err(failure)?
-        .map_err(failure)?;
-    if sent != bytes.len() {
-        return Err(MediaError::Transport("incomplete datagram".into()));
+// A datagram that a non-blocking socket received, or none when nothing waits.
+fn received(
+    result: io::Result<(usize, SocketAddr)>,
+) -> Result<Option<(usize, SocketAddr)>, MediaError> {
+    match result {
+        Ok(received) => Ok(Some(received)),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) => Err(failure(error)),
     }
-    Ok(())
 }
 
-async fn send_control(socket: &UdpSocket, bytes: &[u8], peer: SocketAddr, stats: &mut LinkStats) {
-    if let Err(error) = send(socket, bytes, peer).await {
-        stats.dropped += 1;
-        tracing::debug!(name: "control_report_dropped", %error, "control report delivery failed");
+// Sends a datagram without waiting, and reports false when the socket has no room for it.
+fn transmit(
+    socket: &std::net::UdpSocket,
+    bytes: &[u8],
+    peer: SocketAddr,
+) -> Result<bool, MediaError> {
+    match socket.send_to(bytes, peer) {
+        Ok(sent) if sent == bytes.len() => Ok(true),
+        Ok(_) => Err(MediaError::Transport("incomplete datagram".into())),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(false),
+        Err(error) => Err(failure(error)),
+    }
+}
+
+// Sends a control report, which a full socket or a failure drops without ending the leg.
+fn transmit_control(
+    socket: &std::net::UdpSocket,
+    bytes: &[u8],
+    peer: SocketAddr,
+    stats: &mut LinkStats,
+) {
+    match transmit(socket, bytes, peer) {
+        Ok(true) => {}
+        Ok(false) => {
+            stats.dropped += 1;
+            tracing::debug!(name: "control_report_dropped", "control report found no socket room");
+        }
+        Err(error) => {
+            stats.dropped += 1;
+            tracing::debug!(name: "control_report_dropped", %error, "control report delivery failed");
+        }
     }
 }
 
@@ -241,11 +289,11 @@ fn report_delay(initial: bool) -> Result<Duration, MediaError> {
     ))
 }
 
-impl RtpLink {
+impl RtpLeg {
     pub fn new(
         sockets: SocketPair,
         session: RtpSession,
-        channels: RtpChannels,
+        direction: PeerMediaDirection,
     ) -> Result<Self, MediaError> {
         if session.remote.port() == 0 || session.remote.port() == u16::MAX {
             return Err(MediaError::InvalidPacket);
@@ -270,16 +318,31 @@ impl RtpLink {
                 })
             })
             .transpose()?;
+        let (data, control) = sockets.into_std().map_err(failure)?;
+        let started = Instant::now();
         Ok(Self {
             telephone,
-            measurements: watch::channel(Measurements::default()).0,
+            measurements: Measurements::default(),
             receiver: RtpReceiver::new(session.format, session.payload_type)?,
             sender,
             presentation: None,
-            sockets,
+            control_peer: SocketAddr::new(session.remote.ip(), session.remote.port() + 1),
+            data,
+            control,
             session,
-            channels,
+            direction,
+            started,
+            report_at: started + report_delay(true)?,
+            sources: Vec::with_capacity(2),
+            active: None,
+            commands: VecDeque::with_capacity(DIGIT_COMMANDS),
+            stats: LinkStats::default(),
         })
+    }
+
+    // Milliseconds since the leg started, which its packet clocks count from.
+    fn elapsed(&self, sampled: Instant) -> u64 {
+        sampled.duration_since(self.started).as_millis() as u64
     }
 
     fn audio_packet(
@@ -296,174 +359,114 @@ impl RtpLink {
         Ok(packet)
     }
 
-    pub async fn run(self) -> Result<LinkStats, MediaError> {
-        self.serve(|_receipt| Ok(())).await
+    pub fn measurements(&self) -> Measurements {
+        self.measurements.clone()
     }
 
-    pub(crate) fn observations(&self) -> watch::Receiver<Measurements> {
-        self.measurements.subscribe()
+    #[cfg(test)]
+    pub(crate) fn measurements_mut(&mut self) -> &mut Measurements {
+        &mut self.measurements
     }
 
-    fn received_control(&self, bytes: &[u8], sources: &[SentSource]) -> Result<(), MediaError> {
+    #[cfg(test)]
+    pub(crate) fn local_addr(&self) -> Result<SocketAddr, MediaError> {
+        self.data.local_addr().map_err(failure)
+    }
+
+    // Swaps the audio socket, so that a test can make the leg's sends fail.
+    #[cfg(test)]
+    pub(crate) fn replace_data_socket(&mut self, socket: std::net::UdpSocket) {
+        self.data = socket;
+    }
+
+    fn received_control(&mut self, bytes: &[u8]) -> Result<(), MediaError> {
+        let sources = &self.sources;
         let report = rusterisk_media::reception_report(bytes, |ssrc, sequence| {
             sources.iter().any(|source| {
                 source.report.ssrc == ssrc && source.covers_reported_sequence(sequence)
             })
         })?;
         if let Some(report) = report {
-            self.measurements.send_modify(|snapshot| {
-                snapshot.peer = Some(rusterisk_api::PeerReception {
-                    source: rusterisk_api::PeerReportSource::PeerRtcp,
-                    observed_at: crate::utc_timestamps::now_millis(),
-                    reporter_ssrc: report.reporter_ssrc,
-                    reported_ssrc: report.reported_ssrc,
-                    extended_highest_sequence: report.extended_highest_sequence,
-                    cumulative_lost: report.cumulative_lost,
-                })
+            self.measurements.peer = Some(rusterisk_api::PeerReception {
+                source: rusterisk_api::PeerReportSource::PeerRtcp,
+                observed_at: crate::utc_timestamps::now_millis(),
+                reporter_ssrc: report.reporter_ssrc,
+                reported_ssrc: report.reported_ssrc,
+                extended_highest_sequence: report.extended_highest_sequence,
+                cumulative_lost: report.cumulative_lost,
             });
         }
         Ok(())
     }
 
-    async fn serve(
-        mut self,
-        mut control_receipt: impl FnMut(ControlReception) -> Result<(), MediaError>,
-    ) -> Result<LinkStats, MediaError> {
-        let period = Duration::from_millis(20);
-        let mut playout =
-            tokio::time::interval_at(tokio::time::Instant::now() + period * 2, period);
-        playout.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut report_at = tokio::time::Instant::now() + report_delay(true)?;
-        let mut data = [0; MAX_PACKET + 1];
-        let mut control = [0; MAX_PACKET + 1];
-        let mut stats = LinkStats::default();
-        let started = tokio::time::Instant::now();
-        let mut sources = Vec::with_capacity(2);
-        let mut active: Option<RtpDigitCommand> = None;
-        let control_peer =
-            SocketAddr::new(self.session.remote.ip(), self.session.remote.port() + 1);
-        loop {
-            if *self.channels.stop.borrow() || self.channels.incoming.is_closed() {
-                break;
-            }
-            tokio::select! {
-                changed = self.channels.stop.changed() => {
-                    if changed.is_err() || *self.channels.stop.borrow() { break; }
-                }
-                changed = self.channels.direction.changed() => {
-                    if changed.is_err() { break; }
-                    self.receiver.discard_pending();
-                    if !self.channels.direction.borrow().can_send() {
-                        if let Some(telephone) = &mut self.telephone {
-                            telephone.receiver.discard_pending();
-                        }
-                    }
-                }
-                packet = self.sockets.data.recv_from(&mut data) => {
-                    let (size, peer) = packet.map_err(failure)?;
-                    if peer != self.session.remote || size > MAX_PACKET { stats.dropped += 1; continue; }
-                    let now = started.elapsed().as_millis() as u64;
-                    match RtpPacket::parse(&data[..size]).and_then(|packet| {
-                        self.measurements.send_modify(|snapshot| snapshot.local.rxcount = snapshot.local.rxcount.saturating_add(1));
-                        self.receive(&packet, now)
-                    }) {
-                        Ok(true) => stats.packets_received += 1,
-                        Ok(false) | Err(_) => stats.dropped += 1,
-                    }
-                }
-                packet = self.sockets.control.recv_from(&mut control) => {
-                    let (size, peer) = packet.map_err(failure)?;
-                    let receipt = if peer != control_peer || size > MAX_PACKET || self.received_control(&control[..size], &sources).is_err() {
-                        stats.dropped += 1;
-                        ControlReception::Rejected
-                    } else {
-                        ControlReception::Accepted
-                    };
-                    control_receipt(receipt)?;
-                }
-                frame = self.channels.outgoing.recv() => {
-                    let Some(frame) = frame else { break; };
-                    if !self.channels.direction.borrow().can_receive() { continue; }
-                    let sampled = tokio::time::Instant::now();
-                    let now = sampled.duration_since(started).as_millis() as u64;
-                    let packet = self.audio_packet(frame, now)?;
-                    send(&self.sockets.data, &packet.encode()?, self.session.remote).await?;
-                    self.measurements.send_modify(|snapshot| snapshot.local.txcount = snapshot.local.txcount.saturating_add(1));
-                    record(&mut sources, &packet, self.session.format.rate(), packet.timestamp(), sampled)?;
-                    stats.packets_sent += 1;
-                }
-                command = self.channels.commands.recv(), if active.is_none() && self.telephone.is_some() && (!self.channels.commands.is_closed() || !self.channels.commands.is_empty()) => {
-                    active = command;
-                }
-                _instant = playout.tick() => {
-                    if let Some(telephone) = &mut self.telephone {
-                        let sampled = tokio::time::Instant::now();
-                        let now = sampled.duration_since(started).as_millis() as u64;
-                        if let Some(tone) = telephone.receiver.expire(now)? {
-                            if self.channels.direction.borrow().can_send() {
-                                self.channels.digits.try_send(tone).map_err(|_| MediaError::Capacity)?;
-                            }
-                        }
-                        for packet in telephone.sender.poll(now, &mut self.sender)? {
-                            if !self.channels.direction.borrow().can_receive() { continue; }
-                            send(&self.sockets.data, &packet.encode()?, self.session.remote).await?;
-                            self.measurements.send_modify(|snapshot| snapshot.local.txcount = snapshot.local.txcount.saturating_add(1));
-                            let timestamp = telephone.sender.timestamp_at(now, &self.sender);
-                            record(&mut sources, &packet, telephone.format.rate(), timestamp, sampled)?;
-                            stats.packets_sent += 1;
-                        }
-                        if let Some(command) = &mut active {
-                            match command {
-                                RtpDigitCommand::Tone(tone) => {
-                                    if telephone.sender.ready() {
-                                        telephone.sender.start(*tone, now, &self.sender)?;
-                                        active = None;
-                                    }
-                                }
-                                RtpDigitCommand::Sequence(command) => {
-                                    let mut sequence = command.sequence;
-                                    let tone = sequence.advance(now).map_err(|error| MediaError::Transport(format!("digit schedule: {error:?}")))?;
-                                    if tone.is_none() || telephone.sender.ready() {
-                                        if let Some(tone) = tone { telephone.sender.start(tone, now, &self.sender)?; }
-                                        command.sequence = sequence;
-                                        if sequence.finished() {
-                                            self.channels.completed.try_send(command.token).map_err(|_| MediaError::Capacity)?;
-                                            active = None;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    match self.receiver.pop() {
-                        Ok(Some(frame)) if self.channels.direction.borrow().can_send() => match self.channels.incoming.try_send(frame) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(_)) => stats.dropped += 1,
-                            Err(mpsc::error::TrySendError::Closed(_)) => break,
-                        },
-                        Ok(Some(_)) | Ok(None) => {}
-                        Err(_) => stats.dropped += 1,
-                    }
-                }
-                () = tokio::time::sleep_until(report_at) => {
-                    if !sources.is_empty() {
-                        let (reports, ntp) = reports(&sources)?;
-                        let bytes = rusterisk_media::sender_reports(&reports, ntp, "rusterisk")?;
-                        send_control(&self.sockets.control, &bytes, control_peer, &mut stats).await;
-                    }
-                    report_at = tokio::time::Instant::now() + report_delay(false)?;
-                }
+    // Changes the peer direction and drops the audio and digits that the old direction admitted.
+    pub fn set_direction(&mut self, direction: PeerMediaDirection) {
+        self.direction = direction;
+        self.receiver.discard_pending();
+        if !direction.can_send() {
+            if let Some(telephone) = &mut self.telephone {
+                telephone.receiver.discard_pending();
             }
         }
-        if !sources.is_empty() {
-            let (reports, ntp) = reports(&sources)?;
-            let bytes = rusterisk_media::goodbye_reports(&reports, ntp, "rusterisk")?;
-            send_control(&self.sockets.control, &bytes, control_peer, &mut stats).await;
-        }
-        Ok(stats)
     }
 
-    fn receive(&mut self, packet: &RtpPacket, now: u64) -> Result<bool, MediaError> {
+    // Queues a digit command behind the one that the leg sends now.
+    pub fn queue_digits(&mut self, command: RtpDigitCommand) -> Result<(), MediaError> {
+        if self.commands.len() >= DIGIT_COMMANDS {
+            return Err(MediaError::Capacity);
+        }
+        self.commands.push_back(command);
+        Ok(())
+    }
+
+    // Reads the datagrams that arrived since the last turn, at most one reorder window from each socket.
+    pub fn receive(
+        &mut self,
+        scratch: &mut [u8; MAX_PACKET + 1],
+        tones: &mut Vec<DtmfTone>,
+        mut receipt: impl FnMut(ControlReception) -> Result<(), MediaError>,
+    ) -> Result<(), MediaError> {
+        for _ in 0..TURN_DATAGRAMS {
+            let Some((size, peer)) = received(self.data.recv_from(scratch))? else {
+                break;
+            };
+            if peer != self.session.remote || size > MAX_PACKET {
+                self.stats.dropped += 1;
+                continue;
+            }
+            let now = self.elapsed(Instant::now());
+            match RtpPacket::parse(&scratch[..size]).and_then(|packet| {
+                self.measurements.local.rxcount = self.measurements.local.rxcount.saturating_add(1);
+                self.accept(&packet, now, tones)
+            }) {
+                Ok(true) => self.stats.packets_received += 1,
+                Ok(false) | Err(_) => self.stats.dropped += 1,
+            }
+        }
+        for _ in 0..TURN_DATAGRAMS {
+            let Some((size, peer)) = received(self.control.recv_from(scratch))? else {
+                break;
+            };
+            let reception = if peer != self.control_peer
+                || size > MAX_PACKET
+                || self.received_control(&scratch[..size]).is_err()
+            {
+                self.stats.dropped += 1;
+                ControlReception::Rejected
+            } else {
+                ControlReception::Accepted
+            };
+            receipt(reception)?;
+        }
+        Ok(())
+    }
+
+    fn accept(
+        &mut self,
+        packet: &RtpPacket,
+        now: u64,
+        tones: &mut Vec<DtmfTone>,
+    ) -> Result<bool, MediaError> {
         if self
             .session
             .telephone
@@ -471,26 +474,148 @@ impl RtpLink {
         {
             let telephone = self.telephone.as_mut().ok_or(MediaError::Unsupported)?;
             let events = telephone.receiver.push(packet, now)?;
-            if !self.channels.direction.borrow().can_send() {
+            if !self.direction.can_send() {
                 telephone.receiver.discard_pending();
                 return Ok(false);
             }
-            for tone in events.into_tones() {
-                self.channels
-                    .digits
-                    .try_send(tone)
-                    .map_err(|_| MediaError::Capacity)?;
-            }
+            tones.extend(events.into_tones());
             self.receiver.skip(packet)?;
             Ok(true)
-        } else if self.channels.direction.borrow().can_send() {
+        } else if self.direction.can_send() {
             self.receiver.push(packet)
         } else {
             Ok(false)
         }
     }
+
+    // Advances telephone events, digit commands, and control reports to this turn, and takes the next received frame.
+    pub fn advance(&mut self, tones: &mut Vec<DtmfTone>) -> Result<Advanced, MediaError> {
+        let mut advanced = Advanced {
+            frame: None,
+            completed: None,
+        };
+        if self.active.is_none() && self.telephone.is_some() {
+            self.active = self.commands.pop_front();
+        }
+        let sampled = Instant::now();
+        let now = self.elapsed(sampled);
+        if let Some(telephone) = &mut self.telephone {
+            if let Some(tone) = telephone.receiver.expire(now)? {
+                if self.direction.can_send() {
+                    tones.push(tone);
+                }
+            }
+            for packet in telephone.sender.poll(now, &mut self.sender)? {
+                if !self.direction.can_receive() {
+                    continue;
+                }
+                if transmit(&self.data, &packet.encode()?, self.session.remote)? {
+                    self.measurements.local.txcount =
+                        self.measurements.local.txcount.saturating_add(1);
+                    let timestamp = telephone.sender.timestamp_at(now, &self.sender);
+                    record(
+                        &mut self.sources,
+                        &packet,
+                        telephone.format.rate(),
+                        timestamp,
+                        sampled,
+                    )?;
+                    self.stats.packets_sent += 1;
+                } else {
+                    self.stats.dropped += 1;
+                }
+            }
+            if let Some(command) = &mut self.active {
+                match command {
+                    RtpDigitCommand::Tone(tone) => {
+                        if telephone.sender.ready() {
+                            telephone.sender.start(*tone, now, &self.sender)?;
+                            self.active = None;
+                        }
+                    }
+                    RtpDigitCommand::Sequence(command) => {
+                        let mut sequence = command.sequence;
+                        let tone = sequence.advance(now).map_err(|error| {
+                            MediaError::Transport(format!("digit schedule: {error:?}"))
+                        })?;
+                        if tone.is_none() || telephone.sender.ready() {
+                            if let Some(tone) = tone {
+                                telephone.sender.start(tone, now, &self.sender)?;
+                            }
+                            command.sequence = sequence;
+                            if sequence.finished() {
+                                advanced.completed = Some(command.token);
+                                self.active = None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        match self.receiver.pop() {
+            Ok(Some(frame)) if self.direction.can_send() => advanced.frame = Some(frame),
+            Ok(Some(_)) | Ok(None) => {}
+            Err(_) => self.stats.dropped += 1,
+        }
+        if sampled >= self.report_at {
+            if !self.sources.is_empty() {
+                let (reports, ntp) = reports(&self.sources)?;
+                let bytes = rusterisk_media::sender_reports(&reports, ntp, "rusterisk")?;
+                transmit_control(&self.control, &bytes, self.control_peer, &mut self.stats);
+            }
+            self.report_at = sampled + report_delay(false)?;
+        }
+        Ok(advanced)
+    }
+
+    // Sends one mixed frame as the next audio packet.
+    pub fn send(&mut self, frame: rusterisk_media::Frame) -> Result<(), MediaError> {
+        if !self.direction.can_receive() {
+            return Ok(());
+        }
+        let sampled = Instant::now();
+        let now = self.elapsed(sampled);
+        let packet = self.audio_packet(frame, now)?;
+        if !transmit(&self.data, &packet.encode()?, self.session.remote)? {
+            self.stats.dropped += 1;
+            return Ok(());
+        }
+        self.measurements.local.txcount = self.measurements.local.txcount.saturating_add(1);
+        record(
+            &mut self.sources,
+            &packet,
+            self.session.format.rate(),
+            packet.timestamp(),
+            sampled,
+        )?;
+        self.stats.packets_sent += 1;
+        Ok(())
+    }
+
+    // Ends the leg with a goodbye report for each source that it sent.
+    pub fn finish(mut self) -> LinkStats {
+        if !self.sources.is_empty() {
+            match reports(&self.sources).and_then(|(reports, ntp)| {
+                rusterisk_media::goodbye_reports(&reports, ntp, "rusterisk")
+            }) {
+                Ok(bytes) => {
+                    transmit_control(&self.control, &bytes, self.control_peer, &mut self.stats)
+                }
+                Err(error) => {
+                    self.stats.dropped += 1;
+                    tracing::debug!(name: "control_report_dropped", %error, "goodbye report failed");
+                }
+            }
+        }
+        self.stats
+    }
 }
 
+// What one turn of a leg produced for the media task.
+pub struct Advanced {
+    pub frame: Option<rusterisk_media::Frame>,
+    pub completed: Option<DtmfToken>,
+}
 fn reports(sources: &[SentSource]) -> Result<(Vec<SourceReport>, u64), MediaError> {
     let sampled = tokio::time::Instant::now();
     let wall = SystemTime::now()
