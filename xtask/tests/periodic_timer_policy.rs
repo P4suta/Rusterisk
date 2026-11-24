@@ -109,6 +109,44 @@ fn rejects_a_function_value_that_a_registration_cannot_count() -> Result<(), syn
 }
 
 #[test]
+fn reports_an_import_once_and_reads_no_constructor_in_a_bare_name() -> Result<(), syn::Error> {
+    let details = |source: &str, timers: &[Timer]| {
+        inspect(source, timers).map(|findings| {
+            findings
+                .into_iter()
+                .map(|finding| finding.detail)
+                .collect::<Vec<_>>()
+        })
+    };
+    for source in [
+        "use tokio::time::interval; fn scale(interval: u64) -> u64 { interval * 2 }",
+        "use tokio::time::interval; fn run() { record!(interval = period()); }",
+        "use tokio::time::interval; fn run() { let _ticks = interval(period()); }",
+    ] {
+        assert_eq!(
+            details(source, &[])?,
+            ["an import hides a periodic timer"],
+            "{source}"
+        );
+    }
+    assert_eq!(
+        details(
+            "use tokio::time::*; fn scale(interval: u64) -> u64 { interval * 2 }",
+            &[]
+        )?,
+        ["a glob import hides a periodic timer"]
+    );
+    assert_eq!(
+        details(
+            "use tokio::time::interval; fn serve() { let _ticks = interval(period()); }",
+            &[timer("serve")]
+        )?,
+        ["an import hides a periodic timer", "serve"]
+    );
+    Ok(())
+}
+
+#[test]
 fn ignores_a_timer_name_in_a_literal_a_binding_or_a_method() -> Result<(), syn::Error> {
     for source in [
         r#"fn run() { println!("interval(20ms)"); }"#,
@@ -116,6 +154,8 @@ fn ignores_a_timer_name_in_a_literal_a_binding_or_a_method() -> Result<(), syn::
         "fn run(interval: u64) -> u64 { interval * 2 }",
         "fn run(timing: &Timing) { assert!(timing.interval() > 0); }",
         "use tokio::time::sleep; fn run(interval: Duration) { drop(sleep(interval)); }",
+        "fn run() { record!(interval = period()); }",
+        "fn run() { let interval = || period(); drop(interval()); }",
     ] {
         assert!(rules(source, &[])?.is_empty(), "{source}");
     }

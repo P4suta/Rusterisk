@@ -32,14 +32,11 @@ pub fn production(path: &std::path::Path) -> bool {
 /// Finds each periodic timer outside the registered functions of one production source file.
 pub fn inspect(source: &str, timers: &[Timer]) -> Result<Vec<Finding>, syn::Error> {
     let file = syn::parse_file(source)?;
-    let mut imports = Imports { bare: false };
-    imports.visit_file(&file);
     let mut policy = Policy {
         findings: Vec::new(),
         timers,
         used: BTreeSet::new(),
         function: None,
-        bare: imports.bare,
     };
     policy.visit_file(&file);
     for (index, timer) in timers.iter().enumerate() {
@@ -58,13 +55,21 @@ struct Policy<'a> {
     timers: &'a [Timer],
     used: BTreeSet<usize>,
     function: Option<String>,
-    bare: bool,
 }
 
 const HIDDEN: &str = "a function value hides a periodic timer";
 
 fn periodic(name: &syn::Ident) -> bool {
     name == "interval" || name == "interval_at"
+}
+
+// A constructor is named through a path, because the policy rejects every import of its bare name.
+fn constructor(path: &syn::Path) -> bool {
+    path.segments.len() > 1
+        && path
+            .segments
+            .last()
+            .is_some_and(|segment| periodic(&segment.ident))
 }
 
 // Whether a condition holds only in a test build.
@@ -101,34 +106,6 @@ fn globbed(tree: &syn::UseTree) -> bool {
     }
 }
 
-// Whether production code brings a timer constructor into scope under its bare name.
-struct Imports {
-    bare: bool,
-}
-
-impl<'ast> Visit<'ast> for Imports {
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if !test_only(&node.attrs) {
-            visit::visit_item_mod(self, node);
-        }
-    }
-
-    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
-        if !test_only(&node.attrs) {
-            visit::visit_item_use(self, node);
-        }
-    }
-
-    fn visit_use_name(&mut self, node: &'ast syn::UseName) {
-        self.bare |= periodic(&node.ident);
-    }
-
-    fn visit_use_path(&mut self, node: &'ast syn::UsePath) {
-        self.bare |= node.ident == "time" && globbed(&node.tree);
-        visit::visit_use_path(self, node);
-    }
-}
-
 impl Policy<'_> {
     fn reject(&mut self, detail: &str) {
         self.findings.push(Finding {
@@ -156,10 +133,8 @@ impl Policy<'_> {
     }
 
     // A macro body stays unparsed, so this walks its tokens for the same references.
-    // A name inside a literal or after a member access names no constructor.
     fn tokens(&mut self, stream: TokenStream) {
         let mut colons = 0_u8;
-        let mut member = false;
         let mut trees = stream.into_iter().peekable();
         while let Some(tree) = trees.next() {
             match tree {
@@ -168,18 +143,16 @@ impl Policy<'_> {
                         trees.peek(),
                         Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Parenthesis
                     );
-                    if periodic(&name) && !member {
+                    if periodic(&name) && colons == 2 {
                         if called {
                             self.timer();
-                        } else if colons == 2 || self.bare {
+                        } else {
                             self.reject(HIDDEN);
                         }
                     }
                     colons = 0;
-                    member = false;
                 }
                 TokenTree::Punct(punct) => {
-                    member = punct.as_char() == '.';
                     colons = if punct.as_char() == ':' {
                         colons.saturating_add(1).min(2)
                     } else {
@@ -189,12 +162,8 @@ impl Policy<'_> {
                 TokenTree::Group(group) => {
                     self.tokens(group.stream());
                     colons = 0;
-                    member = false;
                 }
-                TokenTree::Literal(_) => {
-                    colons = 0;
-                    member = false;
-                }
+                TokenTree::Literal(_) => colons = 0,
             }
         }
     }
@@ -228,30 +197,17 @@ impl<'ast> Visit<'ast> for Policy<'_> {
     }
 
     // A constructor outside call position is a function value, whose calls no registration counts.
-    // A bare name is a constructor only where an import brings it into scope.
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        let segments = &node.path.segments;
-        if segments
-            .last()
-            .is_some_and(|segment| periodic(&segment.ident))
-            && (segments.len() > 1 || self.bare)
-        {
+        if constructor(&node.path) {
             self.reject(HIDDEN);
         }
         visit::visit_expr_path(self, node);
     }
 
-    // A constructor in call position is one timer, even where no import explains a bare name.
+    // A constructor in call position is one timer.
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        let constructor = matches!(
-            &*node.func,
-            syn::Expr::Path(function)
-                if function
-                    .path
-                    .segments
-                    .last()
-                    .is_some_and(|segment| periodic(&segment.ident))
-        );
+        let constructor =
+            matches!(&*node.func, syn::Expr::Path(function) if constructor(&function.path));
         if constructor {
             self.timer();
             for argument in &node.args {
@@ -262,11 +218,30 @@ impl<'ast> Visit<'ast> for Policy<'_> {
         }
     }
 
+    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
+        if !test_only(&node.attrs) {
+            visit::visit_item_use(self, node);
+        }
+    }
+
+    fn visit_use_name(&mut self, node: &'ast syn::UseName) {
+        if periodic(&node.ident) {
+            self.reject("an import hides a periodic timer");
+        }
+    }
+
     fn visit_use_rename(&mut self, node: &'ast syn::UseRename) {
         if periodic(&node.ident) {
             self.reject("an alias hides a periodic timer");
         }
         visit::visit_use_rename(self, node);
+    }
+
+    fn visit_use_path(&mut self, node: &'ast syn::UsePath) {
+        if node.ident == "time" && globbed(&node.tree) {
+            self.reject("a glob import hides a periodic timer");
+        }
+        visit::visit_use_path(self, node);
     }
 
     fn visit_macro(&mut self, node: &'ast syn::Macro) {
