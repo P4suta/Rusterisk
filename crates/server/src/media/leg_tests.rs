@@ -48,6 +48,48 @@ fn read(hub: &MediaHub, key: &CallKey) -> Result<u64, MediaError> {
         .rxcount)
 }
 
+// Signaling bridges two legs, and a peer speaks before the media task reads its commands.
+// The bridge applies before the turn reads that audio, so the other peer hears it.
+#[tokio::test]
+async fn a_bridge_queued_before_a_turn_carries_that_turns_audio() -> Result<(), MediaError> {
+    let (handle, mut hub, _notices) = MediaHub::new(4);
+    let alice = key("alice")?;
+    let bob = key("bob")?;
+    let alice_peer = leg(&mut hub, &alice, None)?;
+    let bob_peer = leg(&mut hub, &bob, None)?;
+    handle.bridge(1, Vec::from([alice.clone(), bob.clone()]))?;
+    let local = hub
+        .legs
+        .get(&bob)
+        .ok_or(MediaError::UnknownStream)?
+        .local_addr()?;
+    let mut sender = rusterisk_media::RtpSender::new(AudioFormat::Pcmu, 0, [8; 10])?;
+    let spoken = sender.packet(rusterisk_media::Frame::new(&[-7000; 160], 8000)?)?;
+    bob_peer
+        .data()
+        .send_to(&spoken.encode()?, local)
+        .await
+        .map_err(failure)?;
+    // A loopback datagram can reach its socket after the sender returns.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    hub.tick()?;
+    let mut bytes = [0; 1501];
+    let (size, _) = tokio::time::timeout(
+        Duration::from_secs(1),
+        alice_peer.data().recv_from(&mut bytes),
+    )
+    .await
+    .map_err(failure)?
+    .map_err(failure)?;
+    let heard = RtpPacket::parse(&bytes[..size])?;
+    hub.close().await?;
+    assert!(heard
+        .payload()
+        .iter()
+        .all(|byte| (i32::from(rusterisk_media::mulaw_decode(*byte)) + 7000).abs() < 300));
+    Ok(())
+}
+
 // A peer floods a leg, and each turn reads one reorder window of its datagrams.
 #[tokio::test]
 async fn a_leg_reads_at_most_one_window_of_datagrams_in_a_turn() -> Result<(), MediaError> {

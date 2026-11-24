@@ -1220,6 +1220,10 @@ impl MediaHub {
     }
 
     fn tick(&mut self) -> Result<(), MediaError> {
+        // Commands that signaling queued before this turn apply before the turn reads any audio.
+        while let Ok(command) = self.commands.try_recv() {
+            self.command(command)?;
+        }
         self.probes.retain(|_, challenge| !challenge.closed());
         for (key, port) in &mut self.ports {
             // An owned leg has no channels, and the loop below runs it.
