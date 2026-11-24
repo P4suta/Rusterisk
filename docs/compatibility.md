@@ -130,6 +130,8 @@ Native and Asterisk reference scenarios decode known tones in both directions ov
 The server reads `http.conf`, `ari.conf`, `pjsip.conf`, `rtp.conf`, and `extensions.conf` with file and line diagnostics.
 Optional `chan_websocket.conf` and `websocket_client.conf` files configure media controls and outgoing media clients.
 Unsupported configuration options fail validation.
+An address of record accepts `remove_existing`, which lets a registration over `max_contacts` replace earlier contacts as the [reference option](https://github.com/asterisk/asterisk/blob/22.9.0/res/res_pjsip/pjsip_config.xml#L2867-L2877) describes.
+The registrar removes the soonest-expiring contacts that the registration neither added nor updated.
 Dialplan execution covers `NoOp`, `Set`, `Answer`, `Dial`, `Stasis`, `Playback`, `Wait`, `Goto`, and `Hangup`.
 `Wait` accepts nonnegative decimal durations, including fractions, exponents, and the `ms`, `s`, `m`, and `h` units in the [reference time parser](https://github.com/asterisk/asterisk/blob/22.9.0/main/app.c#L3106-L3172).
 Durations use integer milliseconds and discard fractional milliseconds.

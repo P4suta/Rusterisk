@@ -3,6 +3,9 @@ use rusterisk_config::{Codec, Config, Dtmf, Protocol, Rtp, Transport};
 use rusterisk_sip::OutboundProfile;
 use std::{fmt, net::SocketAddr};
 
+#[cfg(test)]
+mod media_bind_tests;
+
 #[derive(Clone)]
 pub struct NativeCallProfile {
     endpoint: String,
@@ -241,7 +244,11 @@ impl NativeMediaProfile {
     }
 
     pub(crate) fn bind_ip(&self) -> std::net::IpAddr {
-        self.transport.bind.ip()
+        let signaling = self.transport.bind.ip();
+        match self.transport.external_media_address {
+            Some(external) if self.webrtc && signaling.is_loopback() => external,
+            Some(_) | None => signaling,
+        }
     }
 
     pub(crate) fn advertised(&self, local: SocketAddr) -> SocketAddr {

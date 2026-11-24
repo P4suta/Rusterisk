@@ -444,3 +444,72 @@ async fn receipt_failures_end_the_owned_worker_and_release_its_sockets() -> Resu
     }
     Ok(())
 }
+
+async fn delivered_sequence(
+    outgoing: &mpsc::Sender<Frame>,
+    peer: &SocketPair,
+    sample: i16,
+) -> Result<u16, MediaError> {
+    outgoing
+        .send(Frame::new(&[sample; 160], 8000)?)
+        .await
+        .map_err(failure)?;
+    let mut packet = [0; 256];
+    let (size, _) =
+        tokio::time::timeout(Duration::from_secs(2), peer.data().recv_from(&mut packet))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
+    Ok(RtpPacket::parse(&packet[..size])?.sequence())
+}
+
+struct DroppedReports(watch::Sender<u32>);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for DroppedReports {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().name() == "control_report_dropped" {
+            self.0.send_modify(|count| *count = count.saturating_add(1));
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_control_reports_leave_the_audio_stream_running() -> Result<(), MediaError> {
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let mut phone = fixture(&peer)?;
+    let other_family = tokio::net::UdpSocket::bind((std::net::Ipv6Addr::LOCALHOST, 0))
+        .await
+        .map_err(failure)?;
+    assert!(other_family
+        .send_to(&[0], peer.control_addr().map_err(failure)?)
+        .await
+        .is_err());
+    phone.link.sockets.control = other_family;
+    let (observer, mut dropped) = watch::channel(0);
+    let subscriber = tracing_subscriber::registry().with(DroppedReports(observer));
+    let task = tokio::spawn(phone.link.run().with_subscriber(subscriber));
+    let first = delivered_sequence(&phone.outgoing, &peer, 750).await?;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_millis(3200)).await;
+    tokio::time::resume();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        dropped.wait_for(|count| *count >= 1),
+    )
+    .await
+    .map_err(failure)?
+    .map_err(|_| failure("the worker ended before its periodic report"))?;
+    let second = delivered_sequence(&phone.outgoing, &peer, 1500).await?;
+    assert_eq!(second, first.wrapping_add(1));
+    phone.stop.send_replace(true);
+    let stats = finish(task).await?;
+    assert_eq!(stats.packets_sent, 2);
+    assert!(
+        stats.dropped >= 2,
+        "the periodic report and the closing report both count as dropped"
+    );
+    Ok(())
+}

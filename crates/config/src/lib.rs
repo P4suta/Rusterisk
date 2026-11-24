@@ -325,6 +325,7 @@ impl Auth {
 pub struct Aor {
     pub name: String,
     pub max_contacts: u16,
+    pub remove_existing: bool,
     pub contact: Option<String>,
     pub minimum_expiration: u32,
     pub default_expiration: u32,
@@ -818,6 +819,7 @@ impl Config {
                     &[
                         "type",
                         "max_contacts",
+                        "remove_existing",
                         "contact",
                         "minimum_expiration",
                         "default_expiration",
@@ -844,6 +846,7 @@ impl Config {
                 self.aors.push(Aor {
                     name: section.name.clone(),
                     max_contacts,
+                    remove_existing: section.flag(file, "remove_existing", false)?,
                     contact: section.value("contact").map(String::from),
                     minimum_expiration,
                     default_expiration: section.number(file, "default_expiration", 3600)?,

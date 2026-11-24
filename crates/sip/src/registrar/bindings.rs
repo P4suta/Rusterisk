@@ -105,6 +105,20 @@ impl Bindings {
         Ok(result)
     }
 
+    fn replace_earlier(&mut self, earlier: usize, update: &Update<'_>) -> Result<usize, Rejection> {
+        let (index, binding) = self
+            .values
+            .iter()
+            .take(earlier)
+            .enumerate()
+            .filter(|(_, binding)| binding.address == update.address.name)
+            .min_by_key(|(_, binding)| binding.expires)
+            .ok_or(Rejection::TooManyContacts)?;
+        ordering(binding, update)?;
+        self.values.remove(index);
+        Ok(earlier.saturating_sub(1))
+    }
+
     pub(super) fn prepare(
         &self,
         update: &Update<'_>,
@@ -160,6 +174,7 @@ impl Bindings {
                 candidate.values.remove(index);
             }
         }
+        let mut earlier = candidate.values.len();
         for contact in changes.as_slice() {
             let requested = contact
                 .expires()
@@ -174,14 +189,17 @@ impl Bindings {
             if expires == 0 {
                 continue;
             }
-            if candidate
+            while candidate
                 .values
                 .iter()
                 .filter(|binding| binding.address == update.address.name)
                 .count()
                 >= usize::from(update.address.max_contacts)
             {
-                return Err(Rejection::TooManyContacts);
+                if !update.address.remove_existing {
+                    return Err(Rejection::TooManyContacts);
+                }
+                earlier = candidate.replace_earlier(earlier, update)?;
             }
             if candidate.values.len() == 128 {
                 return Err(Rejection::Capacity);
