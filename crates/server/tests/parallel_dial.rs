@@ -1,5 +1,6 @@
 use rusterisk_api::{ChannelId, EventKind};
 use rusterisk_config::Dialplan;
+use rusterisk_core::Wake;
 use rusterisk_server::{
     Action, CallKey, Control, ControlError, Effect, IncomingCall, IncomingTarget,
 };
@@ -30,7 +31,7 @@ fn start(
 
 #[test]
 fn parallel_attempts_belong_to_the_parent_and_cancel_with_it() -> Result<(), ControlError> {
-    for (timeout, expected) in [("", None), (",1", Some(1))] {
+    for (timeout, expected) in [("", Wake::Idle), (",1", Wake::At(1050))] {
         let (mut control, parent, started) = start(4, timeout)?;
         assert_eq!(started.effects.len(), 2);
         let mut children = Vec::new();
@@ -39,7 +40,6 @@ fn parallel_attempts_belong_to_the_parent_and_cancel_with_it() -> Result<(), Con
                 key,
                 endpoint,
                 caller,
-                timeout,
                 ..
             } = effect
             else {
@@ -47,11 +47,11 @@ fn parallel_attempts_belong_to_the_parent_and_cancel_with_it() -> Result<(), Con
             };
             assert_eq!(endpoint, destination);
             assert_eq!(caller, "100");
-            assert_eq!(*timeout, expected);
             assert_ne!(key, &parent);
             children.push(key.clone());
         }
         assert_ne!(children[0], children[1]);
+        assert_eq!(control.dialplan_wake(), expected);
         assert!(started.events.is_empty());
         assert!(control.tick_dialplans(1049, "later")?.effects.is_empty());
         let ended = control.apply(Action::Hangup(parent.id.clone()), "later", 1049)?;

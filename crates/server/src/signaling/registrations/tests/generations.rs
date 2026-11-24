@@ -215,7 +215,6 @@ async fn calls_and_registration_resolution_share_sixteen_slots_until_work_is_rea
                         call_key(index)?,
                         "PJSIP/phone".into(),
                         "100".into(),
-                        None,
                         0,
                     )?;
                 }
@@ -245,13 +244,7 @@ async fn calls_and_registration_resolution_share_sixteen_slots_until_work_is_rea
                 }
                 if signaling.registrations.setup_count() != 16
                     || !matches!(
-                        signaling.queue_native(
-                            call_key(1)?,
-                            "PJSIP/phone".into(),
-                            "100".into(),
-                            None,
-                            0
-                        ),
+                        signaling.queue_native(call_key(1)?, "PJSIP/phone".into(), "100".into(), 0),
                         Err(ControlError::Capacity)
                     )
                 {
@@ -261,13 +254,7 @@ async fn calls_and_registration_resolution_share_sixteen_slots_until_work_is_rea
                 }
                 signaling.registrations.cancel();
                 if !matches!(
-                    signaling.queue_native(
-                        call_key(2)?,
-                        "PJSIP/phone".into(),
-                        "100".into(),
-                        None,
-                        0
-                    ),
+                    signaling.queue_native(call_key(2)?, "PJSIP/phone".into(), "100".into(), 0),
                     Err(ControlError::Capacity)
                 ) {
                     return Err(ControlError::Invalid(
@@ -275,13 +262,7 @@ async fn calls_and_registration_resolution_share_sixteen_slots_until_work_is_rea
                     ));
                 }
                 signaling.finish_registrations().await?;
-                signaling.queue_native(
-                    call_key(3)?,
-                    "PJSIP/phone".into(),
-                    "100".into(),
-                    None,
-                    0,
-                )?;
+                signaling.queue_native(call_key(3)?, "PJSIP/phone".into(), "100".into(), 0)?;
             }
             Ok(())
         }

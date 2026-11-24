@@ -278,7 +278,6 @@ fn outbound(id: &str) -> Result<Outbound, SipError> {
         endpoint: "phone".into(),
         caller: "shown-caller".into(),
         local_rtp: "127.0.0.1:10000".parse()?,
-        timeout_ms: Some(30_000),
     })
 }
 

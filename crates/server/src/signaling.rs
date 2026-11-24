@@ -664,14 +664,13 @@ impl Signaling {
         let local = sockets.local_addr().map_err(failure)?;
         let local_rtp = profile.advertised(local);
         let dtmf = profile.dtmf;
-        let outbound::CallStart { caller, timeout } = call;
+        let outbound::CallStart { caller } = call;
         let outbound = Outbound {
             id: key.id.as_str().into(),
             generation: key.generation,
             endpoint,
             caller,
             local_rtp,
-            timeout_ms: timeout.map(|timeout| u64::from(timeout) * 1000),
         };
         let engine = &mut self.listeners[listener].engine;
         let (pending, output) = if profile.webrtc {
@@ -943,7 +942,6 @@ impl Signaling {
                 key,
                 endpoint,
                 caller,
-                timeout,
                 settings,
             } => {
                 if self.calls.contains_key(&key) || self.native_pending.contains_key(&key) {
@@ -966,7 +964,7 @@ impl Signaling {
                         self.start(
                             key.clone(),
                             endpoint,
-                            outbound::CallStart { caller, timeout },
+                            outbound::CallStart { caller },
                             profile,
                             settings,
                             now,

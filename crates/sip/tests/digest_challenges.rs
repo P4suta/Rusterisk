@@ -25,7 +25,6 @@ fn originate(engine: &mut Engine) -> Result<Vec<u8>, SipError> {
                 endpoint: "phone".into(),
                 caller: "displayed-caller".into(),
                 local_rtp: "127.0.0.1:10000".parse()?,
-                timeout_ms: None,
             },
             0,
         )?

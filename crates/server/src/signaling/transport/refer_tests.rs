@@ -68,7 +68,6 @@ fn refer(
                 endpoint: "alice".into(),
                 caller: "100".into(),
                 local_rtp: "127.0.0.1:10000".parse().map_err(failure)?,
-                timeout_ms: Some(60_000),
             },
             0,
         )
@@ -210,7 +209,7 @@ async fn cached_reply_flow(usage: Usage) -> Result<(), ControlError> {
         let target = "unrelated-target";
         let started = signaling.listeners[0].engine.originate(Outbound {
             id: target.into(), generation: 8, endpoint: "alice".into(), caller: "200".into(),
-            local_rtp: "127.0.0.1:10004".parse().map_err(failure)?, timeout_ms: Some(60_000),
+            local_rtp: "127.0.0.1:10004".parse().map_err(failure)?,
         }, 11).map_err(failure)?;
         signaling.output(0, started, 11).await?;
         let invite = request(&replacement.packets.try_recv().map_err(failure)?)?;

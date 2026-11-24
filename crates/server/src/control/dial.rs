@@ -588,7 +588,6 @@ impl Control {
                 settings: settings_generation,
                 endpoint: endpoint.into(),
                 caller: snapshot.caller.number.clone(),
-                timeout: timeout.map(u32::from),
             });
             outcome.history.push(super::CallHistoryEvent::Started {
                 key: key.clone(),

@@ -132,7 +132,6 @@ fn assert_captured_profile(replacement: Config) -> Result<(), SipError> {
             endpoint: "phone".into(),
             caller: "displayed-caller".into(),
             local_rtp: "127.0.0.1:10000".parse()?,
-            timeout_ms: Some(5000),
         },
         prepared,
         None,

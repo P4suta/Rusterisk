@@ -103,7 +103,8 @@ fn an_unanswered_call_changes_only_at_its_reported_wakes() -> Result<(), SipErro
 }
 
 #[test]
-fn a_ringing_call_that_times_out_changes_only_at_its_reported_wakes() -> Result<(), SipError> {
+fn a_ringing_call_that_its_owner_cancels_changes_only_at_its_reported_wakes() -> Result<(), SipError>
+{
     let mut twins = Twins::new(calling)?;
     let invite = twins
         .apply(|engine, now| engine.originate(outbound(), now))?
@@ -113,48 +114,38 @@ fn a_ringing_call_that_times_out_changes_only_at_its_reported_wakes() -> Result<
     twins.advance(700)?;
     let ringing = provisional(&invite)?;
     twins.apply(|engine, now| engine.receive(&ringing, "127.0.0.1:5061".parse()?, now))?;
-    let output = twins.advance(31_000)?;
-    assert!(output
-        .datagrams
-        .iter()
-        .any(|datagram| datagram.bytes.starts_with(b"CANCEL ")));
+    let waited = twins.advance(600_000)?;
+    assert!(waited.datagrams.is_empty());
+    assert!(waited.events.is_empty());
+    assert!(twins.skipped() > 599_000);
+    let cancelled = twins.apply(|engine, now| engine.cancel("outgoing", 7, now))?;
+    assert!(cancelled.datagrams[0].bytes.starts_with(b"CANCEL "));
     let late = answered(&invite)?;
     twins.apply(|engine, now| engine.receive(&late, "127.0.0.1:5061".parse()?, now))?;
-    twins.advance(110_000)?;
+    twins.advance(710_000)?;
     assert_eq!(twins.retained(), rusterisk_sip::Retained::default());
     Ok(())
 }
 
 #[test]
-fn an_engine_driven_by_its_wakes_passes_each_instant_within_two_turns() -> Result<(), SipError> {
-    for (timeout, repeated) in [(30_000, 0), (500, 1)] {
-        let mut engine = calling()?;
-        let mut call = outbound();
-        call.timeout_ms = Some(timeout);
-        engine.originate(call, 0)?;
-        let mut now = 0;
-        let mut instants = 0;
-        let mut repeats = 0;
-        while let Wake::At(at) = engine.wake() {
-            now = now.max(at);
-            engine.tick(now)?;
-            if matches!(engine.wake(), Wake::At(again) if again <= now) {
-                let resent = engine.tick(now)?;
-                assert!(resent.datagrams[0].bytes.starts_with(b"INVITE "));
-                repeats += 1;
-            }
-            assert!(
-                !matches!(engine.wake(), Wake::At(again) if again <= now),
-                "the wake stayed at {now} ms after two turns"
-            );
-            instants += 1;
-            assert!(instants < 64, "the engine never ran out of wakes");
-        }
-        assert_eq!(engine.wake(), Wake::Idle);
-        assert_eq!(engine.retained(), Retained::default());
-        assert_eq!(now, 32_000);
-        assert_eq!(repeats, repeated);
+fn an_engine_driven_by_its_wakes_passes_each_instant_in_one_turn() -> Result<(), SipError> {
+    let mut engine = calling()?;
+    engine.originate(outbound(), 0)?;
+    let mut now = 0;
+    let mut instants = 0;
+    while let Wake::At(at) = engine.wake() {
+        now = now.max(at);
+        engine.tick(now)?;
+        assert!(
+            !matches!(engine.wake(), Wake::At(again) if again <= now),
+            "the wake stayed at {now} ms after its turn"
+        );
+        instants += 1;
+        assert!(instants < 64, "the engine never ran out of wakes");
     }
+    assert_eq!(engine.wake(), Wake::Idle);
+    assert_eq!(engine.retained(), Retained::default());
+    assert_eq!(now, 64_000);
     Ok(())
 }
 
@@ -165,12 +156,8 @@ fn authenticating() -> Result<Engine, SipError> {
     Ok(Engine::new(config, [9; 32]))
 }
 
-fn dialed(twins: &mut Twins, timeout: Option<u64>) -> Result<Vec<u8>, SipError> {
-    let mut invited = twins.apply(|engine, now| {
-        let mut call = outbound();
-        call.timeout_ms = timeout;
-        engine.originate(call, now)
-    })?;
+fn dialed(twins: &mut Twins) -> Result<Vec<u8>, SipError> {
+    let mut invited = twins.apply(|engine, now| engine.originate(outbound(), now))?;
     Ok(invited.datagrams.remove(0).bytes)
 }
 
@@ -182,22 +169,10 @@ fn ended(output: &rusterisk_sip::Output, expected: u16) -> bool {
 }
 
 #[test]
-fn a_call_whose_resend_meets_its_deadline_changes_only_at_its_reported_wakes(
-) -> Result<(), SipError> {
-    let mut twins = Twins::new(calling)?;
-    dialed(&mut twins, Some(500))?;
-    let output = twins.advance(70_000)?;
-    assert!(ended(&output, 19));
-    assert_eq!(twins.retained(), Retained::default());
-    assert!(twins.skipped() > 69_900);
-    Ok(())
-}
-
-#[test]
 fn a_call_cancelled_before_any_response_changes_only_at_its_reported_wakes() -> Result<(), SipError>
 {
     let mut twins = Twins::new(calling)?;
-    dialed(&mut twins, Some(30_000))?;
+    dialed(&mut twins)?;
     twins.advance(100)?;
     let cancelled = twins.apply(|engine, now| engine.cancel("outgoing", 7, now))?;
     assert!(cancelled.datagrams.is_empty());
@@ -215,7 +190,7 @@ fn a_call_cancelled_before_any_response_changes_only_at_its_reported_wakes() -> 
 #[test]
 fn a_challenged_call_changes_only_at_its_reported_wakes() -> Result<(), SipError> {
     let mut twins = Twins::new(authenticating)?;
-    let invite = dialed(&mut twins, Some(30_000))?;
+    let invite = dialed(&mut twins)?;
     twins.advance(300)?;
     let challenge = challenge_invite(&invite, false)?;
     let challenged =
@@ -232,7 +207,7 @@ fn a_challenged_call_changes_only_at_its_reported_wakes() -> Result<(), SipError
 #[test]
 fn a_forked_answer_changes_only_at_its_reported_wakes() -> Result<(), SipError> {
     let mut twins = Twins::new(calling)?;
-    let invite = dialed(&mut twins, Some(30_000))?;
+    let invite = dialed(&mut twins)?;
     twins.advance(100)?;
     let answer = answered(&invite)?;
     twins.apply(|engine, now| engine.receive(&answer, "127.0.0.1:5061".parse()?, now))?;
@@ -256,7 +231,7 @@ fn a_forked_answer_changes_only_at_its_reported_wakes() -> Result<(), SipError> 
 #[test]
 fn an_unacknowledged_direction_update_changes_only_at_its_reported_wakes() -> Result<(), SipError> {
     let mut twins = Twins::new(calling)?;
-    let wire = dialed(&mut twins, Some(30_000))?;
+    let wire = dialed(&mut twins)?;
     let invite = request(&wire)?;
     twins.advance(100)?;
     let answer = answered(&wire)?;

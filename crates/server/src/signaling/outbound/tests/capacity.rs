@@ -58,7 +58,6 @@ async fn native_shutdown_drains_every_failed_job_and_recovers_known_setup_slots(
                 key(&format!("aborted-{generation}"), generation)?,
                 "PJSIP/phone".into(),
                 "100".into(),
-                Some(30),
                 0,
             )?;
         }
@@ -169,7 +168,6 @@ async fn cancelled_registered_calls_keep_the_shared_setup_slots_until_their_jobs
                 key(&format!("registered-{generation}"), generation)?,
                 "PJSIP/phone".into(),
                 "100".into(),
-                Some(30),
                 0,
             )?;
         }
@@ -215,7 +213,6 @@ async fn cancelling_jobs_keep_admission_capacity_until_their_completion_is_joine
             key(&format!("pending-{generation}"), generation)?,
             "PJSIP/phone".into(),
             "100".into(),
-            Some(30),
             0,
         )?;
     }
@@ -230,7 +227,6 @@ async fn cancelling_jobs_keep_admission_capacity_until_their_completion_is_joine
             key("replacement", 17)?,
             "PJSIP/phone".into(),
             "100".into(),
-            Some(30),
             0
         ),
         Err(ControlError::Capacity)
@@ -245,7 +241,6 @@ async fn cancelling_jobs_keep_admission_capacity_until_their_completion_is_joine
         key("replacement", 17)?,
         "PJSIP/phone".into(),
         "100".into(),
-        Some(30),
         1,
     )?;
     assert_eq!(fixture.signaling.native_pending.len(), 1);
@@ -258,13 +253,9 @@ async fn delayed_resolution_completions_cannot_touch_a_reused_call_identifier(
     let mut fixture = Fixture::new().await?;
     let previous = key("reused", 1)?;
     let current = key("reused", 2)?;
-    fixture.signaling.queue_native(
-        previous.clone(),
-        "PJSIP/phone".into(),
-        "100".into(),
-        Some(30),
-        0,
-    )?;
+    fixture
+        .signaling
+        .queue_native(previous.clone(), "PJSIP/phone".into(), "100".into(), 0)?;
     fixture.signaling.cancel_native(&previous);
     let completed = fixture
         .signaling
@@ -273,13 +264,9 @@ async fn delayed_resolution_completions_cannot_touch_a_reused_call_identifier(
         .await
         .ok_or(ControlError::Capacity)?
         .map_err(failure)?;
-    fixture.signaling.queue_native(
-        current.clone(),
-        "PJSIP/phone".into(),
-        "100".into(),
-        Some(30),
-        1,
-    )?;
+    fixture
+        .signaling
+        .queue_native(current.clone(), "PJSIP/phone".into(), "100".into(), 1)?;
     fixture.signaling.native_completed(completed, 1).await?;
     assert!(!fixture.signaling.native_pending.contains_key(&previous));
     assert!(fixture.signaling.native_pending.contains_key(&current));

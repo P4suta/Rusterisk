@@ -31,7 +31,6 @@ fn reliable_invites_advertise_the_transport_and_timeout_without_retransmission(
                 endpoint: "phone".into(),
                 caller: "100".into(),
                 local_rtp: "127.0.0.1:10000".parse()?,
-                timeout_ms: None,
             },
             0,
         )?;
@@ -83,7 +82,6 @@ fn a_reliable_call_changes_only_at_its_reported_wakes() -> Result<(), SipError> 
                 endpoint: "phone".into(),
                 caller: "100".into(),
                 local_rtp: "127.0.0.1:10000".parse()?,
-                timeout_ms: None,
             },
             now,
         )
