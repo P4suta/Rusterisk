@@ -49,6 +49,15 @@ impl Runner {
         Ok(self)
     }
 
+    // Hands the WebSocket profile that the call admitted with to the task that connects it.
+    pub(crate) fn websocket_profile(
+        &mut self,
+        key: &CallKey,
+        settings: SettingsGeneration,
+    ) -> Result<WebSocketStartCapsule, ControlError> {
+        self.control.take_websocket_profile(key, settings)
+    }
+
     pub(super) fn websocket_profile_request(
         &mut self,
         key: CallKey,
@@ -58,7 +67,7 @@ impl Runner {
         if reply.is_closed() {
             return Ok(());
         }
-        let result = self.control.take_websocket_profile(&key, settings);
+        let result = self.websocket_profile(&key, settings);
         match reply.send(result) {
             Ok(()) => Ok(()),
             Err(Ok(capsule)) => self

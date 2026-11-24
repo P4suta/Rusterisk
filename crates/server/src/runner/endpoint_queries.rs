@@ -43,6 +43,31 @@ impl Runner {
         if reply.is_closed() {
             return Ok(());
         }
+        match self.endpoint_observation(settings, endpoint, presence, now) {
+            Ok(answer) => {
+                if reply.send(answer).is_err() {
+                    tracing::debug!("Endpoint observer disconnected");
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if reply.send(Err(error.clone())).is_err() {
+                    tracing::debug!("Endpoint observer disconnected");
+                }
+                Err(error)
+            }
+        }
+    }
+
+    // Records the contact presence of an endpoint in the current settings generation.
+    // The outer error ends the control task, and the inner error refuses a stale observation.
+    pub(crate) fn endpoint_observation(
+        &mut self,
+        settings: SettingsGeneration,
+        endpoint: String,
+        presence: ContactPresence,
+        now: u64,
+    ) -> Result<Result<(), ControlError>, ControlError> {
         let key = if self.configuration_generation() != settings {
             Err(ControlError::Conflict(
                 "Endpoint settings generation changed",
@@ -50,19 +75,11 @@ impl Runner {
         } else {
             self.control.endpoint_key(&endpoint)
         };
-        let key = match key {
-            Ok(key) => key,
-            Err(error) => {
-                if reply.send(Err(error)).is_err() {
-                    tracing::debug!("Endpoint observer disconnected");
-                }
-                return Ok(());
-            }
-        };
-        let result = self.apply_signal(Signal::EndpointContact { key, presence }, now);
-        if reply.send(result.clone()).is_err() {
-            tracing::debug!("Endpoint observer disconnected");
+        match key {
+            Ok(key) => self
+                .apply_signal(Signal::EndpointContact { key, presence }, now)
+                .map(Ok),
+            Err(error) => Ok(Err(error)),
         }
-        result
     }
 }

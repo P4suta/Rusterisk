@@ -23,6 +23,8 @@ mod endpoint_queries;
 mod endpoint_queries_tests;
 mod external_admission;
 mod history;
+mod input;
+pub(crate) use input::Flow;
 mod media_connections;
 mod observation;
 pub(crate) use observation::{Filter as WatchFilter, Target as WatchTarget};
@@ -208,6 +210,7 @@ pub struct Controller {
 pub struct Runner {
     clock: Clock,
     closed: mpsc::Receiver<()>,
+    closures_open: bool,
     observations: tokio::sync::broadcast::Sender<rusterisk_api::observation::WatchRecord>,
     control: Control,
     config: Config,
@@ -292,6 +295,7 @@ impl Controller {
             Runner {
                 clock,
                 closed,
+                closures_open: true,
                 control,
                 config,
                 requests: request_receiver,
@@ -592,6 +596,25 @@ impl Runner {
         Ok(())
     }
 
+    // Admits an incoming call and publishes its outcome.
+    // The outer error ends the control task, and the inner error refuses the call.
+    pub(crate) fn incoming_call(
+        &mut self,
+        call: IncomingCall,
+        now_ms: u64,
+    ) -> Result<Result<CallKey, ControlError>, ControlError> {
+        if self.admissions_paused() {
+            return Ok(Err(ControlError::Capacity));
+        }
+        match self.admit_incoming(call, now_ms) {
+            Ok((key, mut outcome)) => {
+                self.publish(&mut outcome)?;
+                Ok(Ok(key))
+            }
+            Err(error) => Ok(Err(error)),
+        }
+    }
+
     fn request(&mut self, request: Request, now_ms: u64) -> Result<(), ControlError> {
         match request {
             Request::ObserveCalls {
@@ -711,25 +734,22 @@ impl Runner {
                 if reply.is_closed() {
                     return Ok(());
                 }
-                if self.admissions_paused() || !self.pending_effects.is_empty() {
-                    if reply.send(Err(ControlError::Capacity)).is_err() {
-                        tracing::debug!("incoming requester disconnected during pending cleanup");
-                    }
-                    return Ok(());
-                }
-                let result = match self.admit_incoming(call, now_ms) {
-                    Ok((key, mut outcome)) => {
-                        if let Err(error) = self.publish(&mut outcome) {
-                            if reply.send(Err(error.clone())).is_err() {
-                                tracing::debug!(
-                                    "incoming admission requester disconnected during overload"
-                                );
-                            }
-                            return Err(error);
+                // Queued effects reach signaling only through a free channel slot.
+                let admitted = if self.pending_effects.is_empty() {
+                    self.incoming_call(call, now_ms)
+                } else {
+                    Ok(Err(ControlError::Capacity))
+                };
+                let result = match admitted {
+                    Ok(result) => result,
+                    Err(error) => {
+                        if reply.send(Err(error.clone())).is_err() {
+                            tracing::debug!(
+                                "incoming admission requester disconnected during overload"
+                            );
                         }
-                        Ok(key)
+                        return Err(error);
                     }
-                    Err(error) => Err(error),
                 };
                 if let Err(Ok(key)) = reply.send(result) {
                     if self
@@ -1018,52 +1038,24 @@ impl Runner {
 
     async fn serve(&mut self) -> Result<(), ControlError> {
         let effect_sender = self.effects.clone();
+        let clock = self.clock;
         let mut overdue = crate::overdue::Overdue::every(OVERDUE_RETRY_MS);
-        let mut closures_open = true;
         loop {
             let timer = overdue.timer(self.wake()?);
+            // A signal waits while effects wait, so that its effects follow theirs.
+            let flushing = !self.pending_effects.is_empty();
             tokio::select! {
-                loaded = self.reload.loaders.join_next(), if !self.reload.loaders.is_empty() => {
-                    self.loading_completed(loaded.ok_or(ControlError::Conflict("Settings loading task missing"))?)?;
-                }
-                prepared = self.reload.preparations.join_next(), if !self.reload.preparations.is_empty() => {
-                    self.preparation_completed(prepared.ok_or(ControlError::Conflict("Settings preparation task missing"))?)?;
-                }
-                step = self.reload.steps.join_next(), if !self.reload.steps.is_empty() => {
-                    self.publication_completed(step.ok_or(ControlError::Conflict("Settings acknowledgement task missing"))?)?;
-                }
-                replacement = self.reload.requests.recv(), if !self.reload.requests.is_closed() || !self.reload.requests.is_empty() => {
-                    if let Some(replacement) = replacement { self.begin_reload(replacement); }
-                }
-                request = self.reload.directory_requests.recv(), if !self.reload.directory_requests.is_closed() || !self.reload.directory_requests.is_empty() => {
-                    if let Some(request) = request { self.begin_directory_reload(request); }
-                }
-                result = self.stored_jobs.join_next(), if !self.stored_jobs.is_empty() => {
-                    result.ok_or(ControlError::Capacity)?.map_err(|error| ControlError::Adapter(error.to_string()))?;
-                }
-                result = self.history_jobs.join_next(), if !self.history_jobs.is_empty() => {
-                    result.ok_or(ControlError::Capacity)?
-                        .map_err(|error| ControlError::Adapter(error.to_string()))?
-                        .map_err(|error| ControlError::Adapter(error.to_string()))?;
-                }
-                permit = effect_sender.reserve(), if !self.pending_effects.is_empty() => {
+                permit = effect_sender.reserve(), if flushing => {
                     match permit {
                         Ok(permit) => if let Some(effect) = self.pending_effects.pop_front() { permit.send(effect); },
                         Err(_) if *self.shutdown.borrow() => break,
                         Err(error) => return Err(ControlError::Adapter(error.to_string())),
                     }
                 }
-                changed = self.shutdown.changed() => { if changed.is_err() || *self.shutdown.borrow() { break; } }
-                signal = self.signals.recv(), if self.pending_effects.is_empty() => {
-                    let Some(signal) = signal else { break; };
-                    let now = self.clock.now_ms()?;
-                    self.apply_signal(signal, now)?;
+                input = self.next(!flushing) => {
+                    if self.handle(input, clock.now_ms()?)? == Flow::Stop { break; }
                 }
-                request = self.requests.recv() => {
-                    if let Some(request) = request { self.request(request, self.clock.now_ms()?)?; } else { break; }
-                }
-                closure = self.closed.recv(), if closures_open => { closures_open = closure.is_some(); }
-                () = self.clock.reached(timer) => {}
+                () = clock.reached(timer) => {}
             }
             let now = self.clock.now_ms()?;
             let before = self.wake()?;

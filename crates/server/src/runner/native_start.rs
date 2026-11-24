@@ -42,8 +42,17 @@ impl Runner {
         if reply.is_closed() {
             return Ok(());
         }
-        let result = self.control.take_native_profile(&key, settings);
+        let result = self.native_profile(&key, settings);
         self.deliver_native_profile(key, settings, result, reply)
+    }
+
+    // Hands the start profile that the call admitted with to the task that starts it.
+    pub(crate) fn native_profile(
+        &mut self,
+        key: &CallKey,
+        settings: SettingsGeneration,
+    ) -> Result<NativeStartCapsule, ControlError> {
+        self.control.take_native_profile(key, settings)
     }
 
     pub(super) fn deliver_native_profile(
