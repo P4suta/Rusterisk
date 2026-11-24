@@ -190,6 +190,21 @@ fn policy() -> Result<(), TaskError> {
             return Err(TaskError::Contract("invalid exception scope or ADR".into()));
         }
     }
+    if exceptions.timers.len() > 16 {
+        return Err(TaskError::Contract("timer capacity exceeded".into()));
+    }
+    for timer in &exceptions.timers {
+        let path = Path::new(&timer.path);
+        if !path.is_file()
+            || !xtask::timer_policy::production(path)
+            || !timer.adr.starts_with("docs/adr/")
+            || timer.adr.contains("..")
+            || !Path::new(&timer.adr).is_file()
+            || timer.rationale.is_empty()
+        {
+            return Err(TaskError::Contract("invalid timer scope or ADR".into()));
+        }
+    }
     let workspace_source = std::fs::read_to_string("Cargo.toml")?;
     let manifest: toml::Value = toml::from_str(&workspace_source)?;
     let members = manifest["workspace"]["members"]
@@ -216,8 +231,20 @@ fn policy() -> Result<(), TaskError> {
             .filter(|exception| Path::new(&exception.path) == path)
             .cloned()
             .collect();
-        let findings = xtask::inspect_with_exceptions(&source, &scoped)
+        let mut findings = xtask::inspect_with_exceptions(&source, &scoped)
             .map_err(|error| TaskError::Contract(format!("{}: {error}", path.display())))?;
+        if xtask::timer_policy::production(path) {
+            let timers: Vec<xtask::timer_policy::Timer> = exceptions
+                .timers
+                .iter()
+                .filter(|timer| Path::new(&timer.path) == path)
+                .cloned()
+                .collect();
+            findings.extend(
+                xtask::timer_policy::inspect(&source, &timers)
+                    .map_err(|error| TaskError::Contract(format!("{}: {error}", path.display())))?,
+            );
+        }
         for finding in findings {
             eprintln!("{}: {}: {}", path.display(), finding.rule, finding.detail);
             count += 1;
