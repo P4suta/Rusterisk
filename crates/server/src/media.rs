@@ -746,6 +746,14 @@ impl MediaHub {
         Ok(())
     }
 
+    // The signaling task queues a WebRTC attachment before any later command for its call.
+    fn ordered(&mut self, command: Command) -> Result<(), MediaError> {
+        while let Ok(attachment) = self.webrtc.try_recv() {
+            self.webrtc_attachment(attachment)?;
+        }
+        self.command(command)
+    }
+
     fn command(&mut self, command: Command) -> Result<(), MediaError> {
         self.remember_music();
         match command {
@@ -1165,7 +1173,7 @@ impl MediaHub {
         tokio::select! {
             changed = stop.changed() => if changed.is_err() || *stop.borrow() { return Ok(Turn::Stop); },
             command = self.commands.recv() => match command {
-                Some(command) => self.command(command)?,
+                Some(command) => self.ordered(command)?,
                 None => return Ok(Turn::Stop),
             },
             attachment = self.websocket.recv() => match attachment {
