@@ -198,7 +198,7 @@ impl Signaling {
                 events,
                 release,
             } => {
-                let attached = Self::attachment(&key, outcome, release).map(drop);
+                let attached = self.attachment(&key, outcome, release).map(drop);
                 self.answered(key.clone(), direction, events, attached)
                     .await?;
             }
@@ -208,7 +208,7 @@ impl Signaling {
                 token,
                 answer,
             } => {
-                let attached = Self::attachment(&key, outcome, release);
+                let attached = self.attachment(&key, outcome, release);
                 let result = self
                     .early_attached(&key, listener, answer, attached, now)
                     .await;
@@ -223,7 +223,7 @@ impl Signaling {
                 .await?;
             }
             Waiting::External { local, release } => {
-                let attached = Self::attachment(&key, outcome, release).map(drop);
+                let attached = self.attachment(&key, outcome, release).map(drop);
                 self.external_attached(key.clone(), local, attached).await?;
             }
             Waiting::Direction { direction } => {
@@ -248,6 +248,7 @@ impl Signaling {
 
     // An attachment that arrives after its deadline finds this release behind it in the queue.
     fn attachment(
+        &mut self,
         key: &CallKey,
         outcome: Outcome,
         release: AttachmentRelease,
@@ -255,7 +256,7 @@ impl Signaling {
         match outcome {
             Outcome::Attached(_, result) => result.map(|()| release),
             Outcome::Direction(..) | Outcome::Expired => {
-                release.send(key.clone());
+                self.release_attachment(key, release);
                 Err(late())
             }
         }

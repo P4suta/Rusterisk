@@ -1,6 +1,6 @@
 use super::{failure, Signaling};
 use crate::{
-    media::{AttachmentMode, AttachmentRelease},
+    media::{AttachmentMode, AttachmentRelease, Order},
     rtp::{RtpSession, SocketPair},
     CallKey, ControlError,
 };
@@ -70,7 +70,7 @@ impl Signaling {
         completed: StreamCompletion,
     ) -> Result<(), ControlError> {
         let Some(pending) = self.stream_admissions.remove(&completed.key) else {
-            self.media.release(completed.key).map_err(failure)?;
+            self.order(Order::Release(completed.key))?;
             return Ok(());
         };
         let admitted = completed.result.is_ok();

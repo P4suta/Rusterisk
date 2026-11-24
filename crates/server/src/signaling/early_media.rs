@@ -165,19 +165,19 @@ impl Signaling {
         let progress = match answer.progress(&mut self.listeners[listener].engine, key, now) {
             Ok(output) => output,
             Err(error) => {
-                release.send(key.clone());
+                self.release_attachment(key, release);
                 return Err(failure(error));
             }
         };
         let Some(call) = self.calls.get_mut(key) else {
-            release.send(key.clone());
+            self.release_attachment(key, release);
             return Err(ControlError::NotFound(
                 "Channel generation no longer active",
             ));
         };
         call.media = MediaAdmission::Early(answer);
         if let Err(error) = self.transmit(listener, progress.datagrams).await {
-            release.send(key.clone());
+            self.release_attachment(key, release);
             return cleanup::combine(
                 Err(error),
                 self.notify(Signal::Terminated {
