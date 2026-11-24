@@ -1,6 +1,6 @@
 ---
 date: 2026-11-24
-status: proposed
+status: accepted
 ---
 
 # Complete media commands outside the signaling turn

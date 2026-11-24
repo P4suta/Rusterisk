@@ -1,6 +1,6 @@
 ---
 date: 2026-11-15
-status: proposed
+status: superseded
 ---
 
 # Preserve terminal effects under control backpressure
@@ -11,6 +11,7 @@ An event queue overflow ends the app's calls while the signaling queue may be fu
 
 ## Decision
 
+[Reserve terminal cleanup behind each turn's effects](reserve-terminal-cleanup-behind-each-turns-effects.md) supersedes this record.
 Check each request's effect budget before changing state.
 Keep ordered, owned pending effects.
 Suspend admission, writes, and signaling input until pending effects drain.
@@ -38,4 +39,3 @@ Revisit the bound whenever a transition gains effects.
 ## Confirmation
 
 Tests fill both queues, preserve cleanup order, verify resumed admission, and check shutdown.
-Keep the record proposed until reference call comparisons pass.

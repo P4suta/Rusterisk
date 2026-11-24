@@ -1,6 +1,6 @@
 ---
 date: 2026-11-24
-status: proposed
+status: accepted
 ---
 
 # Owe media orders while the media queue is full

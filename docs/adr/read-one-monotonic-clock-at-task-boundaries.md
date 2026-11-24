@@ -1,6 +1,6 @@
 ---
 date: 2026-11-24
-status: proposed
+status: accepted
 ---
 
 # Read one monotonic clock at task boundaries
