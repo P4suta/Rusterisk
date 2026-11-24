@@ -208,6 +208,31 @@ fn bridge_updates_are_atomic_and_hangup_releases_membership() -> Result<(), Cont
 }
 
 #[test]
+fn originate_refuses_a_dial_limit_outside_one_second_to_one_hour() -> Result<(), ControlError> {
+    let mut control = Control::new(2);
+    control.subscribe("app")?;
+    for timeout in [0, 3601] {
+        assert_eq!(
+            control
+                .apply(originate("refused", timeout)?, "now", 0)
+                .map(|_| ()),
+            Err(ControlError::Invalid(
+                "Invalid parameters for originating a channel"
+            ))
+        );
+        assert!(control.channel(&id("refused")?).is_err());
+    }
+    control.apply(originate("longest", 3600)?, "now", 0)?;
+    assert!(control.expire(3_599_999, "later")?.effects.is_empty());
+    assert!(control
+        .expire(3_600_000, "later")?
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Release { .. })));
+    Ok(())
+}
+
+#[test]
 fn bounded_capacity_and_dial_timeouts_have_explicit_failures() -> Result<(), ControlError> {
     let mut control = Control::new(1);
     control.subscribe("app")?;
