@@ -96,8 +96,14 @@ fn generated(sequence: &mut Sequence) -> Vec<u8> {
     bytes.extend(sequence.bytes(10));
     bytes.extend(sequence.bytes(4 * contributors));
     if extension {
+        // One-byte and two-byte element profiles appear as often as other profiles.
+        let profile = match sequence.below(3) {
+            0 => [0xbe, 0xde],
+            1 => [0x10, sequence.byte() & 0x0f],
+            _ => [sequence.byte(), sequence.byte()],
+        };
         let words = sequence.below(3);
-        bytes.extend([sequence.byte(), sequence.byte(), 0, words as u8]);
+        bytes.extend([profile[0], profile[1], 0, words as u8]);
         bytes.extend(sequence.bytes(4 * words));
     }
     let length = sequence.below(200);

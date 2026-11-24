@@ -272,6 +272,49 @@ impl OpusCodec {
 
 // The fixed part of a Real-time Transport Protocol header.
 const RTP_HEADER: usize = 12;
+
+// Whether the elements of a one-byte or two-byte header extension stay inside it (RFC 8285).
+// A receiver ignores their contents, and refuses a packet whose element runs past the extension.
+fn extension_elements_fit(profile: u16, elements: &[u8]) -> bool {
+    let mut offset = 0;
+    match profile {
+        0xbede => {
+            while let Some(&first) = elements.get(offset) {
+                offset += 1;
+                if first == 0 {
+                    continue;
+                }
+                if first >> 4 == 0x0f {
+                    return true;
+                }
+                let length = usize::from(first & 0x0f) + 1;
+                if length > elements.len() - offset {
+                    return false;
+                }
+                offset += length;
+            }
+            true
+        }
+        0x1000 => {
+            while let Some(&first) = elements.get(offset) {
+                offset += 1;
+                if first == 0 {
+                    continue;
+                }
+                let Some(&length) = elements.get(offset) else {
+                    return false;
+                };
+                offset += 1;
+                if usize::from(length) > elements.len() - offset {
+                    return false;
+                }
+                offset += usize::from(length);
+            }
+            true
+        }
+        _ => true,
+    }
+}
 const MAX_RTP_PAYLOAD: usize = MAX_PACKET - RTP_HEADER;
 
 // A Real-time Transport Protocol packet in a fixed buffer.
@@ -369,10 +412,18 @@ impl RtpPacket {
         }
         let mut header_len = RTP_HEADER + usize::from(first & 0x0f) * 4;
         if first & 0x10 != 0 {
-            let Some([_, _, high, low, ..]) = bytes.get(header_len..) else {
+            let Some([profile_high, profile_low, high, low, ..]) = bytes.get(header_len..) else {
                 return Err(MediaError::InvalidPacket);
             };
-            header_len += 4 + 4 * usize::from(u16::from_be_bytes([*high, *low]));
+            let start = header_len + 4;
+            header_len = start + 4 * usize::from(u16::from_be_bytes([*high, *low]));
+            let elements = bytes
+                .get(start..header_len)
+                .ok_or(MediaError::InvalidPacket)?;
+            if !extension_elements_fit(u16::from_be_bytes([*profile_high, *profile_low]), elements)
+            {
+                return Err(MediaError::InvalidPacket);
+            }
         }
         let payload = bytes.get(header_len..).ok_or(MediaError::InvalidPacket)?;
         let padding = if first & 0x20 != 0 {
