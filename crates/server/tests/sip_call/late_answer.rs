@@ -254,6 +254,95 @@ async fn exchange(
     Ok(())
 }
 
+async fn ringing(peer: &Peer, invite: &Request, target: SocketAddr) -> Result<(), ControlError> {
+    let tagged = format!(
+        "{};tag=dial-limit",
+        invite.to_header().map_err(failure)?.value()
+    );
+    let ringing = reply(invite, "180 Ringing", &tagged, "", "")?;
+    peer.signal
+        .send_to(ringing.as_bytes(), target)
+        .await
+        .map_err(failure)?;
+    let (cancel, source) = receive(&peer.signal, Method::Cancel).await?;
+    check(source == target, "CANCEL changed the signaling peer")?;
+    cancellation(invite, &cancel)?;
+    let cancelled = reply(&cancel, "200 OK", &tagged, "", "")?;
+    peer.signal
+        .send_to(cancelled.as_bytes(), target)
+        .await
+        .map_err(failure)?;
+    let terminated = reply(invite, "487 Request Terminated", &tagged, "", "")?;
+    peer.signal
+        .send_to(terminated.as_bytes(), target)
+        .await
+        .map_err(failure)?;
+    receive(&peer.signal, Method::Ack).await?;
+    Ok(())
+}
+
+async fn silent(peer: &Peer) -> Result<(), ControlError> {
+    let mut bytes = [0; 16385];
+    let waited = timeout(Duration::from_millis(1600), async {
+        loop {
+            let (size, _) = peer.signal.recv_from(&mut bytes).await.map_err(failure)?;
+            match SipMessage::try_from(&bytes[..size]).map_err(failure)? {
+                SipMessage::Request(request) if request.method == Method::Invite => {}
+                SipMessage::Request(_) | SipMessage::Response(_) => {
+                    return Err::<(), ControlError>(ControlError::Invalid(
+                        "A silent peer received more than the repeated INVITE",
+                    ));
+                }
+            }
+        }
+    })
+    .await;
+    match waited {
+        Ok(result) => result,
+        Err(_) => Ok(()),
+    }
+}
+
+async fn past_its_dial_limit(
+    events: &mut ClientSession,
+    peer: &Peer,
+    answers: bool,
+) -> Result<(), ControlError> {
+    let mut request = Originate::new("PJSIP/phone".into()).map_err(failure)?;
+    request.timeout = Duration::from_secs(1);
+    let mut call = events.originate(request).await.map_err(failure)?;
+    call.wait(CallMilestone::Accepted, STEP)
+        .await
+        .map_err(failure)?;
+    let channel_id = call.id().clone();
+    let (invite, target) = receive(&peer.signal, Method::Invite).await?;
+    if answers {
+        ringing(peer, &invite, target).await?;
+    } else {
+        silent(peer).await?;
+    }
+    let ended = timeout(STEP, async {
+        loop {
+            let event = events.next_event().await.map_err(failure)?;
+            if let EventKind::ChannelDestroyed { cause, channel, .. } = event.kind {
+                if channel.id == channel_id {
+                    return Ok::<u16, ControlError>(cause);
+                }
+            }
+        }
+    })
+    .await
+    .map_err(failure)??;
+    check(
+        ended == 19,
+        "The dial limit ended the call with another cause",
+    )?;
+    timeout(STEP, call.close())
+        .await
+        .map_err(failure)?
+        .map_err(failure)
+}
+
 fn combine(
     result: Result<(), ControlError>,
     cleanup: Result<(), ControlError>,
@@ -264,9 +353,32 @@ fn combine(
     }
 }
 
+#[derive(Clone, Copy)]
+enum Scenario {
+    LateAnswer,
+    RingingDialLimit,
+    SilentDialLimit,
+}
+
 #[tokio::test]
 async fn the_sdk_cancels_a_udp_call_and_a_late_answer_cannot_reconnect_it(
 ) -> Result<(), ControlError> {
+    served(Scenario::LateAnswer).await
+}
+
+#[tokio::test]
+async fn a_ringing_call_past_its_dial_limit_receives_cancel_and_ends_with_no_answer(
+) -> Result<(), ControlError> {
+    served(Scenario::RingingDialLimit).await
+}
+
+#[tokio::test]
+async fn a_silent_call_past_its_dial_limit_ends_with_no_answer_and_sends_no_cancel(
+) -> Result<(), ControlError> {
+    served(Scenario::SilentDialLimit).await
+}
+
+async fn served(scenario: Scenario) -> Result<(), ControlError> {
     let ip = IpAddr::V4(Ipv4Addr::LOCALHOST);
     let peer = Peer::bind(ip, ip).await?;
     let directory = tempfile::tempdir().map_err(failure)?;
@@ -291,7 +403,11 @@ async fn the_sdk_cancels_a_udp_call_and_a_late_answer_cannot_reconnect_it(
     let mut running = tokio::spawn(server.run());
     let result = async {
         let mut events = client.subscribe(&id("app")?).await.map_err(failure)?;
-        let result = exchange(&client, &mut events, &peer).await;
+        let result = match scenario {
+            Scenario::LateAnswer => exchange(&client, &mut events, &peer).await,
+            Scenario::RingingDialLimit => past_its_dial_limit(&mut events, &peer, true).await,
+            Scenario::SilentDialLimit => past_its_dial_limit(&mut events, &peer, false).await,
+        };
         let cleanup = match timeout(STEP, events.shutdown()).await {
             Ok(result) => result.map_err(failure),
             Err(error) => Err(failure(error)),
