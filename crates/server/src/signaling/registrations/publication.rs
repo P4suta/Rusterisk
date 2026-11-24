@@ -164,4 +164,11 @@ impl Registrations {
             .as_ref()
             .is_none_or(|reservation| reservation.retirement.allows(index, client, now))
     }
+
+    pub(super) fn transaction_allowed_from(&self, index: usize, client: &Client) -> Option<u64> {
+        match &self.reservation {
+            Some(reservation) => reservation.retirement.allowed_from(index, client),
+            None => Some(0),
+        }
+    }
 }
