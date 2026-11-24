@@ -443,7 +443,8 @@ impl TelephoneSender {
     }
 
     pub fn poll(&mut self, now: u64, audio: &mut RtpSender) -> Result<Vec<RtpPacket>, MediaError> {
-        let mut packets = Vec::with_capacity(MAX_REPEATED_REPORTS);
+        // A tick without telephone events allocates nothing.
+        let mut packets = Vec::new();
         let mut index = 0;
         while index < self.endings.len() {
             if now < self.endings[index].next {

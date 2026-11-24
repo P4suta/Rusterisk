@@ -82,7 +82,8 @@ impl TelephoneTransport {
     }
 
     pub(super) fn expire(&mut self, now: u64) -> Result<Vec<DtmfTone>, MediaError> {
-        let mut tones = Vec::with_capacity(16);
+        // A tick without an ended tone allocates nothing.
+        let mut tones = Vec::new();
         for reception in &mut self.receivers {
             if let Some(tone) = reception.receiver.expire(now)? {
                 tones.push(tone);
