@@ -4,9 +4,13 @@ use std::{
     time::Duration,
 };
 use tokio::sync::{mpsc, oneshot, watch};
+mod closure;
 mod incoming;
 mod media_probe;
+use closure::{ClosureLatch, ClosureNotice};
 pub(crate) use incoming::adopt;
+#[cfg(test)]
+mod closure_tests;
 #[cfg(test)]
 mod media_probe_tests;
 #[cfg(test)]
@@ -186,6 +190,7 @@ pub struct OwnedCall {
     id: api::ChannelId,
     progress: watch::Receiver<CallSnapshot>,
     lifetime: Lifetime,
+    closure: ClosureNotice,
 }
 
 enum Lifetime {
@@ -214,7 +219,10 @@ impl OwnedCall {
             .progress
             .finish(CallCompletion::Cancelled);
         match std::mem::replace(&mut self.lifetime, Lifetime::Released(progress)) {
-            Lifetime::Owned(lifetime) => drop(lifetime),
+            Lifetime::Owned(lifetime) => {
+                drop(lifetime);
+                self.closure.released();
+            }
             Lifetime::Released(previous) => self.lifetime = Lifetime::Released(previous),
         }
     }
@@ -327,7 +335,7 @@ mod tests {
             let server = tokio::spawn(axum::serve(listener, app).into_future());
             let result: Result<(), Error> = async {
                 let client = Client::new(&format!("http://{address}"), "app", "password")?;
-                let (_commands, mut calls) = Calls::new(client, api::ChannelId::try_from("app".to_owned())?);
+                let (requests, mut calls) = Calls::new(client, api::ChannelId::try_from("app".to_owned())?);
                 let channel = channel("media")?;
                 let (progress, received) = watch::channel(CallSnapshot { progress: OwnedCallProgress::new(), channel: Some(channel.clone()), failure: None, cleanup: Cleanup::Pending, media_probe_failure: None });
                 let (lifetime, dropped) = oneshot::channel();
@@ -340,7 +348,7 @@ mod tests {
                 calls.probed(id, result);
                 assert_eq!(received.borrow().progress.has_reached(CallMilestone::MediaConnected), status == 200 && value == "1");
                 assert_eq!(received.borrow().media_probe_failure.as_ref().and_then(|failure| failure.status), if status == 503 { Some(503) } else { None });
-                let mut call = OwnedCall { id: channel.id.clone(), progress: received, lifetime: Lifetime::Owned(lifetime) };
+                let mut call = OwnedCall { id: channel.id.clone(), progress: received, lifetime: Lifetime::Owned(lifetime), closure: requests.closures.notice() };
                 if status == 503 { assert!(matches!(call.wait(CallMilestone::MediaConnected, Duration::from_secs(1)).await, Err(Error::MediaProbe(failure)) if failure.status == Some(503))); }
                 calls.event(&api::Event { application: "app".into(), timestamp: "connected".into(), kind: api::EventKind::ChannelVarset { channel: channel.clone(), variable: "RUSTERISK_MEDIA_CONNECTED".into(), value: "1".into() } })?;
                 assert!(call.wait(CallMilestone::MediaConnected, Duration::from_secs(1)).await?.media_probe_failure.is_none());
@@ -444,7 +452,7 @@ mod tests {
                 );
                 leases.push((lifetime, received));
             }
-            calls.tick();
+            calls.settle();
             assert_eq!(calls.cleanups.len(), 8);
             assert_eq!(calls.originates.len() + calls.cleanups.len(), 16);
             calls.close().await?;
@@ -508,7 +516,7 @@ mod tests {
                 },
             })?;
             drop(lifetime);
-            calls.tick();
+            calls.settle();
             assert_eq!(
                 received.borrow().progress.completion(),
                 Some(CallCompletion::StasisExited)
@@ -534,6 +542,7 @@ mod tests {
             id: api::ChannelId::try_from("cancelled".to_owned())?,
             progress: received,
             lifetime: Lifetime::Owned(lifetime),
+            closure: closure::latch().0.notice(),
         };
         call.cancel();
         progress.send_modify(|snapshot| {
@@ -596,16 +605,13 @@ pub(crate) struct AdoptRequest {
     reply: oneshot::Sender<Result<(), Error>>,
 }
 
-pub(crate) async fn originate(
-    commands: &mpsc::Sender<Command>,
-    options: Originate,
-) -> Result<OwnedCall, Error> {
+pub(crate) async fn originate(requests: &Requests, options: Originate) -> Result<OwnedCall, Error> {
     options.validate()?;
-    start(commands, Start::Originate(options)).await
+    start(requests, Start::Originate(options)).await
 }
 
 pub(crate) async fn external_websocket(
-    commands: &mpsc::Sender<Command>,
+    requests: &Requests,
     options: api::WebSocketMediaOptions,
     data: &str,
 ) -> Result<OwnedCall, Error> {
@@ -613,7 +619,7 @@ pub(crate) async fn external_websocket(
         return Err(Error::Invalid("invalid media app data"));
     }
     start(
-        commands,
+        requests,
         Start::WebSocket {
             options,
             data: data.into(),
@@ -623,7 +629,7 @@ pub(crate) async fn external_websocket(
 }
 
 pub(crate) async fn external_rtp(
-    commands: &mpsc::Sender<Command>,
+    requests: &Requests,
     target: api::ExternalRtpTarget,
     data: &str,
 ) -> Result<OwnedCall, Error> {
@@ -631,7 +637,7 @@ pub(crate) async fn external_rtp(
         return Err(Error::Invalid("invalid media app data"));
     }
     start(
-        commands,
+        requests,
         Start::Rtp {
             target,
             data: data.into(),
@@ -641,14 +647,22 @@ pub(crate) async fn external_rtp(
 }
 
 pub(crate) async fn external_audio_socket(
-    commands: &mpsc::Sender<Command>,
+    requests: &Requests,
     target: api::AudioSocketTarget,
 ) -> Result<OwnedCall, Error> {
-    start(commands, Start::AudioSocket(target)).await
+    start(requests, Start::AudioSocket(target)).await
 }
 
-async fn start(commands: &mpsc::Sender<Command>, options: Start) -> Result<OwnedCall, Error> {
+#[derive(Clone)]
+pub(crate) struct Requests {
+    commands: mpsc::Sender<Command>,
+    closures: ClosureLatch,
+}
+
+async fn start(requests: &Requests, options: Start) -> Result<OwnedCall, Error> {
     let id = api::ChannelId::try_from(uuid::Uuid::new_v4().to_string())?;
+    // An abandoned request drops this notice after its lifetime and progress handles.
+    let closure = requests.closures.notice();
     let (progress, received) = watch::channel(CallSnapshot {
         progress: OwnedCallProgress::new(),
         channel: None,
@@ -658,7 +672,8 @@ async fn start(commands: &mpsc::Sender<Command>, options: Start) -> Result<Owned
     });
     let (lifetime, dropped) = oneshot::channel();
     let (reply, accepted) = oneshot::channel();
-    commands
+    requests
+        .commands
         .try_send(Command::Create(CreateRequest {
             id: id.clone(),
             options,
@@ -672,6 +687,7 @@ async fn start(commands: &mpsc::Sender<Command>, options: Start) -> Result<Owned
         id,
         progress: received,
         lifetime: Lifetime::Owned(lifetime),
+        closure,
     })
 }
 
@@ -698,6 +714,7 @@ pub(crate) struct Calls {
     incoming: BTreeMap<api::ChannelId, CallSnapshot>,
     used: BTreeSet<api::ChannelId>,
     pub commands: mpsc::Receiver<Command>,
+    pub closed: mpsc::Receiver<()>,
     pub originates: tokio::task::JoinSet<(api::ChannelId, Result<api::Channel, Error>)>,
     pub cleanups: tokio::task::JoinSet<(api::ChannelId, Result<(), Error>)>,
     pub probes: tokio::task::JoinSet<(api::ChannelId, Result<api::Variable, Error>)>,
@@ -705,10 +722,11 @@ pub(crate) struct Calls {
 }
 
 impl Calls {
-    pub fn new(client: Client, application: api::ChannelId) -> (mpsc::Sender<Command>, Self) {
+    pub fn new(client: Client, application: api::ChannelId) -> (Requests, Self) {
         let (commands, received) = mpsc::channel(64);
+        let (closures, closed) = closure::latch();
         (
-            commands,
+            Requests { commands, closures },
             Self {
                 client,
                 application,
@@ -716,6 +734,7 @@ impl Calls {
                 incoming: BTreeMap::new(),
                 used: BTreeSet::new(),
                 commands: received,
+                closed,
                 originates: tokio::task::JoinSet::new(),
                 cleanups: tokio::task::JoinSet::new(),
                 probes: tokio::task::JoinSet::new(),
@@ -725,6 +744,8 @@ impl Calls {
     }
 
     pub fn submit(&mut self, command: Command) {
+        // A slot that a dropped call released admits this request.
+        self.settle();
         match command {
             Command::Create(request) => self.create(request),
             Command::Adopt(request) => self.adopt(request),
@@ -935,11 +956,11 @@ impl Calls {
             });
             observation?;
         }
-        self.tick();
+        self.settle();
         Ok(())
     }
 
-    pub fn tick(&mut self) {
+    pub fn settle(&mut self) {
         for (id, entry) in &mut self.entries {
             match entry.lifetime.try_recv() {
                 Ok(()) | Err(oneshot::error::TryRecvError::Closed) => {
@@ -1042,7 +1063,7 @@ impl Calls {
                 }
             });
         }
-        self.tick();
+        self.settle();
     }
 
     pub fn cleaned(&mut self, id: api::ChannelId, result: Result<(), Error>) {
@@ -1059,7 +1080,7 @@ impl Calls {
                             tracing::debug!(channel = %id, %error, "early hangup needs confirmation after originate completes");
                         }
                     }
-                    self.tick();
+                    self.settle();
                     return;
                 }
                 Work::Cleaning => {}
@@ -1079,7 +1100,7 @@ impl Calls {
                 }
             });
         }
-        self.tick();
+        self.settle();
     }
 
     pub async fn close(&mut self) -> Result<(), Error> {
@@ -1089,7 +1110,7 @@ impl Calls {
                 snapshot.progress = snapshot.progress.finish(CallCompletion::Cancelled);
             });
         }
-        self.tick();
+        self.settle();
         let result = tokio::time::timeout(CLEANUP_TIMEOUT, async {
             while !self.originates.is_empty() || !self.cleanups.is_empty() || !self.probes.is_empty() {
                 tokio::select! {

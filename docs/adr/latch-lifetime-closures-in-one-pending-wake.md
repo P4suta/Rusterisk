@@ -15,6 +15,7 @@ A dropping guard can't fail or wait, and a closure needs no payload because the 
 Give the control task a one-slot latch.
 Each guard marks it after its closed state becomes visible, and the task reads it before rescanning.
 A full latch already holds a wake that covers the new closure.
+The client session latches closed call handles likewise.
 
 ## Alternatives
 

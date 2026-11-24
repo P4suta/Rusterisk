@@ -82,6 +82,6 @@ impl Calls {
                 }
             });
         }
-        self.tick();
+        self.settle();
     }
 }
