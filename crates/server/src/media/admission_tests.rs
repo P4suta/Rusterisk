@@ -535,14 +535,18 @@ async fn one_failing_leg_ends_while_another_keeps_its_audio() -> Result<(), Medi
         .replace_data_socket(other_family);
     speak(&kept_peer, &hub, &kept, 1).await?;
     received(&mut hub, &kept, 1).await?;
-    assert!(matches!(
-        notices.try_recv(),
-        Ok(MediaNotice::Connected { key }) if key == kept
-    ));
-    assert!(matches!(
-        notices.try_recv(),
-        Ok(MediaNotice::Stopped { key, result: Err(_) }) if key == failing
-    ));
+    // The failing leg can fail in a turn before the kept leg connects, so the notices come in either order.
+    let mut connected = false;
+    let mut stopped = false;
+    while let Ok(notice) = notices.try_recv() {
+        connected |= matches!(&notice, MediaNotice::Connected { key } if *key == kept);
+        stopped |=
+            matches!(&notice, MediaNotice::Stopped { key, result: Err(_) } if *key == failing);
+    }
+    assert!(
+        connected && stopped,
+        "connected {connected}, stopped {stopped}"
+    );
     assert!(!hub.ports.contains_key(&failing));
     speak(&kept_peer, &hub, &kept, 2).await?;
     let result = received(&mut hub, &kept, 2).await;

@@ -13,6 +13,8 @@ use tokio::task::JoinSet;
 mod admission_tests;
 #[cfg(test)]
 mod frame_timing_tests;
+#[cfg(test)]
+mod leg_tests;
 mod measurements;
 mod notices;
 pub use notices::MediaNotices;

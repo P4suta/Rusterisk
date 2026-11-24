@@ -87,8 +87,13 @@ impl SocketPair {
     }
 
     // Takes the sockets out of the runtime's reactor, for a leg that reads them without waiting.
+    // A blocking socket would hold the whole media turn, so the leg sets both sockets non-blocking itself.
     fn into_std(self) -> io::Result<(std::net::UdpSocket, std::net::UdpSocket)> {
-        Ok((self.data.into_std()?, self.control.into_std()?))
+        let data = self.data.into_std()?;
+        let control = self.control.into_std()?;
+        data.set_nonblocking(true)?;
+        control.set_nonblocking(true)?;
+        Ok((data, control))
     }
 }
 
