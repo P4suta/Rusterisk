@@ -33,6 +33,8 @@ use pending::{Held, Outcome, Pending, Waiting};
 mod playback_admission_tests;
 mod publication;
 #[cfg(test)]
+mod shutdown_tests;
+#[cfg(test)]
 mod silent_media_tests;
 #[cfg(test)]
 mod state_size_tests;
@@ -96,6 +98,9 @@ impl DigitDelivery {
         }
     }
 }
+
+// Signaling cleanup ends within the runtime shutdown deadline, as the separate signaling task did.
+const SIGNALING_CLEANUP: std::time::Duration = std::time::Duration::from_secs(10);
 
 // Outbound registrations leave at most one packet per interval when more than one is due.
 const REGISTRATION_INTERVAL_MS: u64 = 20;
@@ -1693,10 +1698,25 @@ impl Signaling {
         if let Err(error) = &result {
             self.control.fail(error);
         }
-        // The call decisions end first, and the cleanup below ends every call that they leave.
-        let mut cleanup = self.control.close().await;
+        // A request that waits for the call decisions now fails at once instead of at its budget.
+        self.control.refuse_requests();
+        // Signaling ends every call first, so that a settings loader that control waits for holds no call.
+        let signaling = tokio::time::timeout(SIGNALING_CLEANUP, self.finish_signaling(clock))
+            .await
+            .unwrap_or_else(|elapsed| Err(failure(format!("signaling cleanup: {elapsed}"))));
+        let cleanup = cleanup::combine(signaling, self.control.close().await);
+        match (result, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+            (Err(primary), Err(cleanup)) => Err(ControlError::Adapter(format!(
+                "{primary}; signaling cleanup failed: {cleanup}"
+            ))),
+        }
+    }
+
+    async fn finish_signaling(&mut self, clock: Clock) -> Result<(), ControlError> {
         let now = clock.now_ms()?;
-        cleanup = cleanup::combine(cleanup, self.finish_registrations().await);
+        let mut cleanup = self.finish_registrations().await;
         cleanup = cleanup::combine(cleanup, self.close_refer_routes(now));
         cleanup = cleanup::combine(cleanup, self.finish_native().await);
         cleanup = cleanup::combine(cleanup, self.finish_streams().await);
@@ -1741,12 +1761,6 @@ impl Signaling {
             tracing::error!(%error, "signaling stream shutdown failed");
             cleanup = cleanup::combine(cleanup, Err(error));
         }
-        match (result, cleanup) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
-            (Err(primary), Err(cleanup)) => Err(ControlError::Adapter(format!(
-                "{primary}; signaling cleanup failed: {cleanup}"
-            ))),
-        }
+        cleanup
     }
 }

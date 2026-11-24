@@ -550,6 +550,14 @@ impl Runner {
         self
     }
 
+    // Refuses every request that waits now, and every later one.
+    pub(crate) fn refuse_requests(&mut self) {
+        self.requests.close();
+        while let Ok(request) = self.requests.try_recv() {
+            drop(request);
+        }
+    }
+
     // Takes the next effect that the composing turn applies.
     pub(crate) fn take_effect(&mut self) -> Option<Effect> {
         self.pending_effects.pop_front()

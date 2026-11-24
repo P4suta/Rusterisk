@@ -22,6 +22,8 @@ fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
 }
 
+// The composed loop applies a queued release before it takes the next completion.
+// The test holds the release back to check that the completion still refuses the ended call on its own.
 #[tokio::test]
 async fn cancelled_resolution_cannot_connect_before_the_release_effect_is_consumed(
 ) -> Result<(), ControlError> {
