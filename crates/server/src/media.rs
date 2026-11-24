@@ -1291,11 +1291,11 @@ impl MediaHub {
         }
         let audio = self.mixer.tick_with_music(&playback, &music)?;
         self.recordings.bridges(&audio.bridges)?;
-        for (key, frame) in audio.channels {
-            let port = self.ports.get(&key).ok_or(MediaError::UnknownStream)?;
-            let frame = match (self.probes.get_mut(&key), port.generated_audio_gate) {
+        for (key, frame) in &audio.channels {
+            let port = self.ports.get(key).ok_or(MediaError::UnknownStream)?;
+            let frame = match (self.probes.get_mut(key), port.generated_audio_gate) {
                 (Some(probe), Gate::Open | Gate::IncomingMuted) => probe.transmit()?,
-                _ => frame,
+                _ => *frame,
             };
             match port.outgoing.try_send(frame) {
                 Ok(()) => {}
