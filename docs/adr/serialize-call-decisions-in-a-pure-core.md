@@ -13,7 +13,7 @@ The approved plan requires a dependency-free Rust core and bounded communication
 ## Decision
 
 Keep call transitions and resource ownership in a `no_std` crate with fixed capacities.
-One control task applies decisions and sends commands to signaling and media tasks through bounded channels.
+One owner task applies decisions, as [Compose signaling and call decisions in one owner task](compose-signaling-and-call-decisions-in-one-owner-task.md) records.
 Event ingestion continues while clients await call milestones.
 
 ## Alternatives
@@ -27,7 +27,6 @@ Adapters perform network and storage effects after the core validates transition
 Capacity exhaustion is an explicit error.
 The AudioSocket enum keeps its bounded audio frame inline and records one `large_enum_variant` expectation.
 Heap indirection would add an allocation to every audio message and conflict with the ownership constraint.
-Reconsider the single control task if measured control latency exceeds the integration budget.
 
 ## Confirmation
 
