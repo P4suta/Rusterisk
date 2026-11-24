@@ -1,7 +1,7 @@
 use super::{failure, Signaling};
 use crate::media::{RecordingEnd, RecordingTarget, Reservation};
 use crate::storage::{PlaybackMedia, WorkerError};
-use crate::{ControlError, MediaOwner, Signal};
+use crate::{ControlError, Effect, MediaOwner, Signal};
 use rusterisk_api::{ChannelId, RecordingOptions};
 use rusterisk_core::MediaTaskToken;
 use rusterisk_media::AudioTarget;
@@ -43,16 +43,39 @@ impl Signaling {
         options: RecordingOptions,
         now: u64,
     ) -> Result<(), ControlError> {
-        let admitted = async {
+        let prepared = async {
             let storage = self.storage.clone().ok_or(ControlError::Unsupported)?;
             if self.recordings.len() >= 64 {
                 return Err(ControlError::Capacity);
             }
-            let target = match &owner {
-                MediaOwner::Channel(key) => {
-                    self.answer(key, now).await?;
-                    RecordingTarget::Channel(key.clone())
+            if let MediaOwner::Channel(key) = &owner {
+                self.answer(key, now).await?;
+            }
+            Ok(storage)
+        }
+        .await;
+        // An answer leaves its call waiting for the media task, and the recording starts after that wait.
+        if let (Ok(_), MediaOwner::Channel(key)) = (&prepared, &owner) {
+            if self.waits(key) {
+                let key = key.clone();
+                let effect = Effect::RecordMedia {
+                    owner,
+                    token,
+                    name,
+                    options,
+                };
+                if let Some(effect) = self.hold_first(&key, effect) {
+                    return Err(ControlError::Adapter(format!(
+                        "A waiting call refused its held effect: {effect:?}"
+                    )));
                 }
+                return Ok(());
+            }
+        }
+        let admitted = async {
+            let storage = prepared?;
+            let target = match &owner {
+                MediaOwner::Channel(key) => RecordingTarget::Channel(key.clone()),
                 MediaOwner::Bridge { generation, .. } => RecordingTarget::Bridge(*generation),
             };
             let Reservation {

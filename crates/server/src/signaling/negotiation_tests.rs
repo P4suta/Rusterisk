@@ -115,6 +115,7 @@ async fn direction_answers_wait_for_the_current_transport_and_ignore_cached_retr
                 2,
             )
             .await?;
+        signaling.media_answers_for_test(2).await?;
         assert!(peer.try_recv_from(&mut received).is_err());
         signaling
             .effect(
@@ -127,6 +128,7 @@ async fn direction_answers_wait_for_the_current_transport_and_ignore_cached_retr
                 3,
             )
             .await?;
+        signaling.media_answers_for_test(3).await?;
         let (size, _) = tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut received))
             .await
             .map_err(failure)?

@@ -1,4 +1,6 @@
-use super::{AttachmentMode, AttachmentReceipt, DigitSupport, MediaHub, MediaPort, Port};
+use super::{
+    AttachmentMode, AttachmentReceipt, Completion, DigitSupport, MediaHub, MediaPort, Port,
+};
 use crate::{webrtc::WebRtcSession, CallKey};
 use rusterisk_core::PeerMediaDirection;
 use rusterisk_media::MediaError;
@@ -9,7 +11,7 @@ pub(super) struct Attachment {
     session: WebRtcSession,
     direction: PeerMediaDirection,
     mode: AttachmentMode,
-    reply: oneshot::Sender<Result<(), MediaError>>,
+    reply: Completion<()>,
 }
 
 impl MediaPort {
@@ -38,10 +40,30 @@ impl MediaPort {
                 session,
                 direction,
                 mode,
-                reply,
+                reply: Completion::Reply(reply),
             })
             .map_err(|_| MediaError::Capacity)?;
         Ok(AttachmentReceipt { response })
+    }
+
+    // The media task reports the result of this attachment as a notice.
+    pub(crate) fn start_webrtc_attachment(
+        &self,
+        key: CallKey,
+        session: WebRtcSession,
+        direction: PeerMediaDirection,
+        mode: AttachmentMode,
+        serial: u64,
+    ) -> Result<(), MediaError> {
+        self.webrtc
+            .try_send(Attachment {
+                key,
+                session,
+                direction,
+                mode,
+                reply: Completion::Notice(serial),
+            })
+            .map_err(|_| MediaError::Capacity)
     }
 }
 
@@ -73,12 +95,9 @@ impl MediaHub {
             mode,
             reply,
         } = attachment;
-        if !reply.is_closed() {
+        if !reply.abandoned() {
             let result = self.attach_webrtc(key.clone(), session, direction, mode);
-            let admitted = result.is_ok();
-            if reply.send(result).is_err() && admitted {
-                self.remove(&key)?;
-            }
+            self.complete(&key, result, reply)?;
         }
         Ok(())
     }

@@ -1,5 +1,6 @@
 use super::{failure, Signaling};
 use crate::{
+    media::AttachmentMode,
     rtp::{RtpSession, SocketPair},
     CallKey, ControlError,
 };
@@ -133,13 +134,15 @@ impl Signaling {
         Ok(())
     }
 
-    pub(super) async fn connect_external_rtp(
+    // Queues the attachment, whose result the media task reports as a notice.
+    pub(super) fn start_external_rtp(
         &mut self,
         key: CallKey,
         target: ExternalRtpTarget,
-    ) -> Result<SocketAddr, ControlError> {
+    ) -> Result<(SocketAddr, u64), ControlError> {
         if self.calls.len()
             + self.external_media.len()
+            + self.external_waits()
             + self.stream_admissions.len()
             + self.websocket_admissions.len()
             >= 64
@@ -161,9 +164,10 @@ impl Signaling {
             StaticRtpCodec::Pcmu => AudioFormat::Pcmu,
             StaticRtpCodec::Pcma => AudioFormat::Pcma,
         };
+        let serial = self.next_serial();
         self.media
-            .attach(
-                key.clone(),
+            .start_attachment(
+                key,
                 sockets,
                 RtpSession {
                     remote: target.remote(),
@@ -172,8 +176,9 @@ impl Signaling {
                     telephone: None,
                 },
                 PeerMediaDirection::SendReceive,
+                AttachmentMode::Answered,
+                serial,
             )
-            .await
             .map_err(|error| match error {
                 MediaError::Capacity => ControlError::Capacity,
                 error @ (MediaError::InvalidFrame
@@ -185,7 +190,6 @@ impl Signaling {
                 | MediaError::Transport(_)
                 | MediaError::Control(_)) => failure(error),
             })?;
-        self.external_media.insert(key);
-        Ok(local)
+        Ok((local, serial))
     }
 }

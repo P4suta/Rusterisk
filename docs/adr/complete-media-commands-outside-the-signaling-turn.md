@@ -17,7 +17,7 @@ A reply that is only logged goes away.
 A reservation hands its receipt to the job that owns the operation.
 An attachment or a direction change stays in the call record as a pending completion with a deadline.
 The media task reports that completion in a notice naming the call.
-A completion for a call that no longer waits releases its media.
+A numbered answer completes only its own wait, and an expired wait releases its media.
 
 ## Alternatives
 

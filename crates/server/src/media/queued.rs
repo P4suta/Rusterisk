@@ -4,6 +4,7 @@ use super::{Command, MediaHub, PlaybackControl};
 pub(crate) enum Queued {
     Reservation,
     Stop,
+    Release,
     Other,
 }
 
@@ -28,6 +29,8 @@ impl MediaHub {
             Queued::Reservation
         } else if stop {
             Queued::Stop
+        } else if matches!(command, Command::Release { .. }) {
+            Queued::Release
         } else {
             Queued::Other
         })

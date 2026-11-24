@@ -47,6 +47,18 @@ pub enum MediaNotice {
         key: CallKey,
         result: Result<LinkStats, MediaError>,
     },
+    // The answer to an attachment that its sender numbered and queued without a reply.
+    Attached {
+        key: CallKey,
+        serial: u64,
+        result: Result<(), MediaError>,
+    },
+    // The answer to a direction change that its sender numbered and queued without a reply.
+    DirectionApplied {
+        key: CallKey,
+        serial: u64,
+        result: Result<bool, MediaError>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -159,7 +171,7 @@ enum Command {
         session: RtpSession,
         direction: PeerMediaDirection,
         mode: AttachmentMode,
-        reply: oneshot::Sender<Result<(), MediaError>>,
+        reply: Completion<()>,
     },
     AttachAudioSocket {
         key: CallKey,
@@ -187,8 +199,25 @@ enum Command {
         direction: PeerMediaDirection,
         gate: Gate,
         generated_audio_gate: Gate,
-        reply: oneshot::Sender<Result<bool, MediaError>>,
+        reply: Completion<bool>,
     },
+}
+
+// How the media task answers a queued command.
+// A notice carries the number that its sender gave the command.
+pub(crate) enum Completion<T> {
+    Reply(oneshot::Sender<Result<T, MediaError>>),
+    Notice(u64),
+}
+
+impl<T> Completion<T> {
+    // A sender that dropped its reply no longer wants the command.
+    fn abandoned(&self) -> bool {
+        match self {
+            Self::Reply(reply) => reply.is_closed(),
+            Self::Notice(_) => false,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -473,10 +502,52 @@ impl MediaPort {
                 session,
                 direction,
                 mode,
-                reply,
+                reply: Completion::Reply(reply),
             })
             .map_err(|_| MediaError::Capacity)?;
         Ok(AttachmentReceipt { response })
+    }
+
+    // The media task reports the result of this attachment as a notice with the same number.
+    pub(crate) fn start_attachment(
+        &self,
+        key: CallKey,
+        sockets: SocketPair,
+        session: RtpSession,
+        direction: PeerMediaDirection,
+        mode: AttachmentMode,
+        serial: u64,
+    ) -> Result<(), MediaError> {
+        self.commands
+            .try_send(Command::Attach {
+                key,
+                sockets,
+                session,
+                direction,
+                mode,
+                reply: Completion::Notice(serial),
+            })
+            .map_err(|_| MediaError::Capacity)
+    }
+
+    // The media task reports the result of this direction change as a notice with the same number.
+    pub(crate) fn start_peer_direction(
+        &self,
+        key: CallKey,
+        direction: PeerMediaDirection,
+        gate: Gate,
+        generated_audio_gate: Gate,
+        serial: u64,
+    ) -> Result<(), MediaError> {
+        self.commands
+            .try_send(Command::PeerDirection {
+                key,
+                direction,
+                gate,
+                generated_audio_gate,
+                reply: Completion::Notice(serial),
+            })
+            .map_err(|_| MediaError::Capacity)
     }
     pub fn release(&self, key: CallKey) -> Result<(), MediaError> {
         self.commands
@@ -557,7 +628,7 @@ impl MediaPort {
                 direction,
                 gate,
                 generated_audio_gate,
-                reply,
+                reply: Completion::Reply(reply),
             })
             .map_err(|_| MediaError::Capacity)?;
         tokio::time::timeout(Duration::from_secs(5), response)
@@ -731,6 +802,22 @@ impl MediaHub {
         self.install_link(key.clone(), port, mode.gate(initial_direction))?;
         self.workers.spawn(async move { (key, link.run().await) });
         Ok(())
+    }
+
+    fn complete(
+        &mut self,
+        key: &CallKey,
+        result: Result<(), MediaError>,
+        reply: Completion<()>,
+    ) -> Result<(), MediaError> {
+        match reply {
+            Completion::Reply(reply) => self.complete_attachment(key, result, reply),
+            Completion::Notice(serial) => self.notice(MediaNotice::Attached {
+                key: key.clone(),
+                serial,
+                result,
+            }),
+        }
     }
 
     fn complete_attachment(
@@ -953,9 +1040,9 @@ impl MediaHub {
                 mode,
                 reply,
             } => {
-                if !reply.is_closed() {
+                if !reply.abandoned() {
                     let result = self.attach(key.clone(), sockets, session, direction, mode);
-                    self.complete_attachment(&key, result, reply)?;
+                    self.complete(&key, result, reply)?;
                 }
             }
             Command::Release { key } => self.remove(&key)?,
@@ -1006,7 +1093,7 @@ impl MediaHub {
                 generated_audio_gate,
                 reply,
             } => {
-                if !reply.is_closed() {
+                if !reply.abandoned() {
                     let result = if let Some(port) = self.ports.get_mut(&key) {
                         self.mixer
                             .gates(&key, gate, generated_audio_gate)
@@ -1018,8 +1105,19 @@ impl MediaHub {
                     } else {
                         Ok(false)
                     };
-                    if reply.send(result).is_err() {
-                        tracing::debug!(channel = %key.id, generation = key.generation, "media direction receiver closed");
+                    match reply {
+                        Completion::Reply(reply) => {
+                            if reply.send(result).is_err() {
+                                tracing::debug!(channel = %key.id, generation = key.generation, "media direction receiver closed");
+                            }
+                        }
+                        Completion::Notice(serial) => {
+                            self.notice(MediaNotice::DirectionApplied {
+                                key,
+                                serial,
+                                result,
+                            })?;
+                        }
                     }
                 }
             }
