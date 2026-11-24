@@ -1,5 +1,5 @@
 use crate::clock::Clock;
-use crate::media::{MediaNotice, MediaPort};
+use crate::media::{MediaNotice, MediaPort, Reservation};
 use crate::rtp::SocketPair;
 use crate::storage::{PlaybackMedia, StoragePort};
 use crate::{
@@ -29,6 +29,8 @@ mod outbound;
 #[cfg(test)]
 mod playback_admission_tests;
 mod publication;
+#[cfg(test)]
+mod silent_media_tests;
 #[cfg(test)]
 mod state_size_tests;
 pub(crate) use publication::{NativePreparation, NativePreparedSignaling};
@@ -1150,14 +1152,18 @@ impl Signaling {
                 .await;
         };
         let class = selection.class_name().to_owned();
-        let (cursor, completed) = match self.media.reserve_music(key, token, class).await {
-            Ok(admission) => admission,
+        let Reservation {
+            admission,
+            completed,
+        } = match self.media.queue_music(key, token, class) {
+            Ok(queued) => queued,
             Err(error) => return self.music_failed(owner, token, failure(error)).await,
         };
         let port = self.media.clone();
         let controller = self.controller.clone();
         self.playbacks.spawn(async move {
             let result = async {
+                let cursor = admission.wait().await.map_err(failure)?;
                 let source = storage
                     .play_selected_music(selection, cursor)
                     .await
@@ -1203,20 +1209,19 @@ impl Signaling {
                 let storage = storage.clone();
                 let port = self.media.clone();
                 let controller = self.controller.clone();
-                let completed = match port
-                    .reserve_playback_with_options(
-                        match &owner {
-                            MediaOwner::Channel(key) => AudioTarget::Channel(key.clone()),
-                            MediaOwner::Bridge { generation, .. } => {
-                                AudioTarget::Bridge(*generation)
-                            }
-                        },
-                        token,
-                        options,
-                    )
-                    .await
-                {
-                    Ok(completed) => completed,
+                let queued = port.queue_playback(
+                    match &owner {
+                        MediaOwner::Channel(key) => AudioTarget::Channel(key.clone()),
+                        MediaOwner::Bridge { generation, .. } => AudioTarget::Bridge(*generation),
+                    },
+                    token,
+                    options,
+                );
+                let Reservation {
+                    admission,
+                    completed,
+                } = match queued {
+                    Ok(queued) => queued,
                     Err(error) => {
                         tracing::warn!(?owner, ?token, %error, "playback reservation failed");
                         self.notify(Signal::MediaPlaybackFinished {
@@ -1230,6 +1235,7 @@ impl Signaling {
                 };
                 self.playbacks.spawn(async move {
                         let result = async {
+                            admission.wait().await.map_err(failure)?;
                             let source = storage
                                 .play(media?)
                                 .await
