@@ -1304,7 +1304,7 @@ impl Signaling {
         })
     }
 
-    async fn turn(&mut self, now: u64) -> Result<(), ControlError> {
+    async fn turn(&mut self, now: u64, clock: Clock) -> Result<(), ControlError> {
         for listener in 0..self.listeners.len() {
             if due(self.listeners[listener].engine.wake(), now) {
                 let output = self.listeners[listener].engine.tick(now).map_err(failure)?;
@@ -1313,7 +1313,7 @@ impl Signaling {
         }
         self.digit_tick(now).await?;
         if now >= self.registration_paced && self.registration_turn(now).await? {
-            self.registration_paced = now.saturating_add(REGISTRATION_INTERVAL_MS);
+            self.registration_paced = clock.now_ms()?.saturating_add(REGISTRATION_INTERVAL_MS);
         }
         Ok(())
     }
@@ -1494,7 +1494,7 @@ impl Signaling {
                 () = clock.reached(timer) => {
                     let now = clock.now_ms()?;
                     let before = self.wake(now);
-                    self.turn(now).await?;
+                    self.turn(now, clock).await?;
                     overdue.settled(before, self.wake(now), now);
                 }
             }
