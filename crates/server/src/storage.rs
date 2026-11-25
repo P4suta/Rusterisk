@@ -20,9 +20,9 @@ use file::FileSet;
 pub use file::RecordingFile;
 use playback::PlaybackSet;
 pub use playback::{PlaybackMedia, PlaybackSource};
+pub(crate) use recording::RecordingBatch;
 pub use recording::RecordingSink;
-use recording::{RecordingKey, RecordingSet};
-use rusterisk_media::Frame;
+use recording::{RecordingKey, RecordingMessage, RecordingSet, MESSAGE_CAPACITY};
 use stored::StoredCommand;
 
 pub(crate) fn check_music(
@@ -102,35 +102,31 @@ enum Command {
         name: ChannelId,
         rate: u32,
         policy: rusterisk_api::RecordingIfExists,
-        input: mpsc::Receiver<Frame>,
+        input: mpsc::Receiver<()>,
         lifetime: oneshot::Receiver<()>,
         reply: oneshot::Sender<Result<RecordingKey, StorageError>>,
-    },
-    FinishRecording {
-        key: RecordingKey,
-        trim_milliseconds: u64,
-        reply: oneshot::Sender<Result<(), StorageError>>,
-    },
-    CancelRecording {
-        key: RecordingKey,
-        reply: oneshot::Sender<Result<(), StorageError>>,
     },
 }
 
 #[derive(Clone)]
 pub struct StoragePort {
+    recording: mpsc::Sender<RecordingMessage>,
     commands: mpsc::Sender<Command>,
     stored: mpsc::Sender<StoredCommand>,
     stop: watch::Receiver<bool>,
     wake: mpsc::Sender<()>,
 }
 
+fn notify(wake: &mpsc::Sender<()>) {
+    match wake.try_send(()) {
+        Ok(()) | Err(mpsc::error::TrySendError::Full(_) | mpsc::error::TrySendError::Closed(_)) => {
+        }
+    }
+}
+
 impl StoragePort {
     fn wake(&self) {
-        match self.wake.try_send(()) {
-            Ok(())
-            | Err(mpsc::error::TrySendError::Full(_) | mpsc::error::TrySendError::Closed(_)) => {}
-        }
+        notify(&self.wake);
     }
 
     fn send(&self, command: Command) -> Result<(), WorkerError> {
@@ -294,20 +290,6 @@ fn command(
                 }
             }
         }
-        Command::FinishRecording {
-            key,
-            trim_milliseconds,
-            reply,
-        } => {
-            if !reply.is_closed() {
-                respond(reply, recordings.finish(&key, store, trim_milliseconds));
-            }
-        }
-        Command::CancelRecording { key, reply } => {
-            if !reply.is_closed() {
-                respond(reply, recordings.cancel(&key));
-            }
-        }
     }
 }
 
@@ -321,11 +303,11 @@ fn drain_commands(
     for _ in 0..64 {
         match commands.try_recv() {
             Ok(next) => {
-                recordings.pump();
+                recordings.pump(store);
                 playbacks.pump();
                 files.pump();
                 command(store, recordings, playbacks, next);
-                recordings.pump();
+                recordings.pump(store);
                 playbacks.pump();
                 files.pump();
             }
@@ -341,10 +323,11 @@ fn serve(
     root: PathBuf,
     mut commands: mpsc::Receiver<Command>,
     mut stored: mpsc::Receiver<StoredCommand>,
+    messages: mpsc::Receiver<RecordingMessage>,
     mut wakes: mpsc::Receiver<()>,
     stop: watch::Receiver<bool>,
 ) {
-    let mut recordings = RecordingSet::new(root.clone());
+    let mut recordings = RecordingSet::new(root.clone(), messages);
     let mut playbacks = PlaybackSet::new(root.clone());
     let mut files = FileSet::new();
     loop {
@@ -359,7 +342,7 @@ fn serve(
                 &mut commands,
             );
             while let Ok(next) = stored.try_recv() {
-                recordings.pump();
+                recordings.pump(&mut store);
                 playbacks.pump();
                 files.pump();
                 stored::execute(&mut store, &mut files, &root, next, |_store, _files| {
@@ -369,7 +352,7 @@ fn serve(
                     )))
                 });
             }
-            recordings.pump();
+            recordings.pump(&mut store);
             playbacks.pump();
             files.pump();
             files.close();
@@ -400,7 +383,7 @@ fn serve(
             );
             match stored.try_recv() {
                 Ok(next) => {
-                    recordings.pump();
+                    recordings.pump(&mut store);
                     playbacks.pump();
                     files.pump();
                     stored::execute(&mut store, &mut files, &root, next, |store, files| {
@@ -419,7 +402,7 @@ fn serve(
                         );
                         Ok(())
                     });
-                    recordings.pump();
+                    recordings.pump(&mut store);
                     playbacks.pump();
                     files.pump();
                 }
@@ -428,7 +411,7 @@ fn serve(
                 }
             }
         }
-        recordings.pump();
+        recordings.pump(&mut store);
         playbacks.pump();
         files.pump();
     }
@@ -452,7 +435,9 @@ impl StorageWorker {
         let (stop, stopped) = watch::channel(false);
         let (ready, startup) = oneshot::channel();
         let (completed, completion) = oneshot::channel();
+        let (recording, messages) = mpsc::channel(MESSAGE_CAPACITY);
         let port = StoragePort {
+            recording,
             commands: commands.clone(),
             stored,
             stop: stopped.clone(),
@@ -464,7 +449,15 @@ impl StorageWorker {
                 match Store::open(&root) {
                     Ok(store) => {
                         if ready.send(Ok(())).is_ok() {
-                            serve(store, root, receiver, stored_receiver, wakes, stopped);
+                            serve(
+                                store,
+                                root,
+                                receiver,
+                                stored_receiver,
+                                messages,
+                                wakes,
+                                stopped,
+                            );
                         }
                     }
                     Err(error) => {
@@ -584,6 +577,7 @@ mod tests {
                 directory.path().to_owned(),
                 receiver,
                 stored_receiver,
+                mpsc::channel(1).1,
                 wakes,
                 stopped,
             );
@@ -608,6 +602,7 @@ mod tests {
         let (_stop, stopped) = watch::channel(false);
         let (wake, _notifications) = mpsc::channel(1);
         let port = StoragePort {
+            recording: mpsc::channel(1).0,
             commands: commands.clone(),
             stored,
             stop: stopped,
@@ -639,6 +634,7 @@ mod tests {
         let (_stop, stopped) = watch::channel(false);
         let (wake, notifications) = mpsc::channel(1);
         let port = StoragePort {
+            recording: mpsc::channel(1).0,
             commands,
             stored,
             stop: stopped,
@@ -667,6 +663,7 @@ mod tests {
         let (stop, stopped) = watch::channel(false);
         let (wake, _notifications) = mpsc::channel(1);
         let port = StoragePort {
+            recording: mpsc::channel(1).0,
             commands: commands.clone(),
             stored,
             stop: stopped,

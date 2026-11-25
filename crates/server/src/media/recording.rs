@@ -1,4 +1,4 @@
-use crate::storage::{RecordingSink, WorkerError};
+use crate::storage::{RecordingBatch, RecordingSink, WorkerError};
 use crate::CallKey;
 use rusterisk_api::{RecordingOptions, RecordingTermination};
 use rusterisk_core::{
@@ -576,7 +576,11 @@ impl Capture {
         }
     }
 
-    fn write(&mut self, frame: Frame) -> Result<RecordingWrite, WorkerError> {
+    fn write(
+        &mut self,
+        frame: Frame,
+        batch: &mut RecordingBatch,
+    ) -> Result<RecordingWrite, WorkerError> {
         match &mut self.source {
             Source::Waiting => Ok(RecordingWrite::Continue),
             Source::Attached {
@@ -600,14 +604,14 @@ impl Capture {
                     / frame.samples().len() as u64;
                 let milliseconds = frame.samples().len() as u64 * 1000 / u64::from(frame.rate());
                 match gate {
-                    RecordingGate::Open => sink.try_write(frame)?,
+                    RecordingGate::Open => sink.write_in_batch(frame, batch)?,
                     RecordingGate::Silent => {
                         let silence = Frame::new(
                             &[0; rusterisk_media::MAX_SAMPLES][..frame.samples().len()],
                             frame.rate(),
                         )
                         .map_err(|error| WorkerError::Storage(error.into()))?;
-                        sink.try_write(silence)?;
+                        sink.write_in_batch(silence, batch)?;
                     }
                     RecordingGate::Paused | RecordingGate::PausedSilent => {}
                 }
@@ -624,6 +628,7 @@ impl Capture {
 }
 
 pub(super) struct Recordings {
+    batch: RecordingBatch,
     captures: BTreeMap<MediaTaskToken, Capture>,
     pub workers: JoinSet<()>,
 }
@@ -631,6 +636,7 @@ pub(super) struct Recordings {
 impl Recordings {
     pub fn new() -> Self {
         Self {
+            batch: RecordingBatch::default(),
             captures: BTreeMap::new(),
             workers: JoinSet::new(),
         }
@@ -873,7 +879,7 @@ impl Recordings {
         let mut finished = Vec::new();
         for (token, capture) in &mut self.captures {
             if capture.target == RecordingTarget::Channel(key.clone()) {
-                match capture.write(frame) {
+                match capture.write(frame, &mut self.batch) {
                     Ok(RecordingWrite::Continue) => {}
                     Ok(RecordingWrite::SilenceLimit) => {
                         finished.push((*token, capture.after_limit()))
@@ -919,7 +925,7 @@ impl Recordings {
                     .iter()
                     .find_map(|(bridge, frame)| (*bridge == id).then_some(*frame))
                     .unwrap_or(silence);
-                match capture.write(frame) {
+                match capture.write(frame, &mut self.batch) {
                     Ok(RecordingWrite::Continue) => {}
                     Ok(RecordingWrite::SilenceLimit) => {
                         finished.push((*token, capture.after_limit()))
@@ -942,6 +948,7 @@ impl Recordings {
         for (token, mode) in finished {
             self.finalize(token, mode);
         }
+        self.batch.flush();
         Ok(())
     }
 

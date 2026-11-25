@@ -47,6 +47,13 @@ lint = "clippy::disallowed_types"
 adr = "docs/adr/verify-sip-domains-with-an-immutable-library-callback.md"
 rationale = "Share only immutable SIP certificate trust through the fixed verifier API."
 
+[[exceptions]]
+path = "crates/server/src/storage/recording.rs"
+item = "RecordingMessage"
+lint = "clippy::large_enum_variant"
+adr = "docs/adr/order-recording-audio-and-finalization.md"
+rationale = "Keep accepted audio inline with terminal messages."
+
 [[timers]]
 path = "crates/server/src/media.rs"
 item = "new"
