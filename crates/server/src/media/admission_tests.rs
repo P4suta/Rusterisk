@@ -192,12 +192,12 @@ fn browser() -> Result<crate::webrtc::WebRtcSession, MediaError> {
     Ok(session)
 }
 
-// Runs the next queued command and then every attachment that still waits.
+// Runs all queued media commands in arrival order.
 fn settle(hub: &mut MediaHub) -> Result<(), MediaError> {
     let command = hub.commands.try_recv().map_err(failure)?;
-    hub.ordered(command)?;
-    while let Ok(attachment) = hub.webrtc.try_recv() {
-        hub.webrtc_attachment(attachment)?;
+    hub.command(command)?;
+    while let Ok(command) = hub.commands.try_recv() {
+        hub.command(command)?;
     }
     Ok(())
 }
@@ -331,6 +331,50 @@ async fn a_direction_change_without_a_reply_reports_whether_it_applied() -> Resu
         }
     }
     hub.close().await
+}
+
+#[tokio::test]
+async fn a_replacement_webrtc_answer_survives_release_of_the_expired_attachment(
+) -> Result<(), MediaError> {
+    let (handle, mut hub, mut notices) = MediaHub::new(4);
+    let key = key()?;
+    let expired = handle.start_webrtc_attachment(
+        key.clone(),
+        browser()?,
+        PeerMediaDirection::SendReceive,
+        AttachmentMode::Early,
+        1,
+    )?;
+    expired.send(key.clone());
+    let _replacement = handle.start_webrtc_attachment(
+        key.clone(),
+        browser()?,
+        PeerMediaDirection::SendReceive,
+        AttachmentMode::Answered,
+        2,
+    )?;
+    settle(&mut hub)?;
+    let mut admitted = Vec::new();
+    while let Ok(MediaNotice::Attached { serial, result, .. }) = notices.try_recv() {
+        if result.is_ok() {
+            admitted.push(serial);
+        }
+    }
+    let (_stop, mut stopped) = watch::channel(false);
+    let mut frames = FrameClock::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while hub.workers.len() > 1 {
+            hub.turn(&mut stopped, &mut frames).await?;
+        }
+        Ok::<_, MediaError>(())
+    })
+    .await
+    .map_err(failure)??;
+    let installed = hub.ports.contains_key(&key);
+    hub.close().await?;
+    assert_eq!(admitted, [1, 2]);
+    assert!(installed, "the expired link cannot remove the replacement");
+    Ok(())
 }
 
 #[tokio::test]

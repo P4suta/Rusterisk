@@ -1,11 +1,13 @@
 use super::{
-    AttachmentMode, AttachmentReceipt, AttachmentRelease, Completion, DigitSupport, MediaHub,
-    MediaPort, Port,
+    AttachmentMode, AttachmentReceipt, AttachmentRelease, Command, Completion, DigitSupport,
+    MediaHub, MediaPort, Port,
 };
 use crate::{webrtc::WebRtcSession, CallKey};
 use rusterisk_core::PeerMediaDirection;
 use rusterisk_media::MediaError;
 use tokio::sync::oneshot;
+
+pub(super) const SLOTS: usize = 8;
 
 pub(super) struct Attachment {
     key: CallKey,
@@ -35,15 +37,13 @@ impl MediaPort {
         mode: AttachmentMode,
     ) -> Result<AttachmentReceipt, MediaError> {
         let (reply, response) = oneshot::channel();
-        self.webrtc
-            .try_send(Attachment {
-                key,
-                session,
-                direction,
-                mode,
-                reply: Completion::Reply(reply),
-            })
-            .map_err(|_| MediaError::Capacity)?;
+        self.enqueue_webrtc(Attachment {
+            key,
+            session,
+            direction,
+            mode,
+            reply: Completion::Reply(reply),
+        })?;
         Ok(AttachmentReceipt { response })
     }
 
@@ -57,16 +57,34 @@ impl MediaPort {
         serial: u64,
     ) -> Result<AttachmentRelease, MediaError> {
         let release = self.reserve_attachment_release(serial)?;
-        self.webrtc
-            .try_send(Attachment {
-                key,
-                session,
-                direction,
-                mode,
-                reply: self.completion(serial)?,
-            })
-            .map_err(|_| MediaError::Capacity)?;
+        self.enqueue_webrtc(Attachment {
+            key,
+            session,
+            direction,
+            mode,
+            reply: self.completion(serial)?,
+        })?;
         Ok(release)
+    }
+
+    fn enqueue_webrtc(&self, mut attachment: Attachment) -> Result<(), MediaError> {
+        let command = self
+            .commands
+            .try_reserve()
+            .map_err(|_| MediaError::Capacity)?;
+        for (index, slot) in self.webrtc.iter().enumerate() {
+            match slot.try_send(attachment) {
+                Ok(()) => {
+                    command.send(Command::AttachWebRtc(index));
+                    return Ok(());
+                }
+                Err(std::sync::mpsc::TrySendError::Full(waiting)) => attachment = waiting,
+                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                    return Err(MediaError::Capacity)
+                }
+            }
+        }
+        Err(MediaError::Capacity)
     }
 }
 
@@ -85,9 +103,9 @@ impl MediaHub {
             .unwrap_or(DigitSupport::Unsupported);
         let (port, channels) = Port::new(direction, support);
         self.install_link(key.clone(), port, mode.gate(direction))?;
-        self.workers
-            .spawn(async move { (key, session.run(channels).await.map(|stats| stats.audio)) });
-        Ok(())
+        self.spawn_link(key, async move {
+            session.run(channels).await.map(|stats| stats.audio)
+        })
     }
 
     pub(super) fn webrtc_attachment(&mut self, attachment: Attachment) -> Result<(), MediaError> {

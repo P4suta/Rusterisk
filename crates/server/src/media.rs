@@ -5,6 +5,7 @@ use crate::CallKey;
 use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone, MediaTaskToken, PeerMediaDirection};
 use rusterisk_media::{AudioTarget, Frame, Gate, MediaError, Mixer, TelephoneFormat};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
@@ -173,6 +174,7 @@ enum Command {
         mode: AttachmentMode,
         reply: Completion<()>,
     },
+    AttachWebRtc(usize),
     AttachAudioSocket {
         key: CallKey,
         socket: tokio::net::TcpStream,
@@ -237,7 +239,7 @@ pub struct MediaPort {
     notices: mpsc::WeakSender<MediaNotice>,
     websocket: mpsc::Sender<streams::WebSocketAttachment<axum::extract::ws::WebSocket>>,
     client_websocket: mpsc::Sender<streams::WebSocketAttachment<streams::ClientSocket>>,
-    webrtc: mpsc::Sender<webrtc::Attachment>,
+    webrtc: [std::sync::mpsc::SyncSender<webrtc::Attachment>; webrtc::SLOTS],
 }
 
 impl MediaPort {
@@ -687,6 +689,7 @@ struct SavedMusic {
     cursor: MusicCursor,
 }
 struct Port {
+    worker: Option<tokio::task::Id>,
     measurements: Option<watch::Receiver<crate::rtp::Measurements>>,
     connection_lease: Option<crate::MediaConnectionLease>,
     answers: Option<mpsc::Receiver<()>>,
@@ -740,7 +743,7 @@ pub struct MediaHub {
     commands: mpsc::Receiver<Command>,
     websocket: mpsc::Receiver<streams::WebSocketAttachment<axum::extract::ws::WebSocket>>,
     client_websocket: mpsc::Receiver<streams::WebSocketAttachment<streams::ClientSocket>>,
-    webrtc: mpsc::Receiver<webrtc::Attachment>,
+    webrtc: [std::sync::mpsc::Receiver<webrtc::Attachment>; webrtc::SLOTS],
     notices: mpsc::Sender<MediaNotice>,
     mixer: Mixer<CallKey>,
     ports: BTreeMap<CallKey, Port>,
@@ -771,7 +774,9 @@ impl MediaHub {
         let (commands, receiver) = mpsc::channel(128);
         let (websocket, websocket_receiver) = mpsc::channel(8);
         let (client_websocket, client_websocket_receiver) = mpsc::channel(8);
-        let (webrtc, webrtc_receiver) = mpsc::channel(8);
+        let slots = std::array::from_fn(|_| std::sync::mpsc::sync_channel(1));
+        let webrtc = slots.each_ref().map(|(sender, _)| sender.clone());
+        let webrtc_receiver = slots.map(|(_, receiver)| receiver);
         let (notices, events) = mpsc::channel(128);
         (
             MediaPort {
@@ -836,7 +841,17 @@ impl MediaHub {
         let link = RtpLink::new(sockets, session, channels)?;
         port.measurements = Some(link.observations());
         self.install_link(key.clone(), port, mode.gate(initial_direction))?;
-        self.workers.spawn(async move { (key, link.run().await) });
+        self.spawn_link(key, link.run())
+    }
+
+    fn spawn_link(
+        &mut self,
+        key: CallKey,
+        link: impl Future<Output = Result<LinkStats, MediaError>> + Send + 'static,
+    ) -> Result<(), MediaError> {
+        let port = self.ports.get_mut(&key).ok_or(MediaError::UnknownStream)?;
+        let task = self.workers.spawn(async move { (key, link.await) });
+        port.worker = Some(task.id());
         Ok(())
     }
 
@@ -872,17 +887,18 @@ impl MediaHub {
         Ok(())
     }
 
-    // The signaling task queues a WebRTC attachment before any later command for its call.
-    fn ordered(&mut self, command: Command) -> Result<(), MediaError> {
-        while let Ok(attachment) = self.webrtc.try_recv() {
-            self.webrtc_attachment(attachment)?;
-        }
-        self.command(command)
-    }
-
     fn command(&mut self, command: Command) -> Result<(), MediaError> {
         self.remember_music();
         match command {
+            Command::AttachWebRtc(slot) => {
+                let attachment = self
+                    .webrtc
+                    .get(slot)
+                    .ok_or(MediaError::InvalidRoute)?
+                    .try_recv()
+                    .map_err(|_| MediaError::InvalidRoute)?;
+                self.webrtc_attachment(attachment)?;
+            }
             Command::Probe { key, challenge } => {
                 if self.probes.len() < self.capacity && !challenge.closed() {
                     self.probes.entry(key).or_insert(challenge);
@@ -1310,7 +1326,7 @@ impl MediaHub {
         tokio::select! {
             changed = stop.changed() => if changed.is_err() || *stop.borrow() { return Ok(Turn::Stop); },
             command = self.commands.recv() => match command {
-                Some(command) => self.ordered(command)?,
+                Some(command) => self.command(command)?,
                 None => return Ok(Turn::Stop),
             },
             attachment = self.websocket.recv() => match attachment {
@@ -1321,13 +1337,9 @@ impl MediaHub {
                 Some(attachment) => self.websocket_attachment(attachment)?,
                 None => return Ok(Turn::Stop),
             },
-            attachment = self.webrtc.recv() => match attachment {
-                Some(attachment) => self.webrtc_attachment(attachment)?,
-                None => return Ok(Turn::Stop),
-            },
-            result = self.workers.join_next(), if !self.workers.is_empty() => {
-                let (key, result) = result.ok_or(MediaError::InvalidRoute)?.map_err(|error| MediaError::Transport(error.to_string()))?;
-                if self.ports.contains_key(&key) {
+            result = self.workers.join_next_with_id(), if !self.workers.is_empty() => {
+                let (id, (key, result)) = result.ok_or(MediaError::InvalidRoute)?.map_err(|error| MediaError::Transport(error.to_string()))?;
+                if self.ports.get(&key).is_some_and(|port| port.worker == Some(id)) {
                     self.remove(&key)?;
                     self.notice(MediaNotice::Stopped { key, result })?;
                 }
