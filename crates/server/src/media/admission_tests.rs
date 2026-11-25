@@ -394,7 +394,7 @@ async fn a_replacement_webrtc_answer_survives_release_of_the_expired_attachment(
         AttachmentMode::Early,
         1,
     )?;
-    expired.send(key.clone());
+    expired.send(Order::Release(key.clone()));
     let _replacement = handle.start_webrtc_attachment(
         key.clone(),
         browser()?,
