@@ -7,13 +7,12 @@ use rusterisk_client::{
 use rusterisk_config::{Codec, Config};
 use rusterisk_server::{runtime::Server, ControlError};
 use rusterisk_sip::Session;
+use rusterisk_test_support::Wait;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
 };
-use tokio::{net::UdpSocket, time::timeout};
-
-const STEP: Duration = Duration::from_secs(3);
+use tokio::net::UdpSocket;
 
 fn check(condition: bool, reason: &'static str) -> Result<(), ControlError> {
     if condition {
@@ -28,7 +27,8 @@ pub(super) async fn receive(
     expected: Method,
 ) -> Result<(Request, SocketAddr), ControlError> {
     let mut bytes = [0; 16385];
-    let (size, peer) = timeout(STEP, socket.recv_from(&mut bytes))
+    let (size, peer) = Wait::Ready
+        .bounded(socket.recv_from(&mut bytes))
         .await
         .map_err(|_| failure(format!("Timed out waiting for SIP {expected}")))?
         .map_err(failure)?;
@@ -117,7 +117,7 @@ async fn assert_no_connected_event(
     events: &mut ClientSession,
     channel_id: &ChannelId,
 ) -> Result<(), ControlError> {
-    let result = timeout(Duration::from_millis(250), async {
+    let result = Wait::Observation.bounded(async {
         for _ in 0..64 {
             let event = events.next_event().await.map_err(failure)?;
             let connected = matches!(
@@ -145,7 +145,7 @@ async fn exchange(
         .originate(Originate::new("PJSIP/phone".into()).map_err(failure)?)
         .await
         .map_err(failure)?;
-    call.wait(CallMilestone::Accepted, STEP)
+    call.wait(CallMilestone::Accepted, Wait::Ready.duration())
         .await
         .map_err(failure)?;
     let channel_id = call.id().clone();
@@ -219,20 +219,22 @@ async fn exchange(
     )?;
     let mut packet = [0; 16385];
     check(
-        timeout(
-            Duration::from_millis(250),
-            peer.signal.recv_from(&mut packet),
-        )
-        .await
-        .is_err(),
+        Wait::Observation
+            .bounded(peer.signal.recv_from(&mut packet))
+            .await
+            .is_err(),
         "A repeated answer started another teardown",
     )?;
-    let terminal = call.wait_completion(STEP).await.map_err(failure)?;
+    let terminal = call
+        .wait_completion(Wait::Ready.duration())
+        .await
+        .map_err(failure)?;
     check(
         terminal.progress.completion() == Some(CallCompletion::Cancelled),
         "The SDK lost the cancelled completion",
     )?;
-    timeout(STEP, call.close())
+    Wait::Ready
+        .bounded(call.close())
         .await
         .map_err(failure)?
         .map_err(failure)?;
@@ -283,20 +285,21 @@ async fn ringing(peer: &Peer, invite: &Request, target: SocketAddr) -> Result<()
 
 async fn silent(peer: &Peer) -> Result<(), ControlError> {
     let mut bytes = [0; 16385];
-    let waited = timeout(Duration::from_millis(1600), async {
-        loop {
-            let (size, _) = peer.signal.recv_from(&mut bytes).await.map_err(failure)?;
-            match SipMessage::try_from(&bytes[..size]).map_err(failure)? {
-                SipMessage::Request(request) if request.method == Method::Invite => {}
-                SipMessage::Request(_) | SipMessage::Response(_) => {
-                    return Err::<(), ControlError>(ControlError::Invalid(
-                        "A silent peer received more than the repeated INVITE",
-                    ));
+    let waited = Wait::Ready
+        .bounded(async {
+            loop {
+                let (size, _) = peer.signal.recv_from(&mut bytes).await.map_err(failure)?;
+                match SipMessage::try_from(&bytes[..size]).map_err(failure)? {
+                    SipMessage::Request(request) if request.method == Method::Invite => {}
+                    SipMessage::Request(_) | SipMessage::Response(_) => {
+                        return Err::<(), ControlError>(ControlError::Invalid(
+                            "A silent peer received more than the repeated INVITE",
+                        ));
+                    }
                 }
             }
-        }
-    })
-    .await;
+        })
+        .await;
     match waited {
         Ok(result) => result,
         Err(_) => Ok(()),
@@ -311,7 +314,7 @@ async fn past_its_dial_limit(
     let mut request = Originate::new("PJSIP/phone".into()).map_err(failure)?;
     request.timeout = Duration::from_secs(1);
     let mut call = events.originate(request).await.map_err(failure)?;
-    call.wait(CallMilestone::Accepted, STEP)
+    call.wait(CallMilestone::Accepted, Wait::Ready.duration())
         .await
         .map_err(failure)?;
     let channel_id = call.id().clone();
@@ -321,23 +324,25 @@ async fn past_its_dial_limit(
     } else {
         silent(peer).await?;
     }
-    let ended = timeout(STEP, async {
-        loop {
-            let event = events.next_event().await.map_err(failure)?;
-            if let EventKind::ChannelDestroyed { cause, channel, .. } = event.kind {
-                if channel.id == channel_id {
-                    return Ok::<u16, ControlError>(cause);
+    let ended = Wait::Ready
+        .bounded(async {
+            loop {
+                let event = events.next_event().await.map_err(failure)?;
+                if let EventKind::ChannelDestroyed { cause, channel, .. } = event.kind {
+                    if channel.id == channel_id {
+                        return Ok::<u16, ControlError>(cause);
+                    }
                 }
             }
-        }
-    })
-    .await
-    .map_err(failure)??;
+        })
+        .await
+        .map_err(failure)??;
     check(
         ended == 19,
         "The dial limit ended the call with another cause",
     )?;
-    timeout(STEP, call.close())
+    Wait::Ready
+        .bounded(call.close())
         .await
         .map_err(failure)?
         .map_err(failure)
@@ -408,7 +413,7 @@ async fn served(scenario: Scenario) -> Result<(), ControlError> {
             Scenario::RingingDialLimit => past_its_dial_limit(&mut events, &peer, true).await,
             Scenario::SilentDialLimit => past_its_dial_limit(&mut events, &peer, false).await,
         };
-        let cleanup = match timeout(STEP, events.shutdown()).await {
+        let cleanup = match Wait::Ready.bounded(events.shutdown()).await {
             Ok(result) => result.map_err(failure),
             Err(error) => Err(failure(error)),
         };
@@ -416,7 +421,7 @@ async fn served(scenario: Scenario) -> Result<(), ControlError> {
     }
     .await;
     controller.shutdown();
-    let cleanup = match timeout(STEP, &mut running).await {
+    let cleanup = match Wait::Ready.bounded(&mut running).await {
         Ok(result) => result.map_err(failure).and_then(|result| result),
         Err(error) => {
             running.abort();

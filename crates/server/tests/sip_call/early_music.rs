@@ -14,6 +14,7 @@ use rusterisk_media::{AudioFormat, Frame, RtpPacket, RtpSender};
 use rusterisk_server::{rtp::SocketPair, runtime::Server, ControlError, Controller};
 use rusterisk_sip::Session;
 use rusterisk_storage::Recorder;
+use rusterisk_test_support::Wait;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
@@ -155,11 +156,11 @@ async fn connection(
 
 async fn signaling_response(phone: &Peer, target: SocketAddr) -> Result<Response, ControlError> {
     let mut bytes = [0; 16385];
-    let (length, source) =
-        tokio::time::timeout(Duration::from_secs(2), phone.signal.recv_from(&mut bytes))
-            .await
-            .map_err(failure)?
-            .map_err(failure)?;
+    let (length, source) = Wait::Ready
+        .bounded(phone.signal.recv_from(&mut bytes))
+        .await
+        .map_err(failure)?
+        .map_err(failure)?;
     require(source == target, "Unexpected signaling peer")?;
     let SipMessage::Response(response) = SipMessage::try_from(&bytes[..length]).map_err(failure)?
     else {
@@ -210,40 +211,39 @@ async fn initially_muted_transport(
     phone: &Peer,
     expected: SocketAddr,
 ) -> Result<u32, ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        let mut bytes = [0; 1501];
-        let mut ssrc = None;
-        for _ in 0..6 {
-            let (length, source) = phone
-                .audio
-                .data()
-                .recv_from(&mut bytes)
-                .await
-                .map_err(failure)?;
-            let received = audio_packet(&bytes[..length], source, expected, 0)?;
-            require(
-                ssrc.is_none_or(|previous| previous == received),
-                "Initial muted media changed its RTP sender",
-            )?;
-            ssrc = Some(received);
-        }
-        ssrc.ok_or(ControlError::Invalid("Expected received muted RTP"))
-    })
-    .await
-    .map_err(failure)?
+    Wait::Ready
+        .bounded(async {
+            let mut bytes = [0; 1501];
+            let mut ssrc = None;
+            for _ in 0..6 {
+                let (length, source) = phone
+                    .audio
+                    .data()
+                    .recv_from(&mut bytes)
+                    .await
+                    .map_err(failure)?;
+                let received = audio_packet(&bytes[..length], source, expected, 0)?;
+                require(
+                    ssrc.is_none_or(|previous| previous == received),
+                    "Initial muted media changed its RTP sender",
+                )?;
+                ssrc = Some(received);
+            }
+            ssrc.ok_or(ControlError::Invalid("Expected received muted RTP"))
+        })
+        .await
+        .map_err(failure)?
 }
 
 async fn transport(phone: &Peer, expected: SocketAddr, sample: i32) -> Result<u32, ControlError> {
     drain_received_audio(&phone.audio)?;
     stable_audio(&phone.audio, sample).await?;
     let mut bytes = [0; 1501];
-    let (length, source) = tokio::time::timeout(
-        Duration::from_secs(2),
-        phone.audio.data().recv_from(&mut bytes),
-    )
-    .await
-    .map_err(failure)?
-    .map_err(failure)?;
+    let (length, source) = Wait::Ready
+        .bounded(phone.audio.data().recv_from(&mut bytes))
+        .await
+        .map_err(failure)?
+        .map_err(failure)?;
     audio_packet(&bytes[..length], source, expected, sample)
 }
 
@@ -252,20 +252,21 @@ async fn released_pair(address: SocketAddr) -> Result<SocketPair, ControlError> 
         .port()
         .checked_add(1)
         .ok_or(ControlError::Capacity)?;
-    tokio::time::timeout(Duration::from_secs(2), async {
-        let mut poll = tokio::time::interval(Duration::from_millis(20));
-        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            poll.tick().await;
-            match SocketPair::bind(address.ip(), address.port(), control) {
-                Ok(pair) => return Ok(pair),
-                Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
-                Err(error) => return Err(failure(error)),
+    Wait::Ready
+        .bounded(async {
+            let mut poll = tokio::time::interval(Duration::from_millis(20));
+            poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                poll.tick().await;
+                match SocketPair::bind(address.ip(), address.port(), control) {
+                    Ok(pair) => return Ok(pair),
+                    Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {}
+                    Err(error) => return Err(failure(error)),
+                }
             }
-        }
-    })
-    .await
-    .map_err(failure)?
+        })
+        .await
+        .map_err(failure)?
 }
 
 async fn acknowledge(
@@ -293,11 +294,11 @@ async fn receive_hangup(
     answer: &Response,
 ) -> Result<(), ControlError> {
     let mut bytes = [0; 16385];
-    let (length, source) =
-        tokio::time::timeout(Duration::from_secs(2), phone.signal.recv_from(&mut bytes))
-            .await
-            .map_err(failure)?
-            .map_err(failure)?;
+    let (length, source) = Wait::Ready
+        .bounded(phone.signal.recv_from(&mut bytes))
+        .await
+        .map_err(failure)?
+        .map_err(failure)?;
     require(source == target, "Unexpected BYE peer")?;
     let SipMessage::Request(bye) = SipMessage::try_from(&bytes[..length]).map_err(failure)? else {
         return Err(ControlError::Invalid("Expected source termination"));
@@ -355,7 +356,7 @@ async fn exercise(root: &Path, ending: Ending) -> Result<(), ControlError> {
     let mut channel = None;
     let mut phase = "listener addresses";
     let mut subscription = None;
-    let result = tokio::time::timeout(Duration::from_secs(8), async {
+    let result = Wait::Ready.bounded(async {
         let address = *address.as_ref().map_err(failure)?;
         let listeners = listeners.as_ref().map_err(failure)?;
         require(listeners.len() == 1, "Expected one SIP listener")?;
@@ -501,7 +502,7 @@ async fn exercise(root: &Path, ending: Ending) -> Result<(), ControlError> {
         result = combine(result, cleanup);
     }
     controller.shutdown();
-    result = combine(result, finish(server, Duration::from_secs(3)).await);
+    result = combine(result, finish(server).await);
     drop(subscription);
     drop(reservation);
     drop(phone);

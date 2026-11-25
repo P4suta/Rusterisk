@@ -23,6 +23,7 @@ use rusterisk_server::rtp::SocketPair;
 use rusterisk_server::signaling::Signaling;
 use rusterisk_server::{Action, ControlError, Controller, Credentials};
 use rusterisk_sip::{Direction, DtmfFormat, Session};
+use rusterisk_test_support::Wait;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -70,16 +71,17 @@ async fn matching_event(
     events: &mut tokio::sync::mpsc::Receiver<rusterisk_api::Event>,
     matches: impl Fn(&EventKind) -> bool,
 ) -> Result<EventKind, ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while let Some(event) = events.recv().await {
-            if matches(&event.kind) {
-                return Ok(event.kind);
+    Wait::Ready
+        .bounded(async {
+            while let Some(event) = events.recv().await {
+                if matches(&event.kind) {
+                    return Ok(event.kind);
+                }
             }
-        }
-        Err(ControlError::Capacity)
-    })
-    .await
-    .map_err(failure)?
+            Err(ControlError::Capacity)
+        })
+        .await
+        .map_err(failure)?
 }
 
 async fn answer(signal: &UdpSocket, audio: &SocketPair) -> Result<SocketAddr, ControlError> {
@@ -111,7 +113,8 @@ async fn answer_dialog_at(
     use rsipstack::sip::headers::untyped::ToTypedHeader;
 
     let mut bytes = [0; 16385];
-    let (size, peer) = tokio::time::timeout(Duration::from_secs(2), signal.recv_from(&mut bytes))
+    let (size, peer) = Wait::Ready
+        .bounded(signal.recv_from(&mut bytes))
         .await
         .map_err(failure)?
         .map_err(failure)?;
@@ -154,24 +157,72 @@ async fn answer_dialog_at(
 }
 
 async fn receive_audio(peer: &SocketPair, expected: i32) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        let mut bytes = [0; 1501];
-        for _ in 0..100 {
-            let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
-            let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
-            if packet.payload().len() == 160
-                && packet
-                    .payload()
-                    .iter()
-                    .all(|byte| (i32::from(mulaw_decode(*byte)) - expected).abs() < 300)
-            {
-                return Ok(());
+    receive_frames(peer, expected, 1).await
+}
+
+async fn receive_frames(peer: &SocketPair, expected: i32, count: u8) -> Result<(), ControlError> {
+    Wait::Ready
+        .bounded(async {
+            let mut bytes = [0; 1501];
+            let mut previous = None;
+            let mut consecutive = 0;
+            for _ in 0..150 {
+                let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
+                let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
+                if packet.payload_type() == 0
+                    && packet.payload().len() == 160
+                    && packet
+                        .payload()
+                        .iter()
+                        .all(|byte| (i32::from(mulaw_decode(*byte)) - expected).abs() < 300)
+                {
+                    let identity = (packet.ssrc(), packet.sequence(), packet.timestamp());
+                    consecutive = if previous == Some(identity) {
+                        consecutive + 1
+                    } else {
+                        1
+                    };
+                    previous = Some((
+                        packet.ssrc(),
+                        packet.sequence().wrapping_add(1),
+                        packet.timestamp().wrapping_add(160),
+                    ));
+                    if consecutive == count {
+                        return Ok(());
+                    }
+                } else {
+                    previous = None;
+                }
             }
-        }
-        Err(ControlError::Invalid("Expected received audio"))
-    })
-    .await
-    .map_err(failure)?
+            Err(ControlError::Invalid(
+                "Expected consecutive received audio frames",
+            ))
+        })
+        .await
+        .map_err(failure)?
+}
+
+async fn observed_playback(
+    events: &mut tokio::sync::mpsc::Receiver<rusterisk_api::Event>,
+    peer: &SocketPair,
+    name: &str,
+    source: &str,
+    target: &str,
+    expected: i32,
+) -> Result<(), ControlError> {
+    let lifecycle = async {
+        let started = matching_event(events, |kind| matches!(kind, EventKind::PlaybackStarted { playback } if playback.id.as_str() == name)).await?;
+        assert!(
+            matches!(started, EventKind::PlaybackStarted { playback } if playback.media_uri == source && playback.target_uri == target)
+        );
+        let finished = matching_event(events, |kind| matches!(kind, EventKind::PlaybackFinished { playback } if playback.id.as_str() == name)).await?;
+        assert!(
+            matches!(finished, EventKind::PlaybackFinished { playback } if playback.media_uri == source && playback.target_uri == target && playback.state == rusterisk_api::PlaybackState::Done)
+        );
+        Ok::<(), ControlError>(())
+    };
+    tokio::try_join!(lifecycle, receive_frames(peer, expected, 6))?;
+    Ok(())
 }
 
 fn drain_received_audio(peer: &SocketPair) -> Result<(), ControlError> {
@@ -269,31 +320,32 @@ async fn receive_digit(
     channel: &ChannelId,
     expected: &str,
 ) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        while let Some(event) = events.recv().await {
-            if let EventKind::ChannelDtmfReceived {
-                channel: actual,
-                digit,
-                duration_ms,
-            } = event.kind
-            {
-                assert_eq!(&actual.id, channel);
-                assert_eq!(digit, expected);
-                assert_eq!(duration_ms, 120);
-                return Ok(());
+    Wait::Ready
+        .bounded(async {
+            while let Some(event) = events.recv().await {
+                if let EventKind::ChannelDtmfReceived {
+                    channel: actual,
+                    digit,
+                    duration_ms,
+                } = event.kind
+                {
+                    assert_eq!(&actual.id, channel);
+                    assert_eq!(digit, expected);
+                    assert_eq!(duration_ms, 120);
+                    return Ok(());
+                }
             }
-        }
-        Err(ControlError::Capacity)
-    })
-    .await
-    .map_err(failure)?
+            Err(ControlError::Capacity)
+        })
+        .await
+        .map_err(failure)?
 }
 
 async fn receive_outgoing_digits(
     audio: &SocketPair,
     signaling: &UdpSocket,
 ) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    Wait::Ready.bounded(async {
         let received_audio = async {
             let mut receiver = TelephoneReceiver::new(101, 8000).map_err(failure)?;
             let mut bytes = [0; 1501];
@@ -373,32 +425,26 @@ async fn receive_bulk_digits(audio: &SocketPair) -> Result<(), ControlError> {
     let mut receiver = TelephoneReceiver::new(101, 8000).map_err(failure)?;
     let mut bytes = [0; 1501];
     let mut received = 0;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
-    for now in 0..1000 {
-        let packet = tokio::time::timeout_at(deadline, audio.data().recv_from(&mut bytes)).await;
-        let (size, _) = match packet {
-            Ok(result) => result.map_err(failure)?,
-            Err(_) => {
-                return Err(ControlError::Adapter(format!(
-                    "Expected 64 short digits, received {received}"
-                )))
+    let observation = Wait::Shutdown
+        .bounded(async {
+            for now in 0..1000 {
+                let (size, _) = audio.data().recv_from(&mut bytes).await.map_err(failure)?;
+                let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
+                if packet.payload_type() == 101 {
+                    for tone in receiver.push(&packet, now).map_err(failure)?.into_tones() {
+                        assert_eq!(tone.digit, DtmfDigit::One);
+                        assert_eq!(tone.duration_ms, 1);
+                        received += 1;
+                    }
+                }
+                if received == 64 {
+                    return Ok(());
+                }
             }
-        };
-        let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
-        if packet.payload_type() == 101 {
-            for tone in receiver.push(&packet, now).map_err(failure)?.into_tones() {
-                assert_eq!(tone.digit, DtmfDigit::One);
-                assert_eq!(tone.duration_ms, 1);
-                received += 1;
-            }
-        }
-        if received == 64 {
-            return Ok(());
-        }
-    }
-    Err(ControlError::Adapter(format!(
-        "Expected 64 short digits, received {received}"
-    )))
+            Err(ControlError::Capacity)
+        })
+        .await;
+    observation.map_err(|_| failure(format!("Expected 64 short digits, received {received}")))?
 }
 
 struct AudioPeer<'a> {
@@ -427,31 +473,32 @@ impl AudioPeer<'_> {
 
 async fn stable_audio(peer: &SocketPair, expected: i32) -> Result<(), ControlError> {
     let mut bytes = [0; 1501];
-    tokio::time::timeout(Duration::from_secs(2), async {
-        let mut consecutive = 0;
-        for _ in 0..100 {
-            let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
-            let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
-            if packet.payload().len() == 160
-                && packet
-                    .payload()
-                    .iter()
-                    .all(|sample| (i32::from(mulaw_decode(*sample)) - expected).abs() < 300)
-            {
-                consecutive += 1;
-                if consecutive == 6 {
-                    return Ok(());
+    Wait::Ready
+        .bounded(async {
+            let mut consecutive = 0;
+            for _ in 0..100 {
+                let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
+                let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
+                if packet.payload().len() == 160
+                    && packet
+                        .payload()
+                        .iter()
+                        .all(|sample| (i32::from(mulaw_decode(*sample)) - expected).abs() < 300)
+                {
+                    consecutive += 1;
+                    if consecutive == 6 {
+                        return Ok(());
+                    }
+                } else {
+                    consecutive = 0;
                 }
-            } else {
-                consecutive = 0;
             }
-        }
-        Err(ControlError::Invalid(
-            "Received audio did not stabilize at the expected signal",
-        ))
-    })
-    .await
-    .map_err(failure)?
+            Err(ControlError::Invalid(
+                "Received audio did not stabilize at the expected signal",
+            ))
+        })
+        .await
+        .map_err(failure)?
 }
 
 async fn exchange(
@@ -546,7 +593,8 @@ async fn control_requests_establish_two_sip_calls_and_bridge_received_audio(
                 .await?;
         }
         let mut packet = [0; 4096];
-        let (size, _) = tokio::time::timeout(Duration::from_secs(2), bob.peek_from(&mut packet))
+        let (size, _) = Wait::Ready
+            .bounded(bob.peek_from(&mut packet))
             .await
             .map_err(failure)?
             .map_err(failure)?;
@@ -562,7 +610,8 @@ async fn control_requests_establish_two_sip_calls_and_bridge_received_audio(
             tokio::try_join!(answer(&alice, &alice_audio), answer(&bob, &bob_audio))?;
         let mut answered = BTreeSet::new();
         while answered.len() < 2 {
-            let event = tokio::time::timeout(Duration::from_secs(2), events.events.recv())
+            let event = Wait::Ready
+                .bounded(events.events.recv())
                 .await
                 .map_err(failure)?
                 .ok_or(ControlError::Capacity)?;
@@ -652,7 +701,8 @@ async fn control_requests_establish_two_sip_calls_and_bridge_received_audio(
 
 async fn response(signal: &UdpSocket) -> Result<rsipstack::sip::Response, ControlError> {
     let mut bytes = [0; 16385];
-    let (size, _) = tokio::time::timeout(Duration::from_secs(2), signal.recv_from(&mut bytes))
+    let (size, _) = Wait::Ready
+        .bounded(signal.recv_from(&mut bytes))
         .await
         .map_err(failure)?
         .map_err(failure)?;
@@ -683,17 +733,18 @@ async fn invite(
 }
 
 async fn final_response(signal: &UdpSocket) -> Result<rsipstack::sip::Response, ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        for _ in 0..8 {
-            let response = response(signal).await?;
-            if response.status_code.code() >= 200 {
-                return Ok(response);
+    Wait::Ready
+        .bounded(async {
+            for _ in 0..8 {
+                let response = response(signal).await?;
+                if response.status_code.code() >= 200 {
+                    return Ok(response);
+                }
             }
-        }
-        Err(ControlError::Capacity)
-    })
-    .await
-    .map_err(failure)?
+            Err(ControlError::Capacity)
+        })
+        .await
+        .map_err(failure)?
 }
 
 async fn invite_at(
@@ -833,7 +884,7 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
     let result = async {
         let mut events = controller.subscribe(credentials()?, None, "app".into()).await?;
         invite(&alice, target, &alice_audio).await?;
-        let incoming = tokio::time::timeout(Duration::from_secs(2), async {
+        let incoming = Wait::Ready.bounded(async {
             while let Some(event) = events.events.recv().await {
                 if let EventKind::StasisStart { channel, args } = event.kind {
                     assert_eq!(channel.state, ChannelState::Ring);
@@ -857,7 +908,7 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
         let (bob_target, bob_ack) = answer_dialog(&bob, &bob_audio).await?;
         let mut up = BTreeSet::new();
         while up.len() < 2 {
-            let event = tokio::time::timeout(Duration::from_secs(2), events.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
+            let event = Wait::Ready.bounded(events.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
             if let EventKind::ChannelStateChange { channel } = event.kind {
                 if channel.state == ChannelState::Up { up.insert(channel.id); }
             }
@@ -906,7 +957,7 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
                 receive_audio(&alice_audio, -7000).await?;
             } else {
                 let mut bytes = [0; 1501];
-                assert!(tokio::time::timeout(Duration::from_millis(150), alice_audio.data().recv_from(&mut bytes)).await.is_err());
+                assert!(Wait::Quiet.bounded(alice_audio.data().recv_from(&mut bytes)).await.is_err());
             }
         }
         controller.execute(credentials()?, None, Action::Unmute { channel: incoming.clone(), direction: MuteDirection::Incoming }).await?;
@@ -925,7 +976,7 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
             receive_audio(&alice_audio, -7000).await?;
             if direction == "sendonly" {
                 let mut bytes = [0; 1501];
-                assert!(tokio::time::timeout(Duration::from_millis(150), bob_audio.data().recv_from(&mut bytes)).await.is_err());
+                assert!(Wait::Quiet.bounded(bob_audio.data().recv_from(&mut bytes)).await.is_err());
             } else {
                 receive_audio(&bob_audio, 4000).await?;
             }
@@ -971,16 +1022,17 @@ async fn disconnecting_the_stasis_app_rejects_an_unanswered_invitation() -> Resu
             .subscribe(credentials()?, None, "app".into())
             .await?;
         invite(&phone, target, &audio).await?;
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while let Some(event) = subscription.events.recv().await {
-                if matches!(event.kind, EventKind::StasisStart { .. }) {
-                    return Ok(());
+        Wait::Ready
+            .bounded(async {
+                while let Some(event) = subscription.events.recv().await {
+                    if matches!(event.kind, EventKind::StasisStart { .. }) {
+                        return Ok(());
+                    }
                 }
-            }
-            Err(ControlError::Capacity)
-        })
-        .await
-        .map_err(failure)??;
+                Err(ControlError::Capacity)
+            })
+            .await
+            .map_err(failure)??;
         drop(subscription);
         assert_eq!(response(&phone).await?.status_code.code(), 603);
         let channels = controller
@@ -1030,7 +1082,7 @@ async fn dialplan_answer_wait_and_hangup_finish_a_real_invitation_without_stasis
         assert_eq!(channels[0]["state"], "Up");
         assert_eq!(channels[0]["dialplan"]["app_name"], "Answer");
         let mut bytes = [0; 16385];
-        let (size, peer) = tokio::time::timeout(Duration::from_secs(3), phone.recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
+        let (size, peer) = Wait::Ready.bounded(phone.recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
         let SipMessage::Request(request) = SipMessage::try_from(&bytes[..size]).map_err(failure)? else { return Err(ControlError::Invalid("Expected hangup request")); };
         assert_eq!(request.method, Method::Bye);
         let response = format!("SIP/2.0 200 OK\r\nVia: {}\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {}\r\nContent-Length: 0\r\n\r\n", request.top_via_header().map_err(failure)?.value(), request.from_header().map_err(failure)?.value(), request.to_header().map_err(failure)?.value(), request.call_id_header().map_err(failure)?.value(), request.cseq_header().map_err(failure)?.value());
@@ -1115,20 +1167,8 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
         assert_eq!(answered.status_code.code(), 200);
         let ack = format!("ACK sip:100@{target} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-playback-ack;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", phone.local_addr().map_err(failure)?, answered.from_header().map_err(failure)?.value(), answered.to_header().map_err(failure)?.value(), answered.call_id_header().map_err(failure)?.value());
         phone.send_to(ack.as_bytes(), target).await.map_err(failure)?;
-        let mut bytes = [0; 1501];
-        let mut consecutive = 0;
-        tokio::time::timeout(Duration::from_secs(3), async {
-            for _ in 0..150 {
-                let (size, _) = audio.data().recv_from(&mut bytes).await.map_err(failure)?;
-                let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
-                if packet.payload().iter().all(|sample| (i32::from(mulaw_decode(*sample)) - 5000).abs() < 300) {
-                    consecutive += 1;
-                    if consecutive == 6 { return Ok(()); }
-                } else { consecutive = 0; }
-            }
-            Err(ControlError::Invalid("Expected playback audio"))
-        }).await.map_err(failure)??;
-        let channel = tokio::time::timeout(Duration::from_secs(2), async {
+        receive_frames(&audio, 5000, 6).await?;
+        let channel = Wait::Ready.bounded(async {
             while let Some(event) = subscription.events.recv().await {
                 if let EventKind::StasisStart { channel, args } = event.kind {
                     assert_eq!(args, ["SUCCESS"]);
@@ -1139,15 +1179,12 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
         }).await.map_err(failure)??;
         let app = rusterisk_server::http::router(controller.clone());
         for (name, source, expected) in [("saved-play", "recording:saved", -6000), ("welcome-play", "sound:welcome", 5000)] {
+            drain_received_audio(&audio)?;
             let request = Request::builder().method("POST").uri(format!("/ari/channels/{channel}/play/{name}?media={source}"))
                 .header("Authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("app:test-password"))).body(Body::empty()).map_err(failure)?;
             let accepted = app.clone().oneshot(request).await.map_err(failure)?;
             assert_eq!(accepted.status(), StatusCode::CREATED);
-            let started = tokio::time::timeout(Duration::from_secs(2), subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
-            assert!(matches!(started.kind, EventKind::PlaybackStarted { playback } if playback.id.as_str() == name && playback.media_uri == source));
-            receive_audio(&audio, expected).await?;
-            let finished = tokio::time::timeout(Duration::from_secs(2), subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
-            assert!(matches!(finished.kind, EventKind::PlaybackFinished { playback } if playback.id.as_str() == name && playback.state == rusterisk_api::PlaybackState::Done));
+            observed_playback(&mut subscription.events, &audio, name, source, &format!("channel:{channel}"), expected).await?;
         }
         let destination = Session::parse(std::str::from_utf8(&answered.body).map_err(failure)?, &[Codec::Pcmu]).map_err(failure)?.remote;
         let mut sender = RtpSender::new(AudioFormat::Pcmu, 0, [19; 10]).map_err(failure)?;
@@ -1158,7 +1195,7 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
         let request = Request::builder().method("POST").uri(format!("/ari/channels/{channel}/record?name={name}&format=wav&{options}"))
             .header("Authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("app:test-password"))).body(Body::empty()).map_err(failure)?;
         assert_eq!(app.clone().oneshot(request).await.map_err(failure)?.status(), StatusCode::CREATED);
-        tokio::time::timeout(Duration::from_secs(2), async {
+        Wait::Ready.bounded(async {
             while let Some(event) = subscription.events.recv().await {
                 if let EventKind::RecordingStarted { recording } = event.kind {
                     assert_eq!(recording.name, name);
@@ -1210,7 +1247,7 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
             assert_eq!(app.clone().oneshot(request).await.map_err(failure)?.status(), StatusCode::NO_CONTENT);
         }
         }
-        tokio::time::timeout(Duration::from_secs(2), async {
+        Wait::Ready.bounded(async {
             while let Some(event) = subscription.events.recv().await {
                 if let EventKind::RecordingFinished { recording } = event.kind {
                     assert_eq!(recording.name, name);
@@ -1250,11 +1287,7 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
         let request = Request::builder().method("POST").uri("/ari/bridges/playback-mix/play/bridge-play?media=recording:saved")
             .header("Authorization", format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("app:test-password"))).body(Body::empty()).map_err(failure)?;
         assert_eq!(app.oneshot(request).await.map_err(failure)?.status(), StatusCode::CREATED);
-        let started = matching_event(&mut subscription.events, |kind| matches!(kind, EventKind::PlaybackStarted { playback } if playback.id.as_str() == "bridge-play")).await?;
-        assert!(matches!(started, EventKind::PlaybackStarted { playback } if playback.target_uri == "bridge:playback-mix"));
-        receive_audio(&audio, -6000).await?;
-        let finished = matching_event(&mut subscription.events, |kind| matches!(kind, EventKind::PlaybackFinished { playback } if playback.id.as_str() == "bridge-play")).await?;
-        assert!(matches!(finished, EventKind::PlaybackFinished { playback } if playback.state == rusterisk_api::PlaybackState::Done));
+        observed_playback(&mut subscription.events, &audio, "bridge-play", "recording:saved", "bridge:playback-mix", -6000).await?;
         controller.execute(credentials()?, None, Action::Hangup(channel)).await?;
         finish_bye(&phone).await?;
         Ok(())
@@ -1269,11 +1302,11 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
 async fn finish_bye(socket: &UdpSocket) -> Result<(), ControlError> {
     let mut bytes = [0; 16385];
     for _ in 0..4 {
-        let (size, peer) =
-            tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))
-                .await
-                .map_err(failure)?
-                .map_err(failure)?;
+        let (size, peer) = Wait::Ready
+            .bounded(socket.recv_from(&mut bytes))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
         let SipMessage::Request(request) = SipMessage::try_from(&bytes[..size]).map_err(failure)?
         else {
             return Err(ControlError::Invalid("Expected dialog request"));
@@ -1325,7 +1358,7 @@ async fn parallel_dial_bridges_received_audio_to_the_first_peer_and_cancels_the_
     let result = async {
         invite(&alice, target, &alice_audio).await?;
         let mut bytes = [0; 16385];
-        let (size, charlie_target) = tokio::time::timeout(Duration::from_secs(2), charlie.recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
+        let (size, charlie_target) = Wait::Ready.bounded(charlie.recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
         let SipMessage::Request(invitation) = SipMessage::try_from(&bytes[..size]).map_err(failure)? else { return Err(ControlError::Invalid("Expected parallel invitation")); };
         assert_eq!(invitation.method, Method::Invite);
         let declined = |code: &str, cseq: &str| -> Result<String, ControlError> {
@@ -1339,7 +1372,7 @@ async fn parallel_dial_bridges_received_audio_to_the_first_peer_and_cancels_the_
         let alice_target = Session::parse(std::str::from_utf8(&answered.body).map_err(failure)?, &[Codec::Pcmu]).map_err(failure)?.remote;
         let ack = format!("ACK sip:100@{target} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch=z9hG4bK-parallel-ack;rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", alice.local_addr().map_err(failure)?, answered.from_header().map_err(failure)?.value(), answered.to_header().map_err(failure)?.value(), answered.call_id_header().map_err(failure)?.value());
         alice.send_to(ack.as_bytes(), target).await.map_err(failure)?;
-        let (size, peer) = tokio::time::timeout(Duration::from_secs(2), charlie.recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
+        let (size, peer) = Wait::Ready.bounded(charlie.recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
         let SipMessage::Request(cancel) = SipMessage::try_from(&bytes[..size]).map_err(failure)? else { return Err(ControlError::Invalid("Expected cancelled parallel invitation")); };
         assert_eq!(cancel.method, Method::Cancel);
         charlie.send_to(declined("200 OK", cancel.cseq_header().map_err(failure)?.value())?.as_bytes(), peer).await.map_err(failure)?;

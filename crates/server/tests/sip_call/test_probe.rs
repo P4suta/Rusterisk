@@ -4,6 +4,7 @@ use rusterisk_api::{ChannelState, EventKind};
 use rusterisk_config::{Codec, Config};
 use rusterisk_server::{runtime::Server, Action, ControlError};
 use rusterisk_sip::Session;
+use rusterisk_test_support::Wait;
 use serde_json::Value;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -172,11 +173,11 @@ async fn probe(scenario: Scenario) -> Result<(), ControlError> {
             assert_eq!(result["answered"],answered);
             assert_eq!(result["signal_verified"],scenario==Scenario::Echo);
         }
-        tokio::time::timeout(Duration::from_secs(2),async {
+        Wait::Ready.bounded(async {
             loop {
                 let calls=controller.execute(credentials()?,None,Action::ListChannels).await?.body.ok_or(ControlError::Capacity)?;
                 if let Some([one])=calls.as_array().map(Vec::as_slice){assert_eq!(one["id"],"keep-leg");assert_eq!(one["state"],"Up");break;}
-                tokio::time::sleep(Duration::from_millis(10)).await;
+
             }
             let bridges=controller.execute(credentials()?,None,Action::ListBridges).await?.body.ok_or(ControlError::Capacity)?;
             assert_eq!(bridges.as_array().map(Vec::len),Some(0));
