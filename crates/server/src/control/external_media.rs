@@ -217,7 +217,7 @@ impl Control {
         result: Result<SocketAddr, ControlError>,
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
-        let Some(entry) = self.channels.by_handle_mut(key.handle()) else {
+        let Some(entry) = self.channels.by_key_mut(&key) else {
             let mut outcome = Outcome::empty();
             outcome.effects.push(Effect::Release { key });
             return Ok(outcome);
@@ -257,7 +257,7 @@ impl Control {
         result: Result<(), ControlError>,
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
-        let Some(entry) = self.channels.by_handle_mut(key.handle()) else {
+        let Some(entry) = self.channels.by_key_mut(&key) else {
             let mut outcome = Outcome::empty();
             outcome.effects.push(Effect::Release { key });
             return Ok(outcome);
@@ -288,7 +288,7 @@ impl Control {
         result: Result<(), ControlError>,
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
-        let Some(entry) = self.channels.by_handle_mut(key.handle()) else {
+        let Some(entry) = self.channels.by_key_mut(&key) else {
             let mut outcome = Outcome::empty();
             outcome.effects.push(Effect::Release { key });
             return Ok(outcome);

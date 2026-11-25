@@ -29,7 +29,7 @@ impl<R: CallRecord> CallRecords<R> {
 
     pub(crate) fn get<V>(&self, field: Field<R, V>, key: &CallKey) -> Option<&V> {
         let (current, row) = self.0.get(&key.handle().slot())?;
-        if current.handle() != key.handle() {
+        if current != key {
             return None;
         }
         (field.read)(row).as_ref()
@@ -37,7 +37,7 @@ impl<R: CallRecord> CallRecords<R> {
 
     pub(crate) fn get_mut<V>(&mut self, field: Field<R, V>, key: &CallKey) -> Option<&mut V> {
         let (current, row) = self.0.get_mut(&key.handle().slot())?;
-        if current.handle() != key.handle() {
+        if current != key {
             return None;
         }
         (field.write)(row).as_mut()
@@ -49,7 +49,7 @@ impl<R: CallRecord> CallRecords<R> {
             Entry::Vacant(slot) => slot.insert((key, R::default())),
             Entry::Occupied(slot) => {
                 let record = slot.into_mut();
-                if record.0.handle() != key.handle() {
+                if record.0 != key {
                     if !record.1.empty() {
                         return Err(ControlError::Capacity);
                     }
@@ -85,7 +85,7 @@ impl<R: CallRecord> CallRecords<R> {
             return None;
         };
         let (current, row) = slot.get_mut();
-        if current.handle() != key.handle() {
+        if current != key {
             return None;
         }
         let value = (field.write)(row).take();

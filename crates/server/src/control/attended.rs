@@ -22,7 +22,7 @@ impl Control {
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
         let reference = refer.key();
-        let Some(source_entry) = self.channels.by_handle(source.handle()) else {
+        let Some(source_entry) = self.channels.by_key(&source) else {
             return Ok(rejected(source, reference, ReferFailure::NotFound));
         };
         if !matches!(source_entry.kind, ChannelKind::Sip)

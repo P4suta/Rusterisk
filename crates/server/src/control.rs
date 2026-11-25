@@ -1131,9 +1131,7 @@ impl Control {
         })
     }
     pub(crate) fn has_channel(&self, key: &CallKey) -> bool {
-        self.channels
-            .by_handle(key.handle())
-            .is_some_and(|entry| entry.snapshot.id == key.id)
+        self.channels.by_key(key).is_some()
     }
     pub fn channel(&self, id: &ChannelId) -> Result<&Channel, ControlError> {
         self.channels
@@ -2095,7 +2093,7 @@ impl Control {
             }
             Signal::PeerDirection { key, direction } => {
                 let mut outcome = Outcome::empty();
-                if let Some(entry) = self.channels.by_handle_mut(key.handle()).filter(|entry| {
+                if let Some(entry) = self.channels.by_key_mut(&key).filter(|entry| {
                     entry.call.generation() == key.generation
                         && entry.call.state() != CallState::Ended
                 }) {
@@ -2162,7 +2160,7 @@ impl Control {
                 completion,
             } => self.finish_playback(&MediaOwner::Channel(key), token, completion, timestamp),
             Signal::DtmfReady { key, events } => {
-                if let Some(entry) = self.channels.by_handle_mut(key.handle()) {
+                if let Some(entry) = self.channels.by_key_mut(&key) {
                     if entry.dtmf.is_none() {
                         entry.dtmf = Some(DtmfOutbox::new(events)?);
                     }
@@ -2170,7 +2168,7 @@ impl Control {
                 Ok(Outcome::empty())
             }
             Signal::DtmfFinished { key, token } => {
-                if let Some(entry) = self.channels.by_handle_mut(key.handle()) {
+                if let Some(entry) = self.channels.by_key_mut(&key) {
                     if let Some(outbox) = &mut entry.dtmf {
                         let _released = outbox.finish(token);
                     }
@@ -2183,7 +2181,7 @@ impl Control {
                 duration_ms,
             } => {
                 let mut outcome = Outcome::empty();
-                if let Some(entry) = self.channels.by_handle(key.handle()).filter(|entry| {
+                if let Some(entry) = self.channels.by_key(&key).filter(|entry| {
                     entry.call.generation() == key.generation
                         && entry.call.state() == CallState::Up
                         && matches!(entry.call.stasis(), StasisMembership::Entered(_))
@@ -2203,7 +2201,7 @@ impl Control {
             Signal::Terminated { key, cause } => {
                 if self
                     .channels
-                    .by_handle(key.handle())
+                    .by_key(&key)
                     .is_some_and(|entry| entry.call.generation() == key.generation)
                 {
                     self.end_at(&key.id, timestamp, cause, now)
@@ -2214,7 +2212,7 @@ impl Control {
                 }
             }
             Signal::Milestone { key, milestone } => {
-                let Some(entry) = self.channels.by_handle(key.handle()) else {
+                let Some(entry) = self.channels.by_key(&key) else {
                     let mut outcome = Outcome::empty();
                     outcome.effects.push(Effect::Release { key });
                     return Ok(outcome);
@@ -2240,7 +2238,7 @@ impl Control {
                 }
                 let entry = self
                     .channels
-                    .by_handle_mut(key.handle())
+                    .by_key_mut(&key)
                     .ok_or(ControlError::NotFound("Channel not found"))?;
                 let mut outcome = Outcome::empty();
                 match milestone {

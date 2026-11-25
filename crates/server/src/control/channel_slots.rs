@@ -63,6 +63,16 @@ impl ChannelSlots {
         (entry.call.generation() == handle.0).then_some(entry)
     }
 
+    pub fn by_key(&self, key: &CallKey) -> Option<&ChannelEntry> {
+        self.by_handle(key.handle())
+            .filter(|entry| entry.snapshot.id == key.id)
+    }
+
+    pub fn by_key_mut(&mut self, key: &CallKey) -> Option<&mut ChannelEntry> {
+        self.by_handle_mut(key.handle())
+            .filter(|entry| entry.snapshot.id == key.id)
+    }
+
     pub fn insert(&mut self, id: ChannelId, entry: ChannelEntry) -> Result<(), ControlError> {
         let handle = CallHandle::new(entry.call.generation());
         if !self.available(handle) || self.names.contains_key(&id) {
