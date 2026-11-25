@@ -91,6 +91,44 @@ fn end(control: &mut Control, key: CallKey) -> Result<Outcome, ControlError> {
 }
 
 #[test]
+fn a_retiring_call_counts_towards_the_configured_capacity() -> Result<(), ControlError> {
+    let mut control = Control::new(1);
+    let ended = participant(&mut control, "retiring", 1)?;
+    end(&mut control, ended.clone())?;
+    let mut other = ended.clone();
+    other.id = ChannelId::try_from("another-call".to_owned())?;
+    assert!(!control.media_released(&other));
+    assert!(matches!(
+        participant(&mut control, "replacement", 1),
+        Err(ControlError::Capacity)
+    ));
+    assert!(control.media_released(&ended));
+    participant(&mut control, "replacement", 1)?;
+    Ok(())
+}
+
+#[test]
+fn a_full_table_waits_for_media_to_release_the_ended_call() -> Result<(), ControlError> {
+    let mut control = Control::new(64);
+    let ended = participant(&mut control, "retiring", 1)?;
+    for number in 1..64 {
+        participant(&mut control, &format!("other-{number}"), 1)?;
+    }
+    end(&mut control, ended.clone())?;
+    assert!(matches!(
+        participant(&mut control, "replacement", 1),
+        Err(ControlError::Capacity)
+    ));
+    assert!(control.media_released(&ended));
+    let replacement = participant(&mut control, "replacement", 1)?;
+    assert_eq!(replacement.handle().slot(), ended.handle().slot());
+    assert_ne!(replacement.generation, ended.generation);
+    assert!(!control.media_released(&ended));
+    assert!(control.has_channel(&replacement));
+    Ok(())
+}
+
+#[test]
 fn moving_a_pair_member_preserves_the_other_current_call_and_bridge() -> Result<(), ControlError> {
     for moved in 0..2 {
         let mut control = Control::new(4);
@@ -131,10 +169,13 @@ fn moving_a_pair_member_preserves_the_other_current_call_and_bridge() -> Result<
 fn a_reused_peer_identifier_cannot_end_the_replacement_generation() -> Result<(), ControlError> {
     let mut control = Control::new(4);
     let members = pair(&mut control, 100)?;
-    let mut entry = control
+    let (mut entry, mut cleanup) = control
         .channels
-        .remove(&members[1].id)
+        .end(&members[1].id)
         .ok_or(ControlError::NotFound("Missing reused channel"))?;
+    for _step in cleanup.by_ref() {}
+    assert!(control.channels.await_media(cleanup));
+    assert!(control.media_released(&members[1]));
     let replacement = control.call_generation(0)?;
     entry.call = Call::incoming(replacement)
         .apply(CallEvent::Answer)

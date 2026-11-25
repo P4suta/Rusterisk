@@ -416,16 +416,28 @@ async fn a_replacement_webrtc_answer_survives_release_of_the_expired_attachment(
         2,
     )?;
     settle(&mut hub)?;
-    let mut admitted = Vec::new();
-    while let Ok(MediaNotice::Attached { serial, result, .. }) = notices.try_recv() {
-        if result.is_ok() {
-            admitted.push(serial);
-        }
-    }
+    assert!(matches!(
+        notices.try_recv(),
+        Ok(MediaNotice::Attached {
+            serial: 1,
+            result: Ok(()),
+            ..
+        })
+    ));
+    assert!(
+        matches!(notices.try_recv(), Ok(MediaNotice::Released { key: released }) if released == key)
+    );
+    assert!(matches!(
+        notices.try_recv(),
+        Ok(MediaNotice::Attached {
+            serial: 2,
+            result: Ok(()),
+            ..
+        })
+    ));
     let installed = hub.ports.contains_key(&key) && hub.webrtc_legs.contains_key(&key);
     assert!(hub.workers.is_empty());
     hub.close().await?;
-    assert_eq!(admitted, [1, 2]);
     assert!(installed, "the expired link cannot remove the replacement");
     Ok(())
 }

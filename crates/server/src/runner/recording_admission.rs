@@ -86,6 +86,7 @@ impl Runner {
             | Signal::DtmfFinished { .. }
             | Signal::DtmfReceived { .. }
             | Signal::Milestone { .. }
+            | Signal::MediaReleased { .. }
             | Signal::Terminated { .. } => None,
             Signal::ExternalRtpAdmitted { .. } => None,
             Signal::AudioSocketAdmitted { .. } => None,

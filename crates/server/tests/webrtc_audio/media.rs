@@ -78,7 +78,7 @@ async fn bridge_reports_connection_only_after_received_audio_and_releases_owned_
                 notice = notices.recv() => match notice.ok_or(MediaError::UnknownStream)? {
                     MediaNotice::Connected {key} => { connected.insert(key); }
                     MediaNotice::Stopped { result, .. } => { result?; return Err(MediaError::UnknownStream); }
-                    MediaNotice::Answer {..} | MediaNotice::Dtmf {..} | MediaNotice::DtmfFinished {..} | MediaNotice::Attached {..} | MediaNotice::DirectionApplied {..} => return Err(MediaError::Unsupported),
+                    MediaNotice::Released {..} | MediaNotice::Answer {..} | MediaNotice::Dtmf {..} | MediaNotice::DtmfFinished {..} | MediaNotice::Attached {..} | MediaNotice::DirectionApplied {..} => return Err(MediaError::Unsupported),
                 }
             }
         }

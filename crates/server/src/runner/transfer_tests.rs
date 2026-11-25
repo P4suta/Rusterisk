@@ -146,6 +146,11 @@ fn prepare(runner: &mut Runner, index: usize) -> Result<CallKey, ControlError> {
         }
     )));
     assert!(runner.control.channel(&source.id).is_err());
+    assert!(transferred
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Release { key } if key == &source)));
+    assert!(runner.control.media_released(&source));
     let bridge = id(&format!("bridge-{index}"))?;
     runner.control.apply(
         Action::CreateBridge {

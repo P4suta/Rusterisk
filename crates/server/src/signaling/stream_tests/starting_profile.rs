@@ -510,22 +510,16 @@ async fn an_early_attachment_that_completes_after_a_cancel_releases_its_media(
                     77,
                 )
                 .map_err(failure)?;
-            let notice = fixture
-                .signaling
-                .notices
-                .recv()
-                .await
-                .ok_or(ControlError::Capacity)?;
-            require(
-                matches!(
-                    notice,
-                    crate::media::MediaNotice::Attached {
-                        result: Ok(()),
-                        ..
-                    }
-                ),
-                "The early link outlived its refused progress",
-            )
+            loop {
+                let notice = fixture.signaling.notices.recv().await.ok_or(ControlError::Capacity)?;
+                if matches!(&notice, crate::media::MediaNotice::Released { key: released } if released == &key) {
+                    continue;
+                }
+                return require(
+                    matches!(notice, crate::media::MediaNotice::Attached { key: attached, serial: 77, result: Ok(()) } if attached == key),
+                    "The early link outlived its refused progress",
+                );
+            }
         })
         .await
         .map_err(failure)

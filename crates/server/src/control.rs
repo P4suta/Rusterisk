@@ -14,8 +14,8 @@ use std::collections::{BTreeMap, BTreeSet};
 mod attended;
 mod call_pairs;
 mod channel_slots;
-pub(crate) use channel_slots::CallHandle;
 use channel_slots::ChannelSlots;
+use rusterisk_core::{CallHandle, TeardownStep};
 mod diagnosis;
 mod dial;
 mod dialplan;
@@ -566,6 +566,9 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
+    MediaReleased {
+        key: CallKey,
+    },
     AttendedTransferRequested {
         key: CallKey,
         refer: rusterisk_sip::AttendedReferSource,
@@ -1072,6 +1075,9 @@ impl Control {
     }
 
     fn call_generation(&mut self, reserved: u64) -> Result<u64, ControlError> {
+        if self.channels.occupied() + reserved.count_ones() as usize >= self.capacity {
+            return Err(ControlError::Capacity);
+        }
         for _ in 0..64 {
             let generation = self.generation()?;
             let handle = CallHandle::new(generation);
@@ -1133,6 +1139,10 @@ impl Control {
     pub(crate) fn has_channel(&self, key: &CallKey) -> bool {
         self.channels.by_key(key).is_some()
     }
+    pub(crate) fn media_released(&mut self, key: &CallKey) -> bool {
+        self.channels.acknowledge(key)
+    }
+
     pub fn channel(&self, id: &ChannelId) -> Result<&Channel, ControlError> {
         self.channels
             .get(id)
@@ -1845,112 +1855,114 @@ impl Control {
         cause: u16,
         now: u64,
     ) -> Result<Outcome, ControlError> {
-        let branch = self.dial_branch(&self.key(id)?);
-        let mut entry = self
+        let key = self.key(id)?;
+        let branch = self.dial_branch(&key);
+        let (mut entry, mut teardown) = self
             .channels
-            .remove(id)
+            .end(id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
-        drop(entry.pending_native.take());
-        drop(entry.pending_websocket.take());
-        self.settings.release(entry.settings)?;
-        self.media_connections
-            .retain(|_, (key, _)| key.id != *id || key.generation != entry.call.generation());
         let application =
             application_name(&self.applications, entry.call.stasis())?.map(str::to_owned);
         let was_in_stasis = matches!(entry.call.stasis(), StasisMembership::Entered(_));
         let mut outcome = Outcome::empty();
-        self.end_channel_playbacks(
-            &CallKey {
-                id: id.clone(),
-                generation: entry.call.generation(),
-            },
-            application.as_deref(),
-            timestamp,
-            &mut outcome,
-        );
-        outcome.append(self.end_paired_call(
-            &CallKey {
-                id: id.clone(),
-                generation: entry.call.generation(),
-            },
-            entry.call.bridge(),
-            timestamp,
-            now,
-        )?);
-        outcome.append(self.end_transfer_participant(&CallKey {
-            id: id.clone(),
-            generation: entry.call.generation(),
-        }));
-        outcome
-            .ended_sources
-            .push(subscriptions::EndedSource::Channel {
-                key: CallKey {
-                    id: id.clone(),
-                    generation: entry.call.generation(),
-                },
-                endpoint: entry.endpoint.clone(),
-            });
-        self.finish_owner_recordings(&MediaOwner::Channel(CallKey {
-            id: id.clone(),
-            generation: entry.call.generation(),
-        }));
-        if let Some(frame) = &mut entry.dialplan {
-            if let Some(mut dial) = frame.dial.take() {
-                outcome.append(self.cancel_dial(&mut dial, timestamp)?);
+        let mut settings = Some(entry.settings);
+        for step in teardown.by_ref() {
+            match step {
+                TeardownStep::Admissions => {
+                    drop(entry.pending_native.take());
+                    drop(entry.pending_websocket.take());
+                    self.settings.release(
+                        settings
+                            .take()
+                            .ok_or(ControlError::Conflict("Call settings already released"))?,
+                    )?;
+                    self.media_connections
+                        .retain(|_, (connection, _)| connection.handle() != key.handle());
+                }
+                TeardownStep::Participants => {
+                    self.end_channel_playbacks(
+                        &key,
+                        application.as_deref(),
+                        timestamp,
+                        &mut outcome,
+                    );
+                    outcome.append(self.end_paired_call(
+                        &key,
+                        entry.call.bridge(),
+                        timestamp,
+                        now,
+                    )?);
+                    outcome.append(self.end_transfer_participant(&key));
+                    outcome
+                        .ended_sources
+                        .push(subscriptions::EndedSource::Channel {
+                            key: key.clone(),
+                            endpoint: entry.endpoint.clone(),
+                        });
+                }
+                TeardownStep::Recordings => {
+                    self.finish_owner_recordings(&MediaOwner::Channel(key.clone()));
+                }
+                TeardownStep::Dial => {
+                    if let Some(frame) = &mut entry.dialplan {
+                        if let Some(mut dial) = frame.dial.take() {
+                            outcome.append(self.cancel_dial(&mut dial, timestamp)?);
+                        }
+                    }
+                }
+                TeardownStep::Bridge => {
+                    if let Some(token) = entry.call.bridge() {
+                        for bridge in self
+                            .bridges
+                            .values_mut()
+                            .filter(|bridge| bridge.token == token)
+                        {
+                            bridge.snapshot.channels.retain(|value| value != id);
+                            outcome.optional_event(
+                                application.as_deref(),
+                                timestamp,
+                                EventKind::ChannelLeftBridge {
+                                    bridge: bridge.snapshot.clone(),
+                                    channel: entry.snapshot.clone(),
+                                },
+                            );
+                            let keys = bridge
+                                .snapshot
+                                .channels
+                                .iter()
+                                .filter_map(|id| {
+                                    self.channels.get(id).map(|member| CallKey {
+                                        id: id.clone(),
+                                        generation: member.call.generation(),
+                                    })
+                                })
+                                .collect();
+                            outcome.effects.push(Effect::Bridge {
+                                id: bridge.snapshot.id.clone(),
+                                generation: bridge.token,
+                                channels: keys,
+                            });
+                        }
+                    }
+                }
+                TeardownStep::Media => {
+                    entry.call = entry.call.apply(CallEvent::Hangup).call();
+                    outcome.history.push(CallHistoryEvent::Finished {
+                        key: key.clone(),
+                        timestamp: timestamp.into(),
+                    });
+                    let released = entry.media_tasks.cancel();
+                    tracing::debug!(channel = %id, generation = entry.call.generation(), tasks = released.iter().flatten().count(), "channel media tasks released");
+                    if let Some(outbox) = &mut entry.dtmf {
+                        outbox.cancel();
+                    }
+                    outcome.effects.push(Effect::Release { key: key.clone() });
+                }
             }
         }
-        if let Some(token) = entry.call.bridge() {
-            for bridge in self
-                .bridges
-                .values_mut()
-                .filter(|bridge| bridge.token == token)
-            {
-                bridge.snapshot.channels.retain(|value| value != id);
-                outcome.optional_event(
-                    application.as_deref(),
-                    timestamp,
-                    EventKind::ChannelLeftBridge {
-                        bridge: bridge.snapshot.clone(),
-                        channel: entry.snapshot.clone(),
-                    },
-                );
-                let keys = bridge
-                    .snapshot
-                    .channels
-                    .iter()
-                    .filter_map(|id| {
-                        self.channels.get(id).map(|entry| CallKey {
-                            id: id.clone(),
-                            generation: entry.call.generation(),
-                        })
-                    })
-                    .collect();
-                outcome.effects.push(Effect::Bridge {
-                    id: bridge.snapshot.id.clone(),
-                    generation: bridge.token,
-                    channels: keys,
-                });
-            }
+        if !self.channels.await_media(teardown) {
+            return Err(ControlError::Conflict("Call teardown is incomplete"));
         }
-        entry.call = entry.call.apply(CallEvent::Hangup).call();
-        outcome.history.push(CallHistoryEvent::Finished {
-            key: CallKey {
-                id: id.clone(),
-                generation: entry.call.generation(),
-            },
-            timestamp: timestamp.into(),
-        });
-        let released = entry.media_tasks.cancel();
-        tracing::debug!(channel = %id, generation = entry.call.generation(), tasks = released.iter().flatten().count(), "channel media tasks released");
-        if let Some(outbox) = &mut entry.dtmf {
-            outbox.cancel();
-        }
-        outcome.effects.push(Effect::Release {
-            key: CallKey {
-                id: id.clone(),
-                generation: entry.call.generation(),
-            },
-        });
         if was_in_stasis {
             outcome.optional_event(
                 application.as_deref(),
@@ -2059,6 +2071,12 @@ impl Control {
         now: u64,
     ) -> Result<Outcome, ControlError> {
         match signal {
+            Signal::MediaReleased { key } => {
+                if !self.media_released(&key) {
+                    tracing::trace!(generation = key.generation, "late media release");
+                }
+                Ok(Outcome::empty())
+            }
             Signal::AttendedTransferRequested {
                 key,
                 refer,

@@ -1645,6 +1645,7 @@ impl Signaling {
                         else if let Some(pending) = self.records.get_mut(calls::WEBSOCKET, &key) { pending.received = true; }
                         else { self.notify(Signal::Milestone { key, milestone: Milestone::MediaConnected }).await?; }
                     },
+                    Some(MediaNotice::Released { key }) => self.notify(Signal::MediaReleased { key }).await?,
                     Some(MediaNotice::Stopped { key, result }) => {
                         if let Some(pending) = self.records.remove(calls::WEBSOCKET, &key) {
                             pending.cancel.send_replace(true);

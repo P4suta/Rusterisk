@@ -5,7 +5,6 @@ use crate::CallKey;
 use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone, MediaTaskToken, PeerMediaDirection};
 use rusterisk_media::{AudioTarget, Frame, Gate, MediaError, Mixer, TelephoneFormat, MAX_PACKET};
 use std::collections::BTreeMap;
-use std::future::Future;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
@@ -23,6 +22,8 @@ mod orders;
 mod probe;
 #[cfg(test)]
 mod queued;
+#[cfg(test)]
+mod release_tests;
 pub(crate) use probe::Progress as ProbeProgress;
 #[cfg(test)]
 pub(crate) use queued::Queued;
@@ -37,6 +38,9 @@ use recording::Recordings;
 pub use recording::{RecordingEnd, RecordingPrompt, RecordingTarget};
 
 pub enum MediaNotice {
+    Released {
+        key: CallKey,
+    },
     Answer {
         key: CallKey,
     },
@@ -682,7 +686,6 @@ enum Io {
 }
 
 struct Port {
-    worker: Option<tokio::task::Id>,
     connection_lease: Option<crate::MediaConnectionLease>,
     answers: Option<mpsc::Receiver<()>>,
     io: Io,
@@ -795,6 +798,12 @@ impl FrameClock {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StreamRelease {
+    Running,
+    Requested,
+}
+
 pub struct MediaHub {
     capacity: usize,
     commands: mpsc::Receiver<Command>,
@@ -813,6 +822,8 @@ pub struct MediaHub {
     tones: Vec<DtmfTone>,
     failed: Vec<(CallKey, MediaError)>,
     workers: JoinSet<(CallKey, Result<LinkStats, MediaError>)>,
+    stream_releases: BTreeMap<rusterisk_core::CallHandle, StreamRelease>,
+    release_notices: BTreeMap<u8, CallKey>,
     dropped: u64,
     recordings: Recordings,
     playbacks: Playbacks,
@@ -867,6 +878,8 @@ impl MediaHub {
                 tones: Vec::with_capacity(16),
                 failed: Vec::with_capacity(4),
                 workers: JoinSet::new(),
+                stream_releases: BTreeMap::new(),
+                release_notices: BTreeMap::new(),
                 dropped: 0,
                 recordings: Recordings::new(),
                 playbacks: Playbacks::new(),
@@ -878,6 +891,33 @@ impl MediaHub {
 
     fn notice(&self, notice: MediaNotice) -> Result<(), MediaError> {
         self.notices.try_send(notice)
+    }
+
+    fn release_notice(&mut self, key: CallKey) -> Result<(), MediaError> {
+        match self.notices.try_reserve() {
+            Ok(permit) => permit.send(MediaNotice::Released { key }),
+            Err(mpsc::error::TrySendError::Full(())) => {
+                let slot = key.handle().slot();
+                if self
+                    .release_notices
+                    .get(&slot)
+                    .is_none_or(|pending| pending.generation < key.generation)
+                {
+                    self.release_notices.insert(slot, key);
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(())) => return Err(MediaError::UnknownStream),
+        }
+        Ok(())
+    }
+
+    fn release_call(&mut self, key: CallKey) -> Result<(), MediaError> {
+        self.remove(&key)?;
+        if let Some(stream) = self.stream_releases.get_mut(&key.handle()) {
+            *stream = StreamRelease::Requested;
+            return Ok(());
+        }
+        self.release_notice(key)
     }
 
     fn remove(&mut self, key: &CallKey) -> Result<(), MediaError> {
@@ -963,17 +1003,6 @@ impl MediaHub {
             session.format.rate(),
         )?;
         self.legs.insert(key, leg);
-        Ok(())
-    }
-
-    fn spawn_link(
-        &mut self,
-        key: CallKey,
-        link: impl Future<Output = Result<LinkStats, MediaError>> + Send + 'static,
-    ) -> Result<(), MediaError> {
-        let port = self.ports.get_mut(&key).ok_or(MediaError::UnknownStream)?;
-        let task = self.workers.spawn(async move { (key, link.await) });
-        port.worker = Some(task.id());
         Ok(())
     }
 
@@ -1228,7 +1257,7 @@ impl MediaHub {
                     self.complete(&key, result, reply)?;
                 }
             }
-            Command::Release { key } => self.remove(&key)?,
+            Command::Release { key } => self.release_call(key)?,
             Command::AttachAudioSocket {
                 key,
                 socket,
@@ -1534,9 +1563,18 @@ impl MediaHub {
                 Some(attachment) => self.websocket_attachment(attachment)?,
                 None => return Ok(Turn::Stop),
             },
-            result = self.workers.join_next_with_id(), if !self.workers.is_empty() => {
-                let (id, (key, result)) = result.ok_or(MediaError::InvalidRoute)?.map_err(|error| MediaError::Transport(error.to_string()))?;
-                if self.ports.get(&key).is_some_and(|port| port.worker == Some(id)) {
+            permit = self.notices.clone().reserve_owned(), if !self.release_notices.is_empty() => {
+                let permit = permit.map_err(|_| MediaError::UnknownStream)?;
+                if let Some((_, key)) = self.release_notices.pop_first() {
+                    permit.send(MediaNotice::Released { key });
+                }
+            }
+            result = self.workers.join_next(), if !self.workers.is_empty() => {
+                let (key, result) = result.ok_or(MediaError::InvalidRoute)?.map_err(|error| MediaError::Transport(error.to_string()))?;
+                let release = self.stream_releases.remove(&key.handle());
+                if release == Some(StreamRelease::Requested) {
+                    self.release_notice(key)?;
+                } else if self.ports.contains_key(&key) {
                     self.remove(&key)?;
                     self.notice(MediaNotice::Stopped { key, result })?;
                 }

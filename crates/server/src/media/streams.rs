@@ -60,7 +60,6 @@ impl Port {
         digit_support: DigitSupport,
     ) -> Self {
         Self {
-            worker: None,
             connection_lease: None,
             answers: None,
             io: Io::Owned,
@@ -103,7 +102,7 @@ impl MediaHub {
         if self.ports.len() >= self.capacity || self.workers.len() >= self.capacity {
             return Err(MediaError::Capacity);
         }
-        if self.ports.contains_key(key) {
+        if self.ports.contains_key(key) || self.stream_releases.contains_key(&key.handle()) {
             return Err(MediaError::InvalidRoute);
         }
         Ok(())
@@ -133,7 +132,10 @@ impl MediaHub {
         let (port, channels) = Port::new(PeerMediaDirection::SendReceive, DigitSupport::Stream);
         let link = AudioSocketLink::new(socket, channels, rate)?;
         self.install_link(key.clone(), port, Gate::Open, rate)?;
-        self.spawn_link(key, link.run())
+        self.stream_releases
+            .insert(key.handle(), super::StreamRelease::Running);
+        self.workers.spawn(async move { (key, link.run().await) });
+        Ok(())
     }
 
     pub(super) fn attach_websocket<S: MediaSocket + 'static>(
@@ -160,7 +162,10 @@ impl MediaHub {
         let rate = options.format.rate();
         let link = WebSocketMediaLink::new(socket, channels, options, answer)?;
         self.install_link(key.clone(), port, Gate::Open, rate)?;
-        self.spawn_link(key, link.run())
+        self.stream_releases
+            .insert(key.handle(), super::StreamRelease::Running);
+        self.workers.spawn(async move { (key, link.run().await) });
+        Ok(())
     }
 }
 

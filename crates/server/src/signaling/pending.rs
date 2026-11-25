@@ -320,6 +320,7 @@ impl Signaling {
                     self.completed(key, Outcome::Direction(serial, result), now)
                         .await?;
                 }
+                MediaNotice::Released { key } => self.notify(Signal::MediaReleased { key }).await?,
                 MediaNotice::Answer { .. }
                 | MediaNotice::DtmfFinished { .. }
                 | MediaNotice::Dtmf { .. }

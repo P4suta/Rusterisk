@@ -18,6 +18,10 @@ name = "attended_transfer"
 path = "../tests/attended_transfer.rs"
 
 [[test]]
+name = "call_table"
+path = "../tests/call_table.rs"
+
+[[test]]
 name = "connection_claim"
 path = "../tests/connection_claim.rs"
 
