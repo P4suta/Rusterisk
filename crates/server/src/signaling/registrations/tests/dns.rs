@@ -13,7 +13,8 @@ use hickory_resolver::{
 };
 use rsipstack::sip::{HeadersExt, Method, SipMessage};
 use rusterisk_config::{Protocol, RegistrarUri};
-use std::{net::Ipv4Addr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::Ipv4Addr;
 use tokio::{net::UdpSocket, task::JoinHandle};
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -21,7 +22,7 @@ fn failure(error: impl std::fmt::Display) -> ControlError {
 }
 
 async fn finish(mut task: JoinHandle<Result<(), ControlError>>) -> Result<(), ControlError> {
-    match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+    match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?,
         Err(timeout) => {
             task.abort();
@@ -55,7 +56,8 @@ pub(super) async fn receive(
     socket: &UdpSocket,
 ) -> Result<(Vec<u8>, std::net::SocketAddr), ControlError> {
     let mut bytes = [0; 16_385];
-    let (size, peer) = tokio::time::timeout(Duration::from_secs(3), socket.recv_from(&mut bytes))
+    let (size, peer) = Wait::Ready
+        .bounded(socket.recv_from(&mut bytes))
         .await
         .map_err(failure)?
         .map_err(failure)?;

@@ -10,7 +10,7 @@ use crate::{
 };
 use rusterisk_config::{Config, Protocol};
 use rusterisk_sip::{Datagram, StaticTarget};
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -56,16 +56,16 @@ impl Fixture {
         }
         let address = self.signaling.network.local_addr(0)?;
         for _ in 0..count {
-            let mut peer =
-                tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(address))
-                    .await
-                    .map_err(failure)?
-                    .map_err(failure)?;
+            let mut peer = Wait::Ready
+                .bounded(TcpStream::connect(address))
+                .await
+                .map_err(failure)?
+                .map_err(failure)?;
             peer.write_all(OPTIONS).await.map_err(failure)?;
-            let Input::Packet(packet) =
-                tokio::time::timeout(Duration::from_secs(3), self.signaling.network.next())
-                    .await
-                    .map_err(failure)??
+            let Input::Packet(packet) = Wait::Ready
+                .bounded(self.signaling.network.next())
+                .await
+                .map_err(failure)??
             else {
                 return Err(ControlError::Invalid("Expected an admitted stream frame"));
             };
@@ -185,17 +185,17 @@ async fn initial_setups_reuse_current_streams_at_full_connection_capacity(
             ));
         }
         let mut bytes = [0; OPTIONS.len()];
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            fixture
-                .peers
-                .first_mut()
-                .ok_or(ControlError::Capacity)?
-                .read_exact(&mut bytes),
-        )
-        .await
-        .map_err(failure)?
-        .map_err(failure)?;
+        Wait::Ready
+            .bounded(
+                fixture
+                    .peers
+                    .first_mut()
+                    .ok_or(ControlError::Capacity)?
+                    .read_exact(&mut bytes),
+            )
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
         if bytes.as_slice() != OPTIONS {
             return Err(ControlError::Invalid(
                 "Reused connection changed its packet",
@@ -260,17 +260,17 @@ async fn cancelled_setups_cannot_reuse_or_close_shared_streams() -> Result<(), C
                 ));
             }
             let mut bytes = [0; OPTIONS.len()];
-            tokio::time::timeout(
-                Duration::from_secs(1),
-                fixture
-                    .peers
-                    .first_mut()
-                    .ok_or(ControlError::Capacity)?
-                    .read_exact(&mut bytes),
-            )
-            .await
-            .map_err(failure)?
-            .map_err(failure)?;
+            Wait::Ready
+                .bounded(
+                    fixture
+                        .peers
+                        .first_mut()
+                        .ok_or(ControlError::Capacity)?
+                        .read_exact(&mut bytes),
+                )
+                .await
+                .map_err(failure)?
+                .map_err(failure)?;
             if bytes.as_slice() != OPTIONS {
                 return Err(ControlError::Invalid(
                     "Shared connection changed after setup cancellation",

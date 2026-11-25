@@ -7,7 +7,8 @@ use crate::{
 use rsipstack::sip::HeadersExt;
 use rusterisk_config::{Config, RegistrationAddress};
 use rusterisk_sip::SipStreamDecoder;
-use std::{net::SocketAddr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::SocketAddr;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
@@ -43,7 +44,7 @@ async fn next<S: AsyncRead + Unpin>(
     decoder: &mut SipStreamDecoder,
     registrar: &TcpListener,
 ) -> Result<Packet, ControlError> {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    Wait::Ready.bounded(async {
         tokio::select! {
             biased;
             extra = registrar.accept() => {
@@ -72,8 +73,8 @@ pub(super) async fn requests<S: AsyncRead + AsyncWrite + Unpin>(
     }
     let mut byte = [0; 1];
     let (connection, packet) = tokio::join!(
-        tokio::time::timeout(Duration::from_millis(50), registrar.accept()),
-        tokio::time::timeout(Duration::from_millis(50), peer.read(&mut byte)),
+        Wait::Quiet.bounded(registrar.accept()),
+        Wait::Quiet.bounded(peer.read(&mut byte)),
     );
     match connection {
         Ok(Ok(_)) => {
@@ -138,7 +139,7 @@ pub(super) async fn requests<S: AsyncRead + AsyncWrite + Unpin>(
     )
     .await
     .map_err(failure)?;
-    match tokio::time::timeout(Duration::from_millis(100), registrar.accept()).await {
+    match Wait::Quiet.bounded(registrar.accept()).await {
         Ok(Ok(_)) => {
             return Err(ControlError::Invalid(
                 "Registration opened an unnecessary connection",
@@ -151,7 +152,7 @@ pub(super) async fn requests<S: AsyncRead + AsyncWrite + Unpin>(
 }
 
 async fn finish(mut task: JoinHandle<Result<(), ControlError>>) -> Result<(), ControlError> {
-    match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+    match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?,
         Err(timeout) => {
             task.abort();
@@ -179,22 +180,23 @@ async fn ready_registrations_keep_the_same_registrar_setup_barrier() -> Result<(
     let mut signaling = Signaling::bind(config, controller, runner, media, notices).await?;
     let primary: Result<(), ControlError> = async {
         signaling.registration_tick(1000).await?;
-        let completed =
-            tokio::time::timeout(Duration::from_secs(3), signaling.registrations.completed())
-                .await
-                .map_err(failure)??
-                .ok_or(ControlError::Capacity)?;
+        let completed = Wait::Ready
+            .bounded(signaling.registrations.completed())
+            .await
+            .map_err(failure)??
+            .ok_or(ControlError::Capacity)?;
         signaling.registration_completed(completed, 1000)?;
-        let crate::signaling::transport::Input::Prepared(prepared) =
-            tokio::time::timeout(Duration::from_secs(3), signaling.network.next())
-                .await
-                .map_err(failure)??
+        let crate::signaling::transport::Input::Prepared(prepared) = Wait::Ready
+            .bounded(signaling.network.next())
+            .await
+            .map_err(failure)??
         else {
             return Err(ControlError::Invalid(
                 "Expected initial registration preparation",
             ));
         };
-        let (mut peer, _address) = tokio::time::timeout(Duration::from_secs(3), registrar.accept())
+        let (mut peer, _address) = Wait::Ready
+            .bounded(registrar.accept())
             .await
             .map_err(failure)?
             .map_err(failure)?;
@@ -245,7 +247,8 @@ async fn initial_tcp_registrations_reuse_an_established_flow_before_connecting(
         .1;
     let task = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let primary: Result<(), ControlError> = async {
-        let (mut peer, _address) = tokio::time::timeout(Duration::from_secs(3), registrar.accept())
+        let (mut peer, _address) = Wait::Ready
+            .bounded(registrar.accept())
             .await
             .map_err(failure)?
             .map_err(failure)?;

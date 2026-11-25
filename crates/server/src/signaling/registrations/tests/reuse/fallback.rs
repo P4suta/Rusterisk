@@ -18,7 +18,8 @@ use hickory_resolver::proto::{
 };
 use rusterisk_config::{Protocol, RegistrarUri};
 use rusterisk_sip::StaticTarget;
-use std::{net::Ipv4Addr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::Ipv4Addr;
 use tokio::time::Instant;
 use tokio::{
     net::{TcpListener, TcpSocket, UdpSocket},
@@ -35,14 +36,15 @@ async fn answer(
     backup: u16,
     mut stopped: watch::Receiver<bool>,
 ) -> Result<(), ControlError> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+    let lifetime = Wait::Shutdown.bounded(std::future::pending::<()>());
+    tokio::pin!(lifetime);
     let mut bytes = [0; 1233];
     for _ in 0..16 {
         let (size, peer) = tokio::select! {
             biased;
             _changed = stopped.changed() => return Ok(()),
             packet = socket.recv_from(&mut bytes) => packet.map_err(failure)?,
-            () = tokio::time::sleep_until(deadline) => return Err(ControlError::Invalid("Fallback DNS fixture exceeded its lifetime")),
+            _expired = &mut lifetime => return Err(ControlError::Invalid("Fallback DNS fixture exceeded its lifetime")),
         };
         if size > 1232 {
             return Err(ControlError::Capacity);
@@ -211,11 +213,11 @@ async fn registration(protocol: Protocol) -> Result<(), ControlError> {
         .insert(resolved, Instant::now())?;
     let task = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let primary = async {
-        let (mut socket, _address) =
-            tokio::time::timeout(Duration::from_secs(5), registrar.accept())
-                .await
-                .map_err(|error| ControlError::Adapter(format!("Fallback backup accept: {error}")))?
-                .map_err(failure)?;
+        let (mut socket, _address) = Wait::Ready
+            .bounded(registrar.accept())
+            .await
+            .map_err(|error| ControlError::Adapter(format!("Fallback backup accept: {error}")))?
+            .map_err(failure)?;
         let exchanged = match &context {
             Some(context) => {
                 let mut peer = context.accept(socket).await?;

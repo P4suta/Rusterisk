@@ -14,7 +14,8 @@ use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Request, SipMe
 use rusterisk_config::{Config, MAX_REGISTRATIONS};
 use rusterisk_core::{SettingsError, SettingsLifetimes};
 use rusterisk_sip::{Datagram, RegistrationRetirement, StaticTarget};
-use std::{net::SocketAddr, num::NonZeroU64, time::Duration};
+use rusterisk_test_support::Wait;
+use std::{net::SocketAddr, num::NonZeroU64};
 use tokio::{net::UdpSocket, sync::oneshot};
 
 mod quiesce;
@@ -572,7 +573,7 @@ async fn sixteen_retirements_refuse_replacement_without_touching_current_jobs_or
         require(fixture.signaling.registrations.identity == identity && fixture.signaling.registrations.cursor == cursor && fixture.signaling.registrations.setup_count() == 1, "Capacity refusal changed current request or job ownership")?;
         require(fixture.signaling.registrations.retiring.len() == SLOTS && matches!(fixture.signaling.registrations.clients[0].state, State::Trying { .. }) && matches!(fixture.signaling.registrations.clients[1].state, State::Resolving { setup: active } if active == setup), "Capacity refusal changed current or retired clients")?;
         resume.send(()).map_err(|()| ControlError::Invalid("Current resolution stopped before its release"))?;
-        let completed = tokio::time::timeout(Duration::from_secs(2), fixture.signaling.registrations.completed()).await.map_err(failure)??.ok_or(ControlError::Invalid("Missing current resolution completion"))?;
+        let completed = Wait::Ready.bounded(fixture.signaling.registrations.completed()).await.map_err(failure)??.ok_or(ControlError::Invalid("Missing current resolution completion"))?;
         fixture.signaling.network.finish_resolution(completed.setup);
         require(completed.result.is_ok() && fixture.signaling.registrations.lifetime.is_current(completed.key, &completed.lease), "Rejected replacement cancelled or invalidated current work")?;
         let repeated = fixture.transmit(0, 3000)?;

@@ -8,8 +8,9 @@ use crate::{
 use rsipstack::sip::{HeadersExt, Method};
 use rusterisk_config::{Config, Protocol, RegistrarUri, TlsFiles};
 use rusterisk_sip::SipStreamDecoder;
+use rusterisk_test_support::Wait;
 use sha2::{Digest, Sha256};
-use std::{net::SocketAddr, path::PathBuf, time::Duration};
+use std::{net::SocketAddr, path::PathBuf};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -120,7 +121,7 @@ async fn finish(
     primary: Result<(), ControlError>,
 ) -> Result<(), ControlError> {
     controller.shutdown();
-    let cleanup = match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+    let cleanup = match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure).and_then(|result| result),
         Err(timeout) => {
             task.abort();
@@ -156,7 +157,7 @@ async fn verified_tls_registration_authenticates_and_refreshes_on_one_owned_flow
         .1;
     let task = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let primary: Result<(), ControlError> = async {
-        let (socket, _address) = tokio::time::timeout(Duration::from_secs(3), registrar.accept())
+        let (socket, _address) = Wait::Ready.bounded(registrar.accept())
             .await.map_err(failure)?.map_err(failure)?;
         let mut peer = context.accept(socket).await?;
         let mut decoder = SipStreamDecoder::new();
@@ -171,7 +172,7 @@ async fn verified_tls_registration_authenticates_and_refreshes_on_one_owned_flow
         }
         let challenge = reply(&initial.request, 401, "WWW-Authenticate: Digest realm=\"rusterisk\", nonce=\"tls-nonce\", algorithm=SHA-256, qop=\"auth-int\", opaque=\"tls-opaque\"\r\n")?;
         peer.write_all(&challenge.as_bytes()[..17]).await.map_err(failure)?;
-        if tokio::time::timeout(Duration::from_millis(50), peer.read(&mut [0; 1])).await.is_ok() {
+        if Wait::Quiet.bounded(peer.read(&mut [0; 1])).await.is_ok() {
             return Err(ControlError::Invalid("TLS registration processed an incomplete challenge"));
         }
         peer.write_all(&challenge.as_bytes()[17..]).await.map_err(failure)?;
@@ -195,7 +196,7 @@ async fn verified_tls_registration_authenticates_and_refreshes_on_one_owned_flow
         {
             return Err(ControlError::Invalid("TLS refresh changed its authorized flow"));
         }
-        if tokio::time::timeout(Duration::from_millis(100), registrar.accept()).await.is_ok() {
+        if Wait::Quiet.bounded(registrar.accept()).await.is_ok() {
             return Err(ControlError::Invalid("TLS registration opened another connection"));
         }
         Ok(())
@@ -225,15 +226,16 @@ async fn untrusted_or_name_mismatched_tls_registrars_receive_no_registration_byt
             .1;
         let task = tokio::spawn(signaling.run(controller.shutdown_signal()));
         let primary: Result<(), ControlError> = async {
-            let (socket, _address) =
-                tokio::time::timeout(Duration::from_secs(3), registrar.accept())
-                    .await
-                    .map_err(failure)?
-                    .map_err(failure)?;
+            let (socket, _address) = Wait::Ready
+                .bounded(registrar.accept())
+                .await
+                .map_err(failure)?
+                .map_err(failure)?;
             match context.accept(socket).await {
                 Err(_) => Ok(()),
                 Ok(mut peer) => {
-                    let read = tokio::time::timeout(Duration::from_secs(1), peer.read(&mut [0; 1]))
+                    let read = Wait::Ready
+                        .bounded(peer.read(&mut [0; 1]))
                         .await
                         .map_err(failure)?;
                     if matches!(read, Ok(0) | Err(_)) {

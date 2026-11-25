@@ -15,7 +15,8 @@ use crate::{
 use rsipstack::sip::{HeadersExt, Request};
 use rusterisk_config::Protocol;
 use rusterisk_sip::SipStreamDecoder;
-use std::{future::Future, net::SocketAddr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::{future::Future, net::SocketAddr};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
@@ -171,17 +172,16 @@ async fn prepare<S>(
     now: u64,
 ) -> Result<S, ControlError> {
     signaling.registration_tick(now).await?;
-    let completed =
-        tokio::time::timeout(Duration::from_secs(3), signaling.registrations.completed())
-            .await
-            .map_err(failure)??
-            .ok_or(ControlError::Capacity)?;
+    let completed = Wait::Ready
+        .bounded(signaling.registrations.completed())
+        .await
+        .map_err(failure)??
+        .ok_or(ControlError::Capacity)?;
     signaling.registration_completed(completed, now)?;
-    let (event, peer) = tokio::time::timeout(Duration::from_secs(3), async {
-        tokio::join!(signaling.network.next(), accept)
-    })
-    .await
-    .map_err(failure)?;
+    let (event, peer) = Wait::Ready
+        .bounded(async { tokio::join!(signaling.network.next(), accept) })
+        .await
+        .map_err(failure)?;
     let Input::Prepared(prepared) = event? else {
         return Err(ControlError::Invalid(
             "Expected delayed registration preparation",
@@ -203,10 +203,10 @@ async fn response<S: AsyncWrite + Unpin>(
     peer.write_all(stream::reply(request, status, extra)?.as_bytes())
         .await
         .map_err(failure)?;
-    let Input::Packet(packet) =
-        tokio::time::timeout(Duration::from_secs(3), signaling.network.next())
-            .await
-            .map_err(failure)??
+    let Input::Packet(packet) = Wait::Ready
+        .bounded(signaling.network.next())
+        .await
+        .map_err(failure)??
     else {
         return Err(ControlError::Invalid(
             "Expected delayed registration response",
@@ -242,7 +242,7 @@ async fn silent<S: AsyncRead + Unpin>(
 ) -> Result<(), ControlError> {
     signaling.registration_tick(now).await?;
     let mut byte = [0; 1];
-    tokio::select! {
+    let observed = Wait::Quiet.bounded(async { tokio::select! {
         biased;
         result = peer.read(&mut byte) => match result {
             Ok(0) => Err(ControlError::Invalid("Registration retry closed a shared flow")),
@@ -253,8 +253,8 @@ async fn silent<S: AsyncRead + Unpin>(
             Ok(_) => Err(ControlError::Invalid("Registration retry opened an additional flow")),
             Err(error) => Err(failure(error)),
         },
-        () = tokio::time::sleep(Duration::from_millis(30)) => Ok(()),
-    }
+    }}).await;
+    observed.unwrap_or(Ok(()))
 }
 
 async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
@@ -315,10 +315,10 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
         }
         Scenario::Disconnect => {
             peer.shutdown().await.map_err(failure)?;
-            let Input::Closed { key, result } =
-                tokio::time::timeout(Duration::from_secs(3), signaling.network.next())
-                    .await
-                    .map_err(failure)??
+            let Input::Closed { key, result } = Wait::Ready
+                .bounded(signaling.network.next())
+                .await
+                .map_err(failure)??
             else {
                 return Err(ControlError::Invalid(
                     "Expected closed delayed registration flow",
@@ -335,7 +335,7 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
                     "Closed flow changed the owned retry deadline",
                 ));
             }
-            match tokio::time::timeout(Duration::from_millis(30), registrar.accept()).await {
+            match Wait::Quiet.bounded(registrar.accept()).await {
                 Err(_) => Ok(Some((key, initial.request))),
                 Ok(Err(error)) => Err(failure(error)),
                 Ok(Ok(_)) => Err(ControlError::Invalid(

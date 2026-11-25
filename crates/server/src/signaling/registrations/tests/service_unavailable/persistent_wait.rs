@@ -4,7 +4,8 @@ use super::{
 };
 use crate::signaling::resolver::ResolutionCache;
 use rusterisk_config::Protocol;
-use std::{net::SocketAddr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 
 async fn resolved(
@@ -15,7 +16,7 @@ async fn resolved(
     now: u64,
 ) -> Result<(), ControlError> {
     let (completion, answered) = tokio::join!(
-        tokio::time::timeout(Duration::from_secs(1), signaling.registrations.completed()),
+        Wait::Ready.bounded(signaling.registrations.completed()),
         candidates(dns, primary, backup),
     );
     let completion = completion

@@ -6,6 +6,7 @@ use crate::{
 };
 use rsipstack::sip::HeadersExt;
 use rusterisk_sip::SipStreamDecoder;
+use rusterisk_test_support::Wait;
 use std::time::Duration;
 use tokio::{io::AsyncWriteExt, net::TcpListener};
 
@@ -28,20 +29,20 @@ async fn initiated_registration_waits_for_a_response_beyond_the_accepted_first_m
     let primary: Result<(), ControlError> = async {
         signaling.registration_tick(1000).await?;
         let completed =
-            tokio::time::timeout(Duration::from_secs(3), signaling.registrations.completed())
+            Wait::Ready.bounded(signaling.registrations.completed())
                 .await
                 .map_err(failure)??
                 .ok_or(ControlError::Capacity)?;
         signaling.registration_completed(completed, 1000)?;
         let Input::Prepared(prepared) =
-            tokio::time::timeout(Duration::from_secs(3), signaling.network.next())
+            Wait::Ready.bounded(signaling.network.next())
                 .await
                 .map_err(failure)??
         else {
             return Err(ControlError::Invalid("Expected registration preparation"));
         };
         let (mut peer, _address) =
-            tokio::time::timeout(Duration::from_secs(3), registrar.accept())
+            Wait::Ready.bounded(registrar.accept())
                 .await
                 .map_err(failure)?
                 .map_err(failure)?;
@@ -49,6 +50,7 @@ async fn initiated_registration_waits_for_a_response_beyond_the_accepted_first_m
         signaling.registration_tick(1000).await?;
         let mut decoder = SipStreamDecoder::new();
         let initial = receive(&mut peer, &mut decoder).await?;
+        tokio::time::pause();
         tokio::select! {
             event = signaling.network.next() => {
                 return match event? {
@@ -58,6 +60,7 @@ async fn initiated_registration_waits_for_a_response_beyond_the_accepted_first_m
             }
             () = tokio::time::sleep(Duration::from_secs(6)) => {}
         }
+        tokio::time::resume();
         if !matches!(signaling.registrations.clients[0].state, State::Trying { .. }) {
             return Err(ControlError::Invalid("Registration left its transaction wait"));
         }
@@ -69,7 +72,7 @@ async fn initiated_registration_waits_for_a_response_beyond_the_accepted_first_m
         )?;
         peer.write_all(grant.as_bytes()).await.map_err(failure)?;
         let Input::Packet(packet) =
-            tokio::time::timeout(Duration::from_secs(3), signaling.network.next())
+            Wait::Ready.bounded(signaling.network.next())
                 .await
                 .map_err(failure)??
         else {

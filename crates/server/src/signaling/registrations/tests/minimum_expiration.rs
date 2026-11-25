@@ -6,8 +6,9 @@ use crate::{
 };
 use rsipstack::sip::{HeadersExt, Request, SipMessage};
 use rusterisk_config::{Protocol, RegistrarUri};
+use rusterisk_test_support::Wait;
 use sha2::{Digest, Sha256};
-use std::{net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 mod stream;
 
@@ -56,13 +57,11 @@ impl Driver {
     async fn request(&mut self, now: u64) -> Result<Request, ControlError> {
         self.signaling.registration_tick(now).await?;
         let mut bytes = [0; 16_385];
-        let (size, peer) = tokio::time::timeout(
-            Duration::from_millis(250),
-            self.registrar.recv_from(&mut bytes),
-        )
-        .await
-        .map_err(failure)?
-        .map_err(failure)?;
+        let (size, peer) = Wait::Ready
+            .bounded(self.registrar.recv_from(&mut bytes))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
         let wire = std::str::from_utf8(&bytes[..size]).map_err(failure)?;
         if peer != self.local || !wire.starts_with(&format!("REGISTER {} SIP/2.0\r\n", self.uri)) {
             return Err(ControlError::Invalid(
@@ -92,10 +91,10 @@ impl Driver {
         if size != bytes.len() {
             return Err(ControlError::Invalid("Registrar response was truncated"));
         }
-        let Input::Packet(packet) =
-            tokio::time::timeout(Duration::from_millis(250), self.signaling.network.next())
-                .await
-                .map_err(failure)??
+        let Input::Packet(packet) = Wait::Ready
+            .bounded(self.signaling.network.next())
+            .await
+            .map_err(failure)??
         else {
             return Err(ControlError::Invalid(
                 "Expected registration response packet",
@@ -111,11 +110,9 @@ impl Driver {
 
     async fn silent(&mut self, now: u64) -> Result<(), ControlError> {
         self.signaling.registration_tick(now).await?;
-        match tokio::time::timeout(
-            Duration::from_millis(30),
-            self.registrar.recv_from(&mut [0; 16_385]),
-        )
-        .await
+        match Wait::Quiet
+            .bounded(self.registrar.recv_from(&mut [0; 16_385]))
+            .await
         {
             Err(_) => Ok(()),
             Ok(Err(error)) => Err(failure(error)),

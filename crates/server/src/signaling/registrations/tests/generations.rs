@@ -15,7 +15,8 @@ use hickory_resolver::proto::{
 };
 use rusterisk_api::ChannelId;
 use rusterisk_config::Config;
-use std::{net::Ipv4Addr, num::NonZeroU64, time::Duration};
+use rusterisk_test_support::Wait;
+use std::{net::Ipv4Addr, num::NonZeroU64};
 use tokio::net::UdpSocket;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -71,18 +72,19 @@ async fn configuration_cancelled_before_the_resolution_job_is_polled_never_queri
             signaling.registrations.clients[0].state = State::Waiting { at: now };
             signaling.registration_tick(now).await?;
             signaling.registrations.lifetime.cancel();
-            let completed =
-                tokio::time::timeout(Duration::from_secs(3), signaling.registrations.completed())
-                    .await
-                    .map_err(failure)??
-                    .ok_or(ControlError::Capacity)?;
+            let completed = Wait::Ready
+                .bounded(signaling.registrations.completed())
+                .await
+                .map_err(failure)??
+                .ok_or(ControlError::Capacity)?;
             if completed.result.is_ok() {
                 return Err(ControlError::Invalid(
                     "Cancelled configuration resolved a destination",
                 ));
             }
             signaling.registration_completed(completed, now)?;
-            if tokio::time::timeout(Duration::from_millis(50), dns.recv_from(&mut [0; 2048]))
+            if Wait::Quiet
+                .bounded(dns.recv_from(&mut [0; 2048]))
                 .await
                 .is_ok()
             {
@@ -108,11 +110,11 @@ async fn released_or_previous_configuration_keys_cannot_cache_or_transmit_comple
             let target = signaling.registrations.clients[0].target.clone();
             signaling.registration_tick(1000).await?;
             reply(&dns).await?;
-            let mut completed =
-                tokio::time::timeout(Duration::from_secs(3), signaling.registrations.completed())
-                    .await
-                    .map_err(failure)??
-                    .ok_or(ControlError::Capacity)?;
+            let mut completed = Wait::Ready
+                .bounded(signaling.registrations.completed())
+                .await
+                .map_err(failure)??
+                .ok_or(ControlError::Capacity)?;
             if completed.result.is_err() {
                 return Err(ControlError::Invalid("Expected successful DNS completion"));
             }
@@ -138,12 +140,10 @@ async fn released_or_previous_configuration_keys_cannot_cache_or_transmit_comple
                 ));
             }
             signaling.registration_tick(1001).await?;
-            if tokio::time::timeout(
-                Duration::from_millis(100),
-                registrar.recv_from(&mut [0; 16_385]),
-            )
-            .await
-            .is_ok()
+            if Wait::Quiet
+                .bounded(registrar.recv_from(&mut [0; 16_385]))
+                .await
+                .is_ok()
             {
                 return Err(ControlError::Invalid(
                     "Stale resolution sent registration bytes",
@@ -165,7 +165,8 @@ async fn cancelling_configuration_reaps_unanswered_resolution_without_a_dns_resp
     let primary: Result<(), ControlError> = async {
         signaling.registration_tick(1000).await?;
         dns::receive(&dns).await?;
-        tokio::time::timeout(Duration::from_secs(1), signaling.finish_registrations())
+        Wait::Ready
+            .bounded(signaling.finish_registrations())
             .await
             .map_err(failure)??;
         if signaling.registrations.setup_count() != 0
@@ -231,7 +232,8 @@ async fn calls_and_registration_resolution_share_sixteen_slots_until_work_is_rea
                         "Registration exceeded the shared setup limit",
                     ));
                 }
-                if tokio::time::timeout(Duration::from_millis(100), dns.recv_from(&mut [0; 2048]))
+                if Wait::Quiet
+                    .bounded(dns.recv_from(&mut [0; 2048]))
                     .await
                     .is_ok()
                 {

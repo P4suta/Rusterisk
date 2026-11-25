@@ -11,7 +11,8 @@ use crate::{
 };
 use rsipstack::sip::HeadersExt;
 use rusterisk_sip::SipStreamDecoder;
-use std::{num::NonZeroU64, time::Duration};
+use rusterisk_test_support::Wait;
+use std::num::NonZeroU64;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -45,28 +46,26 @@ impl Fixture {
 
     async fn prepared(&mut self, now: u64) -> Result<(Prepared, TcpStream), ControlError> {
         self.signaling.registration_tick(now).await?;
-        let completed = tokio::time::timeout(
-            Duration::from_secs(3),
-            self.signaling.registrations.completed(),
-        )
-        .await
-        .map_err(failure)??
-        .ok_or(ControlError::Capacity)?;
+        let completed = Wait::Ready
+            .bounded(self.signaling.registrations.completed())
+            .await
+            .map_err(failure)??
+            .ok_or(ControlError::Capacity)?;
         self.signaling.registration_completed(completed, now)?;
-        let Input::Prepared(prepared) =
-            tokio::time::timeout(Duration::from_secs(3), self.signaling.network.next())
-                .await
-                .map_err(failure)??
+        let Input::Prepared(prepared) = Wait::Ready
+            .bounded(self.signaling.network.next())
+            .await
+            .map_err(failure)??
         else {
             return Err(ControlError::Invalid(
                 "Expected registration connection preparation",
             ));
         };
-        let (peer, _address) =
-            tokio::time::timeout(Duration::from_secs(3), self.registrar.accept())
-                .await
-                .map_err(failure)?
-                .map_err(failure)?;
+        let (peer, _address) = Wait::Ready
+            .bounded(self.registrar.accept())
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
         Ok((prepared, peer))
     }
 
@@ -88,26 +87,25 @@ async fn configuration_cancelled_before_the_connection_job_is_polled_never_conne
             let now = 1000 + generation;
             fixture.signaling.registrations.clients[0].state = State::Waiting { at: now };
             fixture.signaling.registration_tick(now).await?;
-            let completed = tokio::time::timeout(
-                Duration::from_secs(3),
-                fixture.signaling.registrations.completed(),
-            )
-            .await
-            .map_err(failure)??
-            .ok_or(ControlError::Capacity)?;
+            let completed = Wait::Ready
+                .bounded(fixture.signaling.registrations.completed())
+                .await
+                .map_err(failure)??
+                .ok_or(ControlError::Capacity)?;
             fixture.signaling.registration_completed(completed, now)?;
             fixture.signaling.registrations.lifetime.cancel();
-            let Input::SetupFinished { key, result } =
-                tokio::time::timeout(Duration::from_secs(3), fixture.signaling.network.next())
-                    .await
-                    .map_err(failure)??
+            let Input::SetupFinished { key, result } = Wait::Ready
+                .bounded(fixture.signaling.network.next())
+                .await
+                .map_err(failure)??
             else {
                 return Err(ControlError::Invalid(
                     "Cancelled configuration published a TCP preparation",
                 ));
             };
             fixture.signaling.registration_setup_finished(key, result);
-            if tokio::time::timeout(Duration::from_millis(50), fixture.registrar.accept())
+            if Wait::Quiet
+                .bounded(fixture.registrar.accept())
                 .await
                 .is_ok()
             {
@@ -130,7 +128,8 @@ async fn cancelled_configuration_cannot_admit_a_prepared_tcp_flow_or_send_regist
         let (prepared, mut peer) = fixture.prepared(1000).await?;
         fixture.signaling.registrations.lifetime.cancel();
         fixture.signaling.registration_prepared(prepared, 1001)?;
-        let event = tokio::time::timeout(Duration::from_secs(3), fixture.signaling.network.next())
+        let event = Wait::Ready
+            .bounded(fixture.signaling.network.next())
             .await
             .map_err(failure)??;
         if !matches!(event, Input::SetupFinished { .. })
@@ -143,7 +142,8 @@ async fn cancelled_configuration_cannot_admit_a_prepared_tcp_flow_or_send_regist
                 "Cancelled TCP preparation changed registration state",
             ));
         }
-        let count = tokio::time::timeout(Duration::from_secs(1), peer.read(&mut [0; 1]))
+        let count = Wait::Ready
+            .bounded(peer.read(&mut [0; 1]))
             .await
             .map_err(failure)?
             .map_err(failure)?;
@@ -180,10 +180,10 @@ async fn disconnected_registrations_stop_refresh_and_ignore_old_connection_gener
             &format!("Contact: {contact};expires=11\r\nExpires: 11\r\n"),
         )?;
         peer.write_all(grant.as_bytes()).await.map_err(failure)?;
-        let Input::Packet(packet) =
-            tokio::time::timeout(Duration::from_secs(3), fixture.signaling.network.next())
-                .await
-                .map_err(failure)??
+        let Input::Packet(packet) = Wait::Ready
+            .bounded(fixture.signaling.network.next())
+            .await
+            .map_err(failure)??
         else {
             return Err(ControlError::Invalid("Expected registration grant"));
         };
@@ -198,10 +198,10 @@ async fn disconnected_registrations_stop_refresh_and_ignore_old_connection_gener
             ));
         }
         peer.shutdown().await.map_err(failure)?;
-        let Input::Closed { key, result } =
-            tokio::time::timeout(Duration::from_secs(3), fixture.signaling.network.next())
-                .await
-                .map_err(failure)??
+        let Input::Closed { key, result } = Wait::Ready
+            .bounded(fixture.signaling.network.next())
+            .await
+            .map_err(failure)??
         else {
             return Err(ControlError::Invalid("Expected closed registration flow"));
         };
