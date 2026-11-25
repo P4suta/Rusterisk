@@ -5,13 +5,15 @@ use crate::{
 };
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{broadcast, watch};
 use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest, protocol::WebSocketConfig, Message,
 };
+use tokio_tungstenite::WebSocketStream;
 
-type Socket =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+#[cfg(test)]
+mod idle_tests;
 
 pub struct Session {
     requests: owned_call::Requests,
@@ -120,6 +122,14 @@ pub(crate) async fn connect(
     {
         return Err(Error::Invalid("invalid event subprotocol"));
     }
+    Ok(start(client, application, socket))
+}
+
+fn start(
+    client: &Client,
+    application: &api::ChannelId,
+    socket: WebSocketStream<impl AsyncRead + AsyncWrite + Unpin + Send + 'static>,
+) -> Session {
     let (events, received) = broadcast::channel(64);
     let (stop, stopped) = watch::channel(false);
     let (requests, calls) = Calls::new(client.clone(), application.clone());
@@ -130,16 +140,16 @@ pub(crate) async fn connect(
         }
         result
     });
-    Ok(Session {
+    Session {
         requests,
         events: received,
         stop,
         task: Some(task),
-    })
+    }
 }
 
 async fn run(
-    mut socket: Socket,
+    mut socket: WebSocketStream<impl AsyncRead + AsyncWrite + Unpin>,
     events: broadcast::Sender<api::Event>,
     mut stop: watch::Receiver<bool>,
     mut calls: Calls,
@@ -192,7 +202,10 @@ async fn run(
     result.and(cleanup).and(close)
 }
 
-async fn send(socket: &mut Socket, message: Message) -> Result<(), Error> {
+async fn send(
+    socket: &mut WebSocketStream<impl AsyncRead + AsyncWrite + Unpin>,
+    message: Message,
+) -> Result<(), Error> {
     tokio::time::timeout(Duration::from_secs(2), socket.send(message))
         .await
         .map_err(|_| Error::Timeout)??;
