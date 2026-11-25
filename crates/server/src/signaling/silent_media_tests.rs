@@ -553,8 +553,8 @@ async fn a_recording_stop_waits_with_its_channel_reservation() -> Result<(), Con
     silent(async |fixture: &mut Silent| {
         let (key, _subscription, answered) = dialed(fixture).await?;
         fixture
-            .controller
-            .signal(crate::Signal::Milestone {
+            .signaling
+            .notify(crate::Signal::Milestone {
                 key: key.clone(),
                 milestone: crate::Milestone::Answered,
             })
