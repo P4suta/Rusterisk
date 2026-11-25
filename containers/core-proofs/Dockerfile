@@ -34,7 +34,8 @@ RUN git init \
     && git diff "${KANI_BACKPORT}^" "$KANI_BACKPORT" | git apply - \
     && git submodule update --init --depth=1 charon \
     && rustup component add --toolchain nightly-2026-08-21 rustc-dev rust-src \
-    && cargo +nightly-2026-08-21 build --locked --release --jobs=1 --package kani-compiler
+    && sysroot="$(rustc +nightly-2026-08-21 --print sysroot)" \
+    && LIBRARY_PATH="$sysroot/lib" cargo +nightly-2026-08-21 build --locked --release --jobs=1 --package kani-compiler
 
 FROM bundle
 COPY --from=compiler /build/kani/target/release/kani-compiler /root/.kani/kani-0.68.0/bin/kani-compiler
