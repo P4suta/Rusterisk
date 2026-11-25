@@ -50,7 +50,10 @@ async fn stored_recording_methods_use_the_public_contract_and_typed_models() -> 
             name: name.clone(),
             format: "wav".into(),
         };
-        assert_eq!(client.stored_recordings().await?, [expected.clone()]);
+        assert_eq!(
+            client.stored_recordings().await?,
+            std::slice::from_ref(&expected)
+        );
         assert_eq!(client.stored_recording(&name).await?, expected);
         let destination = rusterisk_client::RecordingName::try_from("copied".to_owned())?;
         assert_eq!(
