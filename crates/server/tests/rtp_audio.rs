@@ -1,4 +1,5 @@
 use rusterisk_media::{mulaw_decode, AudioFormat, Frame, MediaError, RtpPacket, RtpSender};
+use rusterisk_test_support::Wait;
 #[path = "rtp_leg/driver.rs"]
 mod driver;
 
@@ -8,7 +9,6 @@ use rusterisk_server::rtp::{
     ControlReception, LinkStats, Measurements, RtpChannels, RtpLeg, RtpSession, SocketPair,
 };
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
 fn failure(error: impl std::fmt::Display) -> MediaError {
@@ -59,7 +59,8 @@ async fn real_datagrams_carry_known_audio_in_both_directions_and_release_ports(
             std::array::from_fn::<_, 160, _>(|index| if index % 20 < 10 { 4000 } else { -4000 });
         let bytes = sender.packet(Frame::new(&input, 8000)?)?.encode()?;
         peer.data().send_to(&bytes, local).await.map_err(failure)?;
-        let audio = tokio::time::timeout(Duration::from_secs(2), received.recv())
+        let audio = Wait::Ready
+            .bounded(received.recv())
             .await
             .map_err(failure)?
             .ok_or(MediaError::InvalidFrame)?;
@@ -76,11 +77,11 @@ async fn real_datagrams_carry_known_audio_in_both_directions_and_release_ports(
             .await
             .map_err(failure)?;
         let mut buffer = [0; 1501];
-        let (size, source) =
-            tokio::time::timeout(Duration::from_secs(2), peer.data().recv_from(&mut buffer))
-                .await
-                .map_err(failure)?
-                .map_err(failure)?;
+        let (size, source) = Wait::Ready
+            .bounded(peer.data().recv_from(&mut buffer))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
         assert_eq!(source, local);
         let packet = RtpPacket::parse(&buffer[..size])?;
         assert!(packet

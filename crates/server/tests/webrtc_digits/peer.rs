@@ -7,6 +7,7 @@ use rusterisk_server::{
     rtp::SocketPair,
     webrtc::WebRtcSession,
 };
+use rusterisk_test_support::Wait;
 use std::{net::Ipv4Addr, time::Duration, time::Instant};
 use tokio::{
     net::UdpSocket,
@@ -105,7 +106,8 @@ fn eight_khz_only(source: &str) -> String {
 
 pub(super) async fn answer(signal: &UdpSocket, clock: Clock) -> Result<WebRtcSession, MediaError> {
     let mut bytes = [0; 16385];
-    let (size, server) = tokio::time::timeout(Duration::from_secs(2), signal.recv_from(&mut bytes))
+    let (size, server) = Wait::Ready
+        .bounded(signal.recv_from(&mut bytes))
         .await
         .map_err(failure)?
         .map_err(failure)?;
@@ -141,7 +143,7 @@ pub(super) async fn answer(signal: &UdpSocket, clock: Clock) -> Result<WebRtcSes
 pub(super) async fn finish<T, E: std::fmt::Display>(
     mut task: tokio::task::JoinHandle<Result<T, E>>,
 ) -> Result<T, MediaError> {
-    match tokio::time::timeout(Duration::from_secs(3), &mut task).await {
+    match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?.map_err(failure),
         Err(primary) => {
             task.abort();

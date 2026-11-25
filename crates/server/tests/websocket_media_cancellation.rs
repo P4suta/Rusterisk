@@ -6,7 +6,8 @@ use rusterisk_server::{
     media_websocket::{MediaSocket, SocketMessage},
     Action, ControlError, Controller, Credentials,
 };
-use std::{future::IntoFuture, time::Duration};
+use rusterisk_test_support::Wait;
+use std::future::IntoFuture;
 use tokio::sync::{mpsc, watch};
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -62,70 +63,72 @@ async fn released_control_claims_reject_late_sockets_and_stop_attached_media(
     let (stop, stopped) = watch::channel(false);
     let hub = tokio::spawn(hub.run(stopped));
     let credentials = Credentials::new("app".into(), "test-password".into())?;
-    let result = tokio::time::timeout(Duration::from_secs(3), async {
-        let _subscription = controller
-            .subscribe(credentials.clone(), None, "calls".into())
-            .await?;
-        controller
-            .execute(credentials.clone(), None, create("stale")?)
-            .await?;
-        let stale = controller
-            .claim_media_connection(id("stale")?, None)
-            .await?;
-        controller
-            .execute(credentials.clone(), None, Action::Hangup(id("external")?))
-            .await?;
-        while !stale.lease.is_released() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let (_peer, _) = tokio_tungstenite::connect_async(format!("ws://{address}/media"))
-            .await
-            .map_err(failure)?;
-        assert!(matches!(
+    let result = Wait::Ready
+        .bounded(async {
+            let _subscription = controller
+                .subscribe(credentials.clone(), None, "calls".into())
+                .await?;
+            controller
+                .execute(credentials.clone(), None, create("stale")?)
+                .await?;
+            let stale = controller
+                .claim_media_connection(id("stale")?, None)
+                .await?;
+            controller
+                .execute(credentials.clone(), None, Action::Hangup(id("external")?))
+                .await?;
+            while !stale.lease.is_released() {}
+            let (_peer, _) = tokio_tungstenite::connect_async(format!("ws://{address}/media"))
+                .await
+                .map_err(failure)?;
+            assert!(matches!(
+                media
+                    .attach_claimed_websocket(
+                        stale,
+                        sockets.recv().await.ok_or(ControlError::Capacity)?
+                    )
+                    .await,
+                Err(MediaError::UnknownStream)
+            ));
+            controller
+                .execute(credentials, None, create("active")?)
+                .await?;
+            let active = controller
+                .claim_media_connection(id("active")?, None)
+                .await?;
+            let (mut peer, _) = tokio_tungstenite::connect_async(format!("ws://{address}/media"))
+                .await
+                .map_err(failure)?;
             media
                 .attach_claimed_websocket(
-                    stale,
-                    sockets.recv().await.ok_or(ControlError::Capacity)?
+                    active,
+                    sockets.recv().await.ok_or(ControlError::Capacity)?,
                 )
-                .await,
-            Err(MediaError::UnknownStream)
-        ));
-        controller
-            .execute(credentials, None, create("active")?)
-            .await?;
-        let active = controller
-            .claim_media_connection(id("active")?, None)
-            .await?;
-        let (mut peer, _) = tokio_tungstenite::connect_async(format!("ws://{address}/media"))
-            .await
-            .map_err(failure)?;
-        media
-            .attach_claimed_websocket(active, sockets.recv().await.ok_or(ControlError::Capacity)?)
-            .await
-            .map_err(failure)?;
-        assert!(matches!(
-            MediaSocket::receive(&mut peer).await.map_err(failure)?,
-            Some(SocketMessage::Text(_))
-        ));
-        controller.shutdown();
-        loop {
-            match MediaSocket::receive(&mut peer).await.map_err(failure)? {
-                Some(SocketMessage::Close) => break,
-                Some(
-                    SocketMessage::Binary(_) | SocketMessage::Text(_) | SocketMessage::Pong(_),
-                ) => {}
-                Some(SocketMessage::Ping(bytes)) => {
-                    MediaSocket::send(&mut peer, SocketMessage::Pong(bytes))
-                        .await
-                        .map_err(failure)?
+                .await
+                .map_err(failure)?;
+            assert!(matches!(
+                MediaSocket::receive(&mut peer).await.map_err(failure)?,
+                Some(SocketMessage::Text(_))
+            ));
+            controller.shutdown();
+            loop {
+                match MediaSocket::receive(&mut peer).await.map_err(failure)? {
+                    Some(SocketMessage::Close) => break,
+                    Some(
+                        SocketMessage::Binary(_) | SocketMessage::Text(_) | SocketMessage::Pong(_),
+                    ) => {}
+                    Some(SocketMessage::Ping(bytes)) => {
+                        MediaSocket::send(&mut peer, SocketMessage::Pong(bytes))
+                            .await
+                            .map_err(failure)?
+                    }
+                    None => return Err(ControlError::Unsupported),
                 }
-                None => return Err(ControlError::Unsupported),
             }
-        }
-        Ok::<(), ControlError>(())
-    })
-    .await
-    .map_err(failure);
+            Ok::<(), ControlError>(())
+        })
+        .await
+        .map_err(failure);
     controller.shutdown();
     runner.await.map_err(failure)??;
     stop.send_replace(true);

@@ -1,7 +1,7 @@
 use rusterisk_core::{DtmfDigit, PeerMediaDirection};
 use rusterisk_media::{AudioSocket, Frame, MediaError};
 use rusterisk_server::{audiosocket::AudioSocketLink, media_link::Channels};
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{mpsc, watch},
@@ -51,7 +51,8 @@ async fn partial_stream_reads_survive_outgoing_audio_and_close_with_the_link(
             .await
             .map_err(failure)?;
         let mut response = [0; 323];
-        tokio::time::timeout(Duration::from_secs(1), peer.read_exact(&mut response))
+        Wait::Ready
+            .bounded(peer.read_exact(&mut response))
             .await
             .map_err(failure)?
             .map_err(failure)?;
@@ -65,7 +66,8 @@ async fn partial_stream_reads_survive_outgoing_audio_and_close_with_the_link(
         peer.write_all(&AudioSocket::Dtmf(b'#').encode()?)
             .await
             .map_err(failure)?;
-        let tone = tokio::time::timeout(Duration::from_secs(1), received_digits.recv())
+        let tone = Wait::Ready
+            .bounded(received_digits.recv())
             .await
             .map_err(failure)?
             .ok_or(MediaError::Capacity)?;
@@ -80,7 +82,8 @@ async fn partial_stream_reads_survive_outgoing_audio_and_close_with_the_link(
             .await
             .map_err(failure)?;
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), received.recv())
+            Wait::Ready
+                .bounded(received.recv())
                 .await
                 .map_err(failure)?,
             Some(Frame::new(&[4000; 160], 8000)?)

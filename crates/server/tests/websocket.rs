@@ -3,7 +3,7 @@ use futures_util::StreamExt;
 use rusterisk_api::{ChannelId, Event, EventKind};
 use rusterisk_config::Config;
 use rusterisk_server::{http::router, Action, ControlError, Controller, Credentials};
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest, protocol::frame::coding::CloseCode, protocol::CloseFrame, Message,
 };
@@ -28,7 +28,7 @@ fn combine(
 async fn joined<E: std::fmt::Display>(
     mut task: tokio::task::JoinHandle<Result<(), E>>,
 ) -> Result<(), ControlError> {
-    match tokio::time::timeout(Duration::from_secs(3), &mut task).await {
+    match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?.map_err(failure),
         Err(primary) => {
             task.abort();
@@ -97,7 +97,7 @@ async fn websocket_upgrade_registers_the_app_before_returning_and_streams_real_e
                 },
             )
             .await?;
-        let message = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        let message = Wait::Ready.bounded(socket.next())
             .await
             .map_err(failure)?
             .ok_or(ControlError::Capacity)?
@@ -112,12 +112,12 @@ async fn websocket_upgrade_registers_the_app_before_returning_and_streams_real_e
         }
         let close = CloseFrame { code: CloseCode::Normal, reason: "Event consumer finished".into() };
         socket.close(Some(close.clone())).await.map_err(failure)?;
-        let response = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        let response = Wait::Ready.bounded(socket.next())
             .await.map_err(failure)?.ok_or(ControlError::Invalid("Close response missing"))?.map_err(failure)?;
         if response != Message::Close(Some(close)) {
             return Err(ControlError::Invalid("Close response did not match"));
         }
-        if tokio::time::timeout(Duration::from_secs(2), socket.next())
+        if Wait::Ready.bounded(socket.next())
             .await.map_err(failure)?.transpose().map_err(failure)?.is_some() {
             return Err(ControlError::Invalid("WebSocket TCP connection remained open"));
         }

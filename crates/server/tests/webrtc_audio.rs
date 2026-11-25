@@ -1,6 +1,7 @@
 use rusterisk_config::Codec;
 use rusterisk_core::PeerMediaDirection;
 use rusterisk_media::{Frame, MediaError};
+use rusterisk_test_support::Wait;
 #[path = "webrtc_leg/driver.rs"]
 mod webrtc_driver;
 
@@ -84,7 +85,7 @@ fn received(frame: &Frame, expected: f64, refused: f64) -> bool {
 async fn finished(
     mut task: tokio::task::JoinHandle<Result<WebRtcStats, MediaError>>,
 ) -> Result<WebRtcStats, MediaError> {
-    match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+    match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?,
         Err(primary) => {
             task.abort();
@@ -121,7 +122,7 @@ async fn duplex(
     let (right_channels, mut right_app) = channels();
     let left = tokio::spawn(webrtc_driver::run(left, left_channels));
     let right = tokio::spawn(webrtc_driver::run(right, right_channels));
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
+    let result = Wait::Ready.bounded(async {
         let mut clock = tokio::time::interval(Duration::from_millis(20));
         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut sent = 0;
@@ -275,18 +276,19 @@ async fn cancelling_the_ice_exchange_releases_the_reserved_media_ports() -> Resu
     let left = offer.accept_answer(&answer)?;
     let (channels, mut application) = channels();
     let task = tokio::spawn(webrtc_driver::run(left, channels));
-    let progress = tokio::time::timeout(Duration::from_secs(1), async {
-        for frame in 0..4 {
-            application
-                .outgoing
-                .send(signal(440.0, frame)?)
-                .await
-                .map_err(failure)?;
-        }
-        Ok::<(), MediaError>(())
-    })
-    .await
-    .map_err(failure);
+    let progress = Wait::Ready
+        .bounded(async {
+            for frame in 0..4 {
+                application
+                    .outgoing
+                    .send(signal(440.0, frame)?)
+                    .await
+                    .map_err(failure)?;
+            }
+            Ok::<(), MediaError>(())
+        })
+        .await
+        .map_err(failure);
     application.stop.send_replace(true);
     let stats = finished(task).await?;
     progress??;

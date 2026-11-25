@@ -2,6 +2,7 @@ use super::{failure, sockets};
 use rusterisk_config::Codec;
 use rusterisk_core::{DtmfDigit, DtmfTone, PeerMediaDirection};
 use rusterisk_media::{Frame, MediaError};
+use rusterisk_test_support::Wait;
 #[path = "../webrtc_leg/driver.rs"]
 mod webrtc_driver;
 
@@ -74,7 +75,7 @@ fn only_eight_khz(source: &str) -> String {
 async fn finish(
     mut task: tokio::task::JoinHandle<Result<WebRtcStats, MediaError>>,
 ) -> Result<WebRtcStats, MediaError> {
-    match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+    match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?,
         Err(primary) => {
             task.abort();
@@ -141,39 +142,40 @@ async fn exchange(codec: Codec, duration_ms: u32, clock: u32) -> Result<(), Medi
     let left = tokio::spawn(webrtc_driver::run(left, left_channels));
     let right = tokio::spawn(webrtc_driver::run(right, right_channels));
     let mut phase = "audio readiness";
-    let result = tokio::time::timeout(Duration::from_secs(4), async {
-        ready(&mut left_app, &mut right_app).await?;
-        let left_tone = DtmfTone {
-            digit: DtmfDigit::Hash,
-            duration_ms,
-        };
-        let right_tone = DtmfTone {
-            digit: DtmfDigit::D,
-            duration_ms,
-        };
-        left_app
-            .commands
-            .try_send(DigitCommand::Tone(left_tone))
-            .map_err(failure)?;
-        right_app
-            .commands
-            .try_send(DigitCommand::Tone(right_tone))
-            .map_err(failure)?;
-        phase = "digit delivery";
-        let (received_left, received_right) =
-            tokio::join!(left_app.digits.recv(), right_app.digits.recv());
-        assert_eq!(received_left.ok_or(MediaError::UnknownStream)?, right_tone);
-        assert_eq!(received_right.ok_or(MediaError::UnknownStream)?, left_tone);
-        let (left_duplicate, right_duplicate) = tokio::join!(
-            tokio::time::timeout(Duration::from_millis(100), left_app.digits.recv()),
-            tokio::time::timeout(Duration::from_millis(100), right_app.digits.recv()),
-        );
-        assert!(left_duplicate.is_err());
-        assert!(right_duplicate.is_err());
-        Ok::<(), MediaError>(())
-    })
-    .await
-    .map_err(|error| failure(format!("{phase}: {error}")));
+    let result = Wait::Ready
+        .bounded(async {
+            ready(&mut left_app, &mut right_app).await?;
+            let left_tone = DtmfTone {
+                digit: DtmfDigit::Hash,
+                duration_ms,
+            };
+            let right_tone = DtmfTone {
+                digit: DtmfDigit::D,
+                duration_ms,
+            };
+            left_app
+                .commands
+                .try_send(DigitCommand::Tone(left_tone))
+                .map_err(failure)?;
+            right_app
+                .commands
+                .try_send(DigitCommand::Tone(right_tone))
+                .map_err(failure)?;
+            phase = "digit delivery";
+            let (received_left, received_right) =
+                tokio::join!(left_app.digits.recv(), right_app.digits.recv());
+            assert_eq!(received_left.ok_or(MediaError::UnknownStream)?, right_tone);
+            assert_eq!(received_right.ok_or(MediaError::UnknownStream)?, left_tone);
+            let (left_duplicate, right_duplicate) = tokio::join!(
+                Wait::Quiet.bounded(left_app.digits.recv()),
+                Wait::Quiet.bounded(right_app.digits.recv()),
+            );
+            assert!(left_duplicate.is_err());
+            assert!(right_duplicate.is_err());
+            Ok::<(), MediaError>(())
+        })
+        .await
+        .map_err(|error| failure(format!("{phase}: {error}")));
     left_app.stop.send_replace(true);
     right_app.stop.send_replace(true);
     let (left, right) = tokio::join!(finish(left), finish(right));
@@ -217,60 +219,63 @@ async fn received_events_started_during_hold_do_not_complete_after_resume() -> R
     let (right_channels, mut right_app) = channels();
     let left = tokio::spawn(webrtc_driver::run(left, left_channels));
     let right = tokio::spawn(webrtc_driver::run(right, right_channels));
-    let result = tokio::time::timeout(Duration::from_secs(4), async {
-        ready(&mut left_app, &mut right_app).await?;
-        left_app
-            .direction
-            .send_replace(PeerMediaDirection::ReceiveOnly);
-        right_app
-            .commands
-            .try_send(DigitCommand::Tone(DtmfTone {
-                digit: DtmfDigit::Hash,
-                duration_ms: 500,
-            }))
-            .map_err(failure)?;
-        if tokio::time::timeout(Duration::from_millis(200), left_app.digits.recv())
-            .await
-            .is_ok()
-        {
-            return Err(failure(
-                "A digit was delivered while incoming media was held",
-            ));
-        }
-        left_app
-            .direction
-            .send_replace(PeerMediaDirection::SendReceive);
-        if tokio::time::timeout(Duration::from_millis(500), left_app.digits.recv())
-            .await
-            .is_ok()
-        {
-            return Err(failure(
-                "An event started during hold completed after media resumed",
-            ));
-        }
-        let tone = DtmfTone {
-            digit: DtmfDigit::Two,
-            duration_ms: 60,
-        };
-        right_app
-            .commands
-            .try_send(DigitCommand::Tone(tone))
-            .map_err(failure)?;
-        if left_app
-            .digits
-            .recv()
-            .await
-            .ok_or(MediaError::UnknownStream)?
-            != tone
-        {
-            return Err(failure(
-                "A different event was delivered after media resumed",
-            ));
-        }
-        Ok::<(), MediaError>(())
-    })
-    .await
-    .map_err(failure);
+    let result = Wait::Ready
+        .bounded(async {
+            ready(&mut left_app, &mut right_app).await?;
+            left_app
+                .direction
+                .send_replace(PeerMediaDirection::ReceiveOnly);
+            right_app
+                .commands
+                .try_send(DigitCommand::Tone(DtmfTone {
+                    digit: DtmfDigit::Hash,
+                    duration_ms: 500,
+                }))
+                .map_err(failure)?;
+            if Wait::Observation
+                .bounded(left_app.digits.recv())
+                .await
+                .is_ok()
+            {
+                return Err(failure(
+                    "A digit was delivered while incoming media was held",
+                ));
+            }
+            left_app
+                .direction
+                .send_replace(PeerMediaDirection::SendReceive);
+            if Wait::Observation
+                .bounded(left_app.digits.recv())
+                .await
+                .is_ok()
+            {
+                return Err(failure(
+                    "An event started during hold completed after media resumed",
+                ));
+            }
+            let tone = DtmfTone {
+                digit: DtmfDigit::Two,
+                duration_ms: 60,
+            };
+            right_app
+                .commands
+                .try_send(DigitCommand::Tone(tone))
+                .map_err(failure)?;
+            if left_app
+                .digits
+                .recv()
+                .await
+                .ok_or(MediaError::UnknownStream)?
+                != tone
+            {
+                return Err(failure(
+                    "A different event was delivered after media resumed",
+                ));
+            }
+            Ok::<(), MediaError>(())
+        })
+        .await
+        .map_err(failure);
     left_app.stop.send_replace(true);
     right_app.stop.send_replace(true);
     let (left, right) = tokio::join!(finish(left), finish(right));

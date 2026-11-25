@@ -1,7 +1,7 @@
 use rusterisk_api::ChannelId;
 use rusterisk_media::{AudioSocket, Frame, MediaError};
 use rusterisk_server::{media::MediaHub, CallKey};
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -13,7 +13,7 @@ fn failure(error: impl std::fmt::Display) -> MediaError {
 }
 
 async fn receive(peer: &mut TcpStream, expected: i16) -> Result<(), MediaError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    Wait::Ready.bounded(async {
         let mut header = [0; 3];
         let mut bytes = [0; 1923];
         for _ in 0..100 {

@@ -8,7 +8,8 @@ use rusterisk_server::{
     signaling::Signaling,
     Action, ControlError, Controller, Credentials,
 };
-use std::{future::IntoFuture, time::Duration};
+use rusterisk_test_support::Wait;
+use std::future::IntoFuture;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -33,7 +34,7 @@ async fn incoming_media_upgrades_bind_one_channel_and_clean_up_after_disconnect(
     let http = tokio::spawn(
         axum::serve(listener, router_with_media(controller.clone(), media)).into_future(),
     );
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
+    let result = Wait::Ready.bounded(async {
         let credentials = Credentials::new("app".into(), "test-password".into())?;
         let mut subscription = controller.subscribe(credentials.clone(), None, "calls".into()).await?;
         let client = reqwest::Client::new();
@@ -66,7 +67,7 @@ async fn incoming_media_upgrades_bind_one_channel_and_clean_up_after_disconnect(
         loop {
             let outcome = controller.execute(credentials.clone(), None, Action::GetVariable { channel: ChannelId::try_from("external".to_owned())?, variable: "RUSTERISK_MEDIA_CONNECTED".into() }).await?;
             if outcome.body.as_ref().is_some_and(|body| body["value"] == "1") { break; }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+
         }
         MediaSocket::send(&mut peer, SocketMessage::Close).await.map_err(failure)?;
         loop { match MediaSocket::receive(&mut peer).await.map_err(failure)? { Some(SocketMessage::Close) => break, Some(SocketMessage::Binary(_) | SocketMessage::Text(_) | SocketMessage::Pong(_)) => {}, Some(SocketMessage::Ping(bytes)) => MediaSocket::send(&mut peer, SocketMessage::Pong(bytes)).await.map_err(failure)?, None => return Err(ControlError::Unsupported) } }

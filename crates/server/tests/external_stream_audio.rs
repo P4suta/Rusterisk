@@ -4,7 +4,7 @@ use rusterisk_media::{AudioSocket, Frame};
 use rusterisk_server::{
     media::MediaHub, signaling::Signaling, Action, ControlError, Controller, Credentials,
 };
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -39,16 +39,16 @@ async fn external_streams_send_session_identity_receive_audio_and_release_the_co
         let mut subscription = controller.subscribe(credentials()?, None, "calls".into()).await?;
         let id = ChannelId::try_from("external".to_owned())?;
         let target = AudioSocketTarget::new(listener.local_addr().map_err(failure)?, [7; 16]).map_err(failure)?;
-        let (response, (mut peer, _)) = tokio::time::timeout(Duration::from_secs(2), async {
+        let (response, (mut peer, _)) = Wait::Ready.bounded(async {
             tokio::try_join!(controller.execute(credentials()?, None, Action::ExternalAudioSocket { id: id.clone(), app: "calls".into(), target }), async { listener.accept().await.map_err(failure) })
         }).await.map_err(failure)??;
         let channel: Channel = serde_json::from_value(response.body.ok_or(ControlError::Capacity)?)?;
         assert_eq!(channel.id, id);
         assert!(channel.channelvars.is_none());
         let mut identity = [0; 19];
-        tokio::time::timeout(Duration::from_secs(1), peer.read_exact(&mut identity)).await.map_err(failure)?.map_err(failure)?;
+        Wait::Ready.bounded(peer.read_exact(&mut identity)).await.map_err(failure)?.map_err(failure)?;
         assert_eq!(AudioSocket::parse(&identity).map_err(failure)?, AudioSocket::Uuid([7; 16]));
-        tokio::time::timeout(Duration::from_secs(2), async {
+        Wait::Ready.bounded(async {
             for _ in 0..32 {
                 let event = subscription.events.recv().await.ok_or(ControlError::Capacity)?;
                 if matches!(event.kind, EventKind::StasisStart { channel, .. } if channel.id == id) { return Ok::<(), ControlError>(()); }
@@ -56,7 +56,7 @@ async fn external_streams_send_session_identity_receive_audio_and_release_the_co
             Err(ControlError::Capacity)
         }).await.map_err(failure)??;
         peer.write_all(&AudioSocket::Audio(Frame::new(&[4000; 160], 8000).map_err(failure)?).encode().map_err(failure)?).await.map_err(failure)?;
-        tokio::time::timeout(Duration::from_secs(2), async {
+        Wait::Ready.bounded(async {
             for _ in 0..32 {
                 let event = subscription.events.recv().await.ok_or(ControlError::Capacity)?;
                 if matches!(event.kind, EventKind::ChannelVarset { variable, value, .. } if variable == "RUSTERISK_MEDIA_CONNECTED" && value == "1") { return Ok::<(), ControlError>(()); }
@@ -66,7 +66,7 @@ async fn external_streams_send_session_identity_receive_audio_and_release_the_co
         controller.execute(credentials()?, None, Action::SendDtmf {
             channel: id.clone(), digits: "#A".into(), timing: rusterisk_core::DtmfTiming::new(0, 20, 100, 0)?,
         }).await?;
-        tokio::time::timeout(Duration::from_secs(1), async {
+        Wait::Ready.bounded(async {
             let mut bytes = [0; 1923];
             let mut digits = String::new();
             for _ in 0..100 {
@@ -82,7 +82,7 @@ async fn external_streams_send_session_identity_receive_audio_and_release_the_co
             Err(ControlError::Capacity)
         }).await.map_err(failure)??;
         controller.execute(credentials()?, None, Action::Hangup(id)).await?;
-        tokio::time::timeout(Duration::from_secs(1), async {
+        Wait::Ready.bounded(async {
             let mut bytes = [0; 1923];
             for _ in 0..100 {
                 peer.read_exact(&mut bytes[..3]).await.map_err(failure)?;

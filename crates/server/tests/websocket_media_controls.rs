@@ -7,6 +7,7 @@ use rusterisk_server::{
     media_link::{Channels, DigitCommand, LinkStats},
     media_websocket::{MediaLinkOptions, MediaSocket, SocketMessage, WebSocketMediaLink},
 };
+use rusterisk_test_support::Wait;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
@@ -102,7 +103,8 @@ impl Harness {
     }
 
     async fn text(&mut self) -> Result<String, MediaError> {
-        let message = tokio::time::timeout(Duration::from_secs(1), self.messages.recv())
+        let message = Wait::Ready
+            .bounded(self.messages.recv())
             .await
             .map_err(failure)?
             .ok_or(MediaError::UnknownStream)?;
@@ -281,7 +283,7 @@ async fn receive_only_direction_keeps_queued_audio_while_digits_continue() -> Re
         harness.command(MediaCommand::SetMediaDirection { direction: MediaDirection::Both }).await?;
         harness.status().await?;
         harness.media_turn().await?;
-        assert!(tokio::time::timeout(Duration::from_secs(1), harness.frames.recv()).await.map_err(failure)?.is_some());
+        assert!(Wait::Ready.bounded(harness.frames.recv()).await.map_err(failure)?.is_some());
         Ok(())
     }.await;
     harness.close().await?;
