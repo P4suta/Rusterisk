@@ -7,7 +7,7 @@ status: proposed
 
 ## Context
 
-Eleven media operations can each delay unrelated SIP responses for five seconds.
+Eleven media operations can each delay unrelated signaling responses for five seconds.
 
 ## Decision
 
