@@ -327,18 +327,21 @@ impl Doctor {
                 if json {
                     return encode(&runtime);
                 }
-                let mut lines = vec!["component  turns  late turns  drops".to_owned()];
-                for (name, activity) in [
+                let rows = [
                     ("control", runtime.control),
                     ("signaling", runtime.signaling),
                     ("media", runtime.media),
-                ] {
-                    lines.push(format!(
+                ]
+                .map(|(name, activity)| {
+                    format!(
                         "{name}  {}  {}  {}",
                         activity.turns, activity.late_turns, activity.drops
-                    ));
-                }
-                Ok(lines.join("\n"))
+                    )
+                });
+                Ok(format!(
+                    "component  turns  late turns  drops\n{}",
+                    rows.join("\n")
+                ))
             }
             Self::Channel(id) => {
                 let report = channel(remote, id).await?;
