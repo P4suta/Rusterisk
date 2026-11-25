@@ -96,6 +96,62 @@ const LEG_HELD: usize = 6608;
 const TASK_CHANNELS: usize = 2 * 32 * std::mem::size_of::<rusterisk_media::Frame>();
 
 #[tokio::test]
+async fn the_socket_to_socket_g711_turn_allocates_nothing_after_warmup() -> Result<(), MediaError> {
+    let (_handle, mut hub, _notices) = MediaHub::new(2);
+    let left = key("left")?;
+    let right = key("right")?;
+    let mut peers = Vec::new();
+    for (key, sample) in [(&left, 4000_i16), (&right, -7000)] {
+        let socket = leg(&mut hub, key, None)?;
+        let input = hub
+            .legs
+            .get(key)
+            .ok_or(MediaError::UnknownStream)?
+            .input_observer()?;
+        let sender = rusterisk_media::RtpSender::new(AudioFormat::Pcmu, 0, [3; 10])?;
+        peers.push((socket, input, sender, sample));
+    }
+    hub.mixer.bridge(1, &[left, right])?;
+    for turn in 0..50 {
+        let mut bytes = [0; 1501];
+        for (peer, input, sender, sample) in &mut peers {
+            let packet = sender
+                .packet(Frame::new(&[*sample; 160], 8000)?)?
+                .encode()?;
+            peer.data()
+                .send_to(&packet, input.local_addr().map_err(failure)?)
+                .await
+                .map_err(failure)?;
+            tokio::time::timeout(Duration::from_secs(1), input.peek_from(&mut bytes))
+                .await
+                .map_err(failure)?
+                .map_err(failure)?;
+        }
+        let mut result = Ok(());
+        let counted = allocation_counter::measure(|| {
+            result = hub.tick();
+        });
+        result?;
+        if turn > 0 {
+            assert_eq!(counted.count_total, 0, "turn {turn}: {counted:?}");
+        }
+        for ((peer, _, _, _), expected) in peers.iter().zip([-7000, 4000]) {
+            let (size, _) =
+                tokio::time::timeout(Duration::from_secs(1), peer.data().recv_from(&mut bytes))
+                    .await
+                    .map_err(failure)?
+                    .map_err(failure)?;
+            let packet = RtpPacket::parse(&bytes[..size])?;
+            assert_eq!(
+                packet.payload(),
+                [rusterisk_media::mulaw_encode(expected); 160]
+            );
+        }
+    }
+    hub.close().await
+}
+
+#[tokio::test]
 async fn a_g711_leg_stays_within_its_memory_budget() -> Result<(), MediaError> {
     let (_handle, mut hub, _notices) = MediaHub::new(4);
     let measured = key("measured")?;

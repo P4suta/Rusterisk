@@ -387,6 +387,11 @@ impl RtpLeg {
         self.data.local_addr().map_err(failure)
     }
 
+    #[cfg(test)]
+    pub(crate) fn input_observer(&self) -> Result<UdpSocket, MediaError> {
+        UdpSocket::from_std(self.data.try_clone().map_err(failure)?).map_err(failure)
+    }
+
     // Swaps the audio socket, so that a test can make the leg's sends fail.
     #[cfg(test)]
     pub(crate) fn replace_data_socket(&mut self, socket: std::net::UdpSocket) {
