@@ -316,13 +316,7 @@ impl Control {
         now: u64,
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
-        let entry = self
-            .channels
-            .by_handle_mut(key.handle())
-            .ok_or(ControlError::NotFound("Channel not found"))?;
-        if entry.call.generation() != key.generation {
-            return Err(ControlError::Conflict("Channel generation changed"));
-        }
+        let entry = self.channels.require_key_mut(key)?;
         if entry
             .dialplan
             .as_ref()

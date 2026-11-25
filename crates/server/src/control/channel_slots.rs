@@ -63,6 +63,18 @@ impl ChannelSlots {
         (entry.call.generation() == handle.0).then_some(entry)
     }
 
+    pub fn require_key_mut(&mut self, key: &CallKey) -> Result<&mut ChannelEntry, ControlError> {
+        let current = self
+            .names
+            .get(&key.id)
+            .ok_or(ControlError::NotFound("Channel not found"))?;
+        if *current != key.handle() {
+            return Err(ControlError::Conflict("Channel generation changed"));
+        }
+        self.by_handle_mut(key.handle())
+            .ok_or(ControlError::NotFound("Channel not found"))
+    }
+
     pub fn by_key(&self, key: &CallKey) -> Option<&ChannelEntry> {
         self.by_handle(key.handle())
             .filter(|entry| entry.snapshot.id == key.id)
