@@ -25,5 +25,10 @@ Reduce a pool only if thread count or idle switches fall, first-call bidirection
 
 ## Confirmation
 
-Measure the last disconnect and the later received tone.
-Repeat when adapters add blocking work.
+Repeat measurements when adapters add blocking work.
+
+One worker used three threads, 3,912 KiB of anonymous memory, and 15 context switches in a minute with one registered handset and one subscribed application.
+The two-worker baseline used four threads, 4,228 KiB, and 13 switches under the same conditions, below half the historical 10,841 switches per minute.
+The single worker took 1,458 and 1,209 ms to deliver both tones across two fresh starts, compared with 1,215 and 1,202 ms for two workers.
+The media service acknowledged all 64 simultaneous socket releases in 2.979 ms under a two-CPU limit.
+Keep two runtime workers and the existing blocking pool.

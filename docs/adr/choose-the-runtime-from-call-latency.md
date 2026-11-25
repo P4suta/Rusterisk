@@ -26,4 +26,8 @@ Adopt a runtime change only when idle switches or resident memory fall and first
 ## Confirmation
 
 Measure the later of the two received tones and require the last of 64 simultaneous disconnects to finish within 20 ms.
-Repeat the comparison when the workload changes.
+
+The current-thread candidate used 3,464 KiB of anonymous memory, two threads, and 14 context switches per minute with a registered handset and one subscribed application.
+The two-worker baseline used 4,228 KiB, four threads, and 13 switches per minute under the same workload.
+Across two fresh starts in reverse order, both peers received their first tones after 1,283 and 1,386 ms on the current-thread runtime and after 1,215 ms on each baseline run.
+Keep the multi-thread runtime.
