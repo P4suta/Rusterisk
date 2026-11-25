@@ -3,7 +3,6 @@ use super::{
     WebRtcSession,
 };
 use crate::media_link::{DigitCommand, LinkStats};
-use rusterisk_config::Codec;
 use rusterisk_core::{DtmfToken, DtmfTone, PeerMediaDirection};
 use rusterisk_media::{
     AudioFormat, Frame, MediaError, RtpPacket, RtpReceiver, RtpSender, MAX_PACKET,
@@ -100,11 +99,7 @@ struct AudioInput {
 
 impl WebRtcLeg {
     pub fn new(session: WebRtcSession, direction: PeerMediaDirection) -> Result<Self, MediaError> {
-        let format = match session.codec {
-            Codec::Pcmu => AudioFormat::Pcmu,
-            Codec::Pcma => AudioFormat::Pcma,
-            Codec::Opus => AudioFormat::Opus,
-        };
+        let format = session.audio_format();
         let mut session = session;
         let mid = session.engine.mid.ok_or(MediaError::InvalidRoute)?;
         let source = session

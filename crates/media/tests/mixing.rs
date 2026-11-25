@@ -10,6 +10,36 @@ fn frame(value: i16) -> Result<Frame, MediaError> {
 }
 
 #[test]
+fn a_bridge_uses_its_highest_negotiated_rate_even_when_that_member_is_silent(
+) -> Result<(), MediaError> {
+    let mut mixer = Mixer::new(3);
+    for (key, rate) in [(1, 8000), (2, 12000), (3, 44100)] {
+        mixer.insert_at_rate(key, rate)?;
+    }
+    mixer.bridge(1, &[1, 2, 3])?;
+    let samples = std::array::from_fn::<_, 160, _>(|index| (index as i16 - 80) * 127);
+    let voice = Frame::new(&samples, 8000)?;
+    for (leaving, rate) in [(None, 44100), (Some(3), 12000), (Some(2), 8000)] {
+        if let Some(leaving) = leaving {
+            assert!(mixer.remove(&leaving));
+        }
+        mixer.push(&1, voice)?;
+        let mixed = mixer.tick_with_recordings()?;
+        assert_eq!(mixed.bridges, [(1, voice.resample(rate)?)]);
+        assert_eq!(mixed.channels[0].1.rate(), rate);
+        assert!(mixed.channels[0]
+            .1
+            .samples()
+            .iter()
+            .all(|value| *value == 0));
+        if let Some((_, peer)) = mixed.channels.get(1) {
+            assert_eq!(*peer, voice.resample(rate)?);
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn bridges_mix_received_samples_without_sending_a_call_its_own_audio() -> Result<(), MediaError> {
     let mut mixer = Mixer::new(4);
     for key in 1..=4 {

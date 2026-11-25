@@ -1,5 +1,5 @@
-use crate::{Frame, MediaError, MAX_SAMPLES};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use crate::{Frame, MediaError, PcmFramer, MAX_SAMPLES};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gate {
@@ -26,9 +26,16 @@ impl Gate {
 
 struct Input {
     bridge: Option<u64>,
-    frames: VecDeque<Frame>,
+    frames: PcmFramer,
+    mix_rate: u32,
     gate: Gate,
     generated_audio_gate: Gate,
+}
+
+struct BridgeSum {
+    id: u64,
+    rate: u32,
+    samples: [i32; MAX_SAMPLES],
 }
 
 pub struct Mixer<K> {
@@ -36,7 +43,7 @@ pub struct Mixer<K> {
     inputs: BTreeMap<K, Input>,
     // A tick reuses this storage, so a steady set of members allocates nothing.
     heard: Vec<Option<Frame>>,
-    sums: Vec<(u64, [i32; MAX_SAMPLES])>,
+    sums: Vec<BridgeSum>,
     order: Vec<usize>,
     mixed: MixedAudio<K>,
     // The frame passes of the last tick, which a test bounds by the member count.
@@ -73,6 +80,10 @@ impl<K: Ord + Clone> Mixer<K> {
     }
 
     pub fn insert(&mut self, key: K) -> Result<(), MediaError> {
+        self.insert_at_rate(key, 48000)
+    }
+
+    pub fn insert_at_rate(&mut self, key: K, rate: u32) -> Result<(), MediaError> {
         if self.inputs.contains_key(&key) {
             return Err(MediaError::InvalidRoute);
         }
@@ -83,7 +94,8 @@ impl<K: Ord + Clone> Mixer<K> {
             key,
             Input {
                 bridge: None,
-                frames: VecDeque::with_capacity(3),
+                frames: PcmFramer::with_capacity(rate, 3)?,
+                mix_rate: rate,
                 gate: Gate::Open,
                 generated_audio_gate: Gate::Open,
             },
@@ -92,7 +104,32 @@ impl<K: Ord + Clone> Mixer<K> {
     }
 
     pub fn remove(&mut self, key: &K) -> bool {
-        self.inputs.remove(key).is_some()
+        let Some(input) = self.inputs.remove(key) else {
+            return false;
+        };
+        if let Some(bridge) = input.bridge {
+            self.update_rate(bridge);
+        }
+        true
+    }
+
+    fn update_rate(&mut self, bridge: u64) {
+        let members = |input: &&Input| input.bridge == Some(bridge);
+        if let Some(rate) = self
+            .inputs
+            .values()
+            .filter(members)
+            .map(|input| input.frames.rate())
+            .max()
+        {
+            for input in self
+                .inputs
+                .values_mut()
+                .filter(|input| input.bridge == Some(bridge))
+            {
+                input.mix_rate = rate;
+            }
+        }
     }
 
     pub fn bridge_for(&self, key: &K) -> Option<u64> {
@@ -122,8 +159,10 @@ impl<K: Ord + Clone> Mixer<K> {
             if input.bridge != bridge {
                 input.frames.clear();
                 input.bridge = bridge;
+                input.mix_rate = input.frames.rate();
             }
         }
+        self.update_rate(id);
         Ok(())
     }
 
@@ -148,15 +187,10 @@ impl<K: Ord + Clone> Mixer<K> {
 
     pub fn push(&mut self, key: &K, frame: Frame) -> Result<(), MediaError> {
         let input = self.inputs.get_mut(key).ok_or(MediaError::UnknownStream)?;
-        if input.frames.len() >= 3 {
-            return Err(MediaError::Capacity);
-        }
-        let frame = frame.resample(48000)?;
-        if frame.samples().len() != MAX_SAMPLES {
+        if frame.samples().len() * 50 != frame.rate() as usize {
             return Err(MediaError::InvalidFrame);
         }
-        input.frames.push_back(frame);
-        Ok(())
+        input.frames.push(frame.resample(input.frames.rate())?)
     }
 
     pub fn tick(&mut self) -> Result<Vec<(K, Frame)>, MediaError> {
@@ -229,10 +263,16 @@ impl<K: Ord + Clone> Mixer<K> {
         #[cfg(test)]
         let mut passes = 0_usize;
         for input in inputs.values_mut() {
-            let frame = input.frames.pop_front().filter(|_| input.gate.receives());
+            let frame = input
+                .frames
+                .pop()
+                .filter(|_| input.gate.receives())
+                .map(|frame| frame.resample(input.mix_rate))
+                .transpose()?;
             if let Some(bridge) = input.bridge {
-                if let (Some(sum), Some(frame)) = (bridge_sum(sums, bridge), &frame) {
-                    add(sum, frame);
+                let sum = bridge_sum(sums, bridge, input.mix_rate);
+                if let Some(frame) = &frame {
+                    add(&mut sum.samples, frame);
                     #[cfg(test)]
                     {
                         passes += 1;
@@ -244,7 +284,7 @@ impl<K: Ord + Clone> Mixer<K> {
         for (target, _) in playback {
             match target {
                 AudioTarget::Bridge(bridge) => {
-                    bridge_sum(sums, *bridge);
+                    bridge_sum(sums, *bridge, 48000);
                 }
                 AudioTarget::Channel(_) => {}
             }
@@ -265,13 +305,13 @@ impl<K: Ord + Clone> Mixer<K> {
                 music.iter().find(|(target, _, _)| target == key)
             {
                 if generated_gate.sends() {
-                    add(&mut sum, frame);
+                    add(&mut sum, &frame.resample(input.mix_rate)?);
                 }
             } else {
                 // A member hears its bridge without its own voice.
                 if let Some(bridge) = input.bridge.filter(|_| input.gate.sends()) {
-                    if let Some((_, total)) = sums.iter().find(|(id, _)| *id == bridge) {
-                        sum = *total;
+                    if let Some(total) = sums.iter().find(|total| total.id == bridge) {
+                        sum = total.samples;
                     }
                     if let Some(own) = heard {
                         for (sum, sample) in sum.iter_mut().zip(own.samples()) {
@@ -293,26 +333,26 @@ impl<K: Ord + Clone> Mixer<K> {
                         }
                     };
                     if permitted {
-                        add(&mut sum, frame);
+                        add(&mut sum, &frame.resample(input.mix_rate)?);
                     }
                 }
             }
-            *output = clamped(sum)?;
+            *output = clamped(&sum, input.mix_rate)?;
         }
         order.clear();
         order.extend(0..sums.len());
-        order.sort_unstable_by_key(|index| sums.get(*index).map(|(bridge, _)| *bridge));
+        order.sort_unstable_by_key(|index| sums[*index].id);
         mixed.bridges.clear();
         for index in order.iter() {
-            let Some((bridge, mut sum)) = sums.get(*index).copied() else {
-                continue;
-            };
+            let bridge = &mut sums[*index];
             for (target, frame) in playback {
-                if *target == AudioTarget::Bridge(bridge) {
-                    add(&mut sum, frame);
+                if *target == AudioTarget::Bridge(bridge.id) {
+                    add(&mut bridge.samples, &frame.resample(bridge.rate)?);
                 }
             }
-            mixed.bridges.push((bridge, clamped(sum)?));
+            mixed
+                .bridges
+                .push((bridge.id, clamped(&bridge.samples, bridge.rate)?));
         }
         #[cfg(test)]
         {
@@ -328,24 +368,27 @@ fn add(sum: &mut [i32; MAX_SAMPLES], frame: &Frame) {
     }
 }
 
-fn clamped(sum: [i32; MAX_SAMPLES]) -> Result<Frame, MediaError> {
-    Frame::new(
-        &sum.map(|sample| sample.clamp(i16::MIN.into(), i16::MAX.into()) as i16),
-        48000,
-    )
+fn clamped(sum: &[i32; MAX_SAMPLES], rate: u32) -> Result<Frame, MediaError> {
+    let len = rate as usize / 50;
+    let mut samples = [0; MAX_SAMPLES];
+    for (target, source) in samples[..len].iter_mut().zip(sum) {
+        *target = (*source).clamp(i16::MIN.into(), i16::MAX.into()) as i16;
+    }
+    Frame::new(&samples[..len], rate)
 }
 
 // The running sum of one bridge, which starts at silence.
-fn bridge_sum(
-    sums: &mut Vec<(u64, [i32; MAX_SAMPLES])>,
-    bridge: u64,
-) -> Option<&mut [i32; MAX_SAMPLES]> {
-    if !sums.iter().any(|(id, _)| *id == bridge) {
-        sums.push((bridge, [0; MAX_SAMPLES]));
+fn bridge_sum(sums: &mut Vec<BridgeSum>, id: u64, rate: u32) -> &mut BridgeSum {
+    if let Some(index) = sums.iter().position(|sum| sum.id == id) {
+        return &mut sums[index];
     }
-    sums.iter_mut()
-        .find(|(id, _)| *id == bridge)
-        .map(|(_, sum)| sum)
+    let index = sums.len();
+    sums.push(BridgeSum {
+        id,
+        rate,
+        samples: [0; MAX_SAMPLES],
+    });
+    &mut sums[index]
 }
 
 #[cfg(test)]

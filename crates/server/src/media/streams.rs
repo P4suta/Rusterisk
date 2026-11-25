@@ -114,8 +114,9 @@ impl MediaHub {
         key: CallKey,
         mut port: Port,
         initial_gate: Gate,
+        rate: u32,
     ) -> Result<(), MediaError> {
-        self.mixer.insert(key.clone())?;
+        self.mixer.insert_at_rate(key.clone(), rate)?;
         self.mixer.gates(&key, initial_gate, initial_gate)?;
         port.generated_audio_gate = initial_gate;
         self.ports.insert(key, port);
@@ -131,7 +132,7 @@ impl MediaHub {
         self.check_link(&key)?;
         let (port, channels) = Port::new(PeerMediaDirection::SendReceive, DigitSupport::Stream);
         let link = AudioSocketLink::new(socket, channels, rate)?;
-        self.install_link(key.clone(), port, Gate::Open)?;
+        self.install_link(key.clone(), port, Gate::Open, rate)?;
         self.spawn_link(key, link.run())
     }
 
@@ -156,8 +157,9 @@ impl MediaHub {
         let (answer, answers) = mpsc::channel(8);
         port.answers = Some(answers);
         port.connection_lease = lease;
+        let rate = options.format.rate();
         let link = WebSocketMediaLink::new(socket, channels, options, answer)?;
-        self.install_link(key.clone(), port, Gate::Open)?;
+        self.install_link(key.clone(), port, Gate::Open, rate)?;
         self.spawn_link(key, link.run())
     }
 }

@@ -956,7 +956,12 @@ impl MediaHub {
             .unwrap_or(DigitSupport::Unsupported);
         let leg = RtpLeg::new(sockets, session, initial_direction)?;
         let port = Port::owned(initial_direction, support);
-        self.install_link(key.clone(), port, mode.gate(initial_direction))?;
+        self.install_link(
+            key.clone(),
+            port,
+            mode.gate(initial_direction),
+            session.format.rate(),
+        )?;
         self.legs.insert(key, leg);
         Ok(())
     }

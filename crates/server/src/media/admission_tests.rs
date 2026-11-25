@@ -33,7 +33,7 @@ async fn measurement_reply_preserves_the_capture_time_and_counts() -> Result<(),
     )?;
     leg.measurements_mut().local.rxcount = 7;
     let port = Port::owned(PeerMediaDirection::SendReceive, DigitSupport::Unsupported);
-    hub.install_link(key.clone(), port, Gate::Open)?;
+    hub.install_link(key.clone(), port, Gate::Open, 8000)?;
     hub.legs.insert(key.clone(), leg);
     let (reply, response) = oneshot::channel();
     let before = crate::utc_timestamps::now_millis();

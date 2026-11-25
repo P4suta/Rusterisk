@@ -105,7 +105,9 @@ async fn a_port_attached_after_idleness_receives_its_first_frame_one_period_late
     let key = key()?;
     let (port, mut channels) =
         Port::new(PeerMediaDirection::SendReceive, DigitSupport::Unsupported);
-    fixture.hub.install_link(key.clone(), port, Gate::Open)?;
+    fixture
+        .hub
+        .install_link(key.clone(), port, Gate::Open, 48000)?;
     assert!(channels.outgoing.try_recv().is_err());
     fixture.ticks_one_period_later().await?;
     let frame = channels.outgoing.try_recv().map_err(failure)?;

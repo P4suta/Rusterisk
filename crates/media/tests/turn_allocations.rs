@@ -13,7 +13,7 @@ impl Path {
     fn new() -> Result<Self, MediaError> {
         let mut mixer = Mixer::new(4);
         for key in [0, 1] {
-            mixer.insert(key)?;
+            mixer.insert_at_rate(key, 8000)?;
         }
         mixer.bridge(1, &[0, 1])?;
         Ok(Self {
