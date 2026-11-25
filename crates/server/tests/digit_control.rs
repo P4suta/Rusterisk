@@ -125,7 +125,12 @@ fn digit_admission_requires_answered_stasis_and_negotiated_support() -> Result<(
         control.apply(send("#")?, "now", 0).err(),
         Some(ControlError::Capacity)
     );
-    control.apply(Action::Hangup(id()?), "ended", 0)?;
+    let ended = control.apply(Action::Hangup(id()?), "ended", 0)?;
+    assert!(ended
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, Effect::Release { key: released } if released == &key)));
+    control.signal(Signal::MediaReleased { key: key.clone() }, "released")?;
     control.apply(originate()?, "replacement", 0)?;
     let replacement = control.key(&id()?)?;
     control.signal(

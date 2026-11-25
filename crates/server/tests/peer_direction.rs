@@ -183,6 +183,8 @@ fn stale_and_ended_direction_updates_do_not_control_a_replacement() -> Result<()
         direction: PeerMediaDirection::Inactive,
     };
     assert!(control.signal(signal.clone(), "now")?.effects.is_empty());
+    assert_eq!(originate(&mut control), Err(ControlError::Capacity));
+    control.signal(Signal::MediaReleased { key: key.clone() }, "now")?;
     let current = originate(&mut control)?;
     assert_ne!(current, key);
     assert!(control.signal(signal, "now")?.effects.is_empty());
