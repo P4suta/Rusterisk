@@ -1,11 +1,18 @@
 use super::{cleanup::combine, failure, Active, DigitDelivery, MediaAdmission, Signaling};
-use crate::media::{MediaHub, PlaybackControl, Queued};
+use crate::media::{MediaHub, MediaNotice, PlaybackControl, Queued};
 use crate::storage::{MusicSelection, StorageWorker};
-use crate::{Action, CallKey, ControlError, Controller, Credentials, Effect, MediaOwner};
+use crate::{
+    Action, CallKey, ControlError, Controller, Credentials, Effect, IncomingCall, IncomingTarget,
+    MediaOwner,
+};
 use rusterisk_api::{ChannelId, MediaUri, RecordingOptions};
 use rusterisk_config::Config;
-use rusterisk_core::{MediaTaskKind, MediaTaskToken, MediaTasks};
+use rusterisk_core::{
+    DtmfCommand, DtmfDigit, DtmfOutbox, DtmfTiming, MediaTaskKind, MediaTaskToken, MediaTasks,
+    RecordingControl,
+};
 use rusterisk_media::{Frame, MediaError};
+use rusterisk_sip::{Output, SipEvent};
 use rusterisk_storage::Recorder;
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -354,6 +361,132 @@ async fn a_refused_reservation_fails_its_job_with_the_reason_of_the_media_task(
             Err(ControlError::Adapter(reason)) if reason == MediaError::UnknownStream.to_string()
         ));
         Ok(())
+    })
+    .await
+}
+
+fn digits() -> Result<DtmfCommand, ControlError> {
+    let timing = DtmfTiming::new(3, 20, 60, 4).map_err(|_| ControlError::Invalid("test timing"))?;
+    DtmfOutbox::new(u16::MAX)
+        .and_then(|mut outbox| outbox.admit(&[DtmfDigit::Five], timing))
+        .map_err(|_| ControlError::Invalid("test digits"))
+}
+
+#[tokio::test]
+async fn a_digit_command_leaves_the_turn_free() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (key, _token) = unattached(fixture)?;
+        fixture
+            .turn(Effect::Dtmf {
+                key,
+                command: digits()?,
+            })
+            .await?;
+        assert_eq!(fixture.queued(), Some(Queued::Other));
+        fixture.registers().await
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_recording_control_leaves_the_turn_free() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (_key, token) = unattached(fixture)?;
+        fixture
+            .turn(Effect::ControlRecording {
+                token,
+                operation: RecordingControl::Pause,
+            })
+            .await?;
+        assert_eq!(fixture.queued(), Some(Queued::Other));
+        fixture.registers().await
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_refused_digit_command_reports_its_finish() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (key, _token) = unattached(fixture)?;
+        let command = digits()?;
+        fixture
+            .turn(Effect::Dtmf {
+                key: key.clone(),
+                command,
+            })
+            .await?;
+        fixture.answer()?;
+        let notice = tokio::time::timeout(UNRELATED, fixture.signaling.notices.recv())
+            .await
+            .map_err(failure)?
+            .ok_or(ControlError::Capacity)?;
+        assert!(matches!(
+            notice,
+            MediaNotice::DtmfFinished { key: finished, token }
+                if finished == key && token == command.token
+        ));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_full_command_queue_fails_one_digit_delivery_and_keeps_signaling_running(
+) -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let _subscription = fixture
+            .controller
+            .subscribe(
+                Credentials::new("app".into(), "test-password".into())?,
+                None,
+                "app".into(),
+            )
+            .await?;
+        let key = fixture
+            .controller
+            .incoming(IncomingCall {
+                id: id("digits")?,
+                endpoint: "phone".into(),
+                caller: "100".into(),
+                context: "internal".into(),
+                extension: "100".into(),
+                target: IncomingTarget::Stasis {
+                    application: "app".into(),
+                    arguments: Vec::new(),
+                },
+            })
+            .await?;
+        fixture.signaling.calls.insert(
+            key.clone(),
+            Active {
+                listener: 0,
+                media: MediaAdmission::Attached,
+                digits: DigitDelivery::Media,
+                direction_reply: None,
+            },
+        );
+        let (_unattached, token) = unattached(fixture)?;
+        while fixture.signaling.media.stop_playback(token).is_ok() {}
+        let received = SipEvent::DtmfReceived {
+            id: key.id.as_str().into(),
+            generation: key.generation,
+            digit: DtmfDigit::Five,
+            duration_ms: 40,
+        };
+        tokio::time::timeout(
+            UNRELATED,
+            fixture.signaling.output_for_test(
+                0,
+                Output {
+                    datagrams: Vec::new(),
+                    events: Vec::from([received]),
+                },
+                0,
+            ),
+        )
+        .await
+        .map_err(|_| ControlError::Invalid("The turn waited for queue space"))??;
+        fixture.registers().await
     })
     .await
 }

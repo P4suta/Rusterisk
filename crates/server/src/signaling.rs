@@ -417,10 +417,10 @@ impl Signaling {
                     duration_ms,
                 } => {
                     let key = key(id, generation)?;
-                    self.media
-                        .received_digit(key.clone(), digit)
-                        .await
-                        .map_err(failure)?;
+                    // A full media queue loses this digit for recordings and keeps the call.
+                    if let Err(error) = self.media.received_digit(key.clone(), digit) {
+                        tracing::warn!(channel = %key.id.as_str(), generation = key.generation, %error, "received digit not delivered to the media task");
+                    }
                     self.notify(Signal::DtmfReceived {
                         key,
                         digit,
@@ -825,7 +825,7 @@ impl Signaling {
                     .await?;
             }
             Effect::ControlRecording { token, operation } => {
-                if let Err(error) = self.media.control_recording(token, operation).await {
+                if let Err(error) = self.media.control_recording(token, operation) {
                     tracing::warn!(?token, %error, "recording control failed");
                 }
             }
@@ -839,7 +839,7 @@ impl Signaling {
                         .get(&key)
                         .is_some_and(|call| matches!(call.digits, DigitDelivery::Media))
                 {
-                    match self.media.send_sequence(key.clone(), command).await {
+                    match self.media.send_sequence(key.clone(), command) {
                         Ok(()) => return Ok(()),
                         Err(error) => {
                             tracing::warn!(channel = %key.id, generation = key.generation, %error, "digit command admission failed")
