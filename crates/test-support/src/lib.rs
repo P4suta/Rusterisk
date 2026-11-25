@@ -154,3 +154,20 @@ pub async fn virtual_window<F: std::future::IntoFuture>(
     tokio::time::advance(std::time::Duration::ZERO).await;
     tokio::time::timeout(duration, future).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Wait;
+
+    #[test]
+    fn bounding_a_large_future_stores_its_payload_once() -> std::io::Result<()> {
+        super::block_on(async {
+            let payload = [0_u8; 32 * 1024];
+            let job = async move { std::hint::black_box(payload) };
+            let original = size_of_val(&job);
+            let bounded = Wait::Ready.bounded(job);
+            assert!(size_of_val(&bounded) <= original + 1024);
+            Ok(())
+        })
+    }
+}

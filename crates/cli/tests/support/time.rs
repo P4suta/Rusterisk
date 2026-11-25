@@ -1,5 +1,5 @@
 use std::{future::IntoFuture, time::Duration};
-use tokio::time::error::Elapsed;
+use tokio::time::Timeout;
 
 #[derive(Clone, Copy)]
 pub enum Wait {
@@ -23,7 +23,7 @@ impl Wait {
         }
     }
 
-    pub async fn bounded<F: IntoFuture>(self, future: F) -> Result<F::Output, Elapsed> {
-        tokio::time::timeout(self.duration(), future).await
+    pub fn bounded<F: IntoFuture>(self, future: F) -> Timeout<F::IntoFuture> {
+        tokio::time::timeout(self.duration(), future)
     }
 }
