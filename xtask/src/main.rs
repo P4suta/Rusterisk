@@ -233,6 +233,10 @@ fn policy() -> Result<(), TaskError> {
             .collect();
         let mut findings = xtask::inspect_with_exceptions(&source, &scoped)
             .map_err(|error| TaskError::Contract(format!("{}: {error}", path.display())))?;
+        findings.extend(
+            xtask::inspect_call_turn(path, &source)
+                .map_err(|error| TaskError::Contract(format!("{}: {error}", path.display())))?,
+        );
         if xtask::timer_policy::production(path) {
             let timers: Vec<xtask::timer_policy::Timer> = exceptions
                 .timers
