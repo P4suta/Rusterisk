@@ -164,12 +164,13 @@ fn execute(command: Command) -> Result<(), AppError> {
             Ok(())
         }
         Command::Run {
+            log_level,
             directory,
             data_directory,
         } => {
             let subscriber = tracing_subscriber::fmt()
                 .json()
-                .with_max_level(tracing::Level::INFO)
+                .with_max_level(log_level)
                 .finish();
             tracing::subscriber::set_global_default(subscriber).map_err(AppError::Logging)?;
             runtime()?.block_on(start(directory, data_directory))
