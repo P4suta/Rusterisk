@@ -174,6 +174,8 @@ pub(super) enum Input {
 }
 
 pub(super) struct Network {
+    #[cfg(test)]
+    captured: Option<mpsc::Sender<(tokio::time::Instant, Datagram)>>,
     listeners: Vec<ListenerSocket>,
     ports: BTreeMap<ConnectionKey, Port>,
     jobs: JoinSet<Result<(), ControlError>>,
@@ -484,6 +486,8 @@ impl Network {
         let (upgrade_requests, upgrades) = mpsc::channel(64);
         let (preparation_sender, prepared) = mpsc::channel(64);
         Ok(Self {
+            #[cfg(test)]
+            captured: None,
             listeners,
             ports: BTreeMap::new(),
             jobs: JoinSet::new(),
@@ -625,6 +629,13 @@ impl Network {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(super) fn capture_datagrams(&mut self) -> mpsc::Receiver<(tokio::time::Instant, Datagram)> {
+        let (sender, received) = mpsc::channel(16);
+        self.captured = Some(sender);
+        received
+    }
+
     pub(super) async fn send(
         &mut self,
         listener: usize,
@@ -632,6 +643,12 @@ impl Network {
     ) -> Result<(), ControlError> {
         if packet.bytes.len() > MAX_MESSAGE {
             return Err(ControlError::Capacity);
+        }
+        #[cfg(test)]
+        if let Some(capture) = &self.captured {
+            return capture
+                .try_send((tokio::time::Instant::now(), packet))
+                .map_err(failure);
         }
         if let ListenerSocket::Datagram(socket) = &self.listeners[listener] {
             let size = tokio::time::timeout(
@@ -674,6 +691,13 @@ impl Network {
 
     pub(super) async fn next(&mut self) -> Result<Input, ControlError> {
         loop {
+            let listeners = self.listeners.as_slice();
+            #[cfg(test)]
+            let listeners = if self.captured.is_some() {
+                &[]
+            } else {
+                listeners
+            };
             tokio::select! {
                 event = self.prepared.recv() => {
                     if let Some(input) = self.prepared_event(event.ok_or(ControlError::Capacity)?) { return Ok(input); }
@@ -682,7 +706,7 @@ impl Network {
                     let request = upgrade.ok_or(ControlError::Capacity)?;
                     return Ok(Input::Upgrade(request));
                 },
-                received = listen(&self.listeners) => match received? {
+                received = listen(listeners) => match received? {
                     ListenerInput::Datagram(packet) => return Ok(Input::Packet(packet)),
                     ListenerInput::Accepted { listener, peer, stream } => {
                         if let Err(error) = self.accepted(listener, peer, stream) { tracing::debug!(%error, "signaling connection refused"); }
