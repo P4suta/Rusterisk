@@ -175,7 +175,7 @@ pub(super) enum Input {
 
 pub(super) struct Network {
     #[cfg(test)]
-    captured: Option<mpsc::Sender<(tokio::time::Instant, Datagram)>>,
+    observed_sends: Option<mpsc::Sender<(tokio::time::Instant, SocketAddr)>>,
     listeners: Vec<ListenerSocket>,
     ports: BTreeMap<ConnectionKey, Port>,
     jobs: JoinSet<Result<(), ControlError>>,
@@ -487,7 +487,7 @@ impl Network {
         let (preparation_sender, prepared) = mpsc::channel(64);
         Ok(Self {
             #[cfg(test)]
-            captured: None,
+            observed_sends: None,
             listeners,
             ports: BTreeMap::new(),
             jobs: JoinSet::new(),
@@ -630,10 +630,17 @@ impl Network {
     }
 
     #[cfg(test)]
-    pub(super) fn capture_datagrams(&mut self) -> mpsc::Receiver<(tokio::time::Instant, Datagram)> {
+    pub(super) async fn observe_datagram_sends(
+        &mut self,
+    ) -> Result<mpsc::Receiver<(tokio::time::Instant, SocketAddr)>, ControlError> {
+        for listener in &self.listeners {
+            if let ListenerSocket::Datagram(socket) = listener {
+                socket.writable().await.map_err(failure)?;
+            }
+        }
         let (sender, received) = mpsc::channel(16);
-        self.captured = Some(sender);
-        received
+        self.observed_sends = Some(sender);
+        Ok(received)
     }
 
     pub(super) async fn send(
@@ -644,12 +651,6 @@ impl Network {
         if packet.bytes.len() > MAX_MESSAGE {
             return Err(ControlError::Capacity);
         }
-        #[cfg(test)]
-        if let Some(capture) = &self.captured {
-            return capture
-                .try_send((tokio::time::Instant::now(), packet))
-                .map_err(failure);
-        }
         if let ListenerSocket::Datagram(socket) = &self.listeners[listener] {
             let size = tokio::time::timeout(
                 Duration::from_millis(100),
@@ -658,13 +659,18 @@ impl Network {
             .await
             .map_err(failure)?
             .map_err(failure)?;
-            return if size == packet.bytes.len() {
-                Ok(())
-            } else {
-                Err(ControlError::Adapter(
+            if size != packet.bytes.len() {
+                return Err(ControlError::Adapter(
                     "Incomplete signaling datagram".into(),
-                ))
-            };
+                ));
+            }
+            #[cfg(test)]
+            if let Some(observer) = &self.observed_sends {
+                observer
+                    .try_send((tokio::time::Instant::now(), packet.peer))
+                    .map_err(failure)?;
+            }
+            return Ok(());
         }
         let key = self
             .legacy_connection(listener, packet.peer)?
@@ -692,12 +698,6 @@ impl Network {
     pub(super) async fn next(&mut self) -> Result<Input, ControlError> {
         loop {
             let listeners = self.listeners.as_slice();
-            #[cfg(test)]
-            let listeners = if self.captured.is_some() {
-                &[]
-            } else {
-                listeners
-            };
             tokio::select! {
                 event = self.prepared.recv() => {
                     if let Some(input) = self.prepared_event(event.ok_or(ControlError::Capacity)?) { return Ok(input); }
