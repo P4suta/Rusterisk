@@ -1,4 +1,5 @@
 use crate::media::MediaHub;
+use crate::signaling::calls;
 use crate::signaling::{resolver::DestinationResolver, Signaling};
 use crate::{Action, ControlError, Controller, Credentials, Effect};
 use hickory_resolver::{
@@ -62,7 +63,7 @@ async fn cancelled_resolution_cannot_connect_before_the_release_effect_is_consum
         let mut bytes = [0; 2048];
         let (size, address) = signaling.control_until(tokio::time::timeout(Duration::from_secs(2), dns.recv_from(&mut bytes))).await?.map_err(failure)?.map_err(failure)?;
         signaling.control_until(controller.execute(credentials()?, None, Action::Hangup(id))).await??;
-        assert!(signaling.native_pending.contains_key(&key));
+        assert!(signaling.records.get(calls::NATIVE, &key).is_some());
         let request = Message::from_vec(&bytes[..size]).map_err(failure)?;
         let query = request.queries.first().ok_or(ControlError::Capacity)?.clone();
         let mut reply = Message::response(request.metadata.id, OpCode::Query);
@@ -76,8 +77,8 @@ async fn cancelled_resolution_cannot_connect_before_the_release_effect_is_consum
         assert_eq!(dns.send_to(&reply, address).await.map_err(failure)?, reply.len());
         let completed = tokio::time::timeout(Duration::from_secs(2), signaling.native_job_for_test()).await.map_err(failure)??.ok_or(ControlError::Capacity)?.map_err(failure)?;
         signaling.native_completed(completed, 1).await?;
-        assert!(signaling.calls.is_empty());
-        assert!(signaling.native_pending.is_empty());
+        assert!(signaling.records.iter(calls::ACTIVE).next().is_none());
+        assert!(signaling.records.iter(calls::NATIVE).next().is_none());
         assert!(signaling.resolution_cache.get(&StaticTarget::from_uri(Protocol::Tcp, &target).map_err(failure)?, Instant::now()).is_none());
         assert!(tokio::time::timeout(Duration::from_millis(100), peer.accept()).await.is_err());
         assert!(matches!(signaling.queued_effect_for_test(), Some(Effect::Release { key: released }) if released == key));

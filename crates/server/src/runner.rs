@@ -1,3 +1,4 @@
+mod calls;
 use crate::clock::Clock;
 use crate::storage::{StoragePort, WorkerError};
 use crate::{Action, CallKey, Control, ControlError, Effect, IncomingCall, Outcome, Signal};
@@ -203,6 +204,7 @@ pub struct Controller {
 }
 
 pub struct Runner {
+    records: crate::call_records::CallRecords<calls::Resources>,
     clock: Clock,
     closed: mpsc::Receiver<()>,
     closures_open: bool,
@@ -223,10 +225,6 @@ pub struct Runner {
     history_jobs: JoinSet<Result<(), WorkerError>>,
     stored_jobs: JoinSet<()>,
     recording_admissions: BTreeMap<rusterisk_core::MediaTaskToken, recording_admission::Pending>,
-    external_admissions: BTreeMap<CallKey, external_admission::Pending>,
-    answers: BTreeMap<CallKey, answer::Pending>,
-    media_leases: BTreeMap<CallKey, mpsc::Receiver<()>>,
-    call_lifetimes: BTreeMap<CallKey, mpsc::Receiver<()>>,
 }
 
 pub struct Subscription {
@@ -299,10 +297,7 @@ impl Controller {
                 history_jobs: JoinSet::new(),
                 stored_jobs: JoinSet::new(),
                 recording_admissions: BTreeMap::new(),
-                external_admissions: BTreeMap::new(),
-                answers: BTreeMap::new(),
-                media_leases: BTreeMap::new(),
-                call_lifetimes: BTreeMap::new(),
+                records: crate::call_records::CallRecords::new(),
             },
             effect_receiver,
         )
@@ -569,7 +564,7 @@ impl Runner {
 
     fn emit_effect(&mut self, effect: Effect) -> Result<(), ControlError> {
         if let Effect::Release { key } = &effect {
-            self.call_lifetimes.remove(key);
+            self.records.remove(calls::LIFETIME, key);
         }
         let effect = match &self.effects {
             Outlet::Channel(sender) if self.pending_effects.is_empty() => {
@@ -805,7 +800,7 @@ impl Runner {
                                 && (self.recording_admissions.len() >= 64
                                     || now_ms.checked_add(5000).is_none()))
                             || (external
-                                && (self.external_admissions.len() >= 64
+                                && (self.records.iter(calls::ADMISSION).count() >= 64
                                     || now_ms.checked_add(5000).is_none()))
                         {
                             return Err(ControlError::Capacity);
@@ -868,10 +863,11 @@ impl Runner {
                                     );
                                 }
                                 Admission::ExternalMedia(key) => {
-                                    self.external_admissions.insert(
+                                    self.records.insert(
+                                        calls::ADMISSION,
                                         key,
                                         external_admission::Pending::new(reply, deadline),
-                                    );
+                                    )?;
                                 }
                             }
                             return Ok(());
@@ -989,14 +985,14 @@ impl Runner {
         for pending in self.recording_admissions.values() {
             wake = wake.earliest(Wake::At(pending.deadline()));
         }
-        for (key, pending) in &self.external_admissions {
+        for (key, pending) in self.records.iter(calls::ADMISSION) {
             wake = wake.earliest(if self.control.has_channel(key) {
                 Wake::At(pending.deadline())
             } else {
                 crate::overdue::DUE
             });
         }
-        for (key, pending) in &self.answers {
+        for (key, pending) in self.records.iter(calls::ANSWER) {
             wake = wake.earliest(if self.answer_waits(key) {
                 pending.wake()
             } else {
@@ -1122,11 +1118,11 @@ impl Runner {
     }
 
     pub(crate) async fn close(&mut self) -> Result<(), ControlError> {
-        self.media_leases.clear();
-        self.call_lifetimes.clear();
+        self.records.retain(calls::CONNECTION, |_, _| false);
+        self.records.retain(calls::LIFETIME, |_, _| false);
         self.close_recording_admissions();
         self.close_external_admissions();
-        self.answers.clear();
+        self.records.retain(calls::ANSWER, |_, _| false);
         let result = self
             .control
             .shutdown(&timestamp())

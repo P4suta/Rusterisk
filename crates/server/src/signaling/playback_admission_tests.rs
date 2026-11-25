@@ -1,6 +1,7 @@
 use super::{cleanup::combine, failure, Active, DigitDelivery, Signaling};
 use crate::media::MediaHub;
 use crate::rtp::{RtpSession, SocketPair};
+use crate::signaling::calls;
 use crate::storage::StorageWorker;
 use crate::{
     Action, CallKey, ControlError, Controller, Credentials, Effect, IncomingCall, IncomingTarget,
@@ -291,7 +292,8 @@ async fn exercise(
             )
             .await
             .map_err(failure)?;
-        signaling.calls.insert(
+        signaling.records.insert(
+            calls::ACTIVE,
             key.clone(),
             Active {
                 listener: 0,
@@ -299,7 +301,7 @@ async fn exercise(
                 digits: DigitDelivery::Media,
                 direction_reply: None,
             },
-        );
+        )?;
         signaling
             .control_until(controller.execute(
                 credentials()?,

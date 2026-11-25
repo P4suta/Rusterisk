@@ -1,4 +1,5 @@
 use super::{Controller, Request, Runner};
+use crate::runner::calls;
 use crate::{CallKey, ControlError};
 use tokio::sync::{mpsc, oneshot};
 
@@ -46,24 +47,24 @@ impl Runner {
         if reply.is_closed() || lifetime.is_closed() {
             return;
         }
-        self.call_lifetimes
-            .retain(|key, lifetime| !lifetime.is_closed() && self.control.has_channel(key));
+        self.records.retain(calls::LIFETIME, |key, lifetime| {
+            !lifetime.is_closed() && self.control.has_channel(key)
+        });
         let result = if !self.control.has_channel(&key) {
             Err(ControlError::Conflict(
                 "Channel generation is no longer active",
             ))
-        } else if self.call_lifetimes.contains_key(&key) {
+        } else if self.records.get(calls::LIFETIME, &key).is_some() {
             Err(ControlError::Conflict("Call lifetime already claimed"))
-        } else if self.call_lifetimes.len() >= 64 {
+        } else if self.records.iter(calls::LIFETIME).count() >= 64 {
             Err(ControlError::Capacity)
         } else {
-            self.call_lifetimes.insert(key.clone(), lifetime);
-            Ok(())
+            self.records.insert(calls::LIFETIME, key.clone(), lifetime)
         };
         let inserted = result.is_ok();
         if reply.send(result).is_err() {
             if inserted {
-                self.call_lifetimes.remove(&key);
+                self.records.remove(calls::LIFETIME, &key);
             }
             tracing::debug!("Call lifetime requester disconnected");
         }

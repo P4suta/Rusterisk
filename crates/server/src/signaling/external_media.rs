@@ -1,4 +1,5 @@
 use super::{failure, Signaling};
+use crate::signaling::calls;
 use crate::{
     media::{AttachmentMode, AttachmentRelease, Order},
     rtp::{RtpSession, SocketPair},
@@ -27,10 +28,10 @@ impl Signaling {
         key: CallKey,
         target: AudioSocketTarget,
     ) -> Result<(), ControlError> {
-        if self.calls.len()
-            + self.external_media.len()
-            + self.stream_admissions.len()
-            + self.websocket_admissions.len()
+        if self.records.iter(calls::ACTIVE).count()
+            + self.records.iter(calls::EXTERNAL).count()
+            + self.records.iter(calls::STREAM).count()
+            + self.records.iter(calls::WEBSOCKET).count()
             >= 64
             || self.stream_jobs.len() >= 64
         {
@@ -38,13 +39,14 @@ impl Signaling {
         }
         let (cancel, mut stopped) = watch::channel(false);
         let media = self.media.clone();
-        self.stream_admissions.insert(
+        self.records.insert(
+            calls::STREAM,
             key.clone(),
             PendingStream {
                 cancel,
                 received: false,
             },
-        );
+        )?;
         self.stream_jobs.spawn(async move {
             let connection = async {
                 let mut socket = tokio::net::TcpStream::connect(target.remote()).await.map_err(failure)?;
@@ -69,13 +71,14 @@ impl Signaling {
         &mut self,
         completed: StreamCompletion,
     ) -> Result<(), ControlError> {
-        let Some(pending) = self.stream_admissions.remove(&completed.key) else {
+        let Some(pending) = self.records.remove(calls::STREAM, &completed.key) else {
             self.order(Order::Release(completed.key))?;
             return Ok(());
         };
         let admitted = completed.result.is_ok();
         if admitted {
-            self.external_media.insert(completed.key.clone());
+            self.records
+                .insert(calls::EXTERNAL, completed.key.clone(), ())?;
         }
         self.notify(crate::Signal::AudioSocketAdmitted {
             key: completed.key.clone(),
@@ -105,7 +108,7 @@ impl Signaling {
     }
 
     pub(super) async fn finish_streams(&mut self) -> Result<(), ControlError> {
-        for (_, pending) in std::mem::take(&mut self.stream_admissions) {
+        for (_, pending) in self.records.drain(calls::STREAM) {
             pending.cancel.send_replace(true);
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -143,11 +146,11 @@ impl Signaling {
         if !self.owed.is_empty() {
             return Err(ControlError::Capacity);
         }
-        if self.calls.len()
-            + self.external_media.len()
+        if self.records.iter(calls::ACTIVE).count()
+            + self.records.iter(calls::EXTERNAL).count()
             + self.external_waits()
-            + self.stream_admissions.len()
-            + self.websocket_admissions.len()
+            + self.records.iter(calls::STREAM).count()
+            + self.records.iter(calls::WEBSOCKET).count()
             >= 64
         {
             return Err(ControlError::Capacity);

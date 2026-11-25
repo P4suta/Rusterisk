@@ -1,5 +1,6 @@
 use crate::media::MediaHub;
 use crate::rtp::{RtpSession, SocketPair};
+use crate::signaling::calls;
 use crate::signaling::{Active, DigitDelivery, Signaling};
 use crate::{CallKey, ControlError, Controller, Effect};
 use rusterisk_api::ChannelId;
@@ -46,7 +47,8 @@ async fn media_acknowledgements_never_send_old_answers_on_replacement_connection
         id: ChannelId::try_from("deferred-call".to_owned())?,
         generation: 1,
     };
-    signaling.calls.insert(
+    signaling.records.insert(
+        calls::ACTIVE,
         key.clone(),
         Active {
             listener: 0,
@@ -54,7 +56,7 @@ async fn media_acknowledgements_never_send_old_answers_on_replacement_connection
             digits: DigitDelivery::Media,
             direction_reply: None,
         },
-    );
+    )?;
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let result = async {
         let remote = SocketPair::bind(IpAddr::V4(Ipv4Addr::LOCALHOST), 0, 0).map_err(failure)?;
@@ -146,7 +148,8 @@ async fn closed_deferred_answers_suppress_cached_retries_on_replacement_connecti
             id: ChannelId::try_from("closed-deferred-call".to_owned())?,
             generation: 1,
         };
-        signaling.calls.insert(
+        signaling.records.insert(
+            calls::ACTIVE,
             key.clone(),
             Active {
                 listener: 0,
@@ -154,7 +157,7 @@ async fn closed_deferred_answers_suppress_cached_retries_on_replacement_connecti
                 digits: DigitDelivery::Media,
                 direction_reply: None,
             },
-        );
+        )?;
         let peer = "127.0.0.1:5061".parse().map_err(failure)?;
         let previous = if closing {
             let reserved = signaling.network.reserve(0, peer)?;

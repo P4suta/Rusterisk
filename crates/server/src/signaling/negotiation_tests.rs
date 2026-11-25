@@ -1,6 +1,7 @@
 use super::{Active, DigitDelivery, Signaling};
 use crate::media::MediaHub;
 use crate::rtp::{RtpSession, SocketPair};
+use crate::signaling::calls;
 use crate::{CallKey, ControlError, Controller, Effect};
 use rusterisk_api::ChannelId;
 use rusterisk_config::Config;
@@ -39,7 +40,8 @@ async fn direction_answers_wait_for_the_current_transport_and_ignore_cached_retr
         id: ChannelId::try_from("call".to_owned())?,
         generation: 1,
     };
-    signaling.calls.insert(
+    signaling.records.insert(
+        calls::ACTIVE,
         key.clone(),
         Active {
             listener: 0,
@@ -47,7 +49,7 @@ async fn direction_answers_wait_for_the_current_transport_and_ignore_cached_retr
             digits: DigitDelivery::Media,
             direction_reply: None,
         },
-    );
+    )?;
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let result = async {
         media

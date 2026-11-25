@@ -3,6 +3,7 @@ use super::{
     MediaHub, Message, NameServerConfig, OpCode, Protocol, RData, Record, ResolveHosts,
     ResolverConfig, ResolverOpts, Signaling, A,
 };
+use crate::signaling::calls;
 use crate::{
     signaling::{cleanup, transport::Input},
     Action, CallKey, Credentials,
@@ -278,7 +279,7 @@ impl Fixture {
     async fn connected(&mut self, key: &CallKey) -> Result<(), ControlError> {
         tokio::time::timeout(Duration::from_secs(3), async {
             for _ in 0..16 {
-                if self.signaling.calls.contains_key(key) {
+                if self.signaling.records.get(calls::ACTIVE, key).is_some() {
                     return Ok(());
                 }
                 self.input(2).await?;
@@ -510,7 +511,7 @@ async fn accepted_udp_start_survives_endpoint_removal_before_dispatch() -> Resul
         fixture.signaling.effect(effect, 0).await?;
         fixture.resolved().await?;
         require(
-            fixture.signaling.calls.contains_key(&key),
+            fixture.signaling.records.get(calls::ACTIVE, &key).is_some(),
             "Accepted native profile was lost before dispatch",
         )?;
         let initial = peer.receive().await?;

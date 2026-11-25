@@ -1,4 +1,5 @@
 use super::{configuration, credentials, failure};
+use crate::signaling::calls;
 use crate::{
     media::MediaHub,
     rtp::SocketPair,
@@ -213,12 +214,13 @@ impl Fixture {
             .await?;
         self.response(100).await?;
         require(
-            self.signaling.calls.len() == 1,
+            self.signaling.records.iter(calls::ACTIVE).count() == 1,
             "Incoming profile was not admitted",
         )?;
         self.signaling
-            .calls
-            .keys()
+            .records
+            .iter(calls::ACTIVE)
+            .map(|(key, _)| key)
             .next()
             .cloned()
             .ok_or(ControlError::Capacity)
@@ -485,7 +487,7 @@ async fn an_early_attachment_that_completes_after_a_cancel_releases_its_media(
             fixture.signaling.media_answers_for_test(12).await?;
             require(
                 !matches!(
-                    fixture.signaling.calls.get(&key).map(|call| &call.media),
+                    fixture.signaling.records.get(calls::ACTIVE, &key).map(|call| &call.media),
                     Some(crate::signaling::MediaAdmission::Early(_))
                 ),
                 "A refused progress kept its early transport",

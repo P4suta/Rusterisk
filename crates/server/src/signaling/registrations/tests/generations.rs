@@ -1,4 +1,5 @@
 use super::{config, dns, ControlError};
+use crate::signaling::calls;
 use crate::{
     media::MediaHub,
     signaling::{
@@ -219,7 +220,7 @@ async fn calls_and_registration_resolution_share_sixteen_slots_until_work_is_rea
                     )?;
                 }
                 signaling.registration_tick(1000).await?;
-                if signaling.native_pending.len() != 16
+                if signaling.records.iter(calls::NATIVE).count() != 16
                     || signaling.registrations.setup_count() != 0
                     || !matches!(
                         signaling.registrations.clients[0].state,

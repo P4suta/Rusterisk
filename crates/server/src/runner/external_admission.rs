@@ -1,4 +1,5 @@
 use super::{timestamp, Runner, MAX_PENDING_EFFECTS};
+use crate::runner::calls;
 use crate::{Action, CallKey, ControlError, Outcome, Signal};
 use std::net::SocketAddr;
 use tokio::sync::oneshot;
@@ -67,14 +68,20 @@ impl Runner {
         result: Result<(), ControlError>,
         now: u64,
     ) -> Result<(), ControlError> {
-        if self.external_admissions.get(&key).is_some_and(|pending| {
-            pending.reply.is_closed() || now >= pending.deadline || !self.control.has_channel(&key)
-        }) {
+        if self
+            .records
+            .get(calls::ADMISSION, &key)
+            .is_some_and(|pending| {
+                pending.reply.is_closed()
+                    || now >= pending.deadline
+                    || !self.control.has_channel(&key)
+            })
+        {
             self.expire_external_admission(&key, now)?;
         }
         let mut outcome = self.control.signal_at(signal, &timestamp(), now)?;
         self.publish(&mut outcome)?;
-        if let Some(pending) = self.external_admissions.remove(&key) {
+        if let Some(pending) = self.records.remove(calls::ADMISSION, &key) {
             let response = match result {
                 Ok(_) if outcome.body.is_some() => Ok(outcome),
                 Ok(_) => Err(ControlError::Conflict(
@@ -101,8 +108,8 @@ impl Runner {
 
     fn expire_external_admission(&mut self, key: &CallKey, now: u64) -> Result<(), ControlError> {
         let pending = self
-            .external_admissions
-            .remove(key)
+            .records
+            .remove(calls::ADMISSION, key)
             .ok_or(ControlError::Capacity)?;
         let error = if pending.reply.is_closed() || now >= pending.deadline {
             ControlError::Capacity
@@ -118,8 +125,8 @@ impl Runner {
 
     pub(super) fn expire_external_admissions(&mut self, now: u64) -> Result<(), ControlError> {
         let expired = self
-            .external_admissions
-            .iter()
+            .records
+            .iter(calls::ADMISSION)
             .filter_map(|(key, pending)| {
                 (pending.reply.is_closed()
                     || now >= pending.deadline
@@ -140,7 +147,7 @@ impl Runner {
     }
 
     pub(super) fn close_external_admissions(&mut self) {
-        for (key, pending) in std::mem::take(&mut self.external_admissions) {
+        for (key, pending) in self.records.drain(calls::ADMISSION) {
             if pending
                 .reply
                 .send(Err(ControlError::Adapter("Control task stopped".into())))

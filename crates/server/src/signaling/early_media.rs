@@ -1,6 +1,7 @@
 use super::{
     cleanup, failure, media, MediaAdmission, PendingWebRtc, PreparedAnswer, Signaling, Waiting,
 };
+use crate::signaling::calls;
 use crate::{
     media::{AttachmentMode, AttachmentRelease},
     rtp::SocketPair,
@@ -17,8 +18,8 @@ impl Signaling {
         now: u64,
     ) -> Result<Option<(usize, rusterisk_sip::Output)>, ControlError> {
         let call = self
-            .calls
-            .get(key)
+            .records
+            .get(calls::ACTIVE, key)
             .ok_or(ControlError::NotFound("Channel not found"))?;
         let listener = call.listener;
         if self.listeners[listener]
@@ -38,8 +39,8 @@ impl Signaling {
         let output = answer
             .answer(&mut self.listeners[listener].engine, key, now)
             .map_err(failure)?;
-        self.calls
-            .get_mut(key)
+        self.records
+            .get_mut(calls::ACTIVE, key)
             .ok_or(ControlError::NotFound("Channel not found"))?
             .media = pending;
         Ok(Some((listener, output)))
@@ -71,8 +72,8 @@ impl Signaling {
         key: &CallKey,
     ) -> Result<(MediaAdmission, PreparedAnswer, Session), ControlError> {
         let call = self
-            .calls
-            .get(key)
+            .records
+            .get(calls::ACTIVE, key)
             .ok_or(ControlError::NotFound("Channel not found"))?;
         let listener = call.listener;
         let MediaAdmission::Incoming(profile) = &call.media else {
@@ -129,8 +130,8 @@ impl Signaling {
         now: u64,
     ) -> Result<bool, ControlError> {
         let call = self
-            .calls
-            .get(key)
+            .records
+            .get(calls::ACTIVE, key)
             .ok_or(ControlError::NotFound("Channel not found"))?;
         let listener = call.listener;
         match &call.media {
@@ -151,7 +152,7 @@ impl Signaling {
                 answer,
             },
             now,
-        );
+        )?;
         Ok(true)
     }
 
@@ -172,7 +173,7 @@ impl Signaling {
                 return Err(failure(error));
             }
         };
-        let Some(call) = self.calls.get_mut(key) else {
+        let Some(call) = self.records.get_mut(calls::ACTIVE, key) else {
             self.release_attachment(key, release);
             return Err(ControlError::NotFound(
                 "Channel generation no longer active",

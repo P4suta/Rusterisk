@@ -120,8 +120,7 @@ impl Control {
     pub(super) fn detach_transfer_dial(&mut self, pair: &TransferPair) -> Result<(), ControlError> {
         let frame = self
             .channels
-            .get_mut(&pair.parent.id)
-            .filter(|entry| entry.call.generation() == pair.parent.generation)
+            .by_handle_mut(pair.parent.handle())
             .and_then(|entry| entry.dialplan.as_mut())
             .ok_or(ControlError::Conflict("Transfer parent changed"))?;
         if !frame
@@ -143,8 +142,7 @@ impl Control {
         outcome.append(self.transfer_dial_ringing(&branch.parent, branch.token));
         let entry = self
             .channels
-            .get_mut(&branch.parent.id)
-            .filter(|entry| entry.call.generation() == branch.parent.generation)
+            .by_handle_mut(branch.parent.handle())
             .ok_or(ControlError::NotFound("Channel not found"))?;
         let dialing = entry
             .dialplan
@@ -208,7 +206,7 @@ impl Control {
                 }
             }
             if let Some(branch) = self.dial_branch(&key) {
-                let winner = self.channels.get(&branch.parent.id)
+                let winner = self.channels.by_handle(branch.parent.handle())
                     .and_then(|entry| entry.dialplan.as_ref())
                     .and_then(|frame| frame.dial.as_ref())
                     .is_some_and(|dial| matches!(dial.fork.state(), DialForkState::Bridged { winner } if winner == branch.index));
@@ -244,8 +242,7 @@ impl Control {
     ) -> Result<Outcome, ControlError> {
         let dial = self
             .channels
-            .get_mut(&branch.parent.id)
-            .filter(|entry| entry.call.generation() == branch.parent.generation)
+            .by_handle_mut(branch.parent.handle())
             .and_then(|entry| entry.dialplan.as_mut())
             .and_then(|frame| {
                 if frame
@@ -279,7 +276,7 @@ impl Control {
         };
         let frame = self
             .channels
-            .get_mut(&branch.parent.id)
+            .by_handle_mut(branch.parent.handle())
             .and_then(|entry| entry.dialplan.as_mut())
             .ok_or(ControlError::Conflict("Dial parent disappeared"))?;
         match result {
@@ -289,7 +286,7 @@ impl Control {
                     return Err(error);
                 }
                 self.channels
-                    .get_mut(&branch.parent.id)
+                    .by_handle_mut(branch.parent.handle())
                     .ok_or(ControlError::NotFound("Channel not found"))?
                     .variables
                     .insert("DIALSTATUS".into(), failure_status(dial.failure).into());
@@ -324,8 +321,7 @@ impl Control {
     ) -> Result<Outcome, ControlError> {
         let dial = self
             .channels
-            .get_mut(&branch.parent.id)
-            .filter(|entry| entry.call.generation() == branch.parent.generation)
+            .by_handle_mut(branch.parent.handle())
             .and_then(|entry| entry.dialplan.as_mut())
             .and_then(|frame| {
                 if frame
@@ -351,7 +347,7 @@ impl Control {
             });
         let frame = self
             .channels
-            .get_mut(&branch.parent.id)
+            .by_handle_mut(branch.parent.handle())
             .and_then(|entry| entry.dialplan.as_mut())
             .ok_or(ControlError::Conflict("Dial parent disappeared"))?;
         match result {
@@ -362,7 +358,7 @@ impl Control {
             Ok((DialForkOutcome::Connect { .. }, mut outcome)) => {
                 frame.dial = Some(dial);
                 self.channels
-                    .get_mut(&branch.parent.id)
+                    .by_handle_mut(branch.parent.handle())
                     .ok_or(ControlError::NotFound("Channel not found"))?
                     .variables
                     .insert("DIALSTATUS".into(), "ANSWER".into());
@@ -375,7 +371,7 @@ impl Control {
                     return Err(error);
                 }
                 self.channels
-                    .get_mut(&branch.parent.id)
+                    .by_handle_mut(branch.parent.handle())
                     .ok_or(ControlError::NotFound("Channel not found"))?
                     .variables
                     .insert("DIALSTATUS".into(), "NOANSWER".into());

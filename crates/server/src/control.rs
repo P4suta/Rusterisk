@@ -901,7 +901,8 @@ impl Control {
         incoming: IncomingCall,
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
-        if self.channels.contains_key(&incoming.id) {
+        let id = &incoming.id;
+        if self.channels.contains_key(id) {
             return Err(ControlError::Conflict(
                 "Channel with given unique ID already exists",
             ));

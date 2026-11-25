@@ -2,6 +2,7 @@ use super::{cleanup::combine, failure, Active, DigitDelivery, MediaAdmission, Si
 use super::{Outcome, Waiting};
 use crate::media::{MediaHub, MediaNotice, PlaybackControl, Queued};
 use crate::rtp::SocketPair;
+use crate::signaling::calls;
 use crate::storage::{MusicSelection, StorageWorker};
 use crate::{
     Action, CallKey, ControlError, Controller, Credentials, Effect, IncomingCall, IncomingTarget,
@@ -286,7 +287,8 @@ fn unattached(fixture: &mut Silent) -> Result<(CallKey, MediaTaskToken), Control
         id: id("unattached")?,
         generation: 7,
     };
-    fixture.signaling.calls.insert(
+    fixture.signaling.records.insert(
+        calls::ACTIVE,
         key.clone(),
         Active {
             listener: 0,
@@ -294,7 +296,7 @@ fn unattached(fixture: &mut Silent) -> Result<(CallKey, MediaTaskToken), Control
             digits: DigitDelivery::Media,
             direction_reply: None,
         },
-    );
+    )?;
     let mut tasks = MediaTasks::new(key.generation);
     let token = tasks.reserve(MediaTaskKind::Playback)?;
     tasks.start(token)?;
@@ -441,7 +443,8 @@ async fn a_full_command_queue_fails_one_digit_delivery_and_keeps_signaling_runni
                 },
             }))
             .await??;
-        fixture.signaling.calls.insert(
+        fixture.signaling.records.insert(
+            calls::ACTIVE,
             key.clone(),
             Active {
                 listener: 0,
@@ -449,7 +452,7 @@ async fn a_full_command_queue_fails_one_digit_delivery_and_keeps_signaling_runni
                 digits: DigitDelivery::Media,
                 direction_reply: None,
             },
-        );
+        )?;
         let (_unattached, token) = unattached(fixture)?;
         while fixture.signaling.media.stop_playback(token).is_ok() {}
         let received = SipEvent::DtmfReceived {
@@ -506,7 +509,8 @@ async fn dialed(
     };
     let sockets = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
     let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
-    fixture.signaling.calls.insert(
+    fixture.signaling.records.insert(
+        calls::ACTIVE,
         key.clone(),
         Active {
             listener: 0,
@@ -514,7 +518,7 @@ async fn dialed(
             digits: DigitDelivery::Media,
             direction_reply: None,
         },
-    );
+    )?;
     let answered = SipEvent::Answered {
         id: key.id.as_str().into(),
         generation: key.generation,
@@ -738,7 +742,7 @@ async fn an_answer_to_an_expired_wait_completes_no_later_wait() -> Result<(), Co
             .map_err(failure)?;
         fixture
             .signaling
-            .pend(key.clone(), 1, Waiting::External { local, release }, 0);
+            .pend(key.clone(), 1, Waiting::External { local, release }, 0)?;
         fixture.signaling.expire_pending(5000).await?;
         assert_eq!(fixture.queued(), Some(Queued::Release));
         let release = fixture
@@ -748,19 +752,27 @@ async fn an_answer_to_an_expired_wait_completes_no_later_wait() -> Result<(), Co
             .map_err(failure)?;
         fixture
             .signaling
-            .pend(key.clone(), 2, Waiting::External { local, release }, 5001);
+            .pend(key.clone(), 2, Waiting::External { local, release }, 5001)?;
         fixture
             .signaling
             .completed(key.clone(), Outcome::Attached(1, Ok(())), 5002)
             .await?;
         assert_eq!(fixture.signaling.waiting_serial(&key), Some(2));
-        assert!(!fixture.signaling.external_media.contains(&key));
+        assert!(!fixture
+            .signaling
+            .records
+            .get(calls::EXTERNAL, &key)
+            .is_some());
         fixture
             .signaling
             .completed(key.clone(), Outcome::Attached(2, Ok(())), 5003)
             .await?;
         assert_eq!(fixture.signaling.waiting_serial(&key), None);
-        assert!(fixture.signaling.external_media.contains(&key));
+        assert!(fixture
+            .signaling
+            .records
+            .get(calls::EXTERNAL, &key)
+            .is_some());
         assert_eq!(fixture.queued(), None);
         Ok(())
     })
@@ -789,12 +801,12 @@ async fn a_held_direction_change_keeps_the_release_behind_its_own_wait() -> Resu
             .waiting_serial(&key)
             .ok_or(ControlError::Invalid("The direction change did not wait"))?;
         assert_ne!(Some(direction), attachment);
-        assert!(fixture.signaling.calls.contains_key(&key));
+        assert!(fixture.signaling.records.get(calls::ACTIVE, &key).is_some());
         fixture
             .signaling
             .completed(key.clone(), Outcome::Direction(direction, Ok(true)), 2)
             .await?;
-        assert!(!fixture.signaling.calls.contains_key(&key));
+        assert!(!fixture.signaling.records.get(calls::ACTIVE, &key).is_some());
         assert_eq!(fixture.signaling.pending_wake(), Wake::Idle);
         Ok(())
     })
@@ -821,9 +833,9 @@ async fn a_call_that_holds_too_much_ends_once_and_is_released_after_its_wait(
                 .await?;
         }
         assert_eq!(destroyed(&mut subscription).await?, 42);
-        assert!(fixture.signaling.calls.contains_key(&key));
+        assert!(fixture.signaling.records.get(calls::ACTIVE, &key).is_some());
         fixture.attached(&key, 19).await?;
-        assert!(!fixture.signaling.calls.contains_key(&key));
+        assert!(!fixture.signaling.records.get(calls::ACTIVE, &key).is_some());
         Ok(())
     })
     .await
@@ -912,9 +924,9 @@ async fn a_release_for_a_waiting_call_follows_its_answer() -> Result<(), Control
         let (key, mut subscription, answered) = dialed(fixture).await?;
         fixture.receive(answered, 0).await?;
         fixture.turn(Effect::Release { key: key.clone() }).await?;
-        assert!(fixture.signaling.calls.contains_key(&key));
+        assert!(fixture.signaling.records.get(calls::ACTIVE, &key).is_some());
         fixture.attached(&key, 1).await?;
-        assert!(!fixture.signaling.calls.contains_key(&key));
+        assert!(!fixture.signaling.records.get(calls::ACTIVE, &key).is_some());
         assert_eq!(fixture.signaling.pending_wake(), Wake::Idle);
         let answered = tokio::time::timeout(UNRELATED, async {
             loop {

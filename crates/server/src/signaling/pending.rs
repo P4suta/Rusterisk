@@ -1,5 +1,6 @@
 use super::{failure, media::PreparedAnswer, DigitDelivery, Signaling};
 use crate::media::AttachmentRelease;
+use crate::signaling::calls;
 use crate::{CallKey, ControlError, Effect, Milestone, Signal};
 use rusterisk_core::{MediaTaskToken, PeerMediaDirection, Wake};
 use rusterisk_media::MediaError;
@@ -90,8 +91,15 @@ impl Signaling {
         self.media_serial
     }
 
-    pub(super) fn pend(&mut self, key: CallKey, serial: u64, waiting: Waiting, now: u64) {
-        self.pending.insert(
+    pub(super) fn pend(
+        &mut self,
+        key: CallKey,
+        serial: u64,
+        waiting: Waiting,
+        now: u64,
+    ) -> Result<(), ControlError> {
+        self.records.insert(
+            calls::MEDIA,
             key,
             Pending {
                 serial,
@@ -100,29 +108,35 @@ impl Signaling {
                 held: VecDeque::new(),
                 overflowed: false,
             },
-        );
+        )
     }
 
     pub(super) fn waits(&self, key: &CallKey) -> bool {
-        self.pending.contains_key(key)
+        self.records.get(calls::MEDIA, key).is_some()
     }
 
     #[cfg(test)]
     pub(super) fn waiting_serial(&self, key: &CallKey) -> Option<u64> {
-        self.pending.get(key).map(|pending| pending.serial)
+        self.records
+            .get(calls::MEDIA, key)
+            .map(|pending| pending.serial)
     }
 
     pub(super) fn external_waits(&self) -> usize {
-        self.pending
-            .values()
+        self.records
+            .iter(calls::MEDIA)
+            .map(|(_, value)| value)
             .filter(|pending| matches!(pending.waiting, Waiting::External { .. }))
             .count()
     }
 
     pub(super) fn pending_wake(&self) -> Wake {
-        self.pending.values().fold(Wake::Idle, |wake, pending| {
-            wake.earliest(Wake::At(pending.deadline))
-        })
+        self.records
+            .iter(calls::MEDIA)
+            .map(|(_, value)| value)
+            .fold(Wake::Idle, |wake, pending| {
+                wake.earliest(Wake::At(pending.deadline))
+            })
     }
 
     // Keeps an item for a call that waits and returns every other item to its caller.
@@ -134,7 +148,7 @@ impl Signaling {
         let Some(key) = key else {
             return Ok(Some(item));
         };
-        let Some(pending) = self.pending.get_mut(&key) else {
+        let Some(pending) = self.records.get_mut(calls::MEDIA, &key) else {
             return Ok(Some(item));
         };
         if pending.held.len() < HELD {
@@ -152,7 +166,7 @@ impl Signaling {
 
     // Puts an effect that reached a waiting call back in front of the items that arrived after it.
     pub(super) fn hold_first(&mut self, key: &CallKey, effect: Effect) -> Option<Effect> {
-        match self.pending.get_mut(key) {
+        match self.records.get_mut(calls::MEDIA, key) {
             Some(pending) => {
                 pending.held.push_front(Held::Effect(effect));
                 None
@@ -163,8 +177,8 @@ impl Signaling {
 
     pub(super) async fn expire_pending(&mut self, now: u64) -> Result<(), ControlError> {
         let expired: Vec<_> = self
-            .pending
-            .iter()
+            .records
+            .iter(calls::MEDIA)
             .filter(|(_, pending)| pending.deadline <= now)
             .map(|(key, _)| key.clone())
             .collect();
@@ -181,12 +195,12 @@ impl Signaling {
         now: u64,
     ) -> Result<(), ControlError> {
         let expected = self
-            .pending
-            .get(&key)
+            .records
+            .get(calls::MEDIA, &key)
             .is_some_and(|pending| pending.expects(&outcome));
         // An answer that no wait expects belongs to an expired wait, which released its media then.
         let Some(pending) = (if expected {
-            self.pending.remove(&key)
+            self.records.remove(calls::MEDIA, &key)
         } else {
             None
         }) else {
@@ -238,7 +252,7 @@ impl Signaling {
         self.replay(&key, pending.held, now).await?;
         if pending.overflowed {
             // A call that waits again ends after that wait.
-            match self.pending.get_mut(&key) {
+            match self.records.get_mut(calls::MEDIA, &key) {
                 Some(next) => next.overflowed = true,
                 None => self.apply_effect(Effect::Release { key }, now).await?,
             }
@@ -274,7 +288,7 @@ impl Signaling {
                 Held::Event { listener, event } => self.apply_event(listener, event, now).await?,
                 Held::Effect(effect) => self.apply_effect(effect, now).await?,
             }
-            if let Some(pending) = self.pending.get_mut(key) {
+            if let Some(pending) = self.records.get_mut(calls::MEDIA, key) {
                 while let Some(item) = held.pop_back() {
                     pending.held.push_front(item);
                 }
@@ -287,7 +301,7 @@ impl Signaling {
     #[cfg(test)]
     pub(crate) async fn media_answers_for_test(&mut self, now: u64) -> Result<(), ControlError> {
         use crate::media::MediaNotice;
-        while !self.pending.is_empty() {
+        while !self.records.iter(calls::MEDIA).next().is_none() {
             let notice = self.notices.recv().await.ok_or(ControlError::Capacity)?;
             match notice {
                 MediaNotice::Attached {
@@ -330,7 +344,12 @@ impl Signaling {
                     direction,
                 })
                 .await?;
-                let events = match &self.calls.get(&key).ok_or(ControlError::Capacity)?.digits {
+                let events = match &self
+                    .records
+                    .get(calls::ACTIVE, &key)
+                    .ok_or(ControlError::Capacity)?
+                    .digits
+                {
                     DigitDelivery::Signaling(_) => Some(u16::MAX),
                     DigitDelivery::Media => events,
                 };
@@ -362,7 +381,7 @@ impl Signaling {
     ) -> Result<(), ControlError> {
         let result = match attached {
             Ok(()) => {
-                self.external_media.insert(key.clone());
+                self.records.insert(calls::EXTERNAL, key.clone(), ())?;
                 Ok(local)
             }
             Err(error) => Err(match error {
@@ -400,7 +419,7 @@ impl Signaling {
         direction: PeerMediaDirection,
         applied: Result<bool, MediaError>,
     ) -> Result<(), ControlError> {
-        let reply = self.calls.get_mut(&key).and_then(|call| {
+        let reply = self.records.get_mut(calls::ACTIVE, &key).and_then(|call| {
             call.direction_reply
                 .take_if(|reply| reply.direction == direction)
         });

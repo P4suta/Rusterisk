@@ -7,6 +7,7 @@ use super::{
     },
     Signaling,
 };
+use crate::signaling::calls;
 use crate::{runner::CallLease, CallKey, ControlError, Controller, Signal};
 use rusterisk_config::Protocol;
 use rusterisk_sip::{Destination, PreparedOutbound};
@@ -90,16 +91,16 @@ impl Signaling {
         epoch: ProfileEpoch,
         now: u64,
     ) -> Result<(), ControlError> {
-        if self.native_pending.len() >= 16
+        if self.records.iter(calls::NATIVE).count() >= 16
             || self.native_jobs.len() >= 16
-            || self.calls.len()
-                + self.external_media.len()
-                + self.stream_admissions.len()
-                + self.websocket_admissions.len()
-                + self.native_pending.len()
+            || self.records.iter(calls::ACTIVE).count()
+                + self.records.iter(calls::EXTERNAL).count()
+                + self.records.iter(calls::STREAM).count()
+                + self.records.iter(calls::WEBSOCKET).count()
+                + self.records.iter(calls::NATIVE).count()
                 >= 64
-            || self.native_pending.contains_key(&key)
-            || self.calls.contains_key(&key)
+            || self.records.get(calls::NATIVE, &key).is_some()
+            || self.records.get(calls::ACTIVE, &key).is_some()
         {
             return Err(ControlError::Capacity);
         }
@@ -140,7 +141,8 @@ impl Signaling {
             }
         };
         let (cancel, mut cancelled) = watch::channel(false);
-        self.native_pending.insert(
+        self.records.insert(
+            calls::NATIVE,
             key.clone(),
             Pending {
                 native,
@@ -151,7 +153,7 @@ impl Signaling {
                 phase: Phase::Resolving,
                 cancel,
             },
-        );
+        )?;
         let resolver = self.resolver.clone();
         let controller = self.controller.clone();
         self.native_jobs.spawn(async move {
@@ -175,7 +177,7 @@ impl Signaling {
         completed: Completion,
         now: u64,
     ) -> Result<(), ControlError> {
-        let Some(pending) = self.native_pending.get_mut(&completed.key) else {
+        let Some(pending) = self.records.get_mut(calls::NATIVE, &completed.key) else {
             self.network.finish_resolution(completed.setup);
             return Ok(());
         };
@@ -212,8 +214,8 @@ impl Signaling {
                         .await;
                 }
                 let pending = self
-                    .native_pending
-                    .remove(&completed.key)
+                    .records
+                    .remove(calls::NATIVE, &completed.key)
                     .ok_or(ControlError::Capacity)?;
                 let flow = pending.native.prepared.flow();
                 let result = self
@@ -242,8 +244,8 @@ impl Signaling {
                             .find(|peer| peer.is_ipv4() == local.is_ipv4());
                         self.network.finish_resolution(setup);
                         let pending = self
-                            .native_pending
-                            .remove(&completed.key)
+                            .records
+                            .remove(calls::NATIVE, &completed.key)
                             .ok_or(ControlError::Capacity)?;
                         let result = match peer {
                             Some(peer) => {
@@ -297,7 +299,7 @@ impl Signaling {
         prepared: Prepared,
         now: u64,
     ) -> Result<(), ControlError> {
-        let key = self.native_pending.iter().find_map(|(key, pending)| {
+        let key = self.records.iter(calls::NATIVE).find_map(|(key, pending)| {
             (matches!(pending.route, Route::Static) && pending.setup == prepared.key)
                 .then(|| key.clone())
         });
@@ -306,8 +308,8 @@ impl Signaling {
             return Ok(());
         };
         let pending = self
-            .native_pending
-            .get(&key)
+            .records
+            .get(calls::NATIVE, &key)
             .ok_or(ControlError::Capacity)?;
         match &pending.phase {
             Phase::Connecting(lease) if !lease.is_released() => {}
@@ -334,8 +336,8 @@ impl Signaling {
         now: u64,
     ) -> Result<(), ControlError> {
         let pending = self
-            .native_pending
-            .remove(&key)
+            .records
+            .remove(calls::NATIVE, &key)
             .ok_or(ControlError::Capacity)?;
         let result = self
             .start_resolved(
@@ -358,7 +360,7 @@ impl Signaling {
         setup: SetupKey,
         result: Result<(), ControlError>,
     ) -> Result<(), ControlError> {
-        let key = self.native_pending.iter().find_map(|(key, pending)| {
+        let key = self.records.iter(calls::NATIVE).find_map(|(key, pending)| {
             (matches!(pending.route, Route::Static) && pending.setup == setup).then(|| key.clone())
         });
         if let Some(key) = key {
@@ -372,7 +374,7 @@ impl Signaling {
     }
 
     pub(super) fn cancel_native(&mut self, key: &CallKey) {
-        if let Some(pending) = self.native_pending.remove(key) {
+        if let Some(pending) = self.records.remove(calls::NATIVE, key) {
             pending.cancel.send_replace(true);
             self.network.cancel_setup(pending.setup);
         }
@@ -388,9 +390,9 @@ impl Signaling {
     }
 
     pub(super) async fn finish_native(&mut self) -> Result<(), ControlError> {
-        let pending = std::mem::take(&mut self.native_pending);
+        let pending = self.records.drain(calls::NATIVE);
         let mut setups = Vec::with_capacity(pending.len());
-        for pending in pending.into_values() {
+        for (_, pending) in pending {
             pending.cancel.send_replace(true);
             self.network.cancel_setup(pending.setup);
             setups.push(pending.setup);

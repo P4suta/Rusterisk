@@ -1,5 +1,6 @@
 pub mod audiosocket;
 mod call_profiles;
+mod call_records;
 pub mod cli;
 mod clock;
 #[cfg(test)]
