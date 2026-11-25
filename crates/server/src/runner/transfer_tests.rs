@@ -38,7 +38,6 @@ fn refer(config: &Config, source: &CallKey) -> Result<DialogRefer, ControlError>
                 endpoint: "alice".into(),
                 caller: "100".into(),
                 local_rtp: "127.0.0.1:10000".parse().map_err(failure)?,
-                timeout_ms: Some(60_000),
             },
             0,
         )

@@ -175,7 +175,6 @@ fn start(
             endpoint: "phone".into(),
             caller: "presentation-only".into(),
             local_rtp: "127.0.0.1:10000".parse()?,
-            timeout_ms: Some(30_000),
         },
         prepared,
         None,

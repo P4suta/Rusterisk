@@ -150,7 +150,6 @@ impl Outgoing {
                 endpoint: "phone".into(),
                 caller: "Displayed".into(),
                 local_rtp: "127.0.0.1:10000".parse()?,
-                timeout_ms: None,
             },
             0,
         )?;

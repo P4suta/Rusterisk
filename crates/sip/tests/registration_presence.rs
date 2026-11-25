@@ -146,7 +146,6 @@ fn registered_contact_targets_preserve_browser_identity_and_physical_routing(
                 endpoint: "phone".into(),
                 caller: "100".into(),
                 local_rtp: "127.0.0.1:10000".parse()?,
-                timeout_ms: None,
             },
             now + 2,
         )?;

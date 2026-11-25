@@ -20,7 +20,6 @@ fn websocket_contacts_preserve_sip_targets_and_the_registered_ws_parameter() -> 
                 endpoint: "phone".into(),
                 caller: "100".into(),
                 local_rtp: "127.0.0.1:10000".parse()?,
-                timeout_ms: None,
             },
             0,
         )?;

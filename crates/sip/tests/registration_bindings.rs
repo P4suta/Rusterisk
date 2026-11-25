@@ -178,7 +178,6 @@ fn repeated_headers_and_lists_return_every_binding_and_prefer_the_highest_qualit
             endpoint: "phone".into(),
             caller: "100".into(),
             local_rtp: "127.0.0.1:10000".parse()?,
-            timeout_ms: None,
         },
         1002,
     )?;

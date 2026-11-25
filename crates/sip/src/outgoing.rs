@@ -20,12 +20,10 @@ pub struct Outbound {
     pub endpoint: String,
     pub caller: String,
     pub local_rtp: SocketAddr,
-    pub timeout_ms: Option<u64>,
 }
 
 struct ValidatedOutbound {
     outbound: Outbound,
-    deadline: Option<u64>,
     transaction_deadline: u64,
     now: u64,
 }
@@ -65,7 +63,6 @@ pub(crate) struct Outgoing {
     remote_to: String,
     remote_contact: DialogTarget,
     codecs: Vec<Codec>,
-    deadline: Option<u64>,
     transaction_deadline: u64,
     state: State,
     cseq: u32,
@@ -290,7 +287,6 @@ fn authenticate(
     now: u64,
 ) -> Result<Option<Vec<u8>>, SipError> {
     if dialog.challenges.len() >= 4
-        || dialog.deadline.is_some_and(|deadline| deadline <= now)
         || !matches!(dialog.state, State::Calling { .. } | State::Proceeding)
     {
         return Ok(None);
@@ -693,9 +689,6 @@ impl Engine {
                 .caller
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || b"+*-#._".contains(&byte))
-            || outbound
-                .timeout_ms
-                .is_some_and(|timeout| timeout == 0 || timeout > 65_535_000)
         {
             return Err(SipError::Capacity);
         }
@@ -706,14 +699,9 @@ impl Engine {
         {
             return Err(SipError::InvalidPacket);
         }
-        let deadline = outbound
-            .timeout_ms
-            .map(|timeout| now.checked_add(timeout).ok_or(SipError::Capacity))
-            .transpose()?;
         let transaction_deadline = now.checked_add(32_000).ok_or(SipError::Capacity)?;
         Ok(ValidatedOutbound {
             outbound,
-            deadline,
             transaction_deadline,
             now,
         })
@@ -729,7 +717,6 @@ impl Engine {
     ) -> Result<Output, SipError> {
         let ValidatedOutbound {
             outbound,
-            deadline,
             transaction_deadline,
             now,
         } = validated;
@@ -789,7 +776,6 @@ impl Engine {
             invite,
             bytes: bytes.as_bytes().to_vec(),
             codecs: endpoint.codecs,
-            deadline,
             transaction_deadline,
             state: State::Calling {
                 retry: now.saturating_add(500),
@@ -908,18 +894,13 @@ impl Engine {
                 }
             };
             wake = wake.earliest(match &dialog.state {
-                State::Calling { retry, .. } => Wake::At(
-                    dialog
-                        .deadline
-                        .map_or(dialog.transaction_deadline, |deadline| {
-                            deadline.min(dialog.transaction_deadline)
-                        }),
-                )
-                .earliest(resend(*retry)),
+                State::Calling { retry, .. } => {
+                    Wake::At(dialog.transaction_deadline).earliest(resend(*retry))
+                }
                 State::CancelPending { retry, expires, .. } => {
                     linger(*expires).earliest(resend(*retry))
                 }
-                State::Proceeding => dialog.deadline.map_or(Wake::Idle, Wake::At),
+                State::Proceeding => Wake::Idle,
                 State::Established(media) => media.pending.as_ref().map_or(Wake::Idle, |answer| {
                     Wake::At(answer.deadline).earliest(Wake::At(answer.retry))
                 }),
@@ -997,13 +978,7 @@ impl Engine {
                 }
             }
             match &mut dialog.state {
-                State::Calling { retry, interval }
-                    if dialog
-                        .deadline
-                        .map(|deadline| deadline.min(dialog.transaction_deadline))
-                        .unwrap_or(dialog.transaction_deadline)
-                        > now =>
-                {
+                State::Calling { retry, interval } if dialog.transaction_deadline > now => {
                     if *retry <= now && !dialog.reliable {
                         output
                             .datagrams
@@ -1023,47 +998,13 @@ impl Engine {
                         *retry = now.saturating_add(*interval);
                     }
                 }
-                State::Calling { retry, interval }
-                    if dialog
-                        .deadline
-                        .map(|deadline| deadline.min(dialog.transaction_deadline))
-                        .unwrap_or(dialog.transaction_deadline)
-                        <= now =>
-                {
+                State::Calling { .. } if dialog.transaction_deadline <= now => {
                     output.events.push(SipEvent::Ended {
                         id: dialog.id.clone(),
                         generation: dialog.generation,
                         cause: 19,
                     });
-                    dialog.state = if dialog.transaction_deadline <= now {
-                        State::Terminated {
-                            expires: now.saturating_add(32_000),
-                        }
-                    } else {
-                        State::CancelPending {
-                            retry: *retry,
-                            interval: *interval,
-                            expires: dialog.transaction_deadline,
-                        }
-                    };
-                }
-                State::Proceeding if dialog.deadline.is_some_and(|deadline| deadline <= now) => {
-                    output.datagrams.push(Datagram::on_route(
-                        dialog.route,
-                        related(
-                            dialog,
-                            Method::Cancel,
-                            dialog.invite.to_header()?.value(),
-                            dialog.cseq,
-                            false,
-                        )?,
-                    ));
-                    output.events.push(SipEvent::Ended {
-                        id: dialog.id.clone(),
-                        generation: dialog.generation,
-                        cause: 19,
-                    });
-                    dialog.state = State::Cancelling {
+                    dialog.state = State::Terminated {
                         expires: now.saturating_add(32_000),
                     };
                 }

@@ -33,7 +33,6 @@ impl Outgoing {
                 endpoint: "bob".into(),
                 caller: "display-only".into(),
                 local_rtp: "127.0.0.1:10000".parse()?,
-                timeout_ms: Some(5000),
             },
             0,
         )?;

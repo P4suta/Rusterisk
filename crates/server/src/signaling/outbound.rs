@@ -40,7 +40,6 @@ pub(super) struct Pending {
 
 pub(super) struct CallStart {
     pub(super) caller: String,
-    pub(super) timeout: Option<u32>,
 }
 
 pub(super) struct NativeStart {
@@ -68,7 +67,6 @@ impl Signaling {
         key: CallKey,
         endpoint: String,
         caller: String,
-        timeout: Option<u32>,
         now: u64,
     ) -> Result<(), ControlError> {
         let catalog = crate::call_profiles::NativeProfileCatalog::new(&self.config);
@@ -76,7 +74,7 @@ impl Signaling {
         self.queue_native_profile(
             key,
             endpoint,
-            CallStart { caller, timeout },
+            CallStart { caller },
             profile,
             ProfileEpoch::Configuration(self.registrations.generation()),
             now,

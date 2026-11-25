@@ -72,7 +72,6 @@ fn originate_config(
             endpoint: "phone".into(),
             caller: "100".into(),
             local_rtp: "127.0.0.1:10000".parse()?,
-            timeout_ms: None,
         },
         0,
     )?;

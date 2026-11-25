@@ -532,7 +532,6 @@ pub enum Effect {
         key: CallKey,
         endpoint: String,
         caller: String,
-        timeout: Option<u32>,
         settings: rusterisk_core::SettingsGeneration,
     },
     Release {
@@ -1475,7 +1474,6 @@ impl Control {
                     settings: settings_generation,
                     endpoint,
                     caller: snapshot.caller.number.clone(),
-                    timeout: Some(timeout),
                 });
                 self.channels.insert(
                     id,
