@@ -15,7 +15,8 @@ use rsipstack::sip::{
 use rusterisk_api::{Channel, ChannelId, ChannelState};
 use rusterisk_config::{Codec, Config, TlsFiles};
 use rusterisk_sip::{Session, SipStreamDecoder, StreamItem};
-use std::{net::SocketAddr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::SocketAddr;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
@@ -32,22 +33,23 @@ async fn receive<S: AsyncRead + Unpin>(
     peer: &mut S,
     decoder: &mut SipStreamDecoder,
 ) -> Result<SipMessage, ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        let mut byte = [0; 1];
-        loop {
-            if peer.read(&mut byte).await.map_err(failure)? == 0 {
-                return Err(ControlError::Invalid("Signaling peer closed"));
-            }
-            match decoder.push(&byte).map_err(failure)?.1 {
-                Some(StreamItem::Message(bytes)) => {
-                    return SipMessage::try_from(bytes.as_slice()).map_err(failure);
+    Wait::Ready
+        .bounded(async {
+            let mut byte = [0; 1];
+            loop {
+                if peer.read(&mut byte).await.map_err(failure)? == 0 {
+                    return Err(ControlError::Invalid("Signaling peer closed"));
                 }
-                Some(StreamItem::Crlf) | None => {}
+                match decoder.push(&byte).map_err(failure)?.1 {
+                    Some(StreamItem::Message(bytes)) => {
+                        return SipMessage::try_from(bytes.as_slice()).map_err(failure);
+                    }
+                    Some(StreamItem::Crlf) | None => {}
+                }
             }
-        }
-    })
-    .await
-    .map_err(failure)?
+        })
+        .await
+        .map_err(failure)?
 }
 
 fn registration(
@@ -74,11 +76,7 @@ async fn registered<S: AsyncRead + AsyncWrite + Unpin>(
         .await
         .map_err(failure)?;
     let mut byte = [0; 1];
-    assert!(
-        tokio::time::timeout(Duration::from_millis(30), peer.read(&mut byte))
-            .await
-            .is_err()
-    );
+    assert!(Wait::Quiet.bounded(peer.read(&mut byte)).await.is_err());
     peer.write_all(&initial.as_bytes()[17..])
         .await
         .map_err(failure)?;
@@ -132,27 +130,27 @@ async fn channel_state(
     id: &ChannelId,
     expected: Option<ChannelState>,
 ) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            match controller
-                .execute(credentials()?, None, Action::GetChannel(id.clone()))
-                .await
-            {
-                Ok(response) => {
-                    let channel: Channel =
-                        serde_json::from_value(response.body.ok_or(ControlError::Capacity)?)?;
-                    if Some(channel.state) == expected {
-                        return Ok::<(), ControlError>(());
+    Wait::Ready
+        .bounded(async {
+            loop {
+                match controller
+                    .execute(credentials()?, None, Action::GetChannel(id.clone()))
+                    .await
+                {
+                    Ok(response) => {
+                        let channel: Channel =
+                            serde_json::from_value(response.body.ok_or(ControlError::Capacity)?)?;
+                        if Some(channel.state) == expected {
+                            return Ok::<(), ControlError>(());
+                        }
                     }
+                    Err(ControlError::NotFound(_)) if expected.is_none() => return Ok(()),
+                    Err(error) => return Err(error),
                 }
-                Err(ControlError::NotFound(_)) if expected.is_none() => return Ok(()),
-                Err(error) => return Err(error),
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .map_err(failure)?
+        })
+        .await
+        .map_err(failure)?
 }
 
 fn answer(request: &Request, local: SocketAddr) -> Result<String, ControlError> {
@@ -206,11 +204,7 @@ async fn originated<S: AsyncRead + AsyncWrite + Unpin>(
         .value()
         .starts_with(&format!("SIP/2.0/{token} ")));
     let mut byte = [0; 1];
-    assert!(
-        tokio::time::timeout(Duration::from_millis(550), peer.read(&mut byte))
-            .await
-            .is_err()
-    );
+    assert!(Wait::Ready.bounded(peer.read(&mut byte)).await.is_err());
     Ok((id, request))
 }
 
@@ -460,7 +454,8 @@ async fn initial_outbound_connections_use_tcp_or_verified_tls_and_fail_closed(
                     },
                 )
                 .await?;
-            let (peer, _) = tokio::time::timeout(Duration::from_secs(2), peer_listener.accept())
+            let (peer, _) = Wait::Ready
+                .bounded(peer_listener.accept())
                 .await
                 .map_err(failure)?
                 .map_err(failure)?;
@@ -479,10 +474,10 @@ async fn initial_outbound_connections_use_tcp_or_verified_tls_and_fail_closed(
                     } else {
                         if let Ok(mut peer) = accepted {
                             let mut byte = [0; 1];
-                            let read =
-                                tokio::time::timeout(Duration::from_secs(1), peer.read(&mut byte))
-                                    .await
-                                    .map_err(failure)?;
+                            let read = Wait::Ready
+                                .bounded(peer.read(&mut byte))
+                                .await
+                                .map_err(failure)?;
                             assert!(matches!(read, Ok(0) | Err(_)));
                         }
                         channel_state(&controller, &id, None).await?;

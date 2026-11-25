@@ -11,7 +11,8 @@ use rsipstack::sip::{
 };
 use rusterisk_api::ChannelId;
 use rusterisk_sip::{parse_registration_contacts, RegistrationContacts};
-use std::{net::SocketAddr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::SocketAddr;
 
 fn registration(
     uri: &Uri,
@@ -196,9 +197,8 @@ async fn actual_registered_origination_keeps_the_selected_contact_and_tls_flow(
             selected != other,
             "TLS fixture registered identical contact URIs",
         )?;
-        tokio::time::timeout(
-            Duration::from_secs(2),
-            fixture.controller.execute(
+        Wait::Ready
+            .bounded(fixture.controller.execute(
                 Credentials::new("app".into(), "test".into())?,
                 None,
                 Action::Originate {
@@ -209,10 +209,9 @@ async fn actual_registered_origination_keeps_the_selected_contact_and_tls_flow(
                     caller: "displayed-caller".into(),
                     timeout: 30,
                 },
-            ),
-        )
-        .await
-        .map_err(failure)??;
+            ))
+            .await
+            .map_err(failure)??;
         let invite = selected_invitation(&mut fixture).await?;
         require(
             invite.uri == selected,

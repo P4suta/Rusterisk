@@ -10,7 +10,7 @@ use crate::{
 use rusterisk_api::ChannelId;
 use rusterisk_config::{Config, Protocol, TlsFiles};
 use rusterisk_sip::{Datagram, SipStreamDecoder, StaticTarget, StreamItem};
-use std::{net::SocketAddr, num::NonZeroU64, path::Path, time::Duration};
+use std::{net::SocketAddr, num::NonZeroU64, path::Path};
 use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, TcpStream},
@@ -57,21 +57,22 @@ struct VerifiedFlow {
 
 impl VerifiedFlow {
     async fn message(&mut self) -> Result<Vec<u8>, ControlError> {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            let mut byte = [0; 1];
-            loop {
-                require(
-                    self.socket.read(&mut byte).await.map_err(failure)? == 1,
-                    "Verified TLS flow closed before its captured delivery",
-                )?;
-                match self.decoder.push(&byte).map_err(failure)?.1 {
-                    Some(StreamItem::Message(bytes)) => return Ok(bytes),
-                    Some(StreamItem::Crlf) | None => {}
+        rusterisk_test_support::Wait::Ready
+            .bounded(async {
+                let mut byte = [0; 1];
+                loop {
+                    require(
+                        self.socket.read(&mut byte).await.map_err(failure)? == 1,
+                        "Verified TLS flow closed before its captured delivery",
+                    )?;
+                    match self.decoder.push(&byte).map_err(failure)?.1 {
+                        Some(StreamItem::Message(bytes)) => return Ok(bytes),
+                        Some(StreamItem::Crlf) | None => {}
+                    }
                 }
-            }
-        })
-        .await
-        .map_err(failure)?
+            })
+            .await
+            .map_err(failure)?
     }
 }
 
@@ -224,11 +225,10 @@ impl Fixture {
             }
             Err(ControlError::Capacity)
         };
-        let (socket, key) = tokio::time::timeout(Duration::from_secs(3), async {
-            tokio::try_join!(accepted, admitted)
-        })
-        .await
-        .map_err(failure)??;
+        let (socket, key) = rusterisk_test_support::Wait::Ready
+            .bounded(async { tokio::try_join!(accepted, admitted) })
+            .await
+            .map_err(failure)??;
         require(
             key.listener == 0 && key.peer == peer,
             "Verified TLS flow changed its physical destination",
@@ -283,7 +283,7 @@ impl Fixture {
 }
 
 async fn join(mut task: JoinHandle<Result<(), ControlError>>) -> Result<(), ControlError> {
-    match tokio::time::timeout(Duration::from_secs(3), &mut task).await {
+    match rusterisk_test_support::Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?,
         Err(timeout) => {
             task.abort();

@@ -14,7 +14,7 @@ use rsipstack::sip::{headers::typed::WwwAuthenticate, HeadersExt, SipMessage};
 use rusterisk_api::ChannelId;
 use rusterisk_config::{Config, Protocol};
 use rusterisk_sip::StaticTarget;
-use std::{future::Future, net::SocketAddr, num::NonZeroU64, time::Duration};
+use std::{future::Future, net::SocketAddr, num::NonZeroU64};
 use tokio::{io::AsyncWriteExt, net::TcpListener, task::JoinHandle};
 
 mod registered;
@@ -96,14 +96,16 @@ impl Fixture {
         };
         let controller = fixture.controller.clone();
         let subscribed = match fixture.signaling.as_mut() {
-            Some(signaling) => tokio::time::timeout(
-                Duration::from_secs(2),
-                signaling.control_until(controller.subscribe(credentials, None, "app".into())),
-            )
-            .await
-            .map_err(failure)
-            .and_then(|result| result)
-            .and_then(|result| result),
+            Some(signaling) => rusterisk_test_support::Wait::Ready
+                .bounded(signaling.control_until(controller.subscribe(
+                    credentials,
+                    None,
+                    "app".into(),
+                )))
+                .await
+                .map_err(failure)
+                .and_then(|result| result)
+                .and_then(|result| result),
             None => Err(ControlError::Invalid("TLS fixture driver already started")),
         };
         match subscribed {
@@ -132,9 +134,8 @@ impl Fixture {
             .signaling
             .as_mut()
             .ok_or(ControlError::Invalid("TLS fixture driver already started"))?;
-        let call = tokio::time::timeout(
-            Duration::from_secs(2),
-            signaling.control_until(controller.incoming(IncomingCall {
+        let call = rusterisk_test_support::Wait::Ready
+            .bounded(signaling.control_until(controller.incoming(IncomingCall {
                 id: ChannelId::try_from(name.to_owned())?,
                 endpoint: "phone".into(),
                 caller: "displayed-caller".into(),
@@ -144,16 +145,13 @@ impl Fixture {
                     application: "app".into(),
                     arguments: Vec::new(),
                 },
-            })),
-        )
-        .await
-        .map_err(failure)???;
-        let lease = tokio::time::timeout(
-            Duration::from_secs(2),
-            signaling.control_until(controller.call_lifetime(call)),
-        )
-        .await
-        .map_err(failure)???;
+            })))
+            .await
+            .map_err(failure)???;
+        let lease = rusterisk_test_support::Wait::Ready
+            .bounded(signaling.control_until(controller.call_lifetime(call)))
+            .await
+            .map_err(failure)???;
         let setup = signaling.network.reserve_setup(0, generation)?;
         let peer = self.peer.local_addr().map_err(failure)?;
         let target =
@@ -214,11 +212,10 @@ impl Fixture {
             }
             Err(ControlError::Capacity)
         };
-        let (socket, key) = tokio::time::timeout(Duration::from_secs(3), async {
-            tokio::try_join!(accepted, admitted)
-        })
-        .await
-        .map_err(failure)??;
+        let (socket, key) = rusterisk_test_support::Wait::Ready
+            .bounded(async { tokio::try_join!(accepted, admitted) })
+            .await
+            .map_err(failure)??;
         require(
             key.listener == 0 && key.peer == peer,
             "TLS fixture flow changed its physical peer",
@@ -280,7 +277,8 @@ impl Fixture {
             .get_mut(index)
             .and_then(Option::as_mut)
             .ok_or(ControlError::Invalid("Missing owned TLS fixture flow"))?;
-        tokio::time::timeout(Duration::from_secs(2), flow.socket.write_all(wire))
+        rusterisk_test_support::Wait::Ready
+            .bounded(flow.socket.write_all(wire))
             .await
             .map_err(failure)?
             .map_err(failure)?;

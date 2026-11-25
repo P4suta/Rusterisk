@@ -1,6 +1,6 @@
 use super::{failure, Config, ControlError, Input, Network};
 use crate::signaling::sip_websocket::Scheme;
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 
 async fn network() -> Result<Network, ControlError> {
     let mut config = Config::parse(
@@ -29,7 +29,8 @@ async fn pending_upgrades_share_connection_capacity_and_cancel_without_a_socket(
     ));
     drop(reservations);
     for _ in 0..64 {
-        let input = tokio::time::timeout(Duration::from_secs(1), network.next())
+        let input = Wait::Ready
+            .bounded(network.next())
             .await
             .map_err(failure)??;
         assert!(matches!(input, Input::Closed { result: Err(_), .. }));
@@ -47,7 +48,8 @@ async fn expired_upgrade_senders_cannot_attach_to_a_replacement_generation(
     let Input::Closed {
         key: previous,
         result,
-    } = tokio::time::timeout(Duration::from_secs(6), network.next())
+    } = Wait::Ready
+        .bounded(network.next())
         .await
         .map_err(failure)??
     else {
@@ -64,7 +66,8 @@ async fn expired_upgrade_senders_cannot_attach_to_a_replacement_generation(
             > previous.generation
     );
     drop(replacement);
-    let input = tokio::time::timeout(Duration::from_secs(1), network.next())
+    let input = Wait::Ready
+        .bounded(network.next())
         .await
         .map_err(failure)??;
     assert!(matches!(input, Input::Closed { result: Err(_), .. }));
@@ -76,7 +79,8 @@ async fn shutdown_cancels_reserved_upgrades_without_waiting_for_a_socket(
 ) -> Result<(), ControlError> {
     let mut network = network().await?;
     let reservation = network.upgrade(Scheme::Ws, "127.0.0.1:5061".parse().map_err(failure)?)?;
-    tokio::time::timeout(Duration::from_secs(1), network.close())
+    Wait::Ready
+        .bounded(network.close())
         .await
         .map_err(failure)??;
     assert!(reservation.is_closed());

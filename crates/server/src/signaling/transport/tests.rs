@@ -2,7 +2,7 @@ use super::{
     connection, failure, listen, Config, ConnectionKey, ConnectionState, ControlError, Datagram,
     Input, ListenerInput, Network, Reserved, StreamEvent, StreamPacket, StreamRole,
 };
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -45,7 +45,7 @@ async fn capacity_refuses_the_next_socket_and_shutdown_releases_all_owned_stream
         peers.push(peer);
     }
     let mut extra = TcpStream::connect(address).await.map_err(failure)?;
-    let result = tokio::time::timeout(Duration::from_millis(300), async {
+    let result = Wait::Ready.bounded(async {
         let mut byte = [0; 1];
         tokio::select! {
             read = extra.read(&mut byte) => { assert_eq!(read.map_err(failure)?, 0); Ok(()) },
@@ -87,7 +87,8 @@ async fn output_saturation_closes_only_the_owning_connection_generation() -> Res
     let Input::Closed {
         key: closed,
         result,
-    } = tokio::time::timeout(Duration::from_secs(1), network.next())
+    } = Wait::Ready
+        .bounded(network.next())
         .await
         .map_err(failure)??
     else {
@@ -133,11 +134,7 @@ async fn delayed_packets_and_completions_cannot_close_a_replacement_generation(
         return Err(ControlError::Capacity);
     };
     assert_eq!(packet.bytes, b"current");
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), network.next())
-            .await
-            .is_err()
-    );
+    assert!(Wait::Quiet.bounded(network.next()).await.is_err());
     assert_eq!(
         network
             .ports
@@ -175,7 +172,8 @@ async fn cancellation_drops_a_partial_frame_and_releases_the_stream() -> Result<
         .map_err(failure)?;
     tokio::task::yield_now().await;
     stop.send_replace(true);
-    tokio::time::timeout(Duration::from_secs(1), task)
+    Wait::Ready
+        .bounded(task)
         .await
         .map_err(failure)?
         .map_err(failure)??;
@@ -221,7 +219,8 @@ async fn a_full_event_queue_cannot_hold_shutdown_open() -> Result<(), ControlErr
     network.accepted(listener, source, stream)?;
     peer.write_all(OPTIONS).await.map_err(failure)?;
     tokio::task::yield_now().await;
-    tokio::time::timeout(Duration::from_secs(1), network.close())
+    Wait::Ready
+        .bounded(network.close())
         .await
         .map_err(failure)??;
     assert!(network.jobs.is_empty());
@@ -237,11 +236,10 @@ async fn keepalives_cannot_extend_the_first_message_deadline() -> Result<(), Con
         .map_err(failure)?;
     peer.write_all(b"\r\n\r\n").await.map_err(failure)?;
     let mut pong = [0; 2];
-    let (input, pong) = tokio::time::timeout(Duration::from_secs(6), async {
-        tokio::join!(network.next(), peer.read_exact(&mut pong))
-    })
-    .await
-    .map_err(failure)?;
+    let (input, pong) = Wait::Ready
+        .bounded(async { tokio::join!(network.next(), peer.read_exact(&mut pong)) })
+        .await
+        .map_err(failure)?;
     pong.map_err(failure)?;
     assert!(matches!(input?, Input::Closed { result: Err(_), .. }));
     network.close().await
@@ -272,7 +270,8 @@ async fn a_final_frame_and_its_response_precede_half_closed_connection_cleanup(
         };
         result?;
         let mut response = Vec::new();
-        tokio::time::timeout(Duration::from_secs(1), peer.read_to_end(&mut response))
+        Wait::Ready
+            .bounded(peer.read_to_end(&mut response))
             .await
             .map_err(failure)?
             .map_err(failure)?;

@@ -1,6 +1,7 @@
 use super::{network, ConnectionState, ControlError, Datagram};
 use crate::signaling::transport::Network;
 use rusterisk_config::Config;
+use rusterisk_test_support::Wait;
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::error::TryRecvError;
@@ -130,13 +131,11 @@ async fn captured_datagram_routes_preserve_the_listener_and_remote_address(
     for bytes in [b"initial".as_slice(), b"final"] {
         assert!(network.send_on(route, packet(peer, bytes)).await?);
         let mut buffer = [0; 32];
-        let (count, source) = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            receiver.recv_from(&mut buffer),
-        )
-        .await
-        .map_err(failure)?
-        .map_err(failure)?;
+        let (count, source) = Wait::Ready
+            .bounded(receiver.recv_from(&mut buffer))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
         assert_eq!(&buffer[..count], bytes);
         assert_eq!(source, listener);
     }
