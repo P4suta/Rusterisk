@@ -578,6 +578,38 @@ impl Silent {
 }
 
 #[tokio::test]
+async fn a_recording_stop_waits_with_its_channel_reservation() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (key, _subscription, answered) = dialed(fixture).await?;
+        fixture
+            .controller
+            .signal(crate::Signal::Milestone {
+                key: key.clone(),
+                milestone: crate::Milestone::Answered,
+            })
+            .await?;
+        fixture.receive(answered, 0).await?;
+        fixture
+            .apply(Action::RecordChannel {
+                channel: key.id.clone(),
+                name: id("held-stop")?,
+                options: RecordingOptions::default(),
+            })
+            .await?;
+        fixture
+            .apply(Action::EndRecording {
+                name: id("held-stop")?,
+                mode: crate::media::RecordingEnd::Cancel,
+            })
+            .await?;
+        assert_eq!(fixture.queued(), Some(Queued::Other));
+        assert_eq!(fixture.queued(), None);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn an_answered_attachment_leaves_the_turn_free() -> Result<(), ControlError> {
     silent(async |fixture: &mut Silent| {
         let (_key, _subscription, answered) = dialed(fixture).await?;

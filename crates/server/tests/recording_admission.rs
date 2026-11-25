@@ -56,7 +56,7 @@ async fn recording_replies_wait_for_admission_while_calls_and_cancellation_keep_
         abandoned.abort();
         assert!(abandoned.await.is_err());
         let stopped = tokio::time::timeout(Duration::from_secs(1), effects.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
-        assert!(matches!(stopped, Effect::EndRecording { token: current, mode: RecordingEnd::Cancel } if current == token));
+        assert!(matches!(stopped, Effect::EndRecording { token: current, mode: RecordingEnd::Cancel, .. } if current == token));
         controller.signal(Signal::RecordingAdmitted { owner: owner.clone(), token, result: Ok(()) }).await?;
         controller.signal(Signal::RecordingFinished { owner, token, result: Ok(()) }).await?;
         assert!(matches!(subscription.events.recv().await.ok_or(ControlError::Capacity)?.kind, EventKind::RecordingFinished { recording } if recording.state == RecordingState::Canceled));

@@ -161,7 +161,9 @@ fn failure(error: impl std::fmt::Display) -> ControlError {
 fn effect_call(effect: &Effect) -> Option<&CallKey> {
     match effect {
         Effect::RejectRefer { source, .. } | Effect::ReferProgress { source, .. } => Some(source),
-        Effect::RecordMedia { owner, .. } | Effect::PlayMedia { owner, .. } => match owner {
+        Effect::RecordMedia { owner, .. }
+        | Effect::EndRecording { owner, .. }
+        | Effect::PlayMedia { owner, .. } => match owner {
             MediaOwner::Channel(key) => Some(key),
             MediaOwner::Bridge { .. } => None,
         },
@@ -181,7 +183,6 @@ fn effect_call(effect: &Effect) -> Option<&CallKey> {
         | Effect::Start { key, .. }
         | Effect::Release { key } => Some(key),
         Effect::ControlRecording { .. }
-        | Effect::EndRecording { .. }
         | Effect::ControlPlayback { .. }
         | Effect::Bridge { .. }
         | Effect::ReleaseBridge { .. }
@@ -884,7 +885,7 @@ impl Signaling {
                     tracing::warn!(?token, %error, "recording control failed");
                 }
             }
-            Effect::EndRecording { token, mode } => {
+            Effect::EndRecording { token, mode, .. } => {
                 self.media.stop_recording(token, mode).map_err(failure)?
             }
             Effect::Dtmf { key, command } => {
