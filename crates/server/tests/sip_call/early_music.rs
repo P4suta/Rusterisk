@@ -343,7 +343,7 @@ async fn exercise(root: &Path, ending: Ending) -> Result<(), ControlError> {
     let config = configuration(&config_root, &reservation)?;
     music(&data)?;
     let client = Client::builder()
-        .timeout(Duration::from_secs(2))
+        .timeout(Wait::Io.duration())
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(failure)?;
@@ -356,7 +356,7 @@ async fn exercise(root: &Path, ending: Ending) -> Result<(), ControlError> {
     let mut channel = None;
     let mut phase = "listener addresses";
     let mut subscription = None;
-    let result = Wait::Ready.bounded(async {
+    let result = Wait::Scenario.bounded(async {
         let address = *address.as_ref().map_err(failure)?;
         let listeners = listeners.as_ref().map_err(failure)?;
         require(listeners.len() == 1, "Expected one SIP listener")?;

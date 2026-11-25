@@ -6,7 +6,6 @@ use rusterisk_server::ControlError;
 use rusterisk_test_support::Wait;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::time::Duration;
 
 #[tokio::test]
 async fn startup_rejects_an_invalid_unselected_class_and_releases_listeners_and_storage(
@@ -63,7 +62,7 @@ async fn startup_with_valid_music_serves_and_releases_every_owned_listener(
             let result = async {
                 let response = reqwest::Client::builder()
                     .no_proxy()
-                    .timeout(Duration::from_secs(2))
+                    .timeout(Wait::Io.duration())
                     .build()
                     .map_err(failure)?
                     .get(format!("http://{http}/ari/asterisk/ping"))

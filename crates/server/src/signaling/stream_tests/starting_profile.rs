@@ -362,7 +362,7 @@ async fn exercise(admission: Admission) -> Result<(), ControlError> {
     let primary = async {
         fixture.subscribe().await?;
         phase = "authenticated admission";
-        rusterisk_test_support::Wait::Ready
+        rusterisk_test_support::Wait::Scenario
             .bounded(async {
                 let key = fixture.admit().await?;
                 phase = "adapter current settings replacement";
@@ -423,7 +423,7 @@ async fn a_recording_waits_behind_the_answer_that_it_causes() -> Result<(), Cont
     fixture.signaling.storage = Some(storage);
     let primary = async {
         fixture.subscribe().await?;
-        Wait::Ready
+        Wait::Scenario
             .bounded(async {
                 let key = fixture.admit().await?;
                 fixture.replace_current_settings()?;
@@ -467,7 +467,7 @@ async fn an_early_attachment_that_completes_after_a_cancel_releases_its_media(
     let mut fixture = Fixture::new().await?;
     let primary = async {
         fixture.subscribe().await?;
-        Wait::Ready.bounded(async {
+        Wait::Scenario.bounded(async {
             let key = fixture.admit().await?;
             fixture.replace_current_settings()?;
             let mut tasks = rusterisk_core::MediaTasks::new(key.generation);

@@ -1,9 +1,6 @@
 use rusterisk_client::Error;
 use serde::Deserialize;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 const PINNED: &str = include_str!("../../../api/tests/fixtures/asterisk-22.9.0-routes.tsv");
 
@@ -105,7 +102,7 @@ async fn compare_options(
 
 pub(super) async fn compare(native: &str, reference: &str) -> Result<(), Error> {
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(rusterisk_server::test_time::Wait::Ready.duration())
         .build()?;
     let index: Index = http
         .get(format!("{reference}/ari/api-docs/resources.json"))

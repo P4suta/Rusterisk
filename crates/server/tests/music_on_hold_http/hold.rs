@@ -9,7 +9,7 @@ use rusterisk_media::Frame;
 use rusterisk_server::{rtp::SocketPair, runtime::Server, ControlError};
 use rusterisk_storage::Recorder;
 use rusterisk_test_support::Wait;
-use std::{net::SocketAddr, path::Path, time::Duration};
+use std::{net::SocketAddr, path::Path};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue};
 
 #[tokio::test]
@@ -87,7 +87,7 @@ async fn run(root: &Path) -> Result<(), ControlError> {
     let mut left = Peer::new(83)?;
     let mut right = Peer::new(84)?;
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(Wait::Ready.duration())
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(failure)?;
@@ -104,7 +104,7 @@ async fn run(root: &Path) -> Result<(), ControlError> {
     };
     let mut events = None;
     let mut phase = "event connection";
-    let result = Wait::Ready
+    let result = Wait::Scenario
         .bounded(async {
             let mut event_request = format!("ws://{address}/ari/events?app=music")
                 .into_client_request()

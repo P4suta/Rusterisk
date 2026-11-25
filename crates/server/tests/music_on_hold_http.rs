@@ -299,7 +299,7 @@ async fn run(root: &Path, frame: Frame, repetitions: usize) -> Result<(), Contro
     let mut left = Peer::new(81)?;
     let mut right = Peer::new(82)?;
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(Wait::Ready.duration())
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(failure)?;
@@ -316,7 +316,7 @@ async fn run(root: &Path, frame: Frame, repetitions: usize) -> Result<(), Contro
     };
     let mut events = None;
     let mut phase = "event connection";
-    let result = Wait::Ready
+    let result = Wait::Scenario
         .bounded(async {
             let mut event_request = format!("ws://{address}/ari/events?app=music")
                 .into_client_request()

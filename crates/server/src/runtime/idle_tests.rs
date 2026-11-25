@@ -57,7 +57,7 @@ async fn parks_in_an_idle_hour(interval: Option<Duration>) -> Result<u64, Contro
     }
     tokio::time::resume();
     controller.shutdown();
-    let served = Wait::Ready
+    let served = Wait::Shutdown
         .bounded(serving)
         .await
         .map_err(failure)?

@@ -177,11 +177,11 @@ async fn forced_process_exit_recovers_audio_and_history_through_the_next_server_
     let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
     let client = reqwest::Client::builder()
         .no_proxy()
-        .timeout(Duration::from_secs(2))
+        .timeout(Wait::Io.duration())
         .build()
         .map_err(failure)?;
     let mut first = ChildServer::start(&settings, &data, root.path().join("first.log")).await?;
-    let first_operation = Wait::Ready
+    let first_operation = Wait::Scenario
         .bounded(async {
             let mut events = events(first.address()).await?;
             let remote = peer.local_addr().map_err(failure)?.to_string();

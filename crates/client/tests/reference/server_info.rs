@@ -33,7 +33,7 @@ pub(super) async fn compare(
         );
     }
     let raw = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
+        .timeout(rusterisk_server::test_time::Wait::Ready.duration())
         .build()?;
     for only in ["SYSTEM,status,unknown", "unknown", "", "build,build"] {
         let mut observed = Vec::new();

@@ -2,7 +2,6 @@ use rusterisk_config::{Config, TlsFiles};
 use rusterisk_server::listener::HttpServer;
 use rusterisk_server::{ControlError, Controller};
 use rusterisk_test_support::Wait;
-use std::time::Duration;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
@@ -102,7 +101,7 @@ async fn encrypted_requests_use_a_trusted_certificate_and_shutdown_releases_the_
     let result: Result<(), ControlError> = async {
         let client = reqwest::Client::builder()
             .no_proxy()
-            .timeout(Duration::from_secs(2))
+            .timeout(Wait::Io.duration())
             .tls_certs_only([
                 reqwest::Certificate::from_pem(certificate.as_bytes()).map_err(failure)?
             ])
@@ -111,7 +110,7 @@ async fn encrypted_requests_use_a_trusted_certificate_and_shutdown_releases_the_
         let url = format!("https://localhost:{}/ari/asterisk/ping", address.port());
         assert!(reqwest::Client::builder()
             .no_proxy()
-            .timeout(Duration::from_secs(2))
+            .timeout(Wait::Io.duration())
             .build()
             .map_err(failure)?
             .get(&url)

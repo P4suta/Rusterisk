@@ -505,7 +505,7 @@ async fn accepted_udp_start_survives_endpoint_removal_before_dispatch() -> Resul
     let uri = format!("sip:captured@{address}");
     let mut fixture =
         Fixture::new(configuration(Protocol::Udp, &uri, false)?, Protocol::Udp).await?;
-    let primary = Wait::Ready
+    let primary = Wait::Scenario
         .bounded(async {
             let (effect, key) = fixture.accepted().await?;
             fixture.signaling.config.endpoints.clear();

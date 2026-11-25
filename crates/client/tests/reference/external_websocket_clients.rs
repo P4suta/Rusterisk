@@ -106,7 +106,7 @@ impl Fixture {
                 "{address}/ari/asterisk/modules/res_websocket_client.so"
             ))
             .basic_auth("app", Some("test-password"))
-            .timeout(Duration::from_secs(2))
+            .timeout(Wait::Io.duration())
             .send()
             .await?;
         assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);

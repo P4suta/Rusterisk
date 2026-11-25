@@ -9,7 +9,6 @@ use std::{
     net::{SocketAddr, TcpListener, UdpSocket},
     path::{Path, PathBuf},
     process::{ExitStatus, Output, Stdio},
-    time::Duration,
 };
 use tokio::process::{Child, Command};
 
@@ -191,8 +190,8 @@ impl Fixture {
         credentials(&settings, CURRENT)?;
         let client = Client::builder()
             .no_proxy()
-            .timeout(Duration::from_secs(2))
-            .connect_timeout(Duration::from_secs(2))
+            .timeout(Wait::Io.duration())
+            .connect_timeout(Wait::Io.duration())
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .build()

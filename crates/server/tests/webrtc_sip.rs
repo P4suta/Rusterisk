@@ -165,7 +165,7 @@ async fn bridge_calls(
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let mut applications = Vec::with_capacity(2);
     let mut jobs = Vec::with_capacity(2);
-    let result = Wait::Ready.bounded(async {
+    let result = Wait::Scenario.bounded(async {
         let credentials = Credentials::new("app".into(), "test-password".into()).map_err(failure)?;
         let mut events = controller.subscribe(credentials.clone(), None, "calls".into()).await.map_err(failure)?;
         let mut ids = Vec::with_capacity(2);

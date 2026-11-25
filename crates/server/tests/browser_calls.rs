@@ -117,7 +117,7 @@ fn stored_audio_requires_both_known_senders_even_when_one_sender_is_loud(
 }
 
 async fn joined(mut task: JoinHandle<Result<(), ControlError>>) -> Result<(), ControlError> {
-    match Wait::Ready.bounded(&mut task).await {
+    match Wait::Shutdown.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?,
         Err(primary) => {
             task.abort();

@@ -3,7 +3,6 @@ use rusterisk_config::Config;
 use rusterisk_server::runtime::Server;
 use rusterisk_server::ControlError;
 use rusterisk_test_support::Wait;
-use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 #[path = "runtime/music.rs"]
@@ -40,7 +39,7 @@ async fn server_shutdown_waits_for_event_sockets_and_releases_every_listener(
     let result: Result<(), ControlError> = async {
         let response = reqwest::Client::builder()
             .no_proxy()
-            .timeout(Duration::from_secs(2))
+            .timeout(Wait::Io.duration())
             .build()
             .map_err(failure)?
             .get(format!("http://{address}/ari/asterisk/ping"))
@@ -93,7 +92,7 @@ async fn server_shutdown_waits_for_event_sockets_and_releases_every_listener(
     }
     .await;
     controller.shutdown();
-    Wait::Ready
+    Wait::Shutdown
         .bounded(task)
         .await
         .map_err(failure)?

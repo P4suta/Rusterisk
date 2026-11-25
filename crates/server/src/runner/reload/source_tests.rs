@@ -106,7 +106,7 @@ fn gated_load(
             checkpoint_failure("fixture stopped before observing the started loader")
         })?;
         release
-            .recv_timeout(Duration::from_secs(5))
+            .recv_timeout(Wait::Ready.duration())
             .map_err(checkpoint_failure)?;
         load_startup_configuration(directory)
     }

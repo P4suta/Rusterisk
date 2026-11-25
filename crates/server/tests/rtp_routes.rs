@@ -155,7 +155,7 @@ async fn bridge_calls(origin: CallOrigin) -> Result<(), ControlError> {
     target.set_ip(Ipv4Addr::LOCALHOST.into());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
-    let result = Wait::Ready
+    let result = Wait::Scenario
         .bounded(async {
             let credentials = Credentials::new("app".into(), "test-password".into())?;
             let mut events = controller

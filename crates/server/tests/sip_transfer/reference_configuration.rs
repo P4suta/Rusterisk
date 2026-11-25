@@ -110,7 +110,7 @@ impl Configuration {
             extensions: original(&root.join(DIALPLAN_FIXTURE)).await?,
             root,
             client: Client::builder()
-                .timeout(Duration::from_secs(2))
+                .timeout(Wait::Io.duration())
                 .build()
                 .map_err(failure)?,
             address,

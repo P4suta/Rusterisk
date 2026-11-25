@@ -106,7 +106,7 @@ pub(super) async fn download_recording(
     let mut audio = AudioBuffer(Vec::new());
     let name =
         rusterisk_client::RecordingName::try_from(RECORDING_NAME.to_owned()).map_err(failure)?;
-    rusterisk_test_support::Wait::Ready
+    rusterisk_test_support::Wait::Scenario
         .bounded(client.download_stored_recording(&name, &mut audio))
         .await
         .map_err(failure)?

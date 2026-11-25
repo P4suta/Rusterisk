@@ -44,7 +44,7 @@ impl Gateway {
         Ok(Self {
             base: url::Url::parse(address).map_err(|_| invalid())?,
             http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(3))
+                .timeout(Wait::Ready.duration())
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
         })
@@ -528,7 +528,7 @@ impl Fixture {
 pub async fn compare(address: &str) -> Result<(), Error> {
     let mut fixture = Fixture::new(address).await?;
     let result = phase(
-        Wait::Ready
+        Wait::Scenario
             .bounded(fixture.run())
             .await
             .map_err(|_| Error::Timeout),

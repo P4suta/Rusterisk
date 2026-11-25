@@ -3,7 +3,6 @@ use crate::media::MediaHub;
 use crate::{ControlError, Controller, Credentials};
 use rusterisk_config::Config;
 use rusterisk_test_support::Wait;
-use std::time::Duration;
 
 fn configuration() -> Result<Config, ControlError> {
     Config::parse(
@@ -38,7 +37,7 @@ async fn shutdown_ends_signaling_and_refuses_requests_while_a_settings_loader_ru
             ControlError::Adapter("settings loader fixture".into()),
             move |_directory| {
                 let _observed = started.send(());
-                let _released = waiting.recv_timeout(Duration::from_secs(5));
+                let _released = waiting.recv_timeout(Wait::Ready.duration());
                 Ok(config)
             },
         );

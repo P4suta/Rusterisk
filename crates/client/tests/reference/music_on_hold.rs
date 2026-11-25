@@ -645,7 +645,7 @@ pub async fn compare(
         resources.peers[1].socket.local_addr()?,
         resources.peers[1].socket.control_addr()?,
     ];
-    let operation = Wait::Ready
+    let operation = Wait::Scenario
         .bounded(resources.prepare(client, session, application))
         .await
         .map_err(|_| Error::Timeout)

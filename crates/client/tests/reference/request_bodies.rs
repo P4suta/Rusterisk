@@ -2,7 +2,6 @@ use rusterisk_client::{
     api::{BridgeVideoMode, Channel, ChannelId, MediaControlFormat, MediaEvent},
     Bridge, Client, Error,
 };
-use std::time::Duration;
 
 pub async fn compare(
     actual: &Client,
@@ -11,7 +10,7 @@ pub async fn compare(
     reference_address: &str,
 ) -> Result<(), Error> {
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+        .timeout(rusterisk_server::test_time::Wait::Io.duration())
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     for (path, body, id, name) in [
@@ -63,7 +62,7 @@ pub async fn initial_variables(
     application: &str,
 ) -> Result<(), Error> {
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+        .timeout(rusterisk_server::test_time::Wait::Io.duration())
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let mut url = reqwest::Url::parse(&format!("{address}/ari/channels/externalMedia"))
@@ -107,7 +106,7 @@ pub async fn originate_with_id(
 ) -> Result<(), Error> {
     let id = ChannelId::try_from("path-originated".to_owned())?;
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+        .timeout(rusterisk_server::test_time::Wait::Io.duration())
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let operation = async {
@@ -158,7 +157,7 @@ pub async fn websocket_variables(
     application: &str,
 ) -> Result<(), Error> {
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(2))
+        .timeout(rusterisk_server::test_time::Wait::Io.duration())
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let mut url = reqwest::Url::parse(&format!("{address}/ari/channels/externalMedia"))

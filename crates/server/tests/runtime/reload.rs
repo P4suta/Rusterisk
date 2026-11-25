@@ -8,7 +8,7 @@ use rusterisk_api::{Channel, Event, EventKind};
 use rusterisk_config::Config;
 use rusterisk_server::{rtp::SocketPair, runtime::Server, ControlError, Controller};
 use rusterisk_test_support::Wait;
-use std::{net::SocketAddr, path::Path, time::Duration};
+use std::{net::SocketAddr, path::Path};
 use tokio::{net::TcpStream, task::JoinHandle};
 use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, http::HeaderValue, Error, Message},
@@ -210,7 +210,7 @@ impl Fixture {
         let http = Client::builder()
             .no_proxy()
             .http1_only()
-            .timeout(Duration::from_secs(2))
+            .timeout(Wait::Io.duration())
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(failure)?;

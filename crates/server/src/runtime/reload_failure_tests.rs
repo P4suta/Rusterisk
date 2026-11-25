@@ -91,7 +91,7 @@ async fn participant(
 async fn joined(
     mut task: JoinHandle<Result<(), ControlError>>,
 ) -> Result<Result<(), ControlError>, ControlError> {
-    match Wait::Ready.bounded(&mut task).await {
+    match Wait::Shutdown.bounded(&mut task).await {
         Ok(result) => result.map_err(failure),
         Err(primary) => {
             task.abort();

@@ -52,7 +52,7 @@ async fn browser_signaling_adapter_registers_reconnects_and_refuses_incorrect_cr
     }
     .await;
     controller.shutdown();
-    let cleanup = match Wait::Ready.bounded(&mut serving).await {
+    let cleanup = match Wait::Shutdown.bounded(&mut serving).await {
         Ok(joined) => joined.map_err(failure)?,
         Err(primary) => {
             serving.abort();
