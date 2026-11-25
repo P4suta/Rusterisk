@@ -173,9 +173,15 @@ pub(super) enum Input {
     },
 }
 
+#[cfg(test)]
+struct CapturedDatagrams {
+    addresses: Vec<SocketAddr>,
+    sent: mpsc::Sender<(tokio::time::Instant, Datagram)>,
+}
+
 pub(super) struct Network {
     #[cfg(test)]
-    observed_sends: Option<mpsc::Sender<(tokio::time::Instant, SocketAddr)>>,
+    captured: Option<CapturedDatagrams>,
     listeners: Vec<ListenerSocket>,
     ports: BTreeMap<ConnectionKey, Port>,
     jobs: JoinSet<Result<(), ControlError>>,
@@ -487,7 +493,7 @@ impl Network {
         let (preparation_sender, prepared) = mpsc::channel(64);
         Ok(Self {
             #[cfg(test)]
-            observed_sends: None,
+            captured: None,
             listeners,
             ports: BTreeMap::new(),
             jobs: JoinSet::new(),
@@ -508,6 +514,14 @@ impl Network {
     }
 
     pub(super) fn local_addr(&self, listener: usize) -> Result<SocketAddr, ControlError> {
+        #[cfg(test)]
+        if let Some(capture) = &self.captured {
+            return capture
+                .addresses
+                .get(listener)
+                .copied()
+                .ok_or(ControlError::Invalid("Unknown listener"));
+        }
         match self
             .listeners
             .get(listener)
@@ -630,16 +644,14 @@ impl Network {
     }
 
     #[cfg(test)]
-    pub(super) async fn observe_datagram_sends(
+    pub(super) fn capture_datagrams(
         &mut self,
-    ) -> Result<mpsc::Receiver<(tokio::time::Instant, SocketAddr)>, ControlError> {
-        for listener in &self.listeners {
-            if let ListenerSocket::Datagram(socket) = listener {
-                socket.writable().await.map_err(failure)?;
-            }
-        }
-        let (sender, received) = mpsc::channel(16);
-        self.observed_sends = Some(sender);
+    ) -> Result<mpsc::Receiver<(tokio::time::Instant, Datagram)>, ControlError> {
+        let addresses = (0..self.listeners.len())
+            .map(|listener| self.local_addr(listener))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (sent, received) = mpsc::channel(16);
+        self.captured = Some(CapturedDatagrams { addresses, sent });
         Ok(received)
     }
 
@@ -652,6 +664,13 @@ impl Network {
             return Err(ControlError::Capacity);
         }
         if let ListenerSocket::Datagram(socket) = &self.listeners[listener] {
+            #[cfg(test)]
+            if let Some(capture) = &self.captured {
+                return capture
+                    .sent
+                    .try_send((tokio::time::Instant::now(), packet))
+                    .map_err(failure);
+            }
             let size = tokio::time::timeout(
                 Duration::from_millis(100),
                 socket.send_to(&packet.bytes, packet.peer),
@@ -659,18 +678,13 @@ impl Network {
             .await
             .map_err(failure)?
             .map_err(failure)?;
-            if size != packet.bytes.len() {
-                return Err(ControlError::Adapter(
+            return if size == packet.bytes.len() {
+                Ok(())
+            } else {
+                Err(ControlError::Adapter(
                     "Incomplete signaling datagram".into(),
-                ));
-            }
-            #[cfg(test)]
-            if let Some(observer) = &self.observed_sends {
-                observer
-                    .try_send((tokio::time::Instant::now(), packet.peer))
-                    .map_err(failure)?;
-            }
-            return Ok(());
+                ))
+            };
         }
         let key = self
             .legacy_connection(listener, packet.peer)?
@@ -698,6 +712,12 @@ impl Network {
     pub(super) async fn next(&mut self) -> Result<Input, ControlError> {
         loop {
             let listeners = self.listeners.as_slice();
+            #[cfg(test)]
+            let listeners = if self.captured.is_some() {
+                &[]
+            } else {
+                listeners
+            };
             tokio::select! {
                 event = self.prepared.recv() => {
                     if let Some(input) = self.prepared_event(event.ok_or(ControlError::Capacity)?) { return Ok(input); }
