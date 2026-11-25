@@ -278,10 +278,6 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
             self.answer.try_send(()).map_err(|_| MediaError::Capacity)?;
         }
         let mut stats = LinkStats::default();
-        let period = Duration::from_millis(20);
-        let started = tokio::time::Instant::now();
-        let mut tick = tokio::time::interval_at(started + period, period);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let clock = Clock::start();
         let mut digits = DigitSchedule::default();
         loop {
@@ -289,6 +285,7 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
                 break;
             }
             tokio::select! {
+                () = self.channels.incoming.closed() => break,
                 changed = self.channels.stop.changed() => if changed.is_err() || *self.channels.stop.borrow() { break; },
                 changed = self.channels.direction.changed() => { if changed.is_err() { break; } let flow = self.audio.flush(); self.flow(flow).await?; },
                 message = self.socket.receive() => match message? {
@@ -320,6 +317,9 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
                 },
                 frame = self.channels.outgoing.recv() => {
                     let Some(frame) = frame else { break; };
+                    if self.options.direction != MediaDirection::In && self.channels.incoming.capacity() > 0 {
+                        self.tick(&mut stats).await?;
+                    }
                     if self.options.direction != MediaDirection::Out && self.channels.direction.borrow().can_receive() { let bytes = self.encoded(frame)?; self.send(SocketMessage::Binary(bytes)).await?; stats.packets_sent += 1; }
                 }
                 Some(command) = self.channels.commands.recv(), if digits.idle() => digits.admit(command)?,
@@ -332,9 +332,6 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
                         DigitStep::Finished(token) => self.channels.completed.try_send(token).map_err(|_| MediaError::Capacity)?,
                         DigitStep::Waiting => {}
                     }
-                }
-                _instant = tick.tick() => {
-                    if self.options.direction != MediaDirection::In { self.tick(&mut stats).await?; }
                 }
             }
         }

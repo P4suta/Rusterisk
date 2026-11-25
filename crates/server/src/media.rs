@@ -1396,30 +1396,27 @@ impl MediaHub {
                     ) => break,
                 }
             }
-            for _ in 0..3 {
-                match io.incoming.try_recv() {
-                    Ok(frame) => {
-                        if let Some(challenge) = self.probes.get_mut(key) {
-                            challenge.receive(&frame)?;
-                        }
-                        self.recordings.channel(key, frame);
-                        match self.mixer.push(key, frame) {
-                            Ok(()) => {
-                                if matches!(port.connection, Connection::Waiting) {
-                                    port.connection = Connection::Connected;
-                                    self.notices
-                                        .try_send(MediaNotice::Connected { key: key.clone() })
-                                        .map_err(|_| MediaError::Capacity)?;
-                                }
+            match io.incoming.try_recv() {
+                Ok(frame) => {
+                    if let Some(challenge) = self.probes.get_mut(key) {
+                        challenge.receive(&frame)?;
+                    }
+                    self.recordings.channel(key, frame);
+                    match self.mixer.push(key, frame) {
+                        Ok(()) => {
+                            if matches!(port.connection, Connection::Waiting) {
+                                port.connection = Connection::Connected;
+                                self.notices
+                                    .try_send(MediaNotice::Connected { key: key.clone() })
+                                    .map_err(|_| MediaError::Capacity)?;
                             }
-                            Err(_) => self.dropped += 1,
                         }
+                        Err(_) => self.dropped += 1,
                     }
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
-                        io.stop.send_replace(true);
-                        break;
-                    }
+                }
+                Err(mpsc::error::TryRecvError::Empty) => {}
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    io.stop.send_replace(true);
                 }
             }
         }

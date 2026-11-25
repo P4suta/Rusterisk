@@ -22,9 +22,9 @@ impl Port {
         initial_direction: PeerMediaDirection,
         digit_support: DigitSupport,
     ) -> (Self, RtpChannels) {
-        let (incoming, input) = mpsc::channel(3);
+        let (incoming, input) = mpsc::channel(1);
         let (digits, digit_input) = mpsc::channel(16);
-        let (outgoing, output) = mpsc::channel(3);
+        let (outgoing, output) = mpsc::channel(1);
         let (commands, command_input) = mpsc::channel(8);
         let (completed, completions) = mpsc::channel(8);
         let (stop, stopped) = watch::channel(false);

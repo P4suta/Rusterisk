@@ -77,9 +77,16 @@ async fn websocket_links_keep_control_messages_and_audio_independent() -> Result
         peer.send(SocketMessage::Text(r#"{"command":"START_MEDIA_BUFFERING"}"#.into())).await.map_err(failure)?;
         peer.send(SocketMessage::Binary(axum::body::Bytes::from_static(&[0xff; 80]))).await.map_err(failure)?;
         peer.send(SocketMessage::Text(r#"{"command":"STOP_MEDIA_BUFFERING","correlation_id":"transfer"}"#.into())).await.map_err(failure)?;
+        peer.send(SocketMessage::Text(r#"{"command":"GET_STATUS"}"#.into())).await.map_err(failure)?;
+        let Some(SocketMessage::Text(status)) = messages.recv().await else { return Err(MediaError::InvalidPacket); };
+        assert!(matches!(serde_json::from_str::<MediaEvent>(&status).map_err(failure)?, MediaEvent::Status { queue_length: 1, .. }));
+        outgoing.send(Frame::new(&[0; 160], 8000)?).await.map_err(failure)?;
         assert_eq!(tokio::time::timeout(Duration::from_secs(1), frames.recv()).await.map_err(failure)?, Some(Frame::new(&[0; 160], 8000)?));
+        assert!(matches!(messages.recv().await, Some(SocketMessage::Binary(_))));
+        outgoing.send(Frame::new(&[0; 160], 8000)?).await.map_err(failure)?;
         let Some(SocketMessage::Text(finished)) = tokio::time::timeout(Duration::from_secs(1), messages.recv()).await.map_err(failure)? else { return Err(MediaError::InvalidPacket); };
         assert!(matches!(serde_json::from_str::<MediaEvent>(&finished).map_err(failure)?, MediaEvent::MediaBufferingCompleted { correlation_id, .. } if correlation_id == "transfer"));
+        assert!(matches!(messages.recv().await, Some(SocketMessage::Binary(_))));
         peer.send(SocketMessage::Text(r#"{"command":"HANGUP"}"#.into())).await.map_err(failure)?;
         assert_eq!(messages.recv().await, Some(SocketMessage::Close));
         Ok(())

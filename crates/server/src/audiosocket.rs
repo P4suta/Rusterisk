@@ -51,10 +51,6 @@ impl AudioSocketLink {
     async fn serve(&mut self) -> Result<LinkTermination, MediaError> {
         let mut stats = LinkStats::default();
         let mut input = [0; 1923];
-        let period = Duration::from_millis(20);
-        let started = tokio::time::Instant::now();
-        let mut tick = tokio::time::interval_at(started + period, period);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let clock = Clock::start();
         let mut digits = DigitSchedule::default();
         loop {
@@ -62,6 +58,7 @@ impl AudioSocketLink {
                 break;
             }
             tokio::select! {
+                () = self.channels.incoming.closed() => break,
                 changed = self.channels.stop.changed() => if changed.is_err() || *self.channels.stop.borrow() { break; },
                 changed = self.channels.direction.changed() => {
                     if changed.is_err() { break; }
@@ -98,6 +95,11 @@ impl AudioSocketLink {
                 }
                 frame = self.channels.outgoing.recv() => {
                     let Some(frame) = frame else { break; };
+                    match self.channels.incoming.try_reserve() {
+                        Ok(permit) => if let Some(received) = self.audio.pop() { permit.send(received); },
+                        Err(mpsc::error::TrySendError::Full(())) => {}
+                        Err(mpsc::error::TrySendError::Closed(())) => break,
+                    }
                     if self.channels.direction.borrow().can_receive() {
                         send(&mut self.socket, AudioSocket::Audio(frame.resample(self.rate)?)).await?;
                         stats.packets_sent += 1;
@@ -112,15 +114,6 @@ impl AudioSocketLink {
                         }
                         DigitStep::Finished(token) => self.channels.completed.try_send(token).map_err(|_| MediaError::Capacity)?,
                         DigitStep::Waiting | DigitStep::Send(_) => {}
-                    }
-                }
-                _instant = tick.tick() => {
-                    if let Some(frame) = self.audio.pop() {
-                        match self.channels.incoming.try_send(frame) {
-                            Ok(()) => {},
-                            Err(mpsc::error::TrySendError::Full(_)) => stats.dropped += 1,
-                            Err(mpsc::error::TrySendError::Closed(_)) => break,
-                        }
                     }
                 }
             }

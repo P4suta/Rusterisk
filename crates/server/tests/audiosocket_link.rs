@@ -62,12 +62,6 @@ async fn partial_stream_reads_survive_outgoing_audio_and_close_with_the_link(
         for chunk in bytes[2..].chunks(7) {
             peer.write_all(chunk).await.map_err(failure)?;
         }
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), received.recv())
-                .await
-                .map_err(failure)?,
-            Some(Frame::new(&[4000; 160], 8000)?)
-        );
         peer.write_all(&AudioSocket::Dtmf(b'#').encode()?)
             .await
             .map_err(failure)?;
@@ -77,6 +71,20 @@ async fn partial_stream_reads_survive_outgoing_audio_and_close_with_the_link(
             .ok_or(MediaError::Capacity)?;
         assert_eq!(tone.digit, DtmfDigit::Hash);
         assert_eq!(tone.duration_ms, 0);
+        assert!(matches!(
+            received.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        outgoing
+            .send(Frame::new(&[0; 160], 8000)?)
+            .await
+            .map_err(failure)?;
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .map_err(failure)?,
+            Some(Frame::new(&[4000; 160], 8000)?)
+        );
         Ok(())
     }
     .await;

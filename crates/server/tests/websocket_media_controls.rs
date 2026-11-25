@@ -39,7 +39,7 @@ struct Harness {
     commands: mpsc::Sender<DigitCommand>,
     stop: watch::Sender<bool>,
     _direction: watch::Sender<PeerMediaDirection>,
-    _outgoing: mpsc::Sender<Frame>,
+    outgoing: mpsc::Sender<Frame>,
     _digits: mpsc::Receiver<DtmfTone>,
     completed: mpsc::Receiver<DtmfToken>,
     _answers: mpsc::Receiver<()>,
@@ -54,8 +54,8 @@ impl Harness {
     fn with_media(format: MediaControlFormat, media: MediaFormat) -> Result<Self, MediaError> {
         let (peer, input) = mpsc::channel(64);
         let (output, messages) = mpsc::channel(64);
-        let (incoming, frames) = mpsc::channel(3);
-        let (outgoing, sent) = mpsc::channel(3);
+        let (incoming, frames) = mpsc::channel(1);
+        let (outgoing, sent) = mpsc::channel(1);
         let (digits, received_digits) = mpsc::channel(16);
         let (commands, command_input) = mpsc::channel(8);
         let (completed, completions) = mpsc::channel(8);
@@ -93,7 +93,7 @@ impl Harness {
             commands,
             stop,
             _direction: direction,
-            _outgoing: outgoing,
+            outgoing,
             _digits: received_digits,
             completed: completions,
             _answers: answers,
@@ -127,6 +127,17 @@ impl Harness {
     async fn status(&mut self) -> Result<MediaEvent, MediaError> {
         self.command(MediaCommand::GetStatus).await?;
         serde_json::from_str(&self.text().await?).map_err(failure)
+    }
+
+    async fn media_turn(&mut self) -> Result<(), MediaError> {
+        self.outgoing
+            .try_send(Frame::new(&[0; 160], 8000)?)
+            .map_err(failure)?;
+        assert!(matches!(
+            self.messages.recv().await,
+            Some(SocketMessage::Binary(_))
+        ));
+        Ok(())
     }
 
     async fn close(self) -> Result<(), MediaError> {
@@ -188,6 +199,53 @@ async fn digits_and_completion_follow_their_deadlines_between_audio_frames(
     harness.close().await
 }
 
+#[tokio::test(start_paused = true)]
+async fn each_media_turn_takes_one_frame_and_flush_discards_the_rest() -> Result<(), MediaError> {
+    let mut harness = Harness::start(MediaControlFormat::Json)?;
+    harness.text().await?;
+    for byte in [0xbb, 0x33, 0xff] {
+        harness
+            .peer
+            .send(SocketMessage::Binary(vec![byte; 160].into()))
+            .await
+            .map_err(failure)?;
+    }
+    assert!(matches!(
+        harness.status().await?,
+        MediaEvent::Status {
+            queue_length: 3,
+            ..
+        }
+    ));
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(matches!(
+        harness.status().await?,
+        MediaEvent::Status {
+            queue_length: 3,
+            ..
+        }
+    ));
+    for byte in [0xbb, 0x33] {
+        harness.media_turn().await?;
+        let frame = harness.frames.try_recv().map_err(failure)?;
+        assert_eq!(frame.samples(), [rusterisk_media::mulaw_decode(byte); 160]);
+    }
+    harness.command(MediaCommand::FlushMedia).await?;
+    assert!(matches!(
+        harness.status().await?,
+        MediaEvent::Status {
+            queue_length: 0,
+            ..
+        }
+    ));
+    harness.media_turn().await?;
+    assert!(matches!(
+        harness.frames.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    harness.close().await
+}
+
 #[tokio::test]
 async fn plain_text_direction_commands_return_the_reference_error() -> Result<(), MediaError> {
     let mut harness = Harness::start(MediaControlFormat::PlainText)?;
@@ -221,6 +279,8 @@ async fn receive_only_direction_keeps_queued_audio_while_digits_continue() -> Re
         assert!(matches!(harness.status().await?, MediaEvent::Status { queue_length, .. } if queue_length == before));
         assert!(matches!(harness.frames.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
         harness.command(MediaCommand::SetMediaDirection { direction: MediaDirection::Both }).await?;
+        harness.status().await?;
+        harness.media_turn().await?;
         assert!(tokio::time::timeout(Duration::from_secs(1), harness.frames.recv()).await.map_err(failure)?.is_some());
         Ok(())
     }.await;
