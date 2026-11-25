@@ -12,7 +12,8 @@ use hickory_resolver::{
 use rusterisk_api::ChannelId;
 use rusterisk_config::{Config, Protocol};
 use rusterisk_sip::StaticTarget;
-use std::{net::Ipv4Addr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::Ipv4Addr;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::time::Instant;
 mod authentication;
@@ -61,7 +62,7 @@ async fn cancelled_resolution_cannot_connect_before_the_release_effect_is_consum
         let key = key.clone();
         signaling.effect(effect, 0).await?;
         let mut bytes = [0; 2048];
-        let (size, address) = signaling.control_until(tokio::time::timeout(Duration::from_secs(2), dns.recv_from(&mut bytes))).await?.map_err(failure)?.map_err(failure)?;
+        let (size, address) = signaling.control_until(Wait::Ready.bounded(dns.recv_from(&mut bytes))).await?.map_err(failure)?.map_err(failure)?;
         signaling.control_until(controller.execute(credentials()?, None, Action::Hangup(id))).await??;
         assert!(signaling.records.get(calls::NATIVE, &key).is_some());
         let request = Message::from_vec(&bytes[..size]).map_err(failure)?;
@@ -75,12 +76,12 @@ async fn cancelled_resolution_cannot_connect_before_the_release_effect_is_consum
         reply.edns = request.edns;
         let reply = reply.to_vec().map_err(failure)?;
         assert_eq!(dns.send_to(&reply, address).await.map_err(failure)?, reply.len());
-        let completed = tokio::time::timeout(Duration::from_secs(2), signaling.native_job_for_test()).await.map_err(failure)??.ok_or(ControlError::Capacity)?.map_err(failure)?;
+        let completed = Wait::Ready.bounded(signaling.native_job_for_test()).await.map_err(failure)??.ok_or(ControlError::Capacity)?.map_err(failure)?;
         signaling.native_completed(completed, 1).await?;
         assert!(signaling.records.iter(calls::ACTIVE).next().is_none());
         assert!(signaling.records.iter(calls::NATIVE).next().is_none());
         assert!(signaling.resolution_cache.get(&StaticTarget::from_uri(Protocol::Tcp, &target).map_err(failure)?, Instant::now()).is_none());
-        assert!(tokio::time::timeout(Duration::from_millis(100), peer.accept()).await.is_err());
+        assert!(Wait::Quiet.bounded(peer.accept()).await.is_err());
         assert!(matches!(signaling.queued_effect_for_test(), Some(Effect::Release { key: released }) if released == key));
         drop(subscription);
         Ok(())

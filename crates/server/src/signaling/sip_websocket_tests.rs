@@ -13,7 +13,8 @@ use rsipstack::sip::{
 use rusterisk_api::{Channel, ChannelId, ChannelState, Endpoint, EndpointState};
 use rusterisk_config::{Codec, Config};
 use rusterisk_sip::Session;
-use std::{net::SocketAddr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::SocketAddr;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
@@ -61,25 +62,26 @@ fn configuration(protocol: &str, encryption: &str) -> Result<Config, ControlErro
 async fn receive<S: AsyncRead + AsyncWrite + Unpin>(
     socket: &mut WebSocketStream<S>,
 ) -> Result<SipMessage, ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            match socket.next().await {
-                Some(Ok(Message::Text(bytes))) => {
-                    return SipMessage::try_from(bytes.as_bytes()).map_err(failure);
+    Wait::Ready
+        .bounded(async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(Message::Text(bytes))) => {
+                        return SipMessage::try_from(bytes.as_bytes()).map_err(failure);
+                    }
+                    Some(Ok(Message::Binary(bytes))) => {
+                        return SipMessage::try_from(bytes.as_ref()).map_err(failure);
+                    }
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_) | Message::Frame(_))) | None => {
+                        return Err(ControlError::Invalid("Signaling connection closed"));
+                    }
+                    Some(Err(error)) => return Err(failure(error)),
                 }
-                Some(Ok(Message::Binary(bytes))) => {
-                    return SipMessage::try_from(bytes.as_ref()).map_err(failure);
-                }
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                Some(Ok(Message::Close(_) | Message::Frame(_))) | None => {
-                    return Err(ControlError::Invalid("Signaling connection closed"));
-                }
-                Some(Err(error)) => return Err(failure(error)),
             }
-        }
-    })
-    .await
-    .map_err(failure)?
+        })
+        .await
+        .map_err(failure)?
 }
 
 fn registration(token: &str, sequence: u32, authorization: &str) -> String {
@@ -144,28 +146,28 @@ async fn endpoint_state(
     controller: &Controller,
     expected: EndpointState,
 ) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let response = controller
-                .execute(
-                    credentials()?,
-                    None,
-                    Action::GetEndpoint {
-                        technology: "PJSIP".into(),
-                        resource: "phone".into(),
-                    },
-                )
-                .await?;
-            let endpoint: Endpoint =
-                serde_json::from_value(response.body.ok_or(ControlError::Capacity)?)?;
-            if endpoint.state == Some(expected) {
-                return Ok::<(), ControlError>(());
+    Wait::Ready
+        .bounded(async {
+            loop {
+                let response = controller
+                    .execute(
+                        credentials()?,
+                        None,
+                        Action::GetEndpoint {
+                            technology: "PJSIP".into(),
+                            resource: "phone".into(),
+                        },
+                    )
+                    .await?;
+                let endpoint: Endpoint =
+                    serde_json::from_value(response.body.ok_or(ControlError::Capacity)?)?;
+                if endpoint.state == Some(expected) {
+                    return Ok::<(), ControlError>(());
+                }
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .map_err(failure)?
+        })
+        .await
+        .map_err(failure)?
 }
 
 async fn exercise<S: AsyncRead + AsyncWrite + Unpin>(
@@ -226,21 +228,21 @@ async fn exercise<S: AsyncRead + AsyncWrite + Unpin>(
         return Err(ControlError::Unsupported);
     };
     assert_eq!(ack.method, Method::Ack);
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let channel = controller
-                .execute(credentials()?, None, Action::GetChannel(id.clone()))
-                .await?;
-            let channel: Channel =
-                serde_json::from_value(channel.body.ok_or(ControlError::Capacity)?)?;
-            if channel.state == ChannelState::Up {
-                return Ok::<(), ControlError>(());
+    Wait::Ready
+        .bounded(async {
+            loop {
+                let channel = controller
+                    .execute(credentials()?, None, Action::GetChannel(id.clone()))
+                    .await?;
+                let channel: Channel =
+                    serde_json::from_value(channel.body.ok_or(ControlError::Capacity)?)?;
+                if channel.state == ChannelState::Up {
+                    return Ok::<(), ControlError>(());
+                }
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .map_err(failure)??;
+        })
+        .await
+        .map_err(failure)??;
     controller
         .execute(credentials()?, None, Action::Hangup(id))
         .await?;

@@ -5,12 +5,14 @@ use crate::{Action, ControlError, Controller, Credentials};
 use rsipstack::sip::{HeadersExt, Request, SipMessage};
 use rusterisk_api::ChannelId;
 use rusterisk_config::Config;
-use std::{net::SocketAddr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 
 async fn received(peer: &UdpSocket) -> Result<(Request, SocketAddr), ControlError> {
     let mut bytes = [0; rusterisk_sip::MAX_MESSAGE + 1];
-    let (size, address) = tokio::time::timeout(Duration::from_secs(3), peer.recv_from(&mut bytes))
+    let (size, address) = Wait::Ready
+        .bounded(peer.recv_from(&mut bytes))
         .await
         .map_err(failure)?
         .map_err(failure)?;

@@ -15,6 +15,7 @@ use hickory_resolver::{
 };
 use rusterisk_config::Protocol;
 use rusterisk_sip::StaticTarget;
+use rusterisk_test_support::Wait;
 use std::{
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     time::Duration,
@@ -103,7 +104,8 @@ async fn answer(
     records: Vec<Record>,
 ) -> Result<(), ControlError> {
     let mut bytes = [0; 1233];
-    let (size, peer) = tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut bytes))
+    let (size, peer) = Wait::Ready
+        .bounded(socket.recv_from(&mut bytes))
         .await
         .map_err(failure)?
         .map_err(failure)?;

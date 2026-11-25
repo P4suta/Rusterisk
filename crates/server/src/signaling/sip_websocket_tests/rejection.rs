@@ -1,7 +1,7 @@
 use super::{configuration, failure, receive, request, ControlError, Server};
 use futures_util::{SinkExt, StreamExt};
 use rsipstack::sip::SipMessage;
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tokio_tungstenite::tungstenite::{Error, Message};
 
 #[tokio::test]
@@ -50,14 +50,14 @@ async fn fragmented_websocket_frames_preserve_one_sip_message_and_joined_message
         let (mut socket, _) = tokio_tungstenite::connect_async(request(address, Some("sip"), None)?).await.map_err(failure)?;
         let options = b"OPTIONS sip:localhost SIP/2.0\r\nVia: SIP/2.0/WS browser.invalid;branch=z9hG4bK-fragment\r\nFrom: <sip:phone@localhost>;tag=phone\r\nTo: <sip:server@localhost>\r\nCall-ID: websocket-options\r\nCSeq: 1 OPTIONS\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n";
         socket.send(Message::Frame(Frame::message(options[..17].to_vec(), OpCode::Data(Data::Text), false))).await.map_err(failure)?;
-        assert!(tokio::time::timeout(Duration::from_millis(30), socket.next()).await.is_err());
+        assert!(Wait::Quiet.bounded(socket.next()).await.is_err());
         socket.send(Message::Frame(Frame::message(options[17..].to_vec(), OpCode::Data(Data::Continue), true))).await.map_err(failure)?;
         let SipMessage::Response(response) = receive(&mut socket).await? else { return Err(ControlError::Unsupported); };
         assert_eq!(response.status_code.code(), 200);
         let mut joined = options.to_vec();
         joined.extend_from_slice(options);
         socket.send(Message::Binary(joined.into())).await.map_err(failure)?;
-        let closed = tokio::time::timeout(Duration::from_secs(1), socket.next()).await.map_err(failure)?;
+        let closed = Wait::Ready.bounded(socket.next()).await.map_err(failure)?;
         assert!(matches!(closed, Some(Ok(Message::Close(_))) | Some(Err(_)) | None));
         Ok(())
     }.await;
@@ -90,11 +90,11 @@ async fn upgrade_capacity_includes_active_sip_websockets_and_resumes_after_close
         let mut released = sockets.pop().ok_or(ControlError::Capacity)?;
         released.close(None).await.map_err(failure)?;
         drop(released);
-        let mut replacement = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut replacement = Wait::Ready.bounded(async {
             loop {
                 match tokio_tungstenite::connect_async(request(address, Some("sip"), None)?).await {
                     Ok((socket, _)) => return Ok::<_, ControlError>(socket),
-                    Err(Error::Http(response)) if response.status().as_u16() == 503 => tokio::time::sleep(Duration::from_millis(10)).await,
+                    Err(Error::Http(response)) if response.status().as_u16() == 503 => {},
                     Err(error) => return Err(failure(error)),
                 }
             }

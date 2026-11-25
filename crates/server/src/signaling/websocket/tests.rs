@@ -1,6 +1,7 @@
 use super::{connect, failure, ControlError};
 use futures_util::{SinkExt, StreamExt};
 use rusterisk_config::Config;
+use rusterisk_test_support::Wait;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_tungstenite::tungstenite::{
@@ -48,7 +49,7 @@ async fn a_failed_upgrade_retries_and_returns_the_successful_owned_connection(
     let address = listener.local_addr().map_err(failure)?;
     let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "", "", "").map_err(failure)?
         .with_websocket_configuration("", &format!("[agent]\ntype=websocket_client\nconnection_type=per_call_config\nuri=ws://{address}/media\nprotocols=media\nconnection_timeout=500\nreconnect_interval=100\nreconnect_attempts=2\n")).map_err(failure)?;
-    let result = tokio::time::timeout(Duration::from_secs(2), async {
+    let result = Wait::Ready.bounded(async {
         let server = async {
             let (mut refused, _) = listener.accept().await.map_err(failure)?;
             receive_request(&mut refused).await?;
@@ -78,7 +79,7 @@ async fn each_upgrade_timeout_closes_its_socket_before_the_next_bounded_attempt(
     let address = listener.local_addr().map_err(failure)?;
     let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "", "", "").map_err(failure)?
         .with_websocket_configuration("", &format!("[agent]\ntype=websocket_client\nconnection_type=per_call_config\nuri=ws://{address}/media\nprotocols=media\nconnection_timeout=80\nreconnect_interval=50\nreconnect_attempts=2\n")).map_err(failure)?;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    Wait::Ready.bounded(async {
         let server = async {
             for _ in 0..2 {
                 let (mut peer, _) = listener.accept().await.map_err(failure)?;
