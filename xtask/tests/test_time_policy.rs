@@ -17,6 +17,23 @@ fn real_sleeps_and_private_timeouts_are_rejected_even_inside_macros() -> Result<
 }
 
 #[test]
+fn native_receives_and_request_clients_use_shared_deadlines() -> Result<(), syn::Error> {
+    let path = Path::new("crates/server/tests/fixture.rs");
+    for source in [
+        "fn wait() { chan.recv_timeout(Duration::from_secs(7)); }",
+        "fn wait() { stream.set_read_timeout(Some(std::time::Duration::from_secs(2))); }",
+        "fn wait() { stream.set_write_timeout(Some(Duration::from_millis(50))); }",
+        "fn wait() { TcpStream::connect_timeout(addr, Duration::from_secs(4)); }",
+        "fn wait() { Client::builder().timeout(Duration::from_secs(9)); }",
+    ] {
+        assert!(!inspect(path, source)?.is_empty(), "{source}");
+    }
+    let shared = "fn wait() { client.timeout(Wait::Ready.duration()); }";
+    assert!(inspect(path, shared)?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn test_only_methods_and_resumed_clocks_require_shared_waits() -> Result<(), syn::Error> {
     let path = Path::new("crates/server/src/worker.rs");
     for source in [

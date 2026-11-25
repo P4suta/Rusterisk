@@ -7,6 +7,26 @@ fn timer(name: &str) -> bool {
     matches!(name, "sleep" | "sleep_until" | "timeout" | "timeout_at")
 }
 
+fn duration_literal(expr: &syn::Expr) -> bool {
+    let syn::Expr::Call(call) = expr else {
+        return false;
+    };
+    if let syn::Expr::Path(path) = call.func.as_ref() {
+        let mut components = path.path.segments.iter().rev();
+        let constructor = components
+            .next()
+            .is_some_and(|name| name.ident.to_string().starts_with("from_") || name.ident == "new");
+        if constructor
+            && components
+                .next()
+                .is_some_and(|name| name.ident == "Duration")
+        {
+            return true;
+        }
+    }
+    call.args.iter().any(duration_literal)
+}
+
 fn paused(attributes: &[syn::Attribute]) -> bool {
     attributes.iter().any(|attribute| {
         if !attribute
@@ -39,6 +59,29 @@ struct Policy {
 }
 
 impl Policy {
+    fn io_deadline(
+        &mut self,
+        method: &syn::Ident,
+        arguments: &syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
+    ) {
+        if self.test
+            && matches!(
+                method.to_string().as_str(),
+                "timeout"
+                    | "recv_timeout"
+                    | "connect_timeout"
+                    | "set_read_timeout"
+                    | "set_write_timeout"
+            )
+            && arguments.iter().any(duration_literal)
+        {
+            self.findings.push(Finding {
+                rule: "test-time",
+                detail: format!("{method}: use a shared I/O deadline"),
+            });
+        }
+    }
+
     fn path(&mut self, names: &[String], called: bool) {
         if !self.test || self.common {
             return;
@@ -192,8 +235,16 @@ impl<'ast> Visit<'ast> for Policy {
         (self.test, self.wait_impl) = (test, prior);
     }
 
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        self.io_deadline(&call.method, &call.args);
+        visit::visit_expr_method_call(self, call);
+    }
+
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
         if let syn::Expr::Path(path) = call.func.as_ref() {
+            if let Some(method) = path.path.segments.last() {
+                self.io_deadline(&method.ident, &call.args);
+            }
             self.path(
                 &path
                     .path
