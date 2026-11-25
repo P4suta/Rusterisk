@@ -10,7 +10,7 @@ pub use runner::{execute, plan, CoreProofOutcome, Execution};
 #[cfg(unix)]
 pub(crate) use runner::{read_retained, verify_retained, CommandMode};
 
-pub const HARNESSES: [&str; 22] = [
+pub const HARNESSES: [&str; 25] = [
     "proofs::terminal_release_is_absorbing",
     "proofs::connection_claims_are_exclusive",
     "proofs::stasis_tracks_the_current_app",
@@ -33,6 +33,9 @@ pub const HARNESSES: [&str; 22] = [
     "proofs::dial_forks_change_only_at_their_wake",
     "proofs::answers_change_only_at_their_wake",
     "proofs::digit_sequences_change_only_at_their_wake",
+    "proofs::media_release_follows_every_teardown_step",
+    "proofs::a_call_generation_releases_its_slot_once",
+    "proofs::stale_media_notices_preserve_the_reused_slot",
 ];
 
 pub(crate) const SOLVER: &str = "kissat";

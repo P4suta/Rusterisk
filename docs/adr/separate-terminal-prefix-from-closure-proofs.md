@@ -34,4 +34,4 @@ The memory-intensive terminal harness runs before the smaller proofs.
 
 ## Confirmation
 
-Both modes and the complete campaign of twenty-two harnesses must pass within the declared profile.
+Both modes and the complete campaign of twenty-five harnesses must pass within the declared profile.

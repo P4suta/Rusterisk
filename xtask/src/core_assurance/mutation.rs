@@ -13,11 +13,12 @@ enum Invariant {
     Transfer,
     AttendedTransfer,
     OwnedCallPair,
+    CallSlots,
     Settings,
 }
 
 impl Invariant {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Terminal,
         Self::Connection,
         Self::Stasis,
@@ -27,6 +28,7 @@ impl Invariant {
         Self::Transfer,
         Self::AttendedTransfer,
         Self::OwnedCallPair,
+        Self::CallSlots,
         Self::Settings,
     ];
 
@@ -82,6 +84,21 @@ impl Invariant {
                 | "SettingsLifetimes::release"
                 | "SettingsError::into_reference",
             ) => Some(Self::Settings),
+            ("src/call_table.rs", function)
+                if function.starts_with("CallTable")
+                    && [
+                        "::available",
+                        "::admit",
+                        "::teardown",
+                        "::await_media",
+                        "::acknowledge",
+                    ]
+                    .iter()
+                    .any(|part| function.ends_with(part))
+                    || function.contains("Teardown") && function.ends_with("::next") =>
+            {
+                Some(Self::CallSlots)
+            }
             _ => None,
         }
     }
@@ -97,6 +114,7 @@ impl Invariant {
             Self::Transfer => "transfer ownership",
             Self::AttendedTransfer => "attended transfer ownership",
             Self::OwnedCallPair => "paired call ownership",
+            Self::CallSlots => "call slot release",
             Self::Settings => "settings ownership",
         }
     }
