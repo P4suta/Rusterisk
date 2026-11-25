@@ -174,3 +174,70 @@ async fn cancelled_successful_admission_releases_the_new_link() -> Result<(), Me
     assert!(removed);
     Ok(())
 }
+
+fn browser() -> Result<crate::webrtc::WebRtcSession, MediaError> {
+    let offering = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let answering = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let now = std::time::Instant::now();
+    let codecs = [rusterisk_config::Codec::Pcmu];
+    let offer = crate::webrtc::WebRtcOffer::new(
+        offering,
+        answering.local_addr().map_err(failure)?,
+        &codecs,
+        now,
+    )?;
+    let local = answering.local_addr().map_err(failure)?;
+    let (session, _answer) =
+        crate::webrtc::WebRtcSession::answer(answering, local, offer.description(), &codecs, now)?;
+    Ok(session)
+}
+
+// Runs the next queued command and then every attachment that still waits.
+fn settle(hub: &mut MediaHub) -> Result<(), MediaError> {
+    let command = hub.commands.try_recv().map_err(failure)?;
+    hub.ordered(command)?;
+    while let Ok(attachment) = hub.webrtc.try_recv() {
+        hub.webrtc_attachment(attachment)?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_bridge_command_finds_the_webrtc_attachment_that_was_queued_before_it(
+) -> Result<(), MediaError> {
+    let (handle, mut hub, mut notices) = MediaHub::new(4);
+    let key = key()?;
+    let _receipt = handle.queue_webrtc_attachment(
+        key.clone(),
+        browser()?,
+        PeerMediaDirection::SendReceive,
+        AttachmentMode::Answered,
+    )?;
+    handle.bridge(7, Vec::from([key.clone()]))?;
+    settle(&mut hub)?;
+    let attached = hub.ports.contains_key(&key);
+    let stopped = notices.try_recv().is_ok();
+    hub.close().await?;
+    assert!(attached);
+    assert!(!stopped);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_release_ends_the_webrtc_attachment_that_was_queued_before_it() -> Result<(), MediaError>
+{
+    let (handle, mut hub, _notices) = MediaHub::new(4);
+    let key = key()?;
+    let _receipt = handle.queue_webrtc_attachment(
+        key.clone(),
+        browser()?,
+        PeerMediaDirection::SendReceive,
+        AttachmentMode::Answered,
+    )?;
+    handle.release(key.clone())?;
+    settle(&mut hub)?;
+    let remaining = hub.ports.contains_key(&key);
+    hub.close().await?;
+    assert!(!remaining);
+    Ok(())
+}
