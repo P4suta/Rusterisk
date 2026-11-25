@@ -64,6 +64,7 @@ tower-http = { version = "0.7.1", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+rusterisk-test-support = { version = "0.1.0", path = "../test-support" }
 allocation-counter = "=0.8.1"
 rusterisk-client = { version = "0.1.0", path = "../client" }
 tokio = { workspace = true, features = ["test-util"] }
