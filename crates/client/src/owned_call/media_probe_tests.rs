@@ -44,7 +44,7 @@ async fn media_notifications_and_stasis_exit_cancel_owned_state_requests_before_
             let (progress, received) = watch::channel(CallSnapshot { progress: OwnedCallProgress::new().observe(CallMilestone::Stasis), channel: Some(channel.clone()), failure: None, cleanup: Cleanup::Pending, media_probe_failure: None });
             let (_lifetime, lifetime) = oneshot::channel();
             calls.entries.insert(channel.id.clone(), Entry { progress, lifetime, work: Work::Idle, probe: Probe::Waiting });
-            calls.tick();
+            calls.settle();
             let release = tokio::time::timeout(Duration::from_secs(1), requests.recv()).await.map_err(|_| Error::Timeout)?.ok_or(Error::Closed)?;
             let kind = if exiting { api::EventKind::StasisEnd { channel: channel.clone() } }
                 else { api::EventKind::ChannelVarset { channel: channel.clone(), variable: "RUSTERISK_MEDIA_CONNECTED".into(), value: "1".into() } };

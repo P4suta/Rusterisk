@@ -1,11 +1,11 @@
 use crate::{
     api,
-    owned_call::{self, Calls, Command},
+    owned_call::{self, Calls},
     Client, Error, Originate, OwnedCall,
 };
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, watch};
 use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest, protocol::WebSocketConfig, Message,
 };
@@ -14,7 +14,7 @@ type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 pub struct Session {
-    commands: mpsc::Sender<Command>,
+    requests: owned_call::Requests,
     events: broadcast::Receiver<api::Event>,
     stop: watch::Sender<bool>,
     task: Option<tokio::task::JoinHandle<Result<(), Error>>>,
@@ -25,30 +25,30 @@ impl Session {
     /// The handle preserves observed answer and media milestones.
     /// Incoming adoption has no HTTP acceptance milestone.
     pub async fn adopt(&self, id: &api::ChannelId) -> Result<OwnedCall, Error> {
-        owned_call::adopt(&self.commands, id.clone()).await
+        owned_call::adopt(&self.requests, id.clone()).await
     }
     pub async fn originate(&self, options: Originate) -> Result<OwnedCall, Error> {
-        owned_call::originate(&self.commands, options).await
+        owned_call::originate(&self.requests, options).await
     }
     pub async fn external_websocket(
         &self,
         options: api::WebSocketMediaOptions,
         data: &str,
     ) -> Result<OwnedCall, Error> {
-        owned_call::external_websocket(&self.commands, options, data).await
+        owned_call::external_websocket(&self.requests, options, data).await
     }
     pub async fn external_rtp(
         &self,
         target: api::ExternalRtpTarget,
         data: &str,
     ) -> Result<OwnedCall, Error> {
-        owned_call::external_rtp(&self.commands, target, data).await
+        owned_call::external_rtp(&self.requests, target, data).await
     }
     pub async fn external_audio_socket(
         &self,
         target: api::AudioSocketTarget,
     ) -> Result<OwnedCall, Error> {
-        owned_call::external_audio_socket(&self.commands, target).await
+        owned_call::external_audio_socket(&self.requests, target).await
     }
     pub async fn next_event(&mut self) -> Result<api::Event, Error> {
         match self.events.recv().await {
@@ -122,7 +122,7 @@ pub(crate) async fn connect(
     }
     let (events, received) = broadcast::channel(64);
     let (stop, stopped) = watch::channel(false);
-    let (commands, calls) = Calls::new(client.clone(), application.clone());
+    let (requests, calls) = Calls::new(client.clone(), application.clone());
     let task = tokio::spawn(async move {
         let result = run(socket, events, stopped, calls).await;
         if let Err(error) = &result {
@@ -131,7 +131,7 @@ pub(crate) async fn connect(
         result
     });
     Ok(Session {
-        commands,
+        requests,
         events: received,
         stop,
         task: Some(task),
@@ -148,8 +148,6 @@ async fn run(
     let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
     heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_received = tokio::time::Instant::now();
-    let mut lifetime_tick = tokio::time::interval(Duration::from_millis(20));
-    lifetime_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let result = async {
         loop {
             if *stop.borrow() { break; }
@@ -164,7 +162,7 @@ async fn run(
                 worker = calls.probes.join_next(), if !calls.probes.is_empty() => {
                     if let Some(worker) = worker { let (id, result) = worker.map_err(|_| Error::Closed)?; calls.probed(id, result); }
                 }
-                _instant = lifetime_tick.tick() => calls.tick(),
+                Some(()) = calls.closed.recv() => calls.settle(),
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { break; },
                 message = socket.next() => {
                     let message = message.ok_or(Error::Closed)??;

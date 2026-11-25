@@ -1,13 +1,12 @@
 use super::{
     api, AdoptRequest, CallSnapshot, Calls, Cleanup, Command, Entry, Error, Lifetime, OwnedCall,
-    OwnedCallProgress, Probe, Work,
+    OwnedCallProgress, Probe, Requests, Work,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 
-pub(crate) async fn adopt(
-    commands: &mpsc::Sender<Command>,
-    id: api::ChannelId,
-) -> Result<OwnedCall, Error> {
+pub(crate) async fn adopt(requests: &Requests, id: api::ChannelId) -> Result<OwnedCall, Error> {
+    // An abandoned request drops this notice after its lifetime and progress handles.
+    let closure = requests.closures.notice();
     let (progress, received) = watch::channel(CallSnapshot {
         progress: OwnedCallProgress::new(),
         channel: None,
@@ -17,7 +16,8 @@ pub(crate) async fn adopt(
     });
     let (lifetime, dropped) = oneshot::channel();
     let (reply, accepted) = oneshot::channel();
-    commands
+    requests
+        .commands
         .try_send(Command::Adopt(AdoptRequest {
             id: id.clone(),
             progress,
@@ -33,6 +33,7 @@ pub(crate) async fn adopt(
         id,
         progress: received,
         lifetime: Lifetime::Owned(lifetime),
+        closure,
     })
 }
 
@@ -78,7 +79,7 @@ impl Calls {
                 probe: Probe::Waiting,
             },
         );
-        self.tick();
+        self.settle();
     }
 }
 

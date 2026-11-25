@@ -94,9 +94,3 @@ path = "crates/client/src/session.rs"
 item = "run"
 adr = "docs/adr/wake-each-task-at-its-earliest-deadline.md"
 rationale = "Send the heartbeat of the event connection."
-
-[[timers]]
-path = "crates/client/src/session.rs"
-item = "run"
-adr = "docs/adr/wake-each-task-at-its-earliest-deadline.md"
-rationale = "Check call lifetimes until the session reports them as events."
