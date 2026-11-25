@@ -1,11 +1,12 @@
 #![cfg(unix)]
 
+use rusterisk_test_support::Wait;
 use std::{
     io::{self, Read, Write},
     net::{TcpListener, TcpStream},
     path::Path,
     process::{Command, Stdio},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use xtask::process::{CommandSupervisor, ProcessError};
 
@@ -32,30 +33,17 @@ fn stop_service_fixture() -> io::Result<()> {
     let pending = ready.with_extension("pending");
     std::fs::write(&pending, listener.local_addr()?.to_string())?;
     std::fs::rename(pending, ready)?;
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        match listener.accept() {
-            Ok((mut stream, _)) => {
-                stream.set_nonblocking(false)?;
-                stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-                let mut request = [0; 1];
-                stream.read_exact(&mut request)?;
-                if request != *b"Q" {
-                    return Err(io::Error::other("invalid fixture stop request"));
-                }
-                return if std::env::var_os("RUSTERISK_STOP_SERVICE_FAILURE").is_some() {
-                    Err(io::Error::other("requested fixture service failure"))
-                } else {
-                    Ok(())
-                };
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(error) => return Err(error),
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::other("fixture service deadline exceeded"));
-        }
-        std::thread::sleep(Duration::from_millis(5));
+    let mut stream = rusterisk_test_support::accept(&listener, Wait::Shutdown)?;
+    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    let mut request = [0; 1];
+    stream.read_exact(&mut request)?;
+    if request != *b"Q" {
+        return Err(io::Error::other("invalid fixture stop request"));
+    }
+    if std::env::var_os("RUSTERISK_STOP_SERVICE_FAILURE").is_some() {
+        Err(io::Error::other("requested fixture service failure"))
+    } else {
+        Ok(())
     }
 }
 
@@ -72,7 +60,7 @@ fn stop_command_fixture() -> io::Result<()> {
         }
         Ok("failure") => Err(io::Error::other("requested fixture stop failure")),
         Ok("timeout") => {
-            std::thread::sleep(Duration::from_secs(15));
+            std::thread::park();
             Ok(())
         }
         Ok("noop") | Err(_) => Ok(()),
@@ -101,19 +89,14 @@ fn stopped(case: &str, root: &Path) -> io::Result<()> {
         let mut service = supervisor
             .start_service(&mut server, Duration::from_secs(12))
             .map_err(io::Error::other)?;
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let address = loop {
+        let address = rusterisk_test_support::file_ready(root, || {
             service.poll().map_err(io::Error::other)?;
             match std::fs::read_to_string(&ready) {
-                Ok(address) => break address,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
+                Ok(address) => Ok(Some(address)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
             }
-            if Instant::now() >= deadline {
-                return Err(io::Error::other("fixture ready deadline exceeded"));
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        };
+        })?;
         let mut stop = fixture("stop_command_fixture")?;
         let action = match case {
             "success" | "service-failure" | "interrupt" => "request",

@@ -13,7 +13,7 @@ fn process_fixture() -> Result<(), String> {
     match std::env::var("RUSTERISK_PROCESS_FIXTURE").as_deref() {
         Ok("failure") => Err("requested fixture failure".into()),
         Ok("timeout") => {
-            std::thread::sleep(Duration::from_secs(10));
+            std::thread::park();
             Ok(())
         }
         Ok("success") | Err(_) => Ok(()),

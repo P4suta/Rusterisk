@@ -1,8 +1,9 @@
+use rusterisk_test_support::Wait;
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     process::{Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
 use xtask::process::{run, CommandSupervisor, ProcessError};
 
@@ -152,18 +153,7 @@ fn disconnected(error: &std::io::Error) -> bool {
 }
 
 fn accept(listener: &TcpListener) -> Result<TcpStream, std::io::Error> {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        match listener.accept() {
-            Ok((stream, _)) => return Ok(stream),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(error) => return Err(error),
-        }
-        if Instant::now() >= deadline {
-            return Err(std::io::Error::other("descendant never connected"));
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    rusterisk_test_support::accept(listener, Wait::Ready)
 }
 
 fn ready(stream: &mut TcpStream) -> Result<(), std::io::Error> {
@@ -271,17 +261,13 @@ fn interrupt(signal: &str) -> Result<(), ProcessError> {
         Command::new("/bin/kill").args([signal, &owner.id().to_string()]),
         Duration::from_secs(2),
     );
-    let deadline = Instant::now() + Duration::from_secs(3);
-    let status = loop {
-        if let Some(status) = owner.try_wait()? {
-            break status;
-        }
-        if Instant::now() >= deadline {
+    let status = match rusterisk_test_support::child_exit(&mut owner, Wait::Ready) {
+        Ok(status) => status,
+        Err(error) => {
             owner.kill()?;
             owner.wait()?;
-            return Err(ProcessError::Timeout);
+            return Err(error.into());
         }
-        std::thread::sleep(Duration::from_millis(5));
     };
     let alive = probe_and_stop(stream)?;
     operation?;

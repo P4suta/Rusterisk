@@ -1,11 +1,12 @@
 #![cfg(any(unix, windows))]
 
+use rusterisk_test_support::Wait;
 use std::{
     ffi::OsStr,
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::Path,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 #[cfg(unix)]
 use std::{
@@ -148,27 +149,10 @@ impl Output {
 }
 
 fn accept(listener: &TcpListener) -> io::Result<TcpStream> {
-    listener.set_nonblocking(true)?;
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                stream.set_nonblocking(false)?;
-                stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-                stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-                return Ok(stream);
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(error) => return Err(error),
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Owned descendant never connected",
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    let stream = rusterisk_test_support::accept(listener, Wait::Ready)?;
+    stream.set_read_timeout(Some(Wait::Ready.duration()))?;
+    stream.set_write_timeout(Some(Wait::Ready.duration()))?;
+    Ok(stream)
 }
 
 fn address(name: &str) -> io::Result<SocketAddr> {

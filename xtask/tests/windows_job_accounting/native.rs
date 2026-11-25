@@ -1,3 +1,4 @@
+use rusterisk_test_support::Wait;
 use rusterisk_windows_job_accounting::active_processes;
 use std::{
     fs::File,
@@ -5,14 +6,11 @@ use std::{
     os::windows::io::AsHandle,
     path::{Path, PathBuf},
     process::ExitStatus,
-    thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use windows_spawn::{Child, Command, Job, SpawnOptions, Stdio};
 
 const WORKER_DIRECTORY: &str = "RUSTERISK_JOB_ACCOUNTING_WORKER_DIRECTORY";
-const WAIT_BUDGET: Duration = Duration::from_secs(5);
-const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 fn combine(operation: io::Result<()>, cleanup: io::Result<()>) -> io::Result<()> {
     match (operation, cleanup) {
@@ -54,55 +52,32 @@ fn marker(directory: &Path, name: &str) -> io::Result<()> {
 }
 
 fn wait_for_ready(directory: &Path, child: &mut Child) -> io::Result<()> {
-    let deadline = Instant::now() + WAIT_BUDGET;
-    loop {
+    rusterisk_test_support::file_ready(directory, || {
         if directory.join("ready").try_exists()? {
-            return Ok(());
+            return Ok(Some(()));
         }
         if let Some(status) = child.try_wait()? {
             return Err(io::Error::other(format!(
-                "Job accounting worker exited before readiness: {status}"
+                "Job worker exited before publishing readiness: {status}"
             )));
         }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Job accounting worker readiness deadline exceeded",
-            ));
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
+        Ok(None)
+    })
 }
 
 fn wait_for_exit(child: &mut Child) -> io::Result<ExitStatus> {
-    let deadline = Instant::now() + WAIT_BUDGET;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Job accounting worker exit deadline exceeded",
-            ));
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
+    rusterisk_test_support::signaled(child, Wait::Ready)?;
+    child.wait()
 }
 
 fn wait_for_empty(job: &Job) -> io::Result<()> {
-    let deadline = Instant::now() + WAIT_BUDGET;
-    loop {
-        if active_processes(job.as_handle())? == 0 {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Job accounting empty observation deadline exceeded",
-            ));
-        }
-        thread::sleep(POLL_INTERVAL);
+    let count = active_processes(job.as_handle())?;
+    if count == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "Job still contains {count} processes after teardown"
+        )))
     }
 }
 
@@ -172,17 +147,7 @@ fn accounting_worker() -> io::Result<()> {
     };
     let directory = PathBuf::from(directory);
     marker(&directory, "ready")?;
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if directory.join("release").try_exists()? {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Job accounting worker release deadline exceeded",
-            ));
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
+    rusterisk_test_support::file_ready(&directory, || {
+        Ok(directory.join("release").try_exists()?.then_some(()))
+    })
 }

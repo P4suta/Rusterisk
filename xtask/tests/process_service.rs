@@ -1,9 +1,10 @@
 #![cfg(unix)]
+use rusterisk_test_support::Wait;
 use std::{
     io::{self, Read},
     net::TcpListener,
     process::Command,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use xtask::process::{CommandSupervisor, ProcessError};
 
@@ -13,7 +14,7 @@ fn service_fixture() -> io::Result<()> {
         return Ok(());
     };
     let (mut reader, writer) = std::os::unix::net::UnixStream::pair()?;
-    reader.set_nonblocking(true)?;
+    reader.set_read_timeout(Some(Wait::Shutdown.duration()))?;
     let registration =
         signal_hook::low_level::pipe::register(signal_hook::consts::SIGTERM, writer)?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
@@ -21,19 +22,7 @@ fn service_fixture() -> io::Result<()> {
     let temporary = path.with_extension("pending");
     std::fs::write(&temporary, listener.local_addr()?.to_string())?;
     std::fs::rename(temporary, path)?;
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let result = loop {
-        match reader.read(&mut [0; 1]) {
-            Ok(1) => break Ok(()),
-            Ok(_) => break Err(io::Error::other("fixture signal stream closed")),
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(error) => break Err(error),
-        }
-        if Instant::now() >= deadline {
-            break Err(io::Error::other("fixture service deadline exceeded"));
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    };
+    let result = reader.read_exact(&mut [0; 1]);
     if !signal_hook::low_level::unregister(registration) {
         return Err(io::Error::other("fixture signal cleanup failed"));
     }
@@ -60,19 +49,14 @@ fn an_owned_service_survives_client_commands_then_stops_and_releases_its_listene
             .args(["--exact", "service_fixture", "--nocapture"])
             .env("RUSTERISK_SERVICE_READY", &ready);
         let mut service = supervisor.start_service(&mut command, Duration::from_secs(5))?;
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let address = loop {
-            service.poll()?;
+        let address = rusterisk_test_support::file_ready(&root, || {
+            service.poll().map_err(io::Error::other)?;
             match std::fs::read_to_string(&ready) {
-                Ok(address) => break address,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+                Ok(address) => Ok(Some(address)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
             }
-            if Instant::now() >= deadline {
-                return Err(ProcessError::Timeout);
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        };
+        })?;
         service.run(
             Command::new(std::env::current_exe()?)
                 .args(["--exact", "service_fixture"])
@@ -103,18 +87,11 @@ fn exited_services_cannot_accept_client_commands() -> Result<(), ProcessError> {
         .args(["--exact", "service_fixture"])
         .env_remove("RUSTERISK_SERVICE_READY");
     let mut service = supervisor.start_service(&mut command, Duration::from_secs(3))?;
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        match service.poll() {
-            Err(ProcessError::InvalidOutput) => break,
-            Err(error) => return Err(error),
-            Ok(()) => {}
-        }
-        if Instant::now() >= deadline {
-            return Err(ProcessError::Timeout);
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    rusterisk_test_support::child_state(|| match service.poll() {
+        Err(ProcessError::InvalidOutput) => Ok(Some(())),
+        Err(error) => Err(error),
+        Ok(()) => Ok(None),
+    })?;
     assert!(matches!(
         service.run(
             &mut Command::new("never-run-client"),
@@ -156,28 +133,21 @@ fn expired_and_dropped_services_release_owned_listeners() -> Result<(), ProcessE
                 .args(["--exact", "service_fixture", "--nocapture"])
                 .env("RUSTERISK_SERVICE_READY", &ready);
             let mut service = supervisor.start_service(&mut command, Duration::from_secs(3))?;
-            let deadline = Instant::now() + Duration::from_secs(2);
-            let address = loop {
-                service.poll()?;
+            let address = rusterisk_test_support::file_ready(&root, || {
+                service.poll().map_err(io::Error::other)?;
                 match std::fs::read_to_string(&ready) {
-                    Ok(address) => break address,
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
+                    Ok(address) => Ok(Some(address)),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                    Err(error) => Err(error),
                 }
-                if Instant::now() >= deadline {
-                    return Err(ProcessError::Timeout);
-                }
-                std::thread::sleep(Duration::from_millis(5));
-            };
+            })?;
             if expires {
-                loop {
-                    match service.poll() {
-                        Err(ProcessError::Timeout) => break,
-                        Err(error) => return Err(error),
-                        Ok(()) => {}
-                    }
-                    std::thread::sleep(Duration::from_millis(5));
-                }
+                let mut client = Command::new(std::env::current_exe()?);
+                client
+                    .args(["--exact", "service_fixture"])
+                    .env("RUSTERISK_SERVICE_READY", root.join("client-ready"));
+                assert!(service.run(&mut client, Wait::Shutdown.duration()).is_err());
+                assert!(matches!(service.poll(), Err(ProcessError::Timeout)));
                 assert!(matches!(
                     service.run(
                         &mut Command::new("never-run-client"),
