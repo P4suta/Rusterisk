@@ -7,6 +7,7 @@ use rusterisk_client::{
 };
 use rusterisk_media::{AudioFormat, Frame, RtpSender};
 use rusterisk_server::rtp::SocketPair;
+use rusterisk_server::test_time::Wait;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
@@ -43,36 +44,36 @@ enum Observation<'a> {
 }
 
 async fn observed(session: &mut Session, wanted: Observation<'_>) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        for _ in 0..128 {
-            match (&wanted, session.next_event().await?.kind) {
-                (Observation::Stasis(id), EventKind::StasisStart { channel, .. })
-                    if channel.id == **id =>
-                {
-                    return Ok(())
+    Wait::Ready
+        .bounded(async {
+            for _ in 0..128 {
+                match (&wanted, session.next_event().await?.kind) {
+                    (Observation::Stasis(id), EventKind::StasisStart { channel, .. })
+                        if channel.id == **id =>
+                    {
+                        return Ok(())
+                    }
+                    (
+                        Observation::RecordingStarted(id),
+                        EventKind::RecordingStarted { recording },
+                    ) if recording.name == **id => return Ok(()),
+                    (
+                        Observation::RecordingFinished(id),
+                        EventKind::RecordingFinished { recording },
+                    ) if recording.name == **id => {
+                        return if recording.state == RecordingState::Done {
+                            Ok(())
+                        } else {
+                            Err(Error::Invalid("recording publication failed"))
+                        };
+                    }
+                    _ => {}
                 }
-                (Observation::RecordingStarted(id), EventKind::RecordingStarted { recording })
-                    if recording.name == **id =>
-                {
-                    return Ok(())
-                }
-                (
-                    Observation::RecordingFinished(id),
-                    EventKind::RecordingFinished { recording },
-                ) if recording.name == **id => {
-                    return if recording.state == RecordingState::Done {
-                        Ok(())
-                    } else {
-                        Err(Error::Invalid("recording publication failed"))
-                    };
-                }
-                _ => {}
             }
-        }
-        Err(Error::Capacity)
-    })
-    .await
-    .map_err(|_| Error::Timeout)?
+            Err(Error::Capacity)
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
 }
 
 #[derive(Clone, Copy)]
@@ -251,10 +252,9 @@ async fn bridge_input_continues_after_both_media_paths_deliver_audio() -> Result
         }
         Ok::<(), Error>(())
     };
-    tokio::time::timeout(Duration::from_secs(3), async {
-        tokio::try_join!(send_recording_input(&peers), bridge)
-    })
-    .await
-    .map_err(|_| Error::Timeout)??;
+    Wait::Ready
+        .bounded(async { tokio::try_join!(send_recording_input(&peers), bridge) })
+        .await
+        .map_err(|_| Error::Timeout)??;
     Ok(())
 }

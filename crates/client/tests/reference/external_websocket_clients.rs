@@ -8,6 +8,7 @@ use rusterisk_client::{
     Client, Error, Session,
 };
 use rusterisk_media::mulaw_encode;
+use rusterisk_server::test_time::Wait;
 use std::time::Duration;
 use tokio::{
     sync::{mpsc, watch},
@@ -74,7 +75,7 @@ impl Fixture {
                 );
                 let socket = tokio::select! {
                     _changed = stopped.changed() => return Ok(()),
-                    result = tokio::time::timeout(Duration::from_secs(2), handshake) => result.map_err(invalid)??,
+                    result = Wait::Ready.bounded(handshake) => result.map_err(invalid)??,
                 };
                 sender.try_send(socket).map_err(|_| Error::Capacity)?;
             }
@@ -114,7 +115,7 @@ impl Fixture {
 
     pub async fn shutdown(mut self) -> Result<(), Error> {
         self.stop.send_replace(true);
-        match tokio::time::timeout(Duration::from_secs(3), &mut self.task).await {
+        match Wait::Ready.bounded(&mut self.task).await {
             Ok(result) => result.map_err(invalid)?,
             Err(error) => {
                 self.task.abort();
@@ -160,11 +161,13 @@ async fn connect(
             .map(String::as_str),
         Some("160")
     );
-    let mut peer = tokio::time::timeout(Duration::from_secs(2), fixture.sockets.recv())
+    let mut peer = Wait::Ready
+        .bounded(fixture.sockets.recv())
         .await
         .map_err(invalid)?
         .ok_or(Error::Closed)?;
-    let Message::Text(start) = tokio::time::timeout(Duration::from_secs(2), peer.next())
+    let Message::Text(start) = Wait::Ready
+        .bounded(peer.next())
         .await
         .map_err(invalid)?
         .ok_or(Error::Closed)??
@@ -221,7 +224,7 @@ pub async fn compare(
         .create_bridge(&bridge, "Configured WebSocket comparison")
         .await?;
     client.add_channels(&bridge, &ids).await?;
-    tokio::time::timeout(Duration::from_secs(3), async {
+    Wait::Ready.bounded(async {
         let mut clock = tokio::time::interval(Duration::from_millis(20));
         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut sent = 0;

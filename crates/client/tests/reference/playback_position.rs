@@ -22,24 +22,24 @@ pub(super) async fn removed<F: std::future::Future<Output = Result<Playback, Err
     id: &rusterisk_client::PlaybackId,
     mut lookup: impl FnMut() -> F,
 ) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            match lookup().await {
-                Err(Error::Api { status: 404, .. }) => return Ok(()),
-                Err(error) => return Err(error),
-                Ok(snapshot) if snapshot.id == *id && snapshot.state == PlaybackState::Done => {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-                Ok(_) => {
-                    return Err(Error::Invalid(
-                        "finished playback identity or state changed",
-                    ))
+    rusterisk_server::test_time::Wait::Ready
+        .bounded(async {
+            loop {
+                match lookup().await {
+                    Err(Error::Api { status: 404, .. }) => return Ok(()),
+                    Err(error) => return Err(error),
+                    Ok(snapshot) if snapshot.id == *id && snapshot.state == PlaybackState::Done => {
+                    }
+                    Ok(_) => {
+                        return Err(Error::Invalid(
+                            "finished playback identity or state changed",
+                        ))
+                    }
                 }
             }
-        }
-    })
-    .await
-    .map_err(|_| Error::Invalid("finished playback removal deadline"))?
+        })
+        .await
+        .map_err(|_| Error::Invalid("finished playback removal deadline"))?
 }
 
 pub fn prepare(root: &Path) -> Result<(), Error> {
@@ -147,31 +147,35 @@ async fn received_by(
 ) -> Result<(), Error> {
     let mut packets = 0;
     let mut last = None;
-    let result = tokio::time::timeout_at(deadline, async {
-        let mut window = AudioWindow::new(sample);
-        let mut bytes = [0; 2049];
-        for _ in 0..64 {
-            let (size, _) = peer.data().recv_from(&mut bytes).await?;
-            let packet = RtpPacket::parse(&bytes[..size])
-                .map_err(|_| Error::Invalid("playback audio packet"))?;
-            packets += 1;
-            last = Some((
-                packet.payload_type(),
-                packet.payload().len(),
-                packet.sequence(),
-                packet.timestamp(),
-                packet.ssrc(),
-                packet.payload().first().copied().map(mulaw_decode),
-            ));
-            if window.observe(&packet) {
-                return Ok(());
+    let result = rusterisk_server::test_time::Wait::Ready
+        .bounded(async {
+            let mut window = AudioWindow::new(sample);
+            let mut bytes = [0; 2049];
+            for _ in 0..64 {
+                let (size, _) = peer.data().recv_from(&mut bytes).await?;
+                if tokio::time::Instant::now() > deadline {
+                    return Err(Error::Timeout);
+                }
+                let packet = RtpPacket::parse(&bytes[..size])
+                    .map_err(|_| Error::Invalid("playback audio packet"))?;
+                packets += 1;
+                last = Some((
+                    packet.payload_type(),
+                    packet.payload().len(),
+                    packet.sequence(),
+                    packet.timestamp(),
+                    packet.ssrc(),
+                    packet.payload().first().copied().map(mulaw_decode),
+                ));
+                if window.observe(&packet) {
+                    return Ok(());
+                }
             }
-        }
-        Err(Error::Capacity)
-    })
-    .await
-    .map_err(|_| Error::Timeout)
-    .and_then(|result| result);
+            Err(Error::Capacity)
+        })
+        .await
+        .map_err(|_| Error::Timeout)
+        .and_then(|result| result);
     if let Err(error) = &result {
         eprintln!("playback audio failed: phase={phase}, expected={sample}, packets={packets}, last={last:?}, error={error}");
     }
@@ -185,32 +189,34 @@ enum Observation<'a> {
 }
 
 async fn observed(session: &mut Session, wanted: Observation<'_>) -> Result<(), Error> {
-    let result = tokio::time::timeout(Duration::from_secs(3), async {
-        for _ in 0..64 {
-            let kind = session.next_event().await?.kind;
-            match (&wanted, kind) {
-                (Observation::Stasis(id), EventKind::StasisStart { channel, .. })
-                    if channel.id == **id =>
-                {
-                    return Ok(())
+    let result = rusterisk_server::test_time::Wait::Ready
+        .bounded(async {
+            for _ in 0..64 {
+                let kind = session.next_event().await?.kind;
+                match (&wanted, kind) {
+                    (Observation::Stasis(id), EventKind::StasisStart { channel, .. })
+                        if channel.id == **id =>
+                    {
+                        return Ok(())
+                    }
+                    (
+                        Observation::Finished(id),
+                        EventKind::PlaybackFinished { playback: ended },
+                    ) if ended.id == **id => {
+                        return if ended.state == PlaybackState::Done {
+                            Ok(())
+                        } else {
+                            Err(Error::Invalid("playback finished unsuccessfully"))
+                        };
+                    }
+                    _ => {}
                 }
-                (Observation::Finished(id), EventKind::PlaybackFinished { playback: ended })
-                    if ended.id == **id =>
-                {
-                    return if ended.state == PlaybackState::Done {
-                        Ok(())
-                    } else {
-                        Err(Error::Invalid("playback finished unsuccessfully"))
-                    };
-                }
-                _ => {}
             }
-        }
-        Err(Error::Capacity)
-    })
-    .await
-    .map_err(|_| Error::Timeout)
-    .and_then(|result| result);
+            Err(Error::Capacity)
+        })
+        .await
+        .map_err(|_| Error::Timeout)
+        .and_then(|result| result);
     if let Err(error) = &result {
         eprintln!("playback event wait failed: wanted={wanted:?}, error={error}");
     }

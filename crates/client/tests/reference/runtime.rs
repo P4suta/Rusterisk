@@ -1,8 +1,9 @@
 use super::sounds;
 use rusterisk_client::{Client, Error};
 use rusterisk_config::Config;
+use rusterisk_server::test_time::Wait;
 use rusterisk_server::{runtime::Server, ControlError, Controller};
-use std::{net::SocketAddr, path::Path, time::Duration};
+use std::{net::SocketAddr, path::Path};
 use tokio::task::JoinHandle;
 
 #[path = "runtime/contracts.rs"]
@@ -35,7 +36,7 @@ async fn shutdown(
     mut task: JoinHandle<Result<(), ControlError>>,
 ) -> Result<(), Error> {
     controller.shutdown();
-    match tokio::time::timeout(Duration::from_secs(20), &mut task).await {
+    match Wait::Shutdown.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?.map_err(failure),
         Err(_) => {
             task.abort();

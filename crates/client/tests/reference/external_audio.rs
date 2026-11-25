@@ -5,6 +5,7 @@ use rusterisk_client::{
 };
 use rusterisk_media::{AudioFormat, Frame, RtpSender};
 use rusterisk_server::rtp::SocketPair;
+use rusterisk_server::test_time::Wait;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
@@ -16,18 +17,19 @@ fn invalid(error: impl std::fmt::Display) -> Error {
 }
 
 pub(super) async fn started(session: &mut Session, id: &ChannelId) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        for _ in 0..64 {
-            if let EventKind::StasisStart { channel, .. } = session.next_event().await?.kind {
-                if channel.id == *id {
-                    return Ok(());
+    Wait::Ready
+        .bounded(async {
+            for _ in 0..64 {
+                if let EventKind::StasisStart { channel, .. } = session.next_event().await?.kind {
+                    if channel.id == *id {
+                        return Ok(());
+                    }
                 }
             }
-        }
-        Err(Error::Capacity)
-    })
-    .await
-    .map_err(|_| Error::Timeout)?
+            Err(Error::Capacity)
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
 }
 
 fn local(channel: Channel) -> Result<SocketAddr, Error> {

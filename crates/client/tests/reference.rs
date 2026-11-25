@@ -5,7 +5,8 @@ use rusterisk_client::{
     },
     Bridge, Client, Error,
 };
-use std::{net::Ipv4Addr, time::Duration};
+use rusterisk_server::test_time::Wait;
+use std::net::Ipv4Addr;
 #[path = "reference/ari_routes.rs"]
 mod ari_routes;
 #[path = "reference/dialplan_routes.rs"]
@@ -68,19 +69,20 @@ async fn compare_external_admission(
         .is_some_and(|value| value
             .parse::<u16>()
             .is_ok_and(|port| port > 0 && port < u16::MAX)));
-    tokio::time::timeout(Duration::from_secs(3), async {
-        for _ in 0..32 {
-            if let EventKind::StasisStart { channel, args } = session.next_event().await?.kind {
-                if channel.id == id {
-                    assert_eq!(args, ["media", "agent"]);
-                    return Ok(());
+    Wait::Ready
+        .bounded(async {
+            for _ in 0..32 {
+                if let EventKind::StasisStart { channel, args } = session.next_event().await?.kind {
+                    if channel.id == id {
+                        assert_eq!(args, ["media", "agent"]);
+                        return Ok(());
+                    }
                 }
             }
-        }
-        Err(Error::Capacity)
-    })
-    .await
-    .map_err(|_| Error::Timeout)??;
+            Err(Error::Capacity)
+        })
+        .await
+        .map_err(|_| Error::Timeout)??;
     client.hangup(&id).await
 }
 
@@ -228,17 +230,17 @@ async fn compare_subscriptions(
     reference.destroy_bridge(&id).await?;
     assert_eq!(actual.application(app).await?, released);
     // Asterisk unsubscribes in its bridge snapshot callback.
-    let reference_released = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let application = reference.application(app).await?;
-            if !application.bridge_ids.contains(&id) {
-                return Ok::<_, Error>(application);
+    let reference_released = Wait::Ready
+        .bounded(async {
+            loop {
+                let application = reference.application(app).await?;
+                if !application.bridge_ids.contains(&id) {
+                    return Ok::<_, Error>(application);
+                }
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .map_err(|_| Error::Invalid("reference bridge subscription cleanup deadline"))??;
+        })
+        .await
+        .map_err(|_| Error::Invalid("reference bridge subscription cleanup deadline"))??;
     assert_eq!(reference_released, released);
     assert_eq!(
         rejection(
@@ -288,7 +290,7 @@ async fn compare_existing_client(actual: &str, reference: &str) -> Result<(), Er
         .stdout(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()?;
-    let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
+    let status = match Wait::Shutdown.bounded(child.wait()).await {
         Ok(status) => status?,
         Err(_) => {
             child.kill().await?;
@@ -310,16 +312,16 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
     let reference_address = std::env::var("RUSTERISK_REFERENCE_URL")
         .map_err(|_| Error::Invalid("reference URL is required"))?;
     let reference = Client::new(&reference_address, "app", "test-password")?;
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if reference.ping().await.is_ok() {
-                break;
+    Wait::Shutdown
+        .bounded(async {
+            loop {
+                if reference.ping().await.is_ok() {
+                    break;
+                }
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .map_err(|_| Error::Timeout)?;
+        })
+        .await
+        .map_err(|_| Error::Timeout)?;
     let mut outgoing = external_websocket_clients::Fixture::start().await?;
     let result = compare_resources(reference_address, reference, &mut outgoing).await;
     let cleanup = outgoing.shutdown().await;

@@ -6,6 +6,7 @@ use rusterisk_client::{
     Client, DtmfDigit, DtmfTiming, Error, Session,
 };
 use rusterisk_media::{mulaw_decode, mulaw_encode};
+use rusterisk_server::test_time::Wait;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 
@@ -59,14 +60,13 @@ pub(super) async fn connect(
     request
         .headers_mut()
         .insert("Sec-WebSocket-Protocol", "media".parse().map_err(invalid)?);
-    let (mut peer, response) = tokio::time::timeout(
-        Duration::from_secs(2),
-        tokio_tungstenite::connect_async(request),
-    )
-    .await
-    .map_err(invalid)??;
+    let (mut peer, response) = Wait::Ready
+        .bounded(tokio_tungstenite::connect_async(request))
+        .await
+        .map_err(invalid)??;
     assert_eq!(response.headers()["Sec-WebSocket-Protocol"], "media");
-    let start = tokio::time::timeout(Duration::from_secs(2), peer.next())
+    let start = Wait::Ready
+        .bounded(peer.next())
         .await
         .map_err(invalid)?
         .ok_or(Error::Closed)??;
@@ -102,27 +102,28 @@ pub(super) async fn expect(
     event: MediaEvent,
     format: MediaControlFormat,
 ) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            match peer.next().await.ok_or(Error::Closed)?? {
-                Message::Text(text) => {
-                    match format {
-                        MediaControlFormat::Json => {
-                            assert_eq!(serde_json::from_str::<MediaEvent>(&text)?, event)
+    Wait::Ready
+        .bounded(async {
+            loop {
+                match peer.next().await.ok_or(Error::Closed)?? {
+                    Message::Text(text) => {
+                        match format {
+                            MediaControlFormat::Json => {
+                                assert_eq!(serde_json::from_str::<MediaEvent>(&text)?, event)
+                            }
+                            MediaControlFormat::PlainText => {
+                                assert_eq!(text.as_str(), event.encode(format)?.as_str())
+                            }
                         }
-                        MediaControlFormat::PlainText => {
-                            assert_eq!(text.as_str(), event.encode(format)?.as_str())
-                        }
+                        return Ok(());
                     }
-                    return Ok(());
+                    Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => {}
+                    Message::Close(_) | Message::Frame(_) => return Err(Error::Closed),
                 }
-                Message::Binary(_) | Message::Ping(_) | Message::Pong(_) => {}
-                Message::Close(_) | Message::Frame(_) => return Err(Error::Closed),
             }
-        }
-    })
-    .await
-    .map_err(|error| invalid(format!("waiting for {event:?}: {error}")))?
+        })
+        .await
+        .map_err(|error| invalid(format!("waiting for {event:?}: {error}")))?
 }
 
 async fn status(
@@ -424,29 +425,30 @@ pub async fn compare(
         .create_bridge(&bridge, "WebSocket comparison")
         .await?;
     client.add_channels(&bridge, &ids).await?;
-    tokio::time::timeout(Duration::from_secs(3), async {
-        let mut clock = tokio::time::interval(Duration::from_millis(20));
-        clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut sent = 0;
-        let mut left_received = false;
-        let mut right_received = false;
-        loop {
-            tokio::select! {
-                _instant = clock.tick(), if sent < 30 => {
-                    left.send(Message::Binary(vec![mulaw_encode(4000); 160].into())).await?;
-                    right.send(Message::Binary(vec![mulaw_encode(-7000); 160].into())).await?;
-                    sent += 1;
+    Wait::Ready
+        .bounded(async {
+            let mut clock = tokio::time::interval(Duration::from_millis(20));
+            clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut sent = 0;
+            let mut left_received = false;
+            let mut right_received = false;
+            loop {
+                tokio::select! {
+                    _instant = clock.tick(), if sent < 30 => {
+                        left.send(Message::Binary(vec![mulaw_encode(4000); 160].into())).await?;
+                        right.send(Message::Binary(vec![mulaw_encode(-7000); 160].into())).await?;
+                        sent += 1;
+                    }
+                    message = left.next() => left_received |= audio(message, -7000)?,
+                    message = right.next() => right_received |= audio(message, 4000)?,
                 }
-                message = left.next() => left_received |= audio(message, -7000)?,
-                message = right.next() => right_received |= audio(message, 4000)?,
+                if sent == 30 && left_received && right_received {
+                    return Ok::<(), Error>(());
+                }
             }
-            if sent == 30 && left_received && right_received {
-                return Ok::<(), Error>(());
-            }
-        }
-    })
-    .await
-    .map_err(invalid)??;
+        })
+        .await
+        .map_err(invalid)??;
     client.remove_channels(&bridge, &ids).await?;
     controls(client, &mut left, &ids[0], MediaControlFormat::Json).await?;
     for id in &ids {
