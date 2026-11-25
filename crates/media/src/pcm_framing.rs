@@ -2,60 +2,75 @@ use crate::{Frame, MediaError, MAX_SAMPLES};
 use std::collections::VecDeque;
 
 pub struct PcmFramer {
-    partial: [i16; MAX_SAMPLES],
-    filled: usize,
+    samples: VecDeque<i16>,
     rate: u32,
-    ready: VecDeque<Frame>,
+    limit: usize,
 }
 
 impl PcmFramer {
     pub fn new(rate: u32) -> Result<Self, MediaError> {
+        Self::with_capacity(rate, 10)
+    }
+
+    pub(crate) fn with_capacity(rate: u32, frames: usize) -> Result<Self, MediaError> {
         Frame::new(&[0], rate)?;
+        let limit = (frames + 1) * (rate as usize / 50) - 1;
         Ok(Self {
-            partial: [0; MAX_SAMPLES],
-            filled: 0,
+            samples: VecDeque::with_capacity(limit),
             rate,
-            ready: VecDeque::with_capacity(10),
+            limit,
         })
+    }
+
+    pub(crate) fn rate(&self) -> u32 {
+        self.rate
     }
 
     pub fn push(&mut self, frame: Frame) -> Result<(), MediaError> {
         if frame.rate() != self.rate {
             return Err(MediaError::InvalidFrame);
         }
-        let frame_len = self.rate as usize / 50;
-        if !self.can_push(frame.samples().len()) {
+        self.push_samples(frame.samples())
+    }
+
+    pub(crate) fn push_samples(&mut self, samples: &[i16]) -> Result<(), MediaError> {
+        if !self.can_push(samples.len()) {
             return Err(MediaError::Capacity);
         }
-        for sample in frame.samples() {
-            self.partial[self.filled] = *sample;
-            self.filled += 1;
-            if self.filled == frame_len {
-                self.ready
-                    .push_back(Frame::new(&self.partial[..frame_len], self.rate)?);
-                self.filled = 0;
-            }
-        }
+        self.samples.extend(samples.iter().copied());
         Ok(())
     }
 
     pub(crate) fn can_push(&self, samples: usize) -> bool {
-        self.filled
-            .checked_add(samples)
-            .and_then(|total| {
-                self.ready
-                    .len()
-                    .checked_add(total / (self.rate as usize / 50))
-            })
-            .is_some_and(|frames| frames <= 10)
+        samples <= self.limit - self.samples.len()
     }
 
     pub fn pop(&mut self) -> Option<Frame> {
-        self.ready.pop_front()
+        let len = self.rate as usize / 50;
+        if self.samples.len() < len {
+            return None;
+        }
+        let mut samples = [0; MAX_SAMPLES];
+        for (slot, sample) in samples.iter_mut().zip(self.samples.drain(..len)) {
+            *slot = sample;
+        }
+        Some(Frame {
+            samples,
+            len,
+            rate: self.rate,
+        })
+    }
+
+    pub(crate) fn discard_partial(&mut self) {
+        let len = self.rate as usize / 50;
+        self.samples.truncate(self.samples.len() / len * len);
+    }
+
+    pub(crate) fn reserved_bytes(&self) -> usize {
+        self.samples.capacity() * size_of::<i16>()
     }
 
     pub fn clear(&mut self) {
-        self.filled = 0;
-        self.ready.clear();
+        self.samples.clear();
     }
 }
