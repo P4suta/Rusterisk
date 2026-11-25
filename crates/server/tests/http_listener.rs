@@ -61,8 +61,19 @@ async fn silent_connections_expire_before_protocol_detection_can_hold_a_slot_for
         let mut socket = tokio::net::TcpStream::connect(address)
             .await
             .map_err(failure)?;
+        let client = reqwest::Client::builder().no_proxy().build().map_err(failure)?;
+        let response = Wait::Ready
+            .bounded(client.get(format!("http://{address}/ari/asterisk/ping")).send())
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
         let mut byte = [0; 1];
-        let read = Wait::Ready
+        assert!(matches!(socket.try_read(&mut byte), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        tokio::time::resume();
+        let read = Wait::Responsive
             .bounded(socket.read(&mut byte))
             .await
             .map_err(failure)?
