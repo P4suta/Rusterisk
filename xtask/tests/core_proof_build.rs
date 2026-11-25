@@ -31,7 +31,7 @@ fn core_proof_builds_use_the_public_context_and_own_their_resource_limits(
         "--load",
         "--progress=plain",
         "--tag",
-        "rusterisk-core-proofs:kani-0.68.0",
+        "rusterisk-core-proofs:kani-0.68.0-1bf25ce3",
         "containers/core-proofs",
     ] {
         assert!(

@@ -238,7 +238,7 @@ impl CoreProofBuild {
     pub fn steps(&self) -> Vec<Step> {
         build_steps(
             &self.name,
-            "rusterisk-core-proofs:kani-0.68.0",
+            "rusterisk-core-proofs:kani-0.68.0-1bf25ce3",
             "containers/core-proofs",
             900,
         )
