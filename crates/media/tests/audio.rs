@@ -79,6 +79,30 @@ fn opus_transmits_a_non_silent_known_signal() -> Result<(), MediaError> {
 }
 
 #[test]
+fn pcm_frame_storage_matches_one_period_at_each_supported_rate() -> Result<(), MediaError> {
+    fn verify<const N: usize>(rate: u32) -> Result<(), MediaError> {
+        use rusterisk_media::PcmFrame;
+        let samples = [97; N];
+        let frame = PcmFrame::<N>::new(&samples, rate)?;
+        assert!(size_of_val(&frame) <= size_of_val(&samples) + 16);
+        assert_eq!(frame.samples(), samples);
+        assert_eq!(frame.expanded().fit::<N>()?, frame);
+        assert_eq!(
+            PcmFrame::<N>::new(&vec![0; N + 1], rate),
+            Err(MediaError::InvalidFrame)
+        );
+        Ok(())
+    }
+    verify::<160>(8000)?;
+    verify::<240>(12000)?;
+    verify::<320>(16000)?;
+    verify::<480>(24000)?;
+    verify::<640>(32000)?;
+    verify::<882>(44100)?;
+    verify::<960>(48000)
+}
+
+#[test]
 fn padded_rtp_header_extensions_keep_the_audio_on_roundtrip() -> Result<(), MediaError> {
     let audio = [0x7f, 0xff, 0x55, 0xd5];
     for (profile, elements) in [
