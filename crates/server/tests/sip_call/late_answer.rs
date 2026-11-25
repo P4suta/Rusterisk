@@ -283,27 +283,11 @@ async fn ringing(peer: &Peer, invite: &Request, target: SocketAddr) -> Result<()
     Ok(())
 }
 
-async fn silent(peer: &Peer) -> Result<(), ControlError> {
-    let mut bytes = [0; 16385];
-    let waited = Wait::Ready
-        .bounded(async {
-            loop {
-                let (size, _) = peer.signal.recv_from(&mut bytes).await.map_err(failure)?;
-                match SipMessage::try_from(&bytes[..size]).map_err(failure)? {
-                    SipMessage::Request(request) if request.method == Method::Invite => {}
-                    SipMessage::Request(_) | SipMessage::Response(_) => {
-                        return Err::<(), ControlError>(ControlError::Invalid(
-                            "A silent peer received more than the repeated INVITE",
-                        ));
-                    }
-                }
-            }
-        })
-        .await;
-    match waited {
-        Ok(result) => result,
-        Err(_) => Ok(()),
-    }
+fn require_silent_invite(bytes: &[u8]) -> Result<(), ControlError> {
+    check(
+        matches!(SipMessage::try_from(bytes).map_err(failure)?, SipMessage::Request(request) if request.method == Method::Invite),
+        "A silent peer received more than the repeated INVITE",
+    )
 }
 
 async fn past_its_dial_limit(
@@ -321,13 +305,19 @@ async fn past_its_dial_limit(
     let (invite, target) = receive(&peer.signal, Method::Invite).await?;
     if answers {
         ringing(peer, &invite, target).await?;
-    } else {
-        silent(peer).await?;
     }
+    let mut bytes = [0; 16385];
     let ended = Wait::Ready
         .bounded(async {
             loop {
-                let event = events.next_event().await.map_err(failure)?;
+                let event = tokio::select! {
+                    event = events.next_event() => event.map_err(failure)?,
+                    packet = peer.signal.recv_from(&mut bytes), if !answers => {
+                        let (size, _) = packet.map_err(failure)?;
+                        require_silent_invite(&bytes[..size])?;
+                        continue;
+                    }
+                };
                 if let EventKind::ChannelDestroyed { cause, channel, .. } = event.kind {
                     if channel.id == channel_id {
                         return Ok::<u16, ControlError>(cause);
