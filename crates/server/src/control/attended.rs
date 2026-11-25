@@ -22,11 +22,7 @@ impl Control {
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
         let reference = refer.key();
-        let Some(source_entry) = self
-            .channels
-            .get(&source.id)
-            .filter(|entry| entry.call.generation() == source.generation)
-        else {
+        let Some(source_entry) = self.channels.by_handle(source.handle()) else {
             return Ok(rejected(source, reference, ReferFailure::NotFound));
         };
         if !matches!(source_entry.kind, ChannelKind::Sip)
@@ -86,14 +82,12 @@ impl Control {
         };
         let transferee_call = self
             .channels
-            .get(&transferee.id)
-            .filter(|entry| entry.call.generation() == transferee.generation)
+            .by_handle(transferee.handle())
             .ok_or(ControlError::Conflict("Transfer survivor changed"))?
             .call;
         let target_call = self
             .channels
-            .get(&target.id)
-            .filter(|entry| entry.call.generation() == target.generation)
+            .by_handle(target.handle())
             .ok_or(ControlError::Conflict("Consultation survivor changed"))?
             .call;
         let Some(bridge) = self.generation.checked_add(1) else {
@@ -121,8 +115,7 @@ impl Control {
             (&target, decision.target),
         ] {
             self.channels
-                .get_mut(&key.id)
-                .filter(|entry| entry.call.generation() == key.generation)
+                .by_handle_mut(key.handle())
                 .ok_or(ControlError::Conflict("Attended participant changed"))?
                 .call = call;
         }

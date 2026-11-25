@@ -43,8 +43,7 @@ impl Control {
         };
         let current_peer = self
             .channels
-            .get(&peer.id)
-            .filter(|entry| entry.call.generation() == peer.generation)
+            .by_handle(peer.handle())
             .map(|entry| entry.call);
         let mut pair = self
             .call_pairs
@@ -68,7 +67,7 @@ impl Control {
                 outcome.effects.push(Effect::ReleaseBridge {
                     generation: release,
                 });
-                if let Some(entry) = self.channels.get_mut(&peer.id).filter(|entry| {
+                if let Some(entry) = self.channels.by_handle_mut(peer.handle()).filter(|entry| {
                     entry.call.generation() == peer.generation
                         && entry.call.bridge() == Some(release)
                         && entry.call.state() != CallState::Ended

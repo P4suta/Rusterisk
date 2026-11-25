@@ -81,7 +81,7 @@ impl Control {
             Target::Rtp(_) | Target::AudioSocket(_) | Target::WebSocketClient { .. } => 5000,
         };
         let deadline = now.checked_add(timeout).ok_or(ControlError::Capacity)?;
-        let generation = self.generation()?;
+        let generation = self.call_generation(0)?;
         let key = CallKey {
             id: id.clone(),
             generation,
@@ -207,7 +207,7 @@ impl Control {
                 pending_native: None,
                 pending_websocket,
             },
-        );
+        )?;
         Ok(outcome)
     }
 
@@ -217,11 +217,7 @@ impl Control {
         result: Result<SocketAddr, ControlError>,
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
-        let Some(entry) = self
-            .channels
-            .get_mut(&key.id)
-            .filter(|entry| entry.call.generation() == key.generation)
-        else {
+        let Some(entry) = self.channels.by_handle_mut(key.handle()) else {
             let mut outcome = Outcome::empty();
             outcome.effects.push(Effect::Release { key });
             return Ok(outcome);
@@ -261,11 +257,7 @@ impl Control {
         result: Result<(), ControlError>,
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
-        let Some(entry) = self
-            .channels
-            .get_mut(&key.id)
-            .filter(|entry| entry.call.generation() == key.generation)
-        else {
+        let Some(entry) = self.channels.by_handle_mut(key.handle()) else {
             let mut outcome = Outcome::empty();
             outcome.effects.push(Effect::Release { key });
             return Ok(outcome);
@@ -296,11 +288,7 @@ impl Control {
         result: Result<(), ControlError>,
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
-        let Some(entry) = self
-            .channels
-            .get_mut(&key.id)
-            .filter(|entry| entry.call.generation() == key.generation)
-        else {
+        let Some(entry) = self.channels.by_handle_mut(key.handle()) else {
             let mut outcome = Outcome::empty();
             outcome.effects.push(Effect::Release { key });
             return Ok(outcome);
@@ -334,8 +322,7 @@ impl Control {
             .ok_or(ControlError::NotFound("WebSocket instance not found"))?;
         let entry = self
             .channels
-            .get_mut(&key.id)
-            .filter(|entry| entry.call.generation() == key.generation)
+            .by_handle_mut(key.handle())
             .ok_or(ControlError::NotFound("WebSocket instance not found"))?;
         match entry.call.connection_claim() {
             rusterisk_core::ConnectionClaim::Available => {}

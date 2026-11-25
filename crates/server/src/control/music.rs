@@ -141,7 +141,7 @@ impl Control {
         };
         let entry = self
             .channels
-            .get_mut(&key.id)
+            .by_handle_mut(key.handle())
             .ok_or(ControlError::Capacity)?;
         let token = entry.media_tasks.reserve(MediaTaskKind::Playback)?;
         let mut outcome = Outcome::empty();
@@ -195,11 +195,7 @@ impl Control {
         key: &CallKey,
         outcome: &mut Outcome,
     ) -> Result<(), ControlError> {
-        let Some(entry) = self
-            .channels
-            .get_mut(&key.id)
-            .filter(|entry| entry.call.generation() == key.generation)
-        else {
+        let Some(entry) = self.channels.by_handle_mut(key.handle()) else {
             return Ok(());
         };
         let Some(music) = entry.music.take() else {
@@ -225,11 +221,7 @@ impl Control {
         let MediaOwner::Channel(key) = owner else {
             return Ok(false);
         };
-        let Some(entry) = self
-            .channels
-            .get_mut(&key.id)
-            .filter(|entry| entry.call.generation() == key.generation)
-        else {
+        let Some(entry) = self.channels.by_handle_mut(key.handle()) else {
             return Ok(false);
         };
         if !entry
@@ -277,7 +269,7 @@ impl Control {
         token: MediaTaskToken,
         result: Result<(), ControlError>,
     ) -> Result<Outcome, ControlError> {
-        let Some(entry) = self.channels.get_mut(&key.id).filter(|entry| {
+        let Some(entry) = self.channels.by_handle_mut(key.handle()).filter(|entry| {
             entry.call.generation() == key.generation
                 && matches!(entry.music.as_ref(), Some(MusicTask::Preparing { token: current, .. }) if *current == token)
         }) else {
@@ -325,7 +317,7 @@ impl Control {
         let MediaOwner::Channel(key) = owner else {
             return false;
         };
-        self.channels.get(&key.id).is_some_and(|entry| {
+        self.channels.by_handle(key.handle()).is_some_and(|entry| {
             entry.call.generation() == key.generation
                 && entry
                     .music
@@ -347,7 +339,7 @@ impl Control {
         };
         let entry = self
             .channels
-            .get_mut(&key.id)
+            .by_handle_mut(key.handle())
             .ok_or(ControlError::Capacity)?;
         if !entry.media_tasks.finish(token) {
             return Err(ControlError::Conflict("Music completion changed"));

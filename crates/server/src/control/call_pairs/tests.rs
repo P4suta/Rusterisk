@@ -63,6 +63,21 @@ fn pair(control: &mut Control, bridge: u64) -> Result<[CallKey; 2], ControlError
     Ok(members)
 }
 
+#[test]
+fn unrelated_generation_changes_cannot_assign_two_live_calls_the_same_slot(
+) -> Result<(), ControlError> {
+    let mut control = Control::new(64);
+    let first = participant(&mut control, "first-slot", 1)?;
+    for _ in 0..63 {
+        control.generation()?;
+    }
+    let second = participant(&mut control, "second-slot", 2)?;
+    assert_ne!(first.handle().slot(), second.handle().slot());
+    assert!(control.has_channel(&first));
+    assert!(control.has_channel(&second));
+    Ok(())
+}
+
 fn releases(outcome: &Outcome, key: &CallKey) -> usize {
     outcome
         .effects
@@ -116,16 +131,17 @@ fn moving_a_pair_member_preserves_the_other_current_call_and_bridge() -> Result<
 fn a_reused_peer_identifier_cannot_end_the_replacement_generation() -> Result<(), ControlError> {
     let mut control = Control::new(4);
     let members = pair(&mut control, 100)?;
-    let replacement = control.generation()?;
-    let entry = control
+    let mut entry = control
         .channels
-        .get_mut(&members[1].id)
+        .remove(&members[1].id)
         .ok_or(ControlError::NotFound("Missing reused channel"))?;
+    let replacement = control.call_generation(0)?;
     entry.call = Call::incoming(replacement)
         .apply(CallEvent::Answer)
         .call()
         .join(200)?;
     let current = entry.call;
+    control.channels.insert(members[1].id.clone(), entry)?;
     let outcome = end(&mut control, members[0].clone())?;
     assert_eq!(releases(&outcome, &members[0]), 1);
     assert_eq!(releases(&outcome, &members[1]), 0);

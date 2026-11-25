@@ -13,6 +13,9 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 mod attended;
 mod call_pairs;
+mod channel_slots;
+pub(crate) use channel_slots::CallHandle;
+use channel_slots::ChannelSlots;
 mod diagnosis;
 mod dial;
 mod dialplan;
@@ -862,7 +865,7 @@ struct BridgeEntry {
 pub struct Control {
     capacity: usize,
     generation: u64,
-    channels: BTreeMap<ChannelId, ChannelEntry>,
+    channels: ChannelSlots,
     bridges: BTreeMap<ChannelId, BridgeEntry>,
     applications: BTreeMap<String, StasisApplication>,
     event_filters: BTreeMap<StasisApplication, stasis::EventFilters>,
@@ -936,7 +939,7 @@ impl Control {
         {
             return Err(ControlError::Invalid("Invalid incoming channel parameters"));
         }
-        let generation = self.generation()?;
+        let generation = self.call_generation(0)?;
         let mut call = Call::incoming(generation).apply(CallEvent::Ring).call();
         if let Some(application) = application {
             call = call.enter_stasis(application)?;
@@ -1006,7 +1009,7 @@ impl Control {
                 pending_native: None,
                 pending_websocket: None,
             },
-        );
+        )?;
         Ok(outcome)
     }
 
@@ -1048,7 +1051,7 @@ impl Control {
         Self {
             capacity: capacity.min(64),
             generation: 0,
-            channels: BTreeMap::new(),
+            channels: ChannelSlots::default(),
             bridges: BTreeMap::new(),
             applications: BTreeMap::new(),
             event_filters: BTreeMap::new(),
@@ -1065,6 +1068,17 @@ impl Control {
             transfers: BTreeMap::new(),
             call_pairs: BTreeMap::new(),
         }
+    }
+
+    fn call_generation(&mut self, reserved: u64) -> Result<u64, ControlError> {
+        for _ in 0..64 {
+            let generation = self.generation()?;
+            let handle = CallHandle::new(generation);
+            if self.channels.available(handle) && reserved & (1 << handle.slot()) == 0 {
+                return Ok(generation);
+            }
+        }
+        Err(ControlError::Capacity)
     }
 
     fn generation(&mut self) -> Result<u64, ControlError> {
@@ -1117,8 +1131,8 @@ impl Control {
     }
     pub(crate) fn has_channel(&self, key: &CallKey) -> bool {
         self.channels
-            .get(&key.id)
-            .is_some_and(|entry| entry.call.generation() == key.generation)
+            .by_handle(key.handle())
+            .is_some_and(|entry| entry.snapshot.id == key.id)
     }
     pub fn channel(&self, id: &ChannelId) -> Result<&Channel, ControlError> {
         self.channels
@@ -1418,7 +1432,7 @@ impl Control {
                         "Invalid parameters for originating a channel",
                     ));
                 }
-                let generation = self.generation()?;
+                let generation = self.call_generation(0)?;
                 let endpoint_resource = endpoint_resource(&endpoint)?.to_owned();
                 let deadline = now_ms
                     .checked_add(u64::from(timeout) * 1000)
@@ -1494,7 +1508,7 @@ impl Control {
                         pending_native: Some(capsule),
                         pending_websocket: None,
                     },
-                );
+                )?;
                 Ok(outcome)
             }
             Action::Hangup(id) => self.end_at(&id, timestamp, 16, now_ms),
@@ -2080,7 +2094,7 @@ impl Control {
             }
             Signal::PeerDirection { key, direction } => {
                 let mut outcome = Outcome::empty();
-                if let Some(entry) = self.channels.get_mut(&key.id).filter(|entry| {
+                if let Some(entry) = self.channels.by_handle_mut(key.handle()).filter(|entry| {
                     entry.call.generation() == key.generation
                         && entry.call.state() != CallState::Ended
                 }) {
@@ -2147,11 +2161,7 @@ impl Control {
                 completion,
             } => self.finish_playback(&MediaOwner::Channel(key), token, completion, timestamp),
             Signal::DtmfReady { key, events } => {
-                if let Some(entry) = self
-                    .channels
-                    .get_mut(&key.id)
-                    .filter(|entry| entry.call.generation() == key.generation)
-                {
+                if let Some(entry) = self.channels.by_handle_mut(key.handle()) {
                     if entry.dtmf.is_none() {
                         entry.dtmf = Some(DtmfOutbox::new(events)?);
                     }
@@ -2159,11 +2169,7 @@ impl Control {
                 Ok(Outcome::empty())
             }
             Signal::DtmfFinished { key, token } => {
-                if let Some(entry) = self
-                    .channels
-                    .get_mut(&key.id)
-                    .filter(|entry| entry.call.generation() == key.generation)
-                {
+                if let Some(entry) = self.channels.by_handle_mut(key.handle()) {
                     if let Some(outbox) = &mut entry.dtmf {
                         let _released = outbox.finish(token);
                     }
@@ -2176,7 +2182,7 @@ impl Control {
                 duration_ms,
             } => {
                 let mut outcome = Outcome::empty();
-                if let Some(entry) = self.channels.get(&key.id).filter(|entry| {
+                if let Some(entry) = self.channels.by_handle(key.handle()).filter(|entry| {
                     entry.call.generation() == key.generation
                         && entry.call.state() == CallState::Up
                         && matches!(entry.call.stasis(), StasisMembership::Entered(_))
@@ -2196,7 +2202,7 @@ impl Control {
             Signal::Terminated { key, cause } => {
                 if self
                     .channels
-                    .get(&key.id)
+                    .by_handle(key.handle())
                     .is_some_and(|entry| entry.call.generation() == key.generation)
                 {
                     self.end_at(&key.id, timestamp, cause, now)
@@ -2207,7 +2213,7 @@ impl Control {
                 }
             }
             Signal::Milestone { key, milestone } => {
-                let Some(entry) = self.channels.get(&key.id) else {
+                let Some(entry) = self.channels.by_handle(key.handle()) else {
                     let mut outcome = Outcome::empty();
                     outcome.effects.push(Effect::Release { key });
                     return Ok(outcome);
@@ -2233,7 +2239,7 @@ impl Control {
                 }
                 let entry = self
                     .channels
-                    .get_mut(&key.id)
+                    .by_handle_mut(key.handle())
                     .ok_or(ControlError::NotFound("Channel not found"))?;
                 let mut outcome = Outcome::empty();
                 match milestone {

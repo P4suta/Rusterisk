@@ -114,11 +114,7 @@ impl Control {
         media: MediaTaskToken,
         completion: PlaybackCompletion,
     ) -> Result<Outcome, ControlError> {
-        let Some(entry) = self
-            .channels
-            .get_mut(&key.id)
-            .filter(|entry| entry.call.generation() == key.generation)
-        else {
+        let Some(entry) = self.channels.by_handle_mut(key.handle()) else {
             return Ok(Outcome::empty());
         };
         let Some(frame) = &mut entry.dialplan else {
@@ -162,7 +158,7 @@ impl Control {
     ) -> Result<PlaybackWait, ControlError> {
         let entry = self
             .channels
-            .get_mut(&key.id)
+            .by_handle_mut(key.handle())
             .ok_or(ControlError::NotFound("Channel not found"))?;
         let media = entry.media_tasks.reserve(MediaTaskKind::Playback)?;
         if let Err(error) = entry.media_tasks.start(media) {
@@ -322,7 +318,7 @@ impl Control {
     ) -> Result<Outcome, ControlError> {
         let entry = self
             .channels
-            .get_mut(&key.id)
+            .by_handle_mut(key.handle())
             .ok_or(ControlError::NotFound("Channel not found"))?;
         if entry.call.generation() != key.generation {
             return Err(ControlError::Conflict("Channel generation changed"));
@@ -393,7 +389,7 @@ impl Control {
     fn expand(&self, key: &CallKey, source: &str) -> Result<String, ControlError> {
         let entry = self
             .channels
-            .get(&key.id)
+            .by_handle(key.handle())
             .ok_or(ControlError::NotFound("Channel not found"))?;
         expand_variables(source, |name| match entry.variable(name) {
             Err(ControlError::NotFound(_)) => Ok(String::new()),
@@ -414,8 +410,7 @@ impl Control {
     ) -> Result<Outcome, ControlError> {
         let frame = self
             .channels
-            .get_mut(&key.id)
-            .filter(|entry| entry.call.generation() == key.generation)
+            .by_handle_mut(key.handle())
             .and_then(|entry| entry.dialplan.take());
         let Some(mut frame) = frame else {
             return Ok(Outcome::empty());
@@ -432,7 +427,7 @@ impl Control {
                 } else {
                     Pace::default()
                 };
-                if let Some(entry) = self.channels.get_mut(&key.id) {
+                if let Some(entry) = self.channels.by_handle_mut(key.handle()) {
                     entry.dialplan = Some(frame);
                 }
             }
@@ -441,7 +436,7 @@ impl Control {
                 if let Some(machine) = &mut frame.machine {
                     machine.cancel();
                 }
-                if let Some(entry) = self.channels.get_mut(&key.id) {
+                if let Some(entry) = self.channels.by_handle_mut(key.handle()) {
                     entry.dialplan = Some(frame);
                     outcome.append(self.end(&key.id, timestamp, 21)?);
                 }
@@ -476,7 +471,7 @@ impl Control {
                     ));
                     frame.dial = None;
                     self.channels
-                        .get_mut(&key.id)
+                        .by_handle_mut(key.handle())
                         .ok_or(ControlError::NotFound("Channel not found"))?
                         .variables
                         .insert("DIALSTATUS".into(), "NOANSWER".into());
@@ -485,7 +480,7 @@ impl Control {
             if let Some(answer) = &mut frame.answer {
                 let entry = self
                     .channels
-                    .get(&key.id)
+                    .by_handle(key.handle())
                     .ok_or(ControlError::NotFound("Channel not found"))?;
                 match answer
                     .observe(now, entry.call.state(), entry.call.media_connection())
@@ -547,7 +542,7 @@ impl Control {
             };
             let entry = self
                 .channels
-                .get_mut(&key.id)
+                .by_handle_mut(key.handle())
                 .ok_or(ControlError::NotFound("Channel not found"))?;
             entry.snapshot.dialplan.context.clone_from(&step.context);
             entry.snapshot.dialplan.exten.clone_from(&frame.extension);
@@ -619,7 +614,7 @@ impl Control {
                     self.set_dialplan_location(key, "Answer", String::new(), timestamp, outcome)?;
                     let entry = self
                         .channels
-                        .get(&key.id)
+                        .by_handle(key.handle())
                         .ok_or(ControlError::NotFound("Channel not found"))?;
                     if entry.call.state() != CallState::Up {
                         frame.answer = Some(AnswerProgress::new());
@@ -679,7 +674,7 @@ impl Control {
                     self.route_resource_events(outcome);
                     let entry = self
                         .channels
-                        .get_mut(&key.id)
+                        .by_handle_mut(key.handle())
                         .ok_or(ControlError::NotFound("Channel not found"))?;
                     if let Some(token) = self.applications.get(application).copied() {
                         entry.variables.insert("STASISSTATUS".into(), String::new());
@@ -740,7 +735,7 @@ impl Control {
                             | ControlError::Unsupported,
                         ) => {
                             self.channels
-                                .get_mut(&key.id)
+                                .by_handle_mut(key.handle())
                                 .ok_or(ControlError::NotFound("Channel not found"))?
                                 .variables
                                 .insert("DIALSTATUS".into(), "CHANUNAVAIL".into());
@@ -753,7 +748,7 @@ impl Control {
                     self.set_dialplan_location(key, "Playback", name.clone(), timestamp, outcome)?;
                     let entry = self
                         .channels
-                        .get(&key.id)
+                        .by_handle(key.handle())
                         .ok_or(ControlError::NotFound("Channel not found"))?;
                     if entry.call.state() == CallState::Up {
                         frame.playback = Some(self.queue_dialplan_playback(
@@ -789,7 +784,7 @@ impl Control {
     ) -> Result<(), ControlError> {
         let entry = self
             .channels
-            .get_mut(&key.id)
+            .by_handle_mut(key.handle())
             .ok_or(ControlError::NotFound("Channel not found"))?;
         entry.snapshot.dialplan.app_name = name.into();
         entry.snapshot.dialplan.app_data = data;

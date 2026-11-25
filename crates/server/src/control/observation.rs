@@ -15,6 +15,7 @@ fn endpoint(value: &Endpoint) -> ObservedEndpoint {
 
 impl Control {
     fn observed_leg(&self, channel: &Channel, ended: &[EndedSource]) -> Option<ObservedLeg> {
+        let id = &channel.id;
         let (generation, endpoint) = ended
             .iter()
             .find_map(|source| match source {
@@ -25,7 +26,7 @@ impl Control {
             })
             .or_else(|| {
                 self.channels
-                    .get(&channel.id)
+                    .get(id)
                     .map(|entry| (entry.call.generation(), &entry.endpoint))
             })?;
         let bridge_ids = self

@@ -80,7 +80,7 @@ impl Control {
             MediaOwner::Channel(key) => {
                 let live = self
                     .channels
-                    .get(&key.id)
+                    .by_handle(key.handle())
                     .filter(|channel| channel.call.generation() == key.generation);
                 let application = if let Some(channel) = live {
                     application_name(&self.applications, channel.call.stasis())?

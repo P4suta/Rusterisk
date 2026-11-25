@@ -53,8 +53,7 @@ impl Control {
         match owner {
             MediaOwner::Channel(key) => self
                 .channels
-                .get_mut(&key.id)
-                .filter(|entry| entry.call.generation() == key.generation)
+                .by_handle_mut(key.handle())
                 .map(|entry| &mut entry.media_tasks)
                 .ok_or(ControlError::NotFound("Channel not found")),
             MediaOwner::Bridge { id, generation } => self
@@ -78,8 +77,7 @@ impl Control {
             MediaOwner::Channel(key) => {
                 let entry = self
                     .channels
-                    .get(&key.id)
-                    .filter(|entry| entry.call.generation() == key.generation)
+                    .by_handle(key.handle())
                     .ok_or(ControlError::NotFound("Channel not found"))?;
                 outcome.optional_event(
                     application_name(&self.applications, entry.call.stasis())?,
