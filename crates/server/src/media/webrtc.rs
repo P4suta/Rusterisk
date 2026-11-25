@@ -1,5 +1,6 @@
 use super::{
-    AttachmentMode, AttachmentReceipt, Completion, DigitSupport, MediaHub, MediaPort, Port,
+    AttachmentMode, AttachmentReceipt, AttachmentRelease, Completion, DigitSupport, MediaHub,
+    MediaPort, Port,
 };
 use crate::{webrtc::WebRtcSession, CallKey};
 use rusterisk_core::PeerMediaDirection;
@@ -54,16 +55,18 @@ impl MediaPort {
         direction: PeerMediaDirection,
         mode: AttachmentMode,
         serial: u64,
-    ) -> Result<(), MediaError> {
+    ) -> Result<AttachmentRelease, MediaError> {
+        let release = self.reserve_attachment_release(serial)?;
         self.webrtc
             .try_send(Attachment {
                 key,
                 session,
                 direction,
                 mode,
-                reply: Completion::Notice(serial),
+                reply: self.completion(serial)?,
             })
-            .map_err(|_| MediaError::Capacity)
+            .map_err(|_| MediaError::Capacity)?;
+        Ok(release)
     }
 }
 

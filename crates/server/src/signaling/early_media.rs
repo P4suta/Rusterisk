@@ -1,7 +1,11 @@
 use super::{
     cleanup, failure, media, MediaAdmission, PendingWebRtc, PreparedAnswer, Signaling, Waiting,
 };
-use crate::{media::AttachmentMode, rtp::SocketPair, CallKey, ControlError, Signal};
+use crate::{
+    media::{AttachmentMode, AttachmentRelease},
+    rtp::SocketPair,
+    CallKey, ControlError, Signal,
+};
 use rusterisk_core::MediaTaskToken;
 use rusterisk_media::MediaError;
 use rusterisk_sip::{Session, SessionSecurity, WebRtcDescription};
@@ -44,10 +48,10 @@ impl Signaling {
     fn queue_early_attachment(
         &mut self,
         key: &CallKey,
-    ) -> Result<(PreparedAnswer, u64), ControlError> {
+    ) -> Result<(PreparedAnswer, AttachmentRelease), ControlError> {
         let (admission, answer, offered) = self.incoming_media(key)?;
         let serial = self.next_serial();
-        admission
+        let release = admission
             .attach(
                 &self.media,
                 key.clone(),
@@ -56,7 +60,7 @@ impl Signaling {
                 serial,
             )
             .map_err(failure)?;
-        Ok((answer, serial))
+        Ok((answer, release))
     }
 
     pub(super) fn incoming_media(
@@ -133,11 +137,12 @@ impl Signaling {
             }
             MediaAdmission::Incoming(_) => {}
         }
-        let (answer, serial) = self.queue_early_attachment(key)?;
+        let (answer, release) = self.queue_early_attachment(key)?;
         self.pend(
             key.clone(),
-            serial,
+            release.serial,
             Waiting::Early {
+                release,
                 listener,
                 token,
                 answer,
@@ -153,33 +158,28 @@ impl Signaling {
         key: &CallKey,
         listener: usize,
         answer: PreparedAnswer,
-        attached: Result<(), MediaError>,
+        attached: Result<AttachmentRelease, MediaError>,
         now: u64,
     ) -> Result<(), ControlError> {
-        attached.map_err(failure)?;
+        let release = attached.map_err(failure)?;
         let progress = match answer.progress(&mut self.listeners[listener].engine, key, now) {
             Ok(output) => output,
             Err(error) => {
-                return cleanup::combine(
-                    Err(failure(error)),
-                    self.media.release(key.clone()).map_err(failure),
-                )
+                release.send(key.clone());
+                return Err(failure(error));
             }
         };
         let Some(call) = self.calls.get_mut(key) else {
-            return cleanup::combine(
-                Err(ControlError::NotFound(
-                    "Channel generation no longer active",
-                )),
-                self.media.release(key.clone()).map_err(failure),
-            );
+            release.send(key.clone());
+            return Err(ControlError::NotFound(
+                "Channel generation no longer active",
+            ));
         };
         call.media = MediaAdmission::Early(answer);
         if let Err(error) = self.transmit(listener, progress.datagrams).await {
-            let result =
-                cleanup::combine(Err(error), self.media.release(key.clone()).map_err(failure));
+            release.send(key.clone());
             return cleanup::combine(
-                result,
+                Err(error),
                 self.notify(Signal::Terminated {
                     key: key.clone(),
                     cause: 41,

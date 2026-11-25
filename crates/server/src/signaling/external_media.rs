@@ -1,6 +1,6 @@
 use super::{failure, Signaling};
 use crate::{
-    media::AttachmentMode,
+    media::{AttachmentMode, AttachmentRelease},
     rtp::{RtpSession, SocketPair},
     CallKey, ControlError,
 };
@@ -139,7 +139,7 @@ impl Signaling {
         &mut self,
         key: CallKey,
         target: ExternalRtpTarget,
-    ) -> Result<(SocketAddr, u64), ControlError> {
+    ) -> Result<(SocketAddr, AttachmentRelease), ControlError> {
         if self.calls.len()
             + self.external_media.len()
             + self.external_waits()
@@ -165,7 +165,8 @@ impl Signaling {
             StaticRtpCodec::Pcma => AudioFormat::Pcma,
         };
         let serial = self.next_serial();
-        self.media
+        let release = self
+            .media
             .start_attachment(
                 key,
                 sockets,
@@ -190,6 +191,6 @@ impl Signaling {
                 | MediaError::Transport(_)
                 | MediaError::Control(_)) => failure(error),
             })?;
-        Ok((local, serial))
+        Ok((local, release))
     }
 }

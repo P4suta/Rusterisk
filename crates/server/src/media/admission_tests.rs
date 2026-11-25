@@ -270,6 +270,40 @@ async fn an_attachment_without_a_reply_reports_its_result_as_a_notice() -> Resul
 }
 
 #[tokio::test]
+async fn accepted_direction_keeps_its_notice_slot_under_load() -> Result<(), MediaError> {
+    let (handle, mut hub, mut notices) = MediaHub::new(4);
+    let key = key()?;
+    handle.start_peer_direction(
+        key.clone(),
+        PeerMediaDirection::SendOnly,
+        Gate::Open,
+        Gate::Open,
+        1,
+    )?;
+    while let Ok(slot) = hub.notices.try_reserve() {
+        slot.send(MediaNotice::Connected { key: key.clone() });
+    }
+    let refused = handle.start_peer_direction(
+        key.clone(),
+        PeerMediaDirection::SendOnly,
+        Gate::Open,
+        Gate::Open,
+        2,
+    );
+    settle(&mut hub)?;
+    let mut completed = Vec::new();
+    while let Ok(notice) = notices.try_recv() {
+        if let MediaNotice::DirectionApplied { serial, result, .. } = notice {
+            completed.push((serial, result?));
+        }
+    }
+    hub.close().await?;
+    assert!(matches!(refused, Err(MediaError::Capacity)));
+    assert_eq!(completed, [(1, false)]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_direction_change_without_a_reply_reports_whether_it_applied() -> Result<(), MediaError> {
     let (handle, mut hub, mut notices) = MediaHub::new(4);
     let key = key()?;

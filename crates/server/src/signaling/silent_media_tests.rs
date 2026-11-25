@@ -610,6 +610,26 @@ async fn a_recording_stop_waits_with_its_channel_reservation() -> Result<(), Con
 }
 
 #[tokio::test]
+async fn an_expired_attachment_releases_through_a_full_command_queue() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (key, _subscription, answered) = dialed(fixture).await?;
+        fixture.receive(answered, 0).await?;
+        while fixture.signaling.media.bridge(71, Vec::new()).is_ok() {}
+        fixture.signaling.expire_pending(5000).await?;
+        let mut releases = 0;
+        while let Some(command) = fixture.queued() {
+            if command == Queued::Release {
+                releases += 1;
+            }
+        }
+        assert_eq!(releases, 1);
+        assert_eq!(fixture.signaling.waiting_serial(&key), None);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn an_answered_attachment_leaves_the_turn_free() -> Result<(), ControlError> {
     silent(async |fixture: &mut Silent| {
         let (_key, _subscription, answered) = dialed(fixture).await?;
@@ -734,14 +754,24 @@ async fn an_answer_to_an_expired_wait_completes_no_later_wait() -> Result<(), Co
             generation: 9,
         };
         let local = "127.0.0.1:4000".parse().map_err(failure)?;
+        let release = fixture
+            .signaling
+            .media
+            .reserve_attachment_release(1)
+            .map_err(failure)?;
         fixture
             .signaling
-            .pend(key.clone(), 1, Waiting::External { local }, 0);
+            .pend(key.clone(), 1, Waiting::External { local, release }, 0);
         fixture.signaling.expire_pending(5000).await?;
         assert_eq!(fixture.queued(), Some(Queued::Release));
+        let release = fixture
+            .signaling
+            .media
+            .reserve_attachment_release(2)
+            .map_err(failure)?;
         fixture
             .signaling
-            .pend(key.clone(), 2, Waiting::External { local }, 5001);
+            .pend(key.clone(), 2, Waiting::External { local, release }, 5001);
         fixture
             .signaling
             .completed(key.clone(), Outcome::Attached(1, Ok(())), 5002)

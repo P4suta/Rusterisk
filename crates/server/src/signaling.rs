@@ -534,8 +534,17 @@ impl Signaling {
                         Ok(AnsweredAttachment::Existing) => {
                             self.answered(key, direction, events, Ok(())).await?;
                         }
-                        Ok(AnsweredAttachment::Pending(serial)) => {
-                            self.pend(key, serial, Waiting::Answered { direction, events }, now);
+                        Ok(AnsweredAttachment::Pending(release)) => {
+                            self.pend(
+                                key,
+                                release.serial,
+                                Waiting::Answered {
+                                    direction,
+                                    events,
+                                    release,
+                                },
+                                now,
+                            );
                         }
                         Ok(AnsweredAttachment::Missing) => {
                             let output = self.listeners[listener]
@@ -859,8 +868,13 @@ impl Signaling {
             }
             Effect::ConnectExternalRtp { key, target } => {
                 match self.start_external_rtp(key.clone(), target) {
-                    Ok((local, serial)) => {
-                        self.pend(key, serial, Waiting::External { local }, now);
+                    Ok((local, release)) => {
+                        self.pend(
+                            key,
+                            release.serial,
+                            Waiting::External { local, release },
+                            now,
+                        );
                     }
                     Err(error) => {
                         self.notify(Signal::ExternalRtpAdmitted {

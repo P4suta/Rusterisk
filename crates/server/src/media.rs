@@ -207,7 +207,7 @@ enum Command {
 // A notice carries the number that its sender gave the command.
 pub(crate) enum Completion<T> {
     Reply(oneshot::Sender<Result<T, MediaError>>),
-    Notice(u64),
+    Notice(u64, mpsc::OwnedPermit<MediaNotice>),
 }
 
 impl<T> Completion<T> {
@@ -215,20 +215,53 @@ impl<T> Completion<T> {
     fn abandoned(&self) -> bool {
         match self {
             Self::Reply(reply) => reply.is_closed(),
-            Self::Notice(_) => false,
+            Self::Notice(..) => false,
         }
+    }
+}
+
+pub(crate) struct AttachmentRelease {
+    pub(crate) serial: u64,
+    command: mpsc::OwnedPermit<Command>,
+}
+
+impl AttachmentRelease {
+    pub(crate) fn send(self, key: CallKey) {
+        self.command.send(Command::Release { key });
     }
 }
 
 #[derive(Clone)]
 pub struct MediaPort {
     commands: mpsc::Sender<Command>,
+    notices: mpsc::WeakSender<MediaNotice>,
     websocket: mpsc::Sender<streams::WebSocketAttachment<axum::extract::ws::WebSocket>>,
     client_websocket: mpsc::Sender<streams::WebSocketAttachment<streams::ClientSocket>>,
     webrtc: mpsc::Sender<webrtc::Attachment>,
 }
 
 impl MediaPort {
+    fn completion<T>(&self, serial: u64) -> Result<Completion<T>, MediaError> {
+        self.notices
+            .upgrade()
+            .ok_or(MediaError::UnknownStream)?
+            .try_reserve_owned()
+            .map(|slot| Completion::Notice(serial, slot))
+            .map_err(|_| MediaError::Capacity)
+    }
+
+    pub(crate) fn reserve_attachment_release(
+        &self,
+        serial: u64,
+    ) -> Result<AttachmentRelease, MediaError> {
+        let command = self
+            .commands
+            .clone()
+            .try_reserve_owned()
+            .map_err(|_| MediaError::Capacity)?;
+        Ok(AttachmentRelease { serial, command })
+    }
+
     pub(crate) fn queue_music(
         &self,
         key: CallKey,
@@ -517,7 +550,8 @@ impl MediaPort {
         direction: PeerMediaDirection,
         mode: AttachmentMode,
         serial: u64,
-    ) -> Result<(), MediaError> {
+    ) -> Result<AttachmentRelease, MediaError> {
+        let release = self.reserve_attachment_release(serial)?;
         self.commands
             .try_send(Command::Attach {
                 key,
@@ -525,9 +559,10 @@ impl MediaPort {
                 session,
                 direction,
                 mode,
-                reply: Completion::Notice(serial),
+                reply: self.completion(serial)?,
             })
-            .map_err(|_| MediaError::Capacity)
+            .map_err(|_| MediaError::Capacity)?;
+        Ok(release)
     }
 
     // The media task reports the result of this direction change as a notice with the same number.
@@ -545,7 +580,7 @@ impl MediaPort {
                 direction,
                 gate,
                 generated_audio_gate,
-                reply: Completion::Notice(serial),
+                reply: self.completion(serial)?,
             })
             .map_err(|_| MediaError::Capacity)
     }
@@ -741,6 +776,7 @@ impl MediaHub {
         (
             MediaPort {
                 commands,
+                notices: notices.downgrade(),
                 websocket,
                 client_websocket,
                 webrtc,
@@ -812,11 +848,14 @@ impl MediaHub {
     ) -> Result<(), MediaError> {
         match reply {
             Completion::Reply(reply) => self.complete_attachment(key, result, reply),
-            Completion::Notice(serial) => self.notice(MediaNotice::Attached {
-                key: key.clone(),
-                serial,
-                result,
-            }),
+            Completion::Notice(serial, slot) => {
+                slot.send(MediaNotice::Attached {
+                    key: key.clone(),
+                    serial,
+                    result,
+                });
+                Ok(())
+            }
         }
     }
 
@@ -1111,12 +1150,12 @@ impl MediaHub {
                                 tracing::debug!(channel = %key.id, generation = key.generation, "media direction receiver closed");
                             }
                         }
-                        Completion::Notice(serial) => {
-                            self.notice(MediaNotice::DirectionApplied {
+                        Completion::Notice(serial, slot) => {
+                            slot.send(MediaNotice::DirectionApplied {
                                 key,
                                 serial,
                                 result,
-                            })?;
+                            });
                         }
                     }
                 }

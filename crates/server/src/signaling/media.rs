@@ -1,5 +1,5 @@
 use crate::{
-    media::{AttachmentMode, MediaPort},
+    media::{AttachmentMode, AttachmentRelease, MediaPort},
     rtp::{RtpSession, SocketPair},
     webrtc::{WebRtcOffer, WebRtcSession},
     CallKey, ControlError,
@@ -86,7 +86,7 @@ pub(super) enum PendingWebRtc {
 
 pub(super) enum AnsweredAttachment {
     Existing,
-    Pending(u64),
+    Pending(AttachmentRelease),
     Missing,
 }
 
@@ -110,7 +110,7 @@ impl super::Signaling {
                     AttachmentMode::Answered,
                     serial,
                 )
-                .map(|()| AnsweredAttachment::Pending(serial)),
+                .map(AnsweredAttachment::Pending),
             MediaAdmission::Incoming(_) | MediaAdmission::Attached => {
                 Ok(AnsweredAttachment::Missing)
             }
@@ -127,7 +127,7 @@ impl MediaAdmission {
         session: &Session,
         mode: AttachmentMode,
         serial: u64,
-    ) -> Result<(), MediaError> {
+    ) -> Result<AttachmentRelease, MediaError> {
         let direction = super::peer_direction(session.direction);
         match (self, &session.security) {
             (Self::Rtp(sockets), SessionSecurity::Rtp) => {

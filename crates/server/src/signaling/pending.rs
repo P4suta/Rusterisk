@@ -1,4 +1,5 @@
 use super::{failure, media::PreparedAnswer, DigitDelivery, Signaling};
+use crate::media::AttachmentRelease;
 use crate::{CallKey, ControlError, Effect, Milestone, Signal};
 use rusterisk_core::{MediaTaskToken, PeerMediaDirection, Wake};
 use rusterisk_media::MediaError;
@@ -18,15 +19,18 @@ pub(super) enum Held {
 // What a call does when the media task answers.
 pub(super) enum Waiting {
     Answered {
+        release: AttachmentRelease,
         direction: PeerMediaDirection,
         events: Option<u16>,
     },
     Early {
+        release: AttachmentRelease,
         listener: usize,
         token: MediaTaskToken,
         answer: PreparedAnswer,
     },
     External {
+        release: AttachmentRelease,
         local: SocketAddr,
     },
     Direction {
@@ -189,17 +193,22 @@ impl Signaling {
             return Ok(());
         };
         match pending.waiting {
-            Waiting::Answered { direction, events } => {
-                let attached = self.attachment(&key, outcome);
+            Waiting::Answered {
+                direction,
+                events,
+                release,
+            } => {
+                let attached = Self::attachment(&key, outcome, release).map(drop);
                 self.answered(key.clone(), direction, events, attached)
                     .await?;
             }
             Waiting::Early {
+                release,
                 listener,
                 token,
                 answer,
             } => {
-                let attached = self.attachment(&key, outcome);
+                let attached = Self::attachment(&key, outcome, release);
                 let result = self
                     .early_attached(&key, listener, answer, attached, now)
                     .await;
@@ -213,8 +222,8 @@ impl Signaling {
                 })
                 .await?;
             }
-            Waiting::External { local } => {
-                let attached = self.attachment(&key, outcome);
+            Waiting::External { local, release } => {
+                let attached = Self::attachment(&key, outcome, release).map(drop);
                 self.external_attached(key.clone(), local, attached).await?;
             }
             Waiting::Direction { direction } => {
@@ -238,11 +247,15 @@ impl Signaling {
     }
 
     // An attachment that arrives after its deadline finds this release behind it in the queue.
-    fn attachment(&self, key: &CallKey, outcome: Outcome) -> Result<(), MediaError> {
+    fn attachment(
+        key: &CallKey,
+        outcome: Outcome,
+        release: AttachmentRelease,
+    ) -> Result<AttachmentRelease, MediaError> {
         match outcome {
-            Outcome::Attached(_, result) => result,
+            Outcome::Attached(_, result) => result.map(|()| release),
             Outcome::Direction(..) | Outcome::Expired => {
-                self.release_media(key);
+                release.send(key.clone());
                 Err(late())
             }
         }
@@ -300,12 +313,6 @@ impl Signaling {
             }
         }
         Ok(())
-    }
-
-    fn release_media(&self, key: &CallKey) {
-        if let Err(error) = self.media.release(key.clone()) {
-            tracing::warn!(channel = %key.id.as_str(), generation = key.generation, %error, "media release deferred");
-        }
     }
 
     pub(super) async fn answered(
