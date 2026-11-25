@@ -1,3 +1,5 @@
+#[path = "support/time.rs"]
+pub mod test_time;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode, Uri},
@@ -8,7 +10,6 @@ use serde_json::{json, Value};
 use std::{
     io,
     process::{Output, Stdio},
-    time::Duration,
 };
 use tokio::{net::TcpListener, process::Command};
 
@@ -47,7 +48,7 @@ async fn probe(outcome: &str, answered: bool, verified: bool) -> io::Result<Outp
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
-    tokio::select! {out=tokio::time::timeout(Duration::from_secs(5),child.wait_with_output())=>out?,stopped=axum::serve(listener,app)=>Err(io::Error::other(format!("fixture stopped: {stopped:?}")))}
+    tokio::select! {out=crate::test_time::Wait::Ready.bounded(child.wait_with_output())=>out?,stopped=axum::serve(listener,app)=>Err(io::Error::other(format!("fixture stopped: {stopped:?}")))}
 }
 #[tokio::test]
 async fn probe_reports_only_verified_received_audio_as_success() -> io::Result<()> {

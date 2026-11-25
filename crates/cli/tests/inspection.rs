@@ -1,3 +1,5 @@
+#[path = "support/time.rs"]
+pub mod test_time;
 use axum::{
     http::{HeaderMap, Method, StatusCode, Uri},
     routing::get,
@@ -7,7 +9,6 @@ use serde_json::{json, Value};
 use std::{
     io,
     process::{Output, Stdio},
-    time::Duration,
 };
 use tokio::{net::TcpListener, process::Command};
 
@@ -91,7 +92,7 @@ async fn inspect_with(arguments: &[&str], router: Router) -> io::Result<Output> 
         .stderr(Stdio::piped());
     let child = process.spawn()?;
     tokio::select! {
-        output = tokio::time::timeout(Duration::from_secs(5),child.wait_with_output()) => output?,
+        output = crate::test_time::Wait::Ready.bounded(child.wait_with_output()) => output?,
         result = axum::serve(listener,router) => Err(io::Error::other(format!("fixture stopped: {result:?}"))),
     }
 }
