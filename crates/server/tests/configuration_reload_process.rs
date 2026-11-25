@@ -2,6 +2,7 @@
 
 use base64::Engine;
 use reqwest::{Client, StatusCode};
+use rusterisk_test_support::Wait;
 use std::{
     fs::{self, File},
     io::{self, Read},
@@ -74,8 +75,9 @@ fn isolate_proxy(command: &mut Command) {
     command.env("NO_PROXY", "127.0.0.1");
 }
 
-async fn waited(child: &mut Child, budget: Duration) -> io::Result<ExitStatus> {
-    tokio::time::timeout(budget, child.wait())
+async fn waited(child: &mut Child) -> io::Result<ExitStatus> {
+    Wait::Ready
+        .bounded(child.wait())
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Process deadline elapsed"))?
 }
@@ -86,14 +88,11 @@ async fn forced(child: &mut Child) -> io::Result<()> {
         Ok(None) => child.start_kill(),
         Err(primary) => combine(Err(primary), child.start_kill()),
     };
-    combine(
-        killed,
-        waited(child, Duration::from_secs(2)).await.map(|_| ()),
-    )
+    combine(killed, waited(child).await.map(|_| ()))
 }
 
-async fn completed(child: &mut Child, budget: Duration) -> io::Result<ExitStatus> {
-    match waited(child, budget).await {
+async fn completed(child: &mut Child) -> io::Result<ExitStatus> {
+    match waited(child).await {
         Ok(status) => Ok(status),
         Err(primary) => combine(Err(primary), forced(child).await),
     }
@@ -108,7 +107,7 @@ async fn terminate(pid: u32) -> io::Result<()> {
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .spawn()?;
-    let status = completed(&mut signal, Duration::from_secs(2)).await?;
+    let status = completed(&mut signal).await?;
     verify(
         status.success(),
         format!("Termination request failed: {status}"),
@@ -125,7 +124,7 @@ async fn shutdown(child: &mut Child) -> io::Result<()> {
             .id()
             .ok_or_else(|| io::Error::other("Server process identity was released"))?;
         terminate(pid).await?;
-        let status = waited(child, Duration::from_secs(5)).await?;
+        let status = waited(child).await?;
         verify(
             status.success(),
             format!("Server did not shut down gracefully: {status}"),
@@ -254,33 +253,36 @@ impl Fixture {
     }
 
     async fn ready(&mut self) -> io::Result<()> {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(status) = self.child.try_wait()? {
-                    return Err(io::Error::other(format!(
-                        "Server exited before HTTP readiness: {status}"
-                    )));
-                }
-                match self.ping(CURRENT).await {
-                    Ok(StatusCode::OK) => return Ok(()),
-                    Ok(status) => {
+        let mut changes =
+            rusterisk_test_support::DirectoryChanges::new(&self.root.join("server.stdout"))?;
+        Wait::Ready
+            .bounded(async {
+                loop {
+                    if let Some(status) = self.child.try_wait()? {
                         return Err(io::Error::other(format!(
-                            "Server readiness returned HTTP {status}"
-                        )))
+                            "Server exited before HTTP readiness: {status}"
+                        )));
                     }
-                    Err(error) if error.kind() == io::ErrorKind::NotConnected => {}
-                    Err(error) => return Err(error),
+                    match self.ping(CURRENT).await {
+                        Ok(StatusCode::OK) => return Ok(()),
+                        Ok(status) => {
+                            return Err(io::Error::other(format!(
+                                "Server readiness returned HTTP {status}"
+                            )))
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotConnected => {}
+                        Err(error) => return Err(error),
+                    }
+                    changes.changed().await?;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Server HTTP readiness deadline elapsed",
-            )
-        })??;
+            })
+            .await
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "Server HTTP readiness deadline elapsed",
+                )
+            })??;
         verify(
             matches!(
                 rusterisk_storage::Store::open(&self.data),
@@ -310,7 +312,7 @@ impl Fixture {
             .kill_on_drop(true);
         isolate_proxy(&mut command);
         let mut child = command.spawn()?;
-        let status = completed(&mut child, Duration::from_secs(5)).await?;
+        let status = completed(&mut child).await?;
         Ok(Output {
             status,
             stdout: read(&self.client_root.join("stdout"), 8192)?,

@@ -2,6 +2,7 @@ use futures_util::StreamExt;
 use rusterisk_api::{Channel, Event, EventKind, StoredRecording};
 use rusterisk_media::{AudioFormat, Frame, RtpSender};
 use rusterisk_server::{rtp::SocketPair, ControlError};
+use rusterisk_test_support::Wait;
 use std::{
     net::{Ipv4Addr, SocketAddr},
     path::Path,
@@ -62,7 +63,7 @@ async fn recording_event(
     name: &str,
     finished: bool,
 ) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    Wait::Ready.bounded(async {
         for _ in 0..64 {
             match events.next().await {
                 Some(Ok(Message::Text(text))) => {
@@ -180,118 +181,122 @@ async fn forced_process_exit_recovers_audio_and_history_through_the_next_server_
         .build()
         .map_err(failure)?;
     let mut first = ChildServer::start(&settings, &data, root.path().join("first.log")).await?;
-    let first_operation = tokio::time::timeout(Duration::from_secs(10), async {
-        let mut events = events(first.address()).await?;
-        let remote = peer.local_addr().map_err(failure)?.to_string();
-        let mut active = None;
-        for id in ["completed-call", "interrupted-call"] {
-            let channel: Channel = request(
-                &client,
-                first.address(),
-                reqwest::Method::POST,
-                "channels/externalMedia",
-                &[
-                    ("app", "recovery"),
-                    ("channelId", id),
-                    ("external_host", &remote),
-                    ("format", "ulaw"),
-                    ("transport", "udp"),
-                    ("encapsulation", "rtp"),
-                ],
-            )
-            .await?
-            .json()
-            .await
-            .map_err(failure)?;
-            if id == "completed-call" {
-                request(
+    let first_operation = Wait::Ready
+        .bounded(async {
+            let mut events = events(first.address()).await?;
+            let remote = peer.local_addr().map_err(failure)?.to_string();
+            let mut active = None;
+            for id in ["completed-call", "interrupted-call"] {
+                let channel: Channel = request(
                     &client,
                     first.address(),
-                    reqwest::Method::DELETE,
-                    &format!("channels/{id}"),
-                    &[],
+                    reqwest::Method::POST,
+                    "channels/externalMedia",
+                    &[
+                        ("app", "recovery"),
+                        ("channelId", id),
+                        ("external_host", &remote),
+                        ("format", "ulaw"),
+                        ("transport", "udp"),
+                        ("encapsulation", "rtp"),
+                    ],
                 )
-                .await?;
-            } else {
-                active = Some(channel);
+                .await?
+                .json()
+                .await
+                .map_err(failure)?;
+                if id == "completed-call" {
+                    request(
+                        &client,
+                        first.address(),
+                        reqwest::Method::DELETE,
+                        &format!("channels/{id}"),
+                        &[],
+                    )
+                    .await?;
+                } else {
+                    active = Some(channel);
+                }
             }
-        }
-        let channel = active.ok_or(ControlError::Capacity)?;
-        let variables = channel.channelvars.ok_or(ControlError::Capacity)?;
-        let ip = variables
-            .get("UNICASTRTP_LOCAL_ADDRESS")
-            .ok_or(ControlError::Capacity)?;
-        let port = variables
-            .get("UNICASTRTP_LOCAL_PORT")
-            .ok_or(ControlError::Capacity)?;
-        let destination: SocketAddr = format!("{ip}:{port}").parse().map_err(failure)?;
-        let mut sender = RtpSender::new(AudioFormat::Pcmu, 0, [31; 10]).map_err(failure)?;
-        for name in ["complete", "interrupted"] {
-            request(
-                &client,
-                first.address(),
-                reqwest::Method::POST,
-                "channels/interrupted-call/record",
-                &[("name", name), ("format", "wav")],
-            )
-            .await?;
-            recording_event(&mut events, name, false).await?;
-            let mut tick = tokio::time::interval(Duration::from_millis(20));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            for _ in 0..30 {
-                tick.tick().await;
-                let bytes = sender
-                    .packet(Frame::new(&[4000; 160], 8000).map_err(failure)?)
-                    .map_err(failure)?
-                    .encode()
-                    .map_err(failure)?;
-                peer.data()
-                    .send_to(&bytes, destination)
-                    .await
-                    .map_err(failure)?;
-            }
-            if name == "complete" {
+            let channel = active.ok_or(ControlError::Capacity)?;
+            let variables = channel.channelvars.ok_or(ControlError::Capacity)?;
+            let ip = variables
+                .get("UNICASTRTP_LOCAL_ADDRESS")
+                .ok_or(ControlError::Capacity)?;
+            let port = variables
+                .get("UNICASTRTP_LOCAL_PORT")
+                .ok_or(ControlError::Capacity)?;
+            let destination: SocketAddr = format!("{ip}:{port}").parse().map_err(failure)?;
+            let mut sender = RtpSender::new(AudioFormat::Pcmu, 0, [31; 10]).map_err(failure)?;
+            for name in ["complete", "interrupted"] {
                 request(
                     &client,
                     first.address(),
                     reqwest::Method::POST,
-                    "recordings/live/complete/stop",
-                    &[],
+                    "channels/interrupted-call/record",
+                    &[("name", name), ("format", "wav")],
                 )
                 .await?;
-                recording_event(&mut events, name, true).await?;
-                verify_signal(&data.join("recordings/complete.wav"))?;
-            }
-        }
-        if history(&data, "completed-call")? != "completed"
-            || history(&data, "interrupted-call")? != "active"
-        {
-            return Err(ControlError::Adapter(
-                "pre-crash call history is incorrect".into(),
-            ));
-        }
-        let partial = data.join("recordings/interrupted.partial");
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if std::fs::metadata(&partial).map_err(failure)?.len() >= 44 + 1280 {
-                    return Ok::<(), ControlError>(());
+                recording_event(&mut events, name, false).await?;
+                let mut tick = tokio::time::interval(Duration::from_millis(20));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                for _ in 0..30 {
+                    tick.tick().await;
+                    let bytes = sender
+                        .packet(Frame::new(&[4000; 160], 8000).map_err(failure)?)
+                        .map_err(failure)?
+                        .encode()
+                        .map_err(failure)?;
+                    peer.data()
+                        .send_to(&bytes, destination)
+                        .await
+                        .map_err(failure)?;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                if name == "complete" {
+                    request(
+                        &client,
+                        first.address(),
+                        reqwest::Method::POST,
+                        "recordings/live/complete/stop",
+                        &[],
+                    )
+                    .await?;
+                    recording_event(&mut events, name, true).await?;
+                    verify_signal(&data.join("recordings/complete.wav"))?;
+                }
             }
+            if history(&data, "completed-call")? != "completed"
+                || history(&data, "interrupted-call")? != "active"
+            {
+                return Err(ControlError::Adapter(
+                    "pre-crash call history is incorrect".into(),
+                ));
+            }
+            let partial = data.join("recordings/interrupted.partial");
+            let mut changes =
+                rusterisk_test_support::DirectoryChanges::new(&partial).map_err(failure)?;
+            Wait::Ready
+                .bounded(async {
+                    loop {
+                        if std::fs::metadata(&partial).map_err(failure)?.len() >= 44 + 1280 {
+                            return Ok::<(), ControlError>(());
+                        }
+                        changes.changed().await.map_err(failure)?;
+                    }
+                })
+                .await
+                .map_err(failure)??;
+            let status = first.terminate().await?;
+            if status.success() {
+                return Err(ControlError::Adapter(
+                    "server exited without forced termination".into(),
+                ));
+            }
+            Ok(())
         })
         .await
-        .map_err(failure)??;
-        let status = first.terminate().await?;
-        if status.success() {
-            return Err(ControlError::Adapter(
-                "server exited without forced termination".into(),
-            ));
-        }
-        Ok(())
-    })
-    .await
-    .map_err(failure)
-    .and_then(|result| result);
+        .map_err(failure)
+        .and_then(|result| result);
     let first_cleanup = first.terminate().await.map(|_| ());
     combine(first_operation, first_cleanup)?;
     let mut restarted =

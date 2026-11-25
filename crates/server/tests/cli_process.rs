@@ -1,8 +1,8 @@
+use rusterisk_test_support::Wait;
 use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
 
 #[path = "cli_process/music.rs"]
 mod music;
@@ -18,30 +18,23 @@ fn run(directory: &Path, arguments: &[&OsStr]) -> Result<Output, io::Error> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if child.try_wait()?.is_some() {
-            return child.wait_with_output();
-        }
-        if Instant::now() >= deadline {
-            match child.kill() {
-                Ok(()) => {}
-                Err(error) => {
-                    if child.try_wait()?.is_none() {
-                        return Err(error);
-                    }
+    match rusterisk_test_support::child_exit(&mut child, Wait::Ready) {
+        Ok(_) => child.wait_with_output(),
+        Err(primary) => {
+            if let Err(error) = child.kill() {
+                if child.try_wait()?.is_none() {
+                    return Err(error);
                 }
             }
             let output = child.wait_with_output()?;
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
+            Err(io::Error::new(
+                primary.kind(),
                 format!(
-                    "command timed out with {} output bytes",
+                    "{primary} with {} output bytes",
                     output.stdout.len() + output.stderr.len()
                 ),
-            ));
+            ))
         }
-        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
