@@ -2,7 +2,8 @@ use super::{failure, start_invitation, transfer_lifetime::combine, update_direct
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, Request, SipMessage};
 use rusterisk_server::rtp::SocketPair;
 use rusterisk_server::ControlError;
-use std::{collections::BTreeSet, net::Ipv4Addr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::{collections::BTreeSet, net::Ipv4Addr};
 use tokio::net::UdpSocket;
 
 async fn request(socket: &UdpSocket) -> Result<Request, ControlError> {
@@ -23,7 +24,7 @@ async fn invitation(call_id: &str, from_tag: &str) -> Result<[Request; 3], Contr
         .map_err(failure)?;
     let local = client.local_addr().map_err(failure)?;
     let target = server.local_addr().map_err(failure)?;
-    let mut result = tokio::time::timeout(Duration::from_secs(2), async {
+    let mut result = Wait::Ready.bounded(async {
         let incoming = async {
             let first = request(&server).await?;
             let challenge = format!("SIP/2.0 401 Unauthorized\r\nVia: {}\r\nFrom: {}\r\nTo: {};tag=challenge\r\nCall-ID: {}\r\nCSeq: {}\r\nWWW-Authenticate: Digest realm=\"fixture\", nonce=\"nonce\", algorithm=MD5, qop=\"auth\"\r\nContent-Length: 0\r\n\r\n", first.top_via_header().map_err(failure)?.value(), first.from_header().map_err(failure)?.value(), first.to_header().map_err(failure)?.value(), first.call_id_header().map_err(failure)?.value(), first.cseq_header().map_err(failure)?.value());
@@ -143,7 +144,7 @@ async fn direction_updates_replace_the_actual_ack_branch_for_each_transaction(
     ];
     let original_branch = "z9hG4bK-0123456789abcdef0123456789abcdef-00000000";
     let ack = format!("ACK sip:fixture@{target} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch={original_branch};rport\r\nFrom: <sip:bob@localhost>;tag=bob\r\nTo: <sip:fixture@localhost>;tag=fixture\r\nCall-ID: direction-update\r\nCSeq: 2 ACK\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n");
-    let mut result = tokio::time::timeout(Duration::from_secs(2), async {
+    let mut result = Wait::Ready.bounded(async {
         let incoming = async {
             let mut packets = Vec::with_capacity(4);
             for _ in 0..2 {

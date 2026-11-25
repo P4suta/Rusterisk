@@ -2,6 +2,7 @@ use super::{failure, transfer_lifetime::combine};
 use reqwest::{Client, StatusCode, Url};
 use rusterisk_api::{Channel, ChannelId};
 use rusterisk_server::ControlError;
+use rusterisk_test_support::Wait;
 use std::{
     collections::BTreeSet,
     net::SocketAddr,
@@ -224,23 +225,24 @@ impl Configuration {
         &self,
         previous: &BTreeSet<ChannelId>,
     ) -> Result<(), ControlError> {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            let mut tick = tokio::time::interval(Duration::from_millis(20));
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            for _ in 0..128 {
-                tick.tick().await;
-                if self
-                    .channels()
-                    .await?
-                    .iter()
-                    .all(|channel| previous.contains(&channel.id))
-                {
-                    return Ok(());
+        Wait::Ready
+            .bounded(async {
+                let mut tick = tokio::time::interval(Duration::from_millis(20));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                for _ in 0..128 {
+                    tick.tick().await;
+                    if self
+                        .channels()
+                        .await?
+                        .iter()
+                        .all(|channel| previous.contains(&channel.id))
+                    {
+                        return Ok(());
+                    }
                 }
-            }
-            Err(ControlError::Capacity)
-        })
-        .await
-        .map_err(failure)?
+                Err(ControlError::Capacity)
+            })
+            .await
+            .map_err(failure)?
     }
 }

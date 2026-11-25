@@ -4,7 +4,6 @@ use rusterisk_server::ControlError;
 use std::{
     collections::BTreeSet,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    time::Duration,
 };
 use tokio::{net::UdpSocket, sync::mpsc};
 
@@ -54,19 +53,16 @@ pub(super) async fn compare() -> Result<(), ControlError> {
         configuration
             .configure(bob_contact, charlie_contact)
             .await?;
-        finish(
-            tokio::spawn(exercise(
-                [first, bob, second, charlie],
-                [target, target],
-                media_ports,
-                Exercise::RetireSource,
-                [
-                    RequestRoute::CallbackPending { server: target },
-                    RequestRoute::CallbackPending { server: target },
-                ],
-            )),
-            Duration::from_secs(8),
-        )
+        finish(tokio::spawn(exercise(
+            [first, bob, second, charlie],
+            [target, target],
+            media_ports,
+            Exercise::RetireSource,
+            [
+                RequestRoute::CallbackPending { server: target },
+                RequestRoute::CallbackPending { server: target },
+            ],
+        )))
         .await
     }
     .await;

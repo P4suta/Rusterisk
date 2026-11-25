@@ -2,7 +2,8 @@ use super::{observation_tests::answer, Observation, RequestRoute, TransferSignal
 use crate::{failure, transfer_lifetime::combine};
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, SipMessage};
 use rusterisk_server::ControlError;
-use std::{io::ErrorKind, net::Ipv4Addr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::{io::ErrorKind, net::Ipv4Addr};
 use tokio::net::UdpSocket;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -61,7 +62,7 @@ async fn retire(reply: Reply) -> Result<Retirement, ControlError> {
         .map_err(failure)?;
     let local = client.local_addr().map_err(failure)?;
     let target = server.local_addr().map_err(failure)?;
-    let mut result = tokio::time::timeout(Duration::from_secs(2), async {
+    let mut result = Wait::Ready.bounded(async {
         let mut signals = TransferSignals::new(&answer()?, RequestRoute::Direct(target))?;
         let via = format!("SIP/2.0/UDP {target};branch=z9hG4bK-retirement-notice");
         for (sequence, completed) in [(1, false), (2, true)] {

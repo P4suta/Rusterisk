@@ -2,7 +2,8 @@ use super::{Observation, ReferEvent, RequestRoute, TransferSignals};
 use crate::{failure, transfer_lifetime::combine};
 use rsipstack::sip::{HeadersExt, Response, SipMessage};
 use rusterisk_server::ControlError;
-use std::{net::Ipv4Addr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::Ipv4Addr;
 use tokio::net::UdpSocket;
 
 #[derive(Clone, Copy)]
@@ -29,7 +30,7 @@ async fn observed(notices: &[Notice]) -> Result<Observation, ControlError> {
         .map_err(failure)?;
     let local = client.local_addr().map_err(failure)?;
     let target = server.local_addr().map_err(failure)?;
-    let mut result = tokio::time::timeout(Duration::from_secs(2), async {
+    let mut result = Wait::Ready.bounded(async {
         let answer = answer()?;
         let mut signals = TransferSignals::new(&answer, RequestRoute::Direct(target))?;
         assert_eq!(signals.observed(), Observation {

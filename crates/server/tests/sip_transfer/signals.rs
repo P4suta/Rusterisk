@@ -6,7 +6,8 @@ use rsipstack::sip::{
     headers::untyped::ToTypedHeader, HeadersExt, Method, Request, Response, SipMessage, Uri,
 };
 use rusterisk_server::ControlError;
-use std::{net::SocketAddr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 #[path = "observations.rs"]
 mod observation_tests;
@@ -281,17 +282,18 @@ impl TransferSignals {
         target: SocketAddr,
         observed: impl Fn(&Self) -> bool,
     ) -> Result<(), ControlError> {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            for _ in 0..16 {
-                if observed(self) {
-                    return Ok(());
+        Wait::Ready
+            .bounded(async {
+                for _ in 0..16 {
+                    if observed(self) {
+                        return Ok(());
+                    }
+                    self.receive(socket, target).await?;
                 }
-                self.receive(socket, target).await?;
-            }
-            Err(ControlError::Capacity)
-        })
-        .await
-        .map_err(failure)?
+                Err(ControlError::Capacity)
+            })
+            .await
+            .map_err(failure)?
     }
 
     pub(super) async fn accepted(
@@ -416,7 +418,8 @@ pub(super) async fn acknowledge(
     expected: &AckIdentity,
 ) -> Result<(), ControlError> {
     let mut bytes = [0; 16385];
-    let (size, peer) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))
+    let (size, peer) = Wait::Ready
+        .bounded(socket.recv_from(&mut bytes))
         .await
         .map_err(failure)?
         .map_err(failure)?;
