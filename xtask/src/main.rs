@@ -350,6 +350,21 @@ fn execute() -> Result<(), TaskError> {
             };
             xtask::core_proofs::execute(execution, image).map_err(|error| TaskError::Contract(error.to_string()))
         }
+        [task, file, path] if task == "server-footprint" && file == "--first-call" => {
+            xtask::server_distribution::footprint::print_first_call(Path::new(path))?;
+            Ok(())
+        }
+        [task, pid_flag, pid, time_flag, seconds, options @ ..]
+            if task == "server-footprint" && pid_flag == "--pid" && time_flag == "--seconds" => {
+            let invalid = || TaskError::Contract("invalid footprint arguments".into());
+            let budget = match options {
+                [] => None,
+                [flag, rate] if flag == "--max-switches-per-minute" => Some(rate.parse().map_err(|_| invalid())?),
+                _ => return Err(invalid()),
+            };
+            xtask::server_distribution::footprint::measure(pid.parse().map_err(|_| invalid())?, seconds.parse().map_err(|_| invalid())?, budget)?;
+            Ok(())
+        }
         [task] if task == "interop" => interop::execute(true),
         [task, mode] if task == "interop" && mode == "--dry-run" => interop::execute(false),
         #[cfg(unix)]
@@ -459,7 +474,7 @@ fn execute() -> Result<(), TaskError> {
             )
         }
         _ => Err(TaskError::Contract(
-            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution cli verify|distribution sdk <plan|build|check-content --candidate <path>|verify --candidate <path> [--consumer-jobs <jobs>]>|distribution server <<plan|build> --target <triple> [--jobs <jobs> --build-timeout-seconds <seconds>]|<plan-container|build-container> --target <triple> --image <digest>|<check-content|export-oci> --candidate <path> --target <triple>|check-startup --candidate <path> [--target <triple> [--rosetta]]|verify --candidate <path> --sdk-candidate <path> [--consumer-jobs <jobs>]|verify-oci --candidate <path> --target <triple> --archive <path> --sdk-candidate <path>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|interop browser <--dry-run|--run> --image <digest> --reference-image <sha256:image-id> [--server-target <triple> --server-candidate <path> [--reference-first]]|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
+            "usage: cargo xtask <check|policy|core-msrv|node-check|browser-types|browser-check|distribution-check|distribution cli verify|distribution sdk <plan|build|check-content --candidate <path>|verify --candidate <path> [--consumer-jobs <jobs>]>|distribution server <<plan|build> --target <triple> [--jobs <jobs> --build-timeout-seconds <seconds>]|<plan-container|build-container> --target <triple> --image <digest>|<check-content|export-oci> --candidate <path> --target <triple>|check-startup --candidate <path> [--target <triple> [--rosetta]]|verify --candidate <path> --sdk-candidate <path> [--consumer-jobs <jobs>]|verify-oci --candidate <path> --target <triple> --archive <path> --sdk-candidate <path>>|server-footprint <--pid <pid> --seconds <seconds> [--max-switches-per-minute <rate>]|--first-call <attachment>>|security|vendor-check|(vendor-import|vendor-patch) --archive <path>|(reference-build|verification-build|core-proofs-build|browser-build) <--dry-run|--run>|interop [--dry-run]|interop browser <--dry-run|--run> --image <digest> --reference-image <sha256:image-id> [--server-target <triple> --server-candidate <path> [--reference-first]]|(core-proofs|core-miri|core-mutation|browser|native-sanitizers) <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>|input-fuzz <all|settings|media_controls|sip|media_packets> <--dry-run|--run> --image <name@sha256:digest|sha256:image-id>>".into(),
         )),
     }
 }
