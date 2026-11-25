@@ -6,7 +6,8 @@ use rusterisk_client::{
     api::{ApiError, ChannelId},
     Client, Error,
 };
-use std::{collections::BTreeMap, future::IntoFuture, time::Duration};
+use rusterisk_server::test_time::Wait;
+use std::{collections::BTreeMap, future::IntoFuture};
 use tokio::sync::{mpsc, oneshot};
 
 struct Request {
@@ -76,41 +77,42 @@ async fn music_controls_preserve_optional_class_query_encoding_authentication_an
             })
             .into_future(),
     );
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
-        let client = Client::new(&format!("http://{address}"), "app", "password")?;
-        let channel = ChannelId::try_from("phone_123".to_owned())?;
-        client.start_music_on_hold(&channel, None).await?;
-        let class = "known /音楽?&";
-        client.start_music_on_hold(&channel, Some(class)).await?;
-        client.stop_music_on_hold(&channel).await?;
-        for (method, class) in [
-            (Method::POST, None),
-            (Method::POST, Some(class)),
-            (Method::DELETE, None),
-        ] {
-            let request = requests.recv().await.ok_or(Error::Closed)?;
-            if request.method != method
-                || request.query.len() != usize::from(class.is_some())
-                || request.query.get("mohClass").map(String::as_str) != class
-            {
-                return Err(Error::Invalid(
-                    "music client changed the method or optional class query",
-                ));
+    let result = Wait::Ready
+        .bounded(async {
+            let client = Client::new(&format!("http://{address}"), "app", "password")?;
+            let channel = ChannelId::try_from("phone_123".to_owned())?;
+            client.start_music_on_hold(&channel, None).await?;
+            let class = "known /音楽?&";
+            client.start_music_on_hold(&channel, Some(class)).await?;
+            client.stop_music_on_hold(&channel).await?;
+            for (method, class) in [
+                (Method::POST, None),
+                (Method::POST, Some(class)),
+                (Method::DELETE, None),
+            ] {
+                let request = requests.recv().await.ok_or(Error::Closed)?;
+                if request.method != method
+                    || request.query.len() != usize::from(class.is_some())
+                    || request.query.get("mohClass").map(String::as_str) != class
+                {
+                    return Err(Error::Invalid(
+                        "music client changed the method or optional class query",
+                    ));
+                }
             }
-        }
-        let missing = ChannelId::try_from("missing".to_owned())?;
-        if !matches!(client.start_music_on_hold(&missing, None).await,
+            let missing = ChannelId::try_from("missing".to_owned())?;
+            if !matches!(client.start_music_on_hold(&missing, None).await,
             Err(Error::Api { status: 404, message }) if message.message == "Channel not found")
-        {
-            return Err(Error::Invalid("music client lost the API failure"));
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|_| Error::Timeout)
-    .and_then(|result| result);
+            {
+                return Err(Error::Invalid("music client lost the API failure"));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::Timeout)
+        .and_then(|result| result);
     let result = combine(result, stop.send(()).map_err(|_| Error::Closed));
-    let cleanup = match tokio::time::timeout(Duration::from_secs(3), &mut serving).await {
+    let cleanup = match Wait::Ready.bounded(&mut serving).await {
         Ok(result) => match result {
             Ok(result) => result.map_err(Error::Io),
             Err(error) => Err(Error::Cleanup(error.to_string())),

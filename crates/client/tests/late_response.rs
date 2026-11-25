@@ -4,6 +4,7 @@ use axum::{
     response::Response,
 };
 use rusterisk_client::{CallCompletion, CallMilestone, Client, Error, Originate};
+use rusterisk_server::test_time::Wait;
 use rusterisk_server::{Effect, Milestone, Signal};
 use std::{future::IntoFuture, time::Duration};
 use tokio::sync::{mpsc, oneshot};
@@ -50,7 +51,8 @@ async fn cancellation_ends_an_observed_channel_before_its_delayed_originate_resp
         let mut call = session
             .originate(Originate::new("PJSIP/phone".into())?)
             .await?;
-        let release = tokio::time::timeout(Duration::from_secs(2), delayed.recv())
+        let release = Wait::Ready
+            .bounded(delayed.recv())
             .await
             .map_err(|_| Error::Timeout)?
             .ok_or(Error::Closed)?;
@@ -80,7 +82,8 @@ async fn cancellation_ends_an_observed_channel_before_its_delayed_originate_resp
                 .await,
             Err(Error::CallEnded(CallCompletion::Cancelled))
         ));
-        let effect = tokio::time::timeout(Duration::from_secs(1), effects.recv())
+        let effect = Wait::Ready
+            .bounded(effects.recv())
             .await
             .map_err(|_| Error::Timeout)?
             .ok_or(Error::Closed)?;

@@ -1,4 +1,5 @@
 use rusterisk_client::{api::ChannelId, Client, Error};
+use rusterisk_server::test_time::Wait;
 use std::{collections::BTreeMap, future::IntoFuture};
 
 fn failure(error: impl std::fmt::Display) -> Error {
@@ -118,60 +119,61 @@ async fn continuation_releases_an_owned_call_and_enters_the_destination_applicat
     let server = tokio::spawn(
         axum::serve(listener, rusterisk_server::http::router(controller.clone())).into_future(),
     );
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
-        let client = Client::new(&format!("http://{address}"), "api", "password")?;
-        let mut first = client
-            .subscribe(&ChannelId::try_from("first".to_owned())?)
-            .await?;
-        let mut second = client
-            .subscribe(&ChannelId::try_from("second".to_owned())?)
-            .await?;
-        let id = ChannelId::try_from("incoming".to_owned())?;
-        controller
-            .incoming(IncomingCall {
-                id: id.clone(),
-                endpoint: "phone".into(),
-                caller: "100".into(),
-                context: "internal".into(),
-                extension: "200".into(),
-                target: IncomingTarget::Dialplan,
-            })
-            .await
-            .map_err(failure)?;
-        entered(&mut first, &id).await?;
-        let mut call = first.adopt(&id).await?;
-        client.continue_in_dialplan(&id, None, None, None).await?;
-        let completed = call.wait_completion(Duration::from_secs(1)).await?;
-        if completed.progress.completion() != Some(CallCompletion::StasisExited)
-            || completed.cleanup != Cleanup::Complete
-        {
-            return Err(Error::Invalid(
-                "continuation kept the previous call ownership",
-            ));
-        }
-        call.close().await?;
-        first.shutdown().await?;
-        entered(&mut second, &id).await?;
-        if client.channel(&id).await?.id != id {
-            return Err(Error::Invalid(
-                "continuation removed the destination channel",
-            ));
-        }
-        second.adopt(&id).await?.close().await?;
-        second.shutdown().await?;
-        if !matches!(
-            client.channel(&id).await,
-            Err(Error::Api { status: 404, .. })
-        ) {
-            return Err(Error::Invalid("destination channel cleanup failed"));
-        }
-        Ok::<(), Error>(())
-    })
-    .await
-    .map_err(|_| Error::Timeout)
-    .and_then(|result| result);
+    let result = Wait::Ready
+        .bounded(async {
+            let client = Client::new(&format!("http://{address}"), "api", "password")?;
+            let mut first = client
+                .subscribe(&ChannelId::try_from("first".to_owned())?)
+                .await?;
+            let mut second = client
+                .subscribe(&ChannelId::try_from("second".to_owned())?)
+                .await?;
+            let id = ChannelId::try_from("incoming".to_owned())?;
+            controller
+                .incoming(IncomingCall {
+                    id: id.clone(),
+                    endpoint: "phone".into(),
+                    caller: "100".into(),
+                    context: "internal".into(),
+                    extension: "200".into(),
+                    target: IncomingTarget::Dialplan,
+                })
+                .await
+                .map_err(failure)?;
+            entered(&mut first, &id).await?;
+            let mut call = first.adopt(&id).await?;
+            client.continue_in_dialplan(&id, None, None, None).await?;
+            let completed = call.wait_completion(Duration::from_secs(1)).await?;
+            if completed.progress.completion() != Some(CallCompletion::StasisExited)
+                || completed.cleanup != Cleanup::Complete
+            {
+                return Err(Error::Invalid(
+                    "continuation kept the previous call ownership",
+                ));
+            }
+            call.close().await?;
+            first.shutdown().await?;
+            entered(&mut second, &id).await?;
+            if client.channel(&id).await?.id != id {
+                return Err(Error::Invalid(
+                    "continuation removed the destination channel",
+                ));
+            }
+            second.adopt(&id).await?.close().await?;
+            second.shutdown().await?;
+            if !matches!(
+                client.channel(&id).await,
+                Err(Error::Api { status: 404, .. })
+            ) {
+                return Err(Error::Invalid("destination channel cleanup failed"));
+            }
+            Ok::<(), Error>(())
+        })
+        .await
+        .map_err(|_| Error::Timeout)
+        .and_then(|result| result);
     controller.shutdown();
-    let cleanup = match tokio::time::timeout(Duration::from_secs(2), &mut runner).await {
+    let cleanup = match Wait::Ready.bounded(&mut runner).await {
         Ok(result) => result
             .map_err(failure)
             .and_then(|result| result.map_err(failure)),

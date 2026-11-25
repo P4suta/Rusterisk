@@ -6,7 +6,8 @@ use axum::{
     Json, Router,
 };
 use rusterisk_client::{api, Client};
-use std::{collections::BTreeMap, future::IntoFuture, time::Duration};
+use rusterisk_server::test_time::Wait;
+use std::{collections::BTreeMap, future::IntoFuture};
 use tokio::sync::{mpsc, oneshot};
 
 const ID: &str = "sdk-distribution-run";
@@ -228,7 +229,7 @@ pub async fn run(
     let signal = shutdown
         .send(())
         .map_err(|_| std::io::Error::other("fixture server ended before shutdown"));
-    let serving = match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
+    let serving = match Wait::Ready.bounded(&mut server).await {
         Ok(result) => result
             .map_err(std::io::Error::other)
             .and_then(|result| result),
@@ -243,7 +244,7 @@ pub async fn run(
         }
     };
     drop(sender);
-    let report = match tokio::time::timeout(Duration::from_secs(5), &mut worker).await {
+    let report = match Wait::Ready.bounded(&mut worker).await {
         Ok(result) => result
             .map_err(std::io::Error::other)
             .and_then(|result| result),

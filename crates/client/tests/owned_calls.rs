@@ -2,6 +2,7 @@ use rusterisk_client::{
     api::ChannelState, CallMilestone, Client, DtmfDigit, DtmfTiming, Error, MuteDirection,
     Originate,
 };
+use rusterisk_server::test_time::Wait;
 use rusterisk_server::{Effect, Milestone, Signal};
 use std::{collections::BTreeMap, future::IntoFuture, time::Duration};
 
@@ -87,7 +88,8 @@ async fn owned_calls_wait_for_distinct_milestones_without_blocking_events_and_ca
             client.variable(call.id(), "INITIAL_TAG").await?.value,
             "value /&=test"
         );
-        let effect = tokio::time::timeout(Duration::from_secs(2), effects.recv())
+        let effect = Wait::Ready
+            .bounded(effects.recv())
             .await
             .map_err(|_| Error::Timeout)?
             .ok_or(Error::Closed)?;
@@ -106,7 +108,8 @@ async fn owned_calls_wait_for_distinct_milestones_without_blocking_events_and_ca
         call.wait(CallMilestone::Answered, Duration::from_secs(2))
             .await?;
         loop {
-            let event = tokio::time::timeout(Duration::from_secs(2), session.next_event())
+            let event = Wait::Ready
+                .bounded(session.next_event())
                 .await
                 .map_err(|_| Error::Timeout)??;
             if let rusterisk_client::api::EventKind::StasisStart { args, .. } = event.kind {
@@ -158,7 +161,8 @@ async fn owned_calls_wait_for_distinct_milestones_without_blocking_events_and_ca
                 AudioControl::Unhold => client.unhold(call.id()).await?,
                 AudioControl::Unmute => client.unmute(call.id(), MuteDirection::Incoming).await?,
             }
-            let effect = tokio::time::timeout(Duration::from_secs(2), effects.recv())
+            let effect = Wait::Ready
+                .bounded(effects.recv())
                 .await
                 .map_err(|_| Error::Timeout)?
                 .ok_or(Error::Closed)?;
@@ -178,7 +182,8 @@ async fn owned_calls_wait_for_distinct_milestones_without_blocking_events_and_ca
                 DtmfTiming::new(3, 20, 60, 4).map_err(|_| Error::Invalid("test timing"))?,
             )
             .await?;
-        let effect = tokio::time::timeout(Duration::from_secs(2), effects.recv())
+        let effect = Wait::Ready
+            .bounded(effects.recv())
             .await
             .map_err(|_| Error::Timeout)?
             .ok_or(Error::Closed)?;
@@ -225,7 +230,8 @@ async fn owned_calls_wait_for_distinct_milestones_without_blocking_events_and_ca
         assert!(command.sequence.finished());
         let id = call.id().clone();
         drop(call);
-        let released = tokio::time::timeout(Duration::from_secs(2), effects.recv())
+        let released = Wait::Ready
+            .bounded(effects.recv())
             .await
             .map_err(|_| Error::Timeout)?
             .ok_or(Error::Closed)?;

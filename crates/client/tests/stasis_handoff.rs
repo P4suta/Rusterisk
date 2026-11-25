@@ -1,4 +1,5 @@
 use rusterisk_client::{api, CallCompletion, CallMilestone, Client, Error, Originate};
+use rusterisk_server::test_time::Wait;
 use rusterisk_server::{Action, Controller, Credentials, Effect, Milestone, Signal};
 use std::{future::IntoFuture, time::Duration};
 
@@ -29,7 +30,7 @@ async fn handoff(operation: Handoff) -> Result<(), Error> {
         let mut destination = client.subscribe(&api::ChannelId::try_from("destination".to_owned())?).await?;
         let mut call = source.originate(Originate::new("PJSIP/phone".into())?).await?;
         call.wait(CallMilestone::Accepted, Duration::from_secs(2)).await?;
-        let Effect::Start { key, .. } = tokio::time::timeout(Duration::from_secs(2), effects.recv()).await.map_err(|_| Error::Timeout)?.ok_or(Error::Closed)? else { return Err(Error::Invalid("expected start effect")); };
+        let Effect::Start { key, .. } = Wait::Ready.bounded(effects.recv()).await.map_err(|_| Error::Timeout)?.ok_or(Error::Closed)? else { return Err(Error::Invalid("expected start effect")); };
         controller.signal(Signal::Milestone { key, milestone: Milestone::Answered }).await.map_err(|_| Error::Closed)?;
         call.wait(CallMilestone::Stasis, Duration::from_secs(2)).await?;
         let id = call.id().clone();
@@ -44,7 +45,7 @@ async fn handoff(operation: Handoff) -> Result<(), Error> {
         assert!(matches!(call.wait(CallMilestone::MediaConnected, Duration::from_secs(1)).await, Err(Error::StasisExited)));
         assert_eq!(client.channel(&id).await?.state, api::ChannelState::Up);
         if matches!(operation, Handoff::App) {
-            let entered = tokio::time::timeout(Duration::from_secs(2), destination.next_event()).await.map_err(|_| Error::Timeout)??;
+            let entered = Wait::Ready.bounded(destination.next_event()).await.map_err(|_| Error::Timeout)??;
             assert!(matches!(entered.kind, api::EventKind::StasisStart { channel, .. } if channel.id == id));
         }
         call.close().await?;

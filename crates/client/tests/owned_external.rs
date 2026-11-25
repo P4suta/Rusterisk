@@ -3,6 +3,7 @@ use rusterisk_client::{
     CallMilestone, Client, Error,
 };
 use rusterisk_media::{mulaw_decode, AudioFormat, AudioSocket, Frame, RtpPacket, RtpSender};
+use rusterisk_server::test_time::Wait;
 use rusterisk_server::{media::MediaHub, rtp::SocketPair, signaling::Signaling, Controller};
 use std::{
     future::IntoFuture,
@@ -28,7 +29,7 @@ fn combine(primary: Result<(), Error>, cleanup: Result<(), Error>) -> Result<(),
 async fn joined<E: std::fmt::Display>(
     mut task: tokio::task::JoinHandle<Result<(), E>>,
 ) -> Result<(), Error> {
-    match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+    match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?.map_err(failure),
         Err(primary) => {
             task.abort();
@@ -82,154 +83,160 @@ async fn owned_rtp_and_audio_socket_calls_exchange_received_audio_and_close_thei
         )
         .into_future(),
     );
-    let result = tokio::time::timeout(Duration::from_secs(8), async {
-        let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
-        let session = client
-            .subscribe(&ChannelId::try_from("owned-external".to_owned())?)
-            .await?;
-        let operation = async {
-            let target =
-                ExternalRtpTarget::new(rtp.local_addr()?, StaticRtpCodec::Pcmu).map_err(failure)?;
-            let mut left = session.external_rtp(target, "left,known-audio").await?;
-            let identity = [0xab; 16];
-            let target = AudioSocketTarget::new(incoming.local_addr()?, identity)
-                .map_err(failure)?
-                .with_session_text("ABABABAB-ABAB-ABAB-ABAB-ABABABABABAB")
-                .map_err(failure)?;
-            let mut right = session.external_audio_socket(target).await?;
-            let (mut stream, _) = incoming.accept().await?;
-            assert_eq!(
-                message(&mut stream).await.map_err(failure)?,
-                AudioSocket::Uuid(identity)
-            );
-            let mut rtp_address: Option<SocketAddr> = None;
-            for call in [&mut left, &mut right] {
-                let accepted = call
-                    .wait(CallMilestone::Accepted, Duration::from_secs(1))
-                    .await?;
-                if let Some(variables) = accepted.channel.and_then(|channel| channel.channelvars) {
-                    if let (Some(ip), Some(port)) = (
-                        variables.get("UNICASTRTP_LOCAL_ADDRESS"),
-                        variables.get("UNICASTRTP_LOCAL_PORT"),
-                    ) {
-                        rtp_address = Some(format!("{ip}:{port}").parse().map_err(failure)?);
-                    }
-                }
-                call.wait(CallMilestone::Stasis, Duration::from_secs(1))
-                    .await?;
-                call.wait(CallMilestone::Answered, Duration::from_secs(1))
-                    .await?;
-            }
-            let destination = rtp_address.ok_or(Error::Invalid("missing RTP transport"))?;
-            let ids = [left.id().clone(), right.id().clone()];
-            let bridge = rusterisk_client::BridgeId::try_from("owned-external-bridge".to_owned())?;
-            client
-                .create_bridge(&bridge, "Owned external audio")
+    let result = Wait::Ready
+        .bounded(async {
+            let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
+            let session = client
+                .subscribe(&ChannelId::try_from("owned-external".to_owned())?)
                 .await?;
-            client.add_channels(&bridge, &ids).await?;
-            let (mut reader, mut writer) = stream.split();
-            let send = async {
-                let mut sender = RtpSender::new(AudioFormat::Pcmu, 0, [31; 10]).map_err(failure)?;
-                let audio = AudioSocket::Audio(Frame::new(&[-7000; 160], 8000).map_err(failure)?)
-                    .encode()
+            let operation = async {
+                let target = ExternalRtpTarget::new(rtp.local_addr()?, StaticRtpCodec::Pcmu)
                     .map_err(failure)?;
-                let mut tick = tokio::time::interval(Duration::from_millis(20));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                for _ in 0..100 {
-                    tick.tick().await;
-                    let bytes = sender
-                        .packet(Frame::new(&[4000; 160], 8000).map_err(failure)?)
-                        .map_err(failure)?
-                        .encode()
-                        .map_err(failure)?;
-                    rtp.data().send_to(&bytes, destination).await?;
-                    writer.write_all(&audio).await?;
-                }
-                Err::<(), Error>(Error::Timeout)
-            };
-            let receive = async {
-                let from_rtp = async {
-                    let mut bytes = [0; 2049];
-                    for _ in 0..150 {
-                        let (size, source) = rtp.data().recv_from(&mut bytes).await?;
-                        if source != destination {
-                            return Err(Error::Invalid("unexpected RTP source"));
-                        }
-                        let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
-                        if packet.payload().len() == 160
-                            && packet
-                                .payload()
-                                .iter()
-                                .all(|byte| (i32::from(mulaw_decode(*byte)) + 7000).abs() < 300)
-                        {
-                            return Ok::<(), Error>(());
+                let mut left = session.external_rtp(target, "left,known-audio").await?;
+                let identity = [0xab; 16];
+                let target = AudioSocketTarget::new(incoming.local_addr()?, identity)
+                    .map_err(failure)?
+                    .with_session_text("ABABABAB-ABAB-ABAB-ABAB-ABABABABABAB")
+                    .map_err(failure)?;
+                let mut right = session.external_audio_socket(target).await?;
+                let (mut stream, _) = incoming.accept().await?;
+                assert_eq!(
+                    message(&mut stream).await.map_err(failure)?,
+                    AudioSocket::Uuid(identity)
+                );
+                let mut rtp_address: Option<SocketAddr> = None;
+                for call in [&mut left, &mut right] {
+                    let accepted = call
+                        .wait(CallMilestone::Accepted, Duration::from_secs(1))
+                        .await?;
+                    if let Some(variables) =
+                        accepted.channel.and_then(|channel| channel.channelvars)
+                    {
+                        if let (Some(ip), Some(port)) = (
+                            variables.get("UNICASTRTP_LOCAL_ADDRESS"),
+                            variables.get("UNICASTRTP_LOCAL_PORT"),
+                        ) {
+                            rtp_address = Some(format!("{ip}:{port}").parse().map_err(failure)?);
                         }
                     }
-                    Err(Error::Invalid("missing AudioSocket signal"))
+                    call.wait(CallMilestone::Stasis, Duration::from_secs(1))
+                        .await?;
+                    call.wait(CallMilestone::Answered, Duration::from_secs(1))
+                        .await?;
+                }
+                let destination = rtp_address.ok_or(Error::Invalid("missing RTP transport"))?;
+                let ids = [left.id().clone(), right.id().clone()];
+                let bridge =
+                    rusterisk_client::BridgeId::try_from("owned-external-bridge".to_owned())?;
+                client
+                    .create_bridge(&bridge, "Owned external audio")
+                    .await?;
+                client.add_channels(&bridge, &ids).await?;
+                let (mut reader, mut writer) = stream.split();
+                let send = async {
+                    let mut sender =
+                        RtpSender::new(AudioFormat::Pcmu, 0, [31; 10]).map_err(failure)?;
+                    let audio =
+                        AudioSocket::Audio(Frame::new(&[-7000; 160], 8000).map_err(failure)?)
+                            .encode()
+                            .map_err(failure)?;
+                    let mut tick = tokio::time::interval(Duration::from_millis(20));
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    for _ in 0..100 {
+                        tick.tick().await;
+                        let bytes = sender
+                            .packet(Frame::new(&[4000; 160], 8000).map_err(failure)?)
+                            .map_err(failure)?
+                            .encode()
+                            .map_err(failure)?;
+                        rtp.data().send_to(&bytes, destination).await?;
+                        writer.write_all(&audio).await?;
+                    }
+                    Err::<(), Error>(Error::Timeout)
                 };
-                let from_stream = async {
-                    let mut bytes = [0; 1923];
-                    for _ in 0..150 {
-                        reader.read_exact(&mut bytes[..3]).await?;
-                        let length = 3 + usize::from(u16::from_be_bytes([bytes[1], bytes[2]]));
-                        if length > bytes.len() {
-                            return Err(Error::Capacity);
-                        }
-                        reader.read_exact(&mut bytes[3..length]).await?;
-                        if let AudioSocket::Audio(frame) =
-                            AudioSocket::parse(&bytes[..length]).map_err(failure)?
-                        {
-                            if frame.samples().len() == 160
-                                && frame
-                                    .samples()
+                let receive = async {
+                    let from_rtp = async {
+                        let mut bytes = [0; 2049];
+                        for _ in 0..150 {
+                            let (size, source) = rtp.data().recv_from(&mut bytes).await?;
+                            if source != destination {
+                                return Err(Error::Invalid("unexpected RTP source"));
+                            }
+                            let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
+                            if packet.payload().len() == 160
+                                && packet
+                                    .payload()
                                     .iter()
-                                    .all(|sample| (i32::from(*sample) - 4000).abs() < 300)
+                                    .all(|byte| (i32::from(mulaw_decode(*byte)) + 7000).abs() < 300)
                             {
                                 return Ok::<(), Error>(());
                             }
                         }
-                    }
-                    Err(Error::Invalid("missing RTP signal"))
+                        Err(Error::Invalid("missing AudioSocket signal"))
+                    };
+                    let from_stream = async {
+                        let mut bytes = [0; 1923];
+                        for _ in 0..150 {
+                            reader.read_exact(&mut bytes[..3]).await?;
+                            let length = 3 + usize::from(u16::from_be_bytes([bytes[1], bytes[2]]));
+                            if length > bytes.len() {
+                                return Err(Error::Capacity);
+                            }
+                            reader.read_exact(&mut bytes[3..length]).await?;
+                            if let AudioSocket::Audio(frame) =
+                                AudioSocket::parse(&bytes[..length]).map_err(failure)?
+                            {
+                                if frame.samples().len() == 160
+                                    && frame
+                                        .samples()
+                                        .iter()
+                                        .all(|sample| (i32::from(*sample) - 4000).abs() < 300)
+                                {
+                                    return Ok::<(), Error>(());
+                                }
+                            }
+                        }
+                        Err(Error::Invalid("missing RTP signal"))
+                    };
+                    tokio::try_join!(from_rtp, from_stream)?;
+                    Ok::<(), Error>(())
                 };
-                tokio::try_join!(from_rtp, from_stream)?;
+                tokio::select! { result = send => result?, result = receive => result? }
+                for call in [&mut left, &mut right] {
+                    call.wait(CallMilestone::MediaConnected, Duration::from_secs(1))
+                        .await?;
+                }
+                left.close().await?;
+                right.close().await?;
+                let mut terminated = false;
+                for _ in 0..150 {
+                    if message(&mut stream).await? == AudioSocket::Terminate {
+                        terminated = true;
+                        break;
+                    }
+                }
+                if !terminated {
+                    return Err(Error::Invalid("AudioSocket did not terminate"));
+                }
+                for id in &ids {
+                    if !matches!(
+                        client.channel(id).await,
+                        Err(Error::Api { status: 404, .. })
+                    ) {
+                        return Err(Error::Invalid("owned channel survived close"));
+                    }
+                }
+                let released = tokio::net::UdpSocket::bind(destination).await?;
+                drop(released);
+                client.destroy_bridge(&bridge).await?;
                 Ok::<(), Error>(())
-            };
-            tokio::select! { result = send => result?, result = receive => result? }
-            for call in [&mut left, &mut right] {
-                call.wait(CallMilestone::MediaConnected, Duration::from_secs(1))
-                    .await?;
             }
-            left.close().await?;
-            right.close().await?;
-            let mut terminated = false;
-            for _ in 0..150 {
-                if message(&mut stream).await? == AudioSocket::Terminate {
-                    terminated = true;
-                    break;
-                }
-            }
-            if !terminated {
-                return Err(Error::Invalid("AudioSocket did not terminate"));
-            }
-            for id in &ids {
-                if !matches!(
-                    client.channel(id).await,
-                    Err(Error::Api { status: 404, .. })
-                ) {
-                    return Err(Error::Invalid("owned channel survived close"));
-                }
-            }
-            let released = tokio::net::UdpSocket::bind(destination).await?;
-            drop(released);
-            client.destroy_bridge(&bridge).await?;
-            Ok::<(), Error>(())
-        }
-        .await;
-        combine(operation, session.shutdown().await)
-    })
-    .await
-    .map_err(|_| Error::Timeout)
-    .and_then(|result| result);
+            .await;
+            combine(operation, session.shutdown().await)
+        })
+        .await
+        .map_err(|_| Error::Timeout)
+        .and_then(|result| result);
     controller.shutdown();
     let result = combine(result, joined(signaling).await);
     let result = combine(result, joined(hub).await);

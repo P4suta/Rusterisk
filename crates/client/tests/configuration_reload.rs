@@ -1,6 +1,7 @@
 use axum::{http::StatusCode, response::IntoResponse};
 use rusterisk_client::{api, Client, Error};
-use std::{future::IntoFuture, time::Duration};
+use rusterisk_server::test_time::Wait;
+use std::future::IntoFuture;
 
 #[derive(Clone, Copy)]
 struct ReloadReply {
@@ -59,11 +60,10 @@ async fn exchange(reply: ReloadReply) -> Result<ReloadExchange, Error> {
         },
     ));
     let server = tokio::spawn(axum::serve(listener, app).into_future());
-    let result =
-        match tokio::time::timeout(Duration::from_secs(5), client.reload_configuration()).await {
-            Ok(result) => result,
-            Err(_) => Err(Error::Timeout),
-        };
+    let result = match Wait::Ready.bounded(client.reload_configuration()).await {
+        Ok(result) => result,
+        Err(_) => Err(Error::Timeout),
+    };
     server.abort();
     match server.await {
         Err(error) if error.is_cancelled() => {}
