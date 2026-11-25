@@ -91,3 +91,19 @@ impl DigitSchedule {
         }
     }
 }
+
+macro_rules! pcm_rates {
+    ($define:ident) => {
+        $define!(
+            Hz8000(8000, 160),
+            Hz12000(12000, 240),
+            Hz16000(16000, 320),
+            Hz24000(24000, 480),
+            Hz32000(32000, 640),
+            Hz44100(44100, 882),
+            Hz48000(48000, 960),
+        );
+    };
+}
+
+pub(crate) use pcm_rates;

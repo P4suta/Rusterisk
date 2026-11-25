@@ -2,7 +2,8 @@ use rusterisk_api::MediaFormat;
 use rusterisk_media::{
     alaw_decode, mulaw_decode, AudioDecoder, AudioFormat, Frame, MediaError, MAX_SAMPLES,
 };
-use std::collections::VecDeque;
+mod queue;
+use queue::PlayoutQueue;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum BufferNotice {
@@ -56,7 +57,7 @@ enum Drain {
 
 pub struct MediaBuffer {
     format: MediaFormat,
-    queue: VecDeque<BufferItem>,
+    queue: PlayoutQueue,
     frames: usize,
     markers: usize,
     partial: [u8; 1920],
@@ -75,7 +76,7 @@ impl MediaBuffer {
             .transpose()?;
         Ok(Self {
             format,
-            queue: VecDeque::with_capacity(16),
+            queue: PlayoutQueue::new(format.rate())?,
             frames: 0,
             markers: 0,
             partial: [0; 1920],
@@ -124,14 +125,14 @@ impl MediaBuffer {
         )
     }
 
-    fn append_frame(&mut self, frame: Frame) -> Option<FlowNotice> {
-        self.queue.push_back(BufferItem::Frame(frame));
+    fn append_frame(&mut self, frame: &Frame) -> Result<Option<FlowNotice>, MediaError> {
+        self.queue.audio(frame)?;
         self.frames += 1;
         if self.flow == Flow::Open && self.frames >= 900 {
             self.flow = Flow::Backpressured;
-            Some(FlowNotice::Xoff)
+            Ok(Some(FlowNotice::Xoff))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -143,7 +144,7 @@ impl MediaBuffer {
             decoder.push(bytes)?;
             let mut flow = None;
             while let Some(frame) = self.packets.as_mut().and_then(AudioDecoder::pop) {
-                flow = self.append_frame(frame).or(flow);
+                flow = self.append_frame(&frame)?.or(flow);
             }
             return Ok(flow);
         }
@@ -162,7 +163,7 @@ impl MediaBuffer {
             offset += count;
             if self.used == size {
                 let frame = self.decoded()?;
-                flow = self.append_frame(frame).or(flow);
+                flow = self.append_frame(&frame)?.or(flow);
                 self.used = 0;
             }
         }
@@ -184,8 +185,7 @@ impl MediaBuffer {
 
     pub fn mark(&mut self, id: String) -> Result<(), MediaError> {
         self.marker_capacity(&id)?;
-        self.queue
-            .push_back(BufferItem::Notice(BufferNotice::Mark(id)));
+        self.queue.notice(BufferNotice::Mark(id));
         self.markers += 1;
         Ok(())
     }
@@ -213,14 +213,13 @@ impl MediaBuffer {
                 | MediaFormat::Opus => 0,
             };
             self.partial[self.used..usize::from(self.format.optimal_frame_size())].fill(silence);
-            self.append_frame(self.decoded()?)
+            self.append_frame(&self.decoded()?)?
         } else {
             None
         };
         self.used = 0;
         self.mode = BufferMode::Discrete;
-        self.queue
-            .push_back(BufferItem::Notice(BufferNotice::BufferingCompleted(id)));
+        self.queue.notice(BufferNotice::BufferingCompleted(id));
         self.markers += 1;
         Ok(flow)
     }
@@ -239,7 +238,7 @@ impl MediaBuffer {
         } else {
             None
         };
-        let item = self.queue.pop_front();
+        let item = self.queue.pop();
         match &item {
             Some(BufferItem::Frame(_)) => self.frames -= 1,
             Some(BufferItem::Notice(_)) => self.markers -= 1,
@@ -269,7 +268,7 @@ impl MediaBuffer {
         self.frames
     }
     pub fn is_empty(&self) -> bool {
-        self.queue.is_empty()
+        self.frames == 0 && self.markers == 0
     }
     pub fn is_buffering(&self) -> bool {
         self.mode == BufferMode::Continuous
