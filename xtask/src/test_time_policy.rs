@@ -17,14 +17,13 @@ fn paused(attributes: &[syn::Attribute]) -> bool {
         {
             return false;
         }
-        let mut clock = false;
-        let _parsed = attribute.parse_nested_meta(|meta| {
-            if meta.path.is_ident("start_paused") {
-                clock = meta.value()?.parse::<syn::LitBool>()?.value;
-            }
-            Ok(())
-        });
-        clock
+        attribute.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+        ).is_ok_and(|settings| settings.iter().any(|setting| {
+            matches!(setting, syn::Meta::NameValue(pair)
+                if pair.path.is_ident("start_paused")
+                    && matches!(&pair.value, syn::Expr::Lit(value) if matches!(&value.lit, syn::Lit::Bool(flag) if flag.value())))
+        }))
     })
 }
 
@@ -89,7 +88,14 @@ impl Policy {
             syn::UseTree::Rename(item) => self.import(prefix, &item.ident, &item.rename),
             syn::UseTree::Glob(_) => {
                 if matches!(prefix, "time" | "thread") {
-                    for name in ["sleep", "sleep_until", "timeout", "timeout_at"] {
+                    for name in [
+                        "sleep",
+                        "sleep_until",
+                        "timeout",
+                        "timeout_at",
+                        "pause",
+                        "resume",
+                    ] {
                         self.imports.insert(
                             name.to_owned(),
                             if prefix == "thread" {
@@ -107,7 +113,8 @@ impl Policy {
     fn import(&mut self, prefix: &str, original: &syn::Ident, alias: &syn::Ident) {
         let original = original.to_string();
         if matches!(original.as_str(), "time" | "thread")
-            || matches!(prefix, "time" | "thread") && timer(&original)
+            || matches!(prefix, "time" | "thread")
+                && (timer(&original) || matches!(original.as_str(), "pause" | "resume"))
         {
             let name = if prefix == "thread" {
                 format!("thread::{original}")
@@ -172,16 +179,17 @@ impl<'ast> Visit<'ast> for Policy {
             }
         }
         visit::visit_block(self, block);
-        self.paused = clock;
+        self.paused &= clock;
         self.imports = imports;
     }
 
     fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
-        let prior = self.wait_impl;
+        let (test, prior) = (self.test, self.wait_impl);
+        self.test |= crate::timer_policy::test_only(&item.attrs);
         self.wait_impl =
             matches!(item.self_ty.as_ref(), syn::Type::Path(ty) if ty.path.is_ident("Wait"));
         visit::visit_item_impl(self, item);
-        self.wait_impl = prior;
+        (self.test, self.wait_impl) = (test, prior);
     }
 
     fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
@@ -238,11 +246,12 @@ impl<'ast> Visit<'ast> for Policy {
     }
 
     fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
-        let (clock, common) = (self.paused, self.common);
+        let (test, clock, common) = (self.test, self.paused, self.common);
+        self.test |= crate::timer_policy::test_only(&item.attrs);
         self.paused = paused(&item.attrs);
         self.common = self.shared_bounds && self.wait_impl && item.sig.ident == "bounded";
         visit::visit_impl_item_fn(self, item);
-        (self.paused, self.common) = (clock, common);
+        (self.test, self.paused, self.common) = (test, clock, common);
     }
 
     fn visit_expr_path(&mut self, expr: &'ast syn::ExprPath) {

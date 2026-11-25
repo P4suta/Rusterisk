@@ -17,6 +17,22 @@ fn real_sleeps_and_private_timeouts_are_rejected_even_inside_macros() -> Result<
 }
 
 #[test]
+fn test_only_methods_and_resumed_clocks_require_shared_waits() -> Result<(), syn::Error> {
+    let path = Path::new("crates/server/src/worker.rs");
+    for source in [
+        "#[cfg(test)] impl Worker { async fn read() { tokio::time::timeout(delay, ready).await; } }",
+        "impl Worker { #[cfg(test)] async fn read() { std::thread::sleep(delay); } }",
+        "use tokio::time::resume as wall; #[tokio::test(start_paused = true)] async fn read() { wall(); tokio::time::sleep(delay).await; }",
+        "#[tokio::test(start_paused = true)] async fn read() { if real { tokio::time::resume(); } tokio::time::sleep(delay).await; }",
+    ] {
+        assert!(!inspect(path, source)?.is_empty(), "{source}");
+    }
+    let paused = "#[tokio::test(flavor = \"current_thread\", start_paused = true)] async fn clock() { tokio::time::sleep(delay).await; }";
+    assert!(inspect(path, paused)?.is_empty());
+    Ok(())
+}
+
+#[test]
 fn test_modules_are_checked_and_paused_timers_preserve_their_clock() -> Result<(), syn::Error> {
     let path = Path::new("crates/server/src/worker.rs");
     let source = "async fn serve() { tokio::time::timeout(limit, read()).await; }
