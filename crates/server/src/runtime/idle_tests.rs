@@ -41,8 +41,10 @@ async fn parks_in_an_idle_hour(interval: Option<Duration>) -> Result<u64, Contro
     tokio::time::sleep(Duration::from_secs(60)).await;
     let metrics = tokio::runtime::Handle::current().metrics();
     let before = metrics.worker_park_count(0);
+    let activity = controller.activity.snapshot();
     tokio::time::sleep(Duration::from_secs(3600)).await;
     let parks = metrics.worker_park_count(0).saturating_sub(before);
+    assert_eq!(controller.activity.snapshot(), activity);
     if let Some(ticking) = ticking {
         ticking.abort();
     }

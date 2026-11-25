@@ -824,6 +824,7 @@ pub struct MediaHub {
     workers: JoinSet<(CallKey, Result<LinkStats, MediaError>)>,
     stream_releases: BTreeMap<rusterisk_core::CallHandle, StreamRelease>,
     release_notices: BTreeMap<u8, CallKey>,
+    pub(crate) activity: crate::activity::Meter,
     dropped: u64,
     recordings: Recordings,
     playbacks: Playbacks,
@@ -880,6 +881,7 @@ impl MediaHub {
                 workers: JoinSet::new(),
                 stream_releases: BTreeMap::new(),
                 release_notices: BTreeMap::new(),
+                activity: crate::activity::Meter::default(),
                 dropped: 0,
                 recordings: Recordings::new(),
                 playbacks: Playbacks::new(),
@@ -1551,6 +1553,8 @@ impl MediaHub {
             return Ok(Turn::Stop);
         }
         let timed = frames.follow(self.needs_frames());
+        let before = self.dropped;
+        let mut late = false;
         tokio::select! {
             changed = stop.changed() => if changed.is_err() || *stop.borrow() { return Ok(Turn::Stop); },
             command = self.commands.recv() => match command {
@@ -1584,8 +1588,13 @@ impl MediaHub {
             result = self.recordings.workers.join_next(), if !self.recordings.workers.is_empty() => {
                 result.ok_or(MediaError::InvalidRoute)?.map_err(|error| MediaError::Transport(error.to_string()))?;
             }
-            _instant = frames.interval.tick(), if timed => self.tick()?,
+            scheduled = frames.interval.tick(), if timed => {
+                late = scheduled.elapsed() >= FRAME_PERIOD;
+                self.tick()?;
+            }
         }
+        self.activity
+            .turn(late, self.dropped.saturating_sub(before));
         Ok(Turn::Continue)
     }
 

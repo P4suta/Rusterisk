@@ -68,3 +68,17 @@ pub struct RouteDiagnosis {
     pub destinations: Vec<Destination>,
     pub channels: Vec<ChannelId>,
 }
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct LoopActivity {
+    pub turns: u64,
+    pub late_turns: u64,
+    pub drops: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct RuntimeActivity {
+    pub control: LoopActivity,
+    pub signaling: LoopActivity,
+    pub media: LoopActivity,
+}

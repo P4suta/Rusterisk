@@ -424,6 +424,7 @@ impl Signaling {
     async fn notify(&mut self, signal: Signal) -> Result<(), ControlError> {
         if !self.controller.is_stopping() {
             let now = self.controller.clock().now_ms()?;
+            self.control.activity.control.turn(false, 0);
             self.control.apply_signal(signal, now)?;
         }
         Ok(())
@@ -1567,9 +1568,12 @@ impl Signaling {
                 return Err(error);
             }
             decisions.settled(before, self.control.wake()?, now);
-            let timer = overdue
-                .timer(self.wake(clock.now_ms()?))
-                .earliest(decisions.timer(self.control.wake()?));
+            let signaling_timer = overdue.timer(self.wake(clock.now_ms()?));
+            let control_timer = decisions.timer(self.control.wake()?);
+            let timer = signaling_timer.earliest(control_timer);
+            let mut signaling_work = true;
+            let mut signaling_late = false;
+            let mut drops = 0;
             before = self.control.wake()?;
             let (prepared, commands) = match &mut self.publication {
                 Some(publication) => (
@@ -1592,6 +1596,7 @@ impl Signaling {
                 },
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { break; },
                 input = self.control.next() => {
+                    signaling_work = false;
                     let now = clock.now_ms()?;
                     if self.control.handle(input, now)? == Flow::Stop { break; }
                 },
@@ -1603,7 +1608,10 @@ impl Signaling {
                             self.network.admit_upgrade(request, &self.config.origins, admitting);
                         },
                         transport::Input::Packet(packet) => {
-                            if self.registration_received(&packet, now) { continue; }
+                            if self.registration_received(&packet, now) {
+                                self.control.activity.signaling.turn(false, 0);
+                                continue;
+                            }
                             let engine = &mut self.listeners[packet.listener].engine;
                             let output = match packet.route().flow()? {
                                 Some(flow) => engine.receive_on_flow(&packet.bytes, packet.peer, flow, now),
@@ -1612,6 +1620,7 @@ impl Signaling {
                             match output {
                             Ok(output) => self.output(packet.listener, output, now).await?,
                             Err(error) => {
+                                drops = 1;
                                 self.network.refuse(packet.route());
                                 tracing::debug!(transport = %self.listeners[packet.listener].name, %error, "signaling input refused");
                             }
@@ -1701,10 +1710,18 @@ impl Signaling {
                 },
                 () = clock.reached(timer) => {
                     let now = clock.now_ms()?;
+                    if due(control_timer, now) {
+                        self.control.activity.control.deadline(control_timer, now);
+                    }
+                    signaling_work = due(signaling_timer, now);
+                    signaling_late = matches!(signaling_timer, Wake::At(at) if at != 0 && now > at);
                     let before = self.wake(now);
                     self.turn(now, clock).await?;
                     overdue.settled(before, self.wake(now), now);
                 }
+            }
+            if signaling_work {
+                self.control.activity.signaling.turn(signaling_late, drops);
             }
         }
         Ok(())

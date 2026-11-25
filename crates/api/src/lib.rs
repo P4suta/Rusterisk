@@ -501,6 +501,7 @@ pub enum ManagementOperation {
     ChannelRtpObservation,
     DiagnoseExtension,
     DiagnoseChannel,
+    DiagnoseRuntime,
     TestCall,
 }
 
@@ -543,6 +544,15 @@ impl ManagementOperation {
                 success_status: 200,
                 parameters: &[],
             },
+            Self::DiagnoseRuntime => &Operation {
+                id: "diagnostics.runtime",
+                nickname: "diagnoseRuntime",
+                method: Method::Get,
+                path: "/rusterisk/diagnostics/runtime",
+                response: "RuntimeActivity",
+                success_status: 200,
+                parameters: &[],
+            },
             Self::TestCall => &Operation {
                 id: "testCalls.probe",
                 nickname: "testCall",
@@ -561,6 +571,7 @@ pub const MANAGEMENT_OPERATIONS: &[ManagementOperation] = &[
     ManagementOperation::ChannelRtpObservation,
     ManagementOperation::DiagnoseExtension,
     ManagementOperation::DiagnoseChannel,
+    ManagementOperation::DiagnoseRuntime,
     ManagementOperation::TestCall,
 ];
 
@@ -1303,6 +1314,7 @@ pub fn schemas() -> Value {
     let _channel = generator.subschema_for::<Channel>();
     let _observation = generator.subschema_for::<observation::WatchRecord>();
     let _route_diagnosis = generator.subschema_for::<diagnosis::RouteDiagnosis>();
+    let _runtime_activity = generator.subschema_for::<diagnosis::RuntimeActivity>();
     let _channel_diagnosis = generator.subschema_for::<diagnosis::ChannelDiagnosis>();
     let _rtp = generator.subschema_for::<RtpObservation>();
     let _test_call = generator.subschema_for::<test_call::TestCallResult>();

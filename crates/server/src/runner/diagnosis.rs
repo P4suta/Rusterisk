@@ -5,6 +5,7 @@ use serde_json::{to_value, Value};
 use tokio::sync::oneshot;
 
 pub(crate) enum Target {
+    Runtime,
     Channel(ChannelId),
     Extension { context: String, extension: String },
 }
@@ -32,6 +33,7 @@ impl Controller {
 impl Runner {
     pub(super) fn diagnose(&self, target: Target) -> Result<Value, ControlError> {
         Ok(match target {
+            Target::Runtime => to_value(self.activity.snapshot())?,
             Target::Channel(id) => to_value(self.control.diagnose_channel(&id)?)?,
             Target::Extension { context, extension } => {
                 to_value(self.control.diagnose_extension(context, extension))?

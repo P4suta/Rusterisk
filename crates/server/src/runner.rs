@@ -194,6 +194,7 @@ struct Session {
 
 #[derive(Clone)]
 pub struct Controller {
+    pub(crate) activity: crate::activity::Meters,
     clock: Clock,
     closures: ClosureLatch,
     requests: mpsc::Sender<Request>,
@@ -204,6 +205,7 @@ pub struct Controller {
 }
 
 pub struct Runner {
+    pub(crate) activity: crate::activity::Meters,
     records: crate::call_records::CallRecords<calls::Resources>,
     clock: Clock,
     closed: mpsc::Receiver<()>,
@@ -266,8 +268,10 @@ impl Controller {
         let control = Control::with_configuration(capacity, &config);
         let clock = Clock::start();
         let (closures, closed) = closure::latch();
+        let activity = crate::activity::Meters::default();
         (
             Self {
+                activity: activity.clone(),
                 clock,
                 closures,
                 requests,
@@ -277,6 +281,7 @@ impl Controller {
                 directory_reload_requests,
             },
             Runner {
+                activity,
                 clock,
                 closed,
                 closures_open: true,
@@ -604,10 +609,11 @@ impl Runner {
             }
             if let Some(subscriber) = self.subscribers.get(&event.application) {
                 let application = event.application.clone();
-                if subscriber.events.try_send(event).is_err()
-                    && !disconnected.contains(&application)
-                {
-                    disconnected.push(application);
+                if subscriber.events.try_send(event).is_err() {
+                    self.activity.control.dropped();
+                    if !disconnected.contains(&application) {
+                        disconnected.push(application);
+                    }
                 }
             }
         }
@@ -1077,7 +1083,7 @@ impl Runner {
                 input = self.next() => {
                     if self.handle(input, clock.now_ms()?)? == Flow::Stop { break; }
                 }
-                () = clock.reached(timer) => {}
+                () = clock.reached(timer) => self.activity.control.deadline(timer, clock.now_ms()?),
             }
         }
         Ok(())

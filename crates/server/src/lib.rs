@@ -1,3 +1,4 @@
+mod activity;
 pub mod audiosocket;
 mod call_profiles;
 mod call_records;
