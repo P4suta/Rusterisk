@@ -39,22 +39,23 @@ async fn pending_upgrades_share_connection_capacity_and_cancel_without_a_socket(
     network.close().await
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn expired_upgrade_senders_cannot_attach_to_a_replacement_generation(
 ) -> Result<(), ControlError> {
     let mut network = network().await?;
     let peer = "127.0.0.1:5061".parse().map_err(failure)?;
+    let start = tokio::time::Instant::now();
     let expired = network.upgrade(Scheme::Ws, peer)?;
     let Input::Closed {
         key: previous,
         result,
-    } = Wait::Ready
-        .bounded(network.next())
+    } = rusterisk_test_support::virtual_window(std::time::Duration::from_secs(6), network.next())
         .await
         .map_err(failure)??
     else {
         return Err(ControlError::Capacity);
     };
+    assert_eq!(start.elapsed(), std::time::Duration::from_secs(5));
     assert!(result.is_err());
     assert!(expired.is_closed());
     let replacement = network.upgrade(Scheme::Ws, peer)?;

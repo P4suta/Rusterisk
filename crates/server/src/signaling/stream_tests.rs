@@ -204,7 +204,10 @@ async fn originated<S: AsyncRead + AsyncWrite + Unpin>(
         .value()
         .starts_with(&format!("SIP/2.0/{token} ")));
     let mut byte = [0; 1];
-    assert!(Wait::Ready.bounded(peer.read(&mut byte)).await.is_err());
+    assert!(Wait::Responsive
+        .bounded(peer.read(&mut byte))
+        .await
+        .is_err());
     Ok((id, request))
 }
 

@@ -150,7 +150,7 @@ async fn registration(identity: Identity, accepted: bool) -> Result<(), ControlE
         {
             return Err(ControlError::Invalid("Resolved TLS refresh changed the original domain"));
         }
-        if Wait::Ready.bounded(registrar.accept()).await.is_ok() {
+        if Wait::Quiet.bounded(registrar.accept()).await.is_ok() {
             return Err(ControlError::Invalid("Resolved TLS registration opened another flow"));
         }
         Ok(())

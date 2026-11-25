@@ -228,21 +228,43 @@ async fn a_full_event_queue_cannot_hold_shutdown_open() -> Result<(), ControlErr
     Ok(())
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn keepalives_cannot_extend_the_first_message_deadline() -> Result<(), ControlError> {
-    let mut network = network().await?;
-    let mut peer = TcpStream::connect(network.local_addr(0)?)
+    let (socket, mut peer) = tokio::io::duplex(8);
+    let key = ConnectionKey {
+        listener: 0,
+        peer: "127.0.0.1:5060".parse().map_err(failure)?,
+        generation: 1,
+    };
+    let (outgoing, packets) = mpsc::channel(1);
+    let (events, mut incoming) = mpsc::channel(1);
+    let (_stop, stopped) = watch::channel(false);
+    let serving = connection(socket, key, packets, events, stopped, StreamRole::Accepted);
+    let start = tokio::time::Instant::now();
+    let observed = async {
+        peer.write_all(b"\r\n\r\n").await.map_err(failure)?;
+        let mut pong = [0; 2];
+        peer.read_exact(&mut pong).await.map_err(failure)?;
+        assert_eq!(&pong, b"\r\n");
+        let packet = incoming.recv().await.ok_or(ControlError::Capacity)?;
+        drop(outgoing);
+        assert_eq!(packet.key, key);
+        assert!(matches!(
+            packet.item,
+            StreamEvent::Finished(Err(ControlError::Invalid("Signaling frame timed out")))
+        ));
+        Ok::<(), ControlError>(())
+    };
+    let (served, result) =
+        rusterisk_test_support::virtual_window(std::time::Duration::from_secs(6), async {
+            tokio::join!(serving, observed)
+        })
         .await
         .map_err(failure)?;
-    peer.write_all(b"\r\n\r\n").await.map_err(failure)?;
-    let mut pong = [0; 2];
-    let (input, pong) = Wait::Ready
-        .bounded(async { tokio::join!(network.next(), peer.read_exact(&mut pong)) })
-        .await
-        .map_err(failure)?;
-    pong.map_err(failure)?;
-    assert!(matches!(input?, Input::Closed { result: Err(_), .. }));
-    network.close().await
+    served?;
+    result?;
+    assert_eq!(start.elapsed(), std::time::Duration::from_secs(5));
+    Ok(())
 }
 
 #[tokio::test]

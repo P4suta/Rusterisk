@@ -4,7 +4,6 @@ use crate::{
 };
 use rusterisk_api::ChannelId;
 use rusterisk_config::Config;
-use rusterisk_test_support::Wait;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
@@ -205,12 +204,14 @@ async fn a_control_loop_alone_stops_while_its_effects_wait_for_a_reader() -> Res
     for _ in 0..16 {
         tokio::task::yield_now().await;
     }
+    let start = tokio::time::Instant::now();
     controller.shutdown();
-    let stopped = Wait::Ready
-        .bounded(running)
-        .await
-        .map_err(|_| ControlError::Invalid("The control loop kept waiting for a reader"))?
-        .map_err(failure)?;
+    let stopped =
+        rusterisk_test_support::virtual_window(std::time::Duration::from_secs(6), running)
+            .await
+            .map_err(|_| ControlError::Invalid("The control loop kept waiting for a reader"))?
+            .map_err(failure)?;
+    assert_eq!(start.elapsed(), std::time::Duration::from_secs(5));
     assert!(
         matches!(stopped, Err(ControlError::Adapter(_))),
         "{stopped:?}"
