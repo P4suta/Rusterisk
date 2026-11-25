@@ -11,7 +11,7 @@ use rusterisk_server::{
     http::router, Action, ControlError, Controller, Credentials, Effect, IncomingCall, Milestone,
     Signal,
 };
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tower::ServiceExt;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -67,9 +67,7 @@ async fn a_reused_channel_cannot_complete_an_earlier_answer() -> Result<(), Cont
             router(controller.clone())
                 .oneshot(http_request("POST", "/ari/channels/reused/answer")?),
         );
-        let effect = tokio::time::timeout(Duration::from_secs(1), effects.recv())
-            .await
-            .map_err(failure)?;
+        let effect = Wait::Ready.bounded(effects.recv()).await.map_err(failure)?;
         assert!(matches!(effect, Some(Effect::Answer { key }) if key == first));
         controller
             .execute(credentials, None, Action::Hangup(id.clone()))
@@ -129,9 +127,9 @@ async fn incoming_admission_publishes_stasis_before_reply_and_http_answer_waits_
         let app = router(controller.clone());
         let answer = http_request("POST", "/ari/channels/incoming/answer")?;
         let mut pending = tokio::spawn(app.clone().oneshot(answer));
-        let effect = tokio::time::timeout(Duration::from_secs(1), effects.recv()).await.map_err(failure)?;
+        let effect = Wait::Ready.bounded(effects.recv()).await.map_err(failure)?;
         assert!(matches!(effect, Some(Effect::Answer { key: answered }) if answered == key));
-        assert!(tokio::time::timeout(Duration::from_millis(30), &mut pending).await.is_err());
+        assert!(Wait::Quiet.bounded(&mut pending).await.is_err());
         let duplicate = tokio::spawn(app.clone().oneshot(http_request("POST", "/ari/channels/incoming/answer")?));
         let snapshot = controller.execute(credentials.clone(), None, Action::GetChannel(id.clone())).await?.body.ok_or(ControlError::Capacity)?;
         assert_eq!(snapshot["state"], "Ring");
@@ -140,7 +138,7 @@ async fn incoming_admission_publishes_stasis_before_reply_and_http_answer_waits_
             assert_eq!(reply.await.map_err(failure)?.map_err(failure)?.status(), StatusCode::NO_CONTENT);
         }
         assert!(effects.try_recv().is_err());
-        let changed = tokio::time::timeout(Duration::from_secs(1), subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
+        let changed = Wait::Ready.bounded(subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
         assert!(matches!(changed.kind, EventKind::ChannelStateChange { channel } if channel.state == ChannelState::Up));
         for (method, path, expected) in [
             ("POST", "/ari/channels/incoming/hold", AudioGate::Closed),

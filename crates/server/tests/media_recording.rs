@@ -6,6 +6,7 @@ use rusterisk_server::rtp::{RtpSession, SocketPair};
 use rusterisk_server::storage::StorageWorker;
 use rusterisk_server::CallKey;
 use rusterisk_storage::WaveReader;
+use rusterisk_test_support::Wait;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
@@ -56,7 +57,8 @@ async fn a_deleted_bridge_rejects_late_recording_files_without_stopping_its_repl
         media.release_bridge(10)?;
         media.stop_recording(current, RecordingEnd::Finish)?;
         for done in [old_done, current_done] {
-            tokio::time::timeout(Duration::from_secs(2), done)
+            Wait::Ready
+                .bounded(done)
                 .await
                 .map_err(failure)?
                 .map_err(failure)?
@@ -169,7 +171,8 @@ async fn channel_and_bridge_recordings_contain_their_actual_received_audio(
         media.stop_recording(channel, RecordingEnd::Finish)?;
         media.release_bridge(10)?;
         for completed in [channel_done, bridge_done] {
-            tokio::time::timeout(Duration::from_secs(2), completed)
+            Wait::Ready
+                .bounded(completed)
                 .await
                 .map_err(failure)?
                 .map_err(failure)?
@@ -230,7 +233,8 @@ async fn cancellation_removes_audio_and_shutdown_finishes_owned_recordings(
             )
             .await?;
         media.stop_recording(cancelled, RecordingEnd::Cancel)?;
-        tokio::time::timeout(Duration::from_secs(2), completion)
+        Wait::Ready
+            .bounded(completion)
             .await
             .map_err(failure)?
             .map_err(failure)?
@@ -293,7 +297,8 @@ async fn failed_publication_is_reported_and_its_partial_audio_recovers_after_res
             .await?;
         std::fs::create_dir(directory.path().join("recordings/recover.wav")).map_err(failure)?;
         media.stop_recording(token, RecordingEnd::Finish)?;
-        let outcome = tokio::time::timeout(Duration::from_secs(2), completion)
+        let outcome = Wait::Ready
+            .bounded(completion)
             .await
             .map_err(failure)?
             .map_err(failure)?;

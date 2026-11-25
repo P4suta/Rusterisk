@@ -6,8 +6,8 @@ use rusterisk_server::rtp::{RtpSession, SocketPair};
 use rusterisk_server::storage::{PlaybackMedia, StorageWorker};
 use rusterisk_server::CallKey;
 use rusterisk_storage::{Recorder, WaveReader};
+use rusterisk_test_support::Wait;
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
 
 fn failure(error: impl std::fmt::Display) -> MediaError {
     MediaError::Transport(error.to_string())
@@ -17,30 +17,31 @@ fn id(value: &str) -> Result<ChannelId, MediaError> {
 }
 
 async fn received(peer: &SocketPair) -> Result<(), MediaError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        let mut bytes = [0; 1501];
-        let mut consecutive = 0;
-        for _ in 0..100 {
-            let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
-            let packet = RtpPacket::parse(&bytes[..size])?;
-            if packet.payload_type() == 0
-                && packet
-                    .payload()
-                    .iter()
-                    .all(|sample| (i32::from(mulaw_decode(*sample)) - 4000).abs() < 300)
-            {
-                consecutive += 1;
-                if consecutive == 6 {
-                    return Ok(());
+    Wait::Ready
+        .bounded(async {
+            let mut bytes = [0; 1501];
+            let mut consecutive = 0;
+            for _ in 0..100 {
+                let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
+                let packet = RtpPacket::parse(&bytes[..size])?;
+                if packet.payload_type() == 0
+                    && packet
+                        .payload()
+                        .iter()
+                        .all(|sample| (i32::from(mulaw_decode(*sample)) - 4000).abs() < 300)
+                {
+                    consecutive += 1;
+                    if consecutive == 6 {
+                        return Ok(());
+                    }
+                } else {
+                    consecutive = 0;
                 }
-            } else {
-                consecutive = 0;
             }
-        }
-        Err(MediaError::InvalidFrame)
-    })
-    .await
-    .map_err(failure)?
+            Err(MediaError::InvalidFrame)
+        })
+        .await
+        .map_err(failure)?
 }
 
 #[tokio::test]
@@ -114,12 +115,14 @@ async fn bridge_playback_reaches_every_peer_and_is_included_in_its_recording(
             )
             .await?;
         tokio::try_join!(received(&alice), received(&bob))?;
-        tokio::time::timeout(Duration::from_secs(2), completed)
+        Wait::Ready
+            .bounded(completed)
             .await
             .map_err(failure)?
             .map_err(failure)??;
         media.stop_recording(record, RecordingEnd::Finish)?;
-        tokio::time::timeout(Duration::from_secs(2), recorded)
+        Wait::Ready
+            .bounded(recorded)
             .await
             .map_err(failure)?
             .map_err(failure)?
@@ -164,11 +167,7 @@ async fn a_cancelled_reservation_rejects_a_late_source_after_the_target_is_reuse
             .map_err(|_| MediaError::Capacity)?;
         let mut old_done = media.reserve_playback(AudioTarget::Bridge(10), old).await?;
         media.bridge(10, Vec::new())?;
-        assert!(
-            tokio::time::timeout(Duration::from_millis(40), &mut old_done)
-                .await
-                .is_err()
-        );
+        assert!(Wait::Quiet.bounded(&mut old_done).await.is_err());
         media.release_bridge(10)?;
         let mut current_tasks = MediaTasks::new(2);
         let current = current_tasks
@@ -192,7 +191,8 @@ async fn a_cancelled_reservation_rejects_a_late_source_after_the_target_is_reuse
         media.attach_playback(current, source).await?;
         media.release_bridge(10)?;
         for done in [old_done, current_done] {
-            tokio::time::timeout(Duration::from_secs(2), done)
+            Wait::Ready
+                .bounded(done)
                 .await
                 .map_err(failure)?
                 .map_err(failure)??;

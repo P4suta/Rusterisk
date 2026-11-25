@@ -2,7 +2,7 @@ use rusterisk_api::{ChannelId, EventKind, RecordingState};
 use rusterisk_config::Config;
 use rusterisk_server::media::RecordingEnd;
 use rusterisk_server::{Action, ControlError, Controller, Credentials, Effect, Signal};
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
@@ -55,7 +55,7 @@ async fn recording_replies_wait_for_admission_while_calls_and_cancellation_keep_
         let Effect::RecordMedia { owner, token, .. } = effects.recv().await.ok_or(ControlError::Capacity)? else { return Err(ControlError::Unsupported); };
         abandoned.abort();
         assert!(abandoned.await.is_err());
-        let stopped = tokio::time::timeout(Duration::from_secs(1), effects.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
+        let stopped = Wait::Ready.bounded(effects.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
         assert!(matches!(stopped, Effect::EndRecording { token: current, mode: RecordingEnd::Cancel, .. } if current == token));
         controller.signal(Signal::RecordingAdmitted { owner: owner.clone(), token, result: Ok(()) }).await?;
         controller.signal(Signal::RecordingFinished { owner, token, result: Ok(()) }).await?;

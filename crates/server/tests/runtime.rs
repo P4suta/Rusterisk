@@ -2,6 +2,7 @@ use futures_util::StreamExt;
 use rusterisk_config::Config;
 use rusterisk_server::runtime::Server;
 use rusterisk_server::ControlError;
+use rusterisk_test_support::Wait;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -71,7 +72,7 @@ async fn server_shutdown_waits_for_event_sockets_and_releases_every_listener(
         let (mut media, _) = tokio_tungstenite::connect_async(request).await.map_err(failure)?;
         assert!(matches!(media.next().await, Some(Ok(tokio_tungstenite::tungstenite::Message::Text(_)))));
         controller.shutdown();
-        tokio::time::timeout(Duration::from_secs(3), async {
+        Wait::Ready.bounded(async {
             loop {
                 match socket.next().await {
                     None | Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => break,
@@ -92,7 +93,8 @@ async fn server_shutdown_waits_for_event_sockets_and_releases_every_listener(
     }
     .await;
     controller.shutdown();
-    tokio::time::timeout(Duration::from_secs(6), task)
+    Wait::Ready
+        .bounded(task)
         .await
         .map_err(failure)?
         .map_err(failure)??;

@@ -11,7 +11,7 @@ use rusterisk_server::{
     http::router, ControlError, Controller, Credentials, Effect, IncomingCall, IncomingTarget,
     Milestone, PlaybackCompletion, Signal,
 };
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tower::ServiceExt;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -54,7 +54,7 @@ async fn http_playback_returns_created_location_and_routes_controls_to_the_owned
     .map_err(failure)?;
     let (controller, runner, mut effects) = Controller::new(config, 4);
     let task = tokio::spawn(runner.run());
-    let result = tokio::time::timeout(Duration::from_secs(3), async {
+    let result = Wait::Ready.bounded(async {
         let mut subscription = controller.subscribe(Credentials::new("app".into(), "password".into())?, None, "app".into()).await?;
         let key = controller.incoming(IncomingCall { id: ChannelId::try_from("phone".to_owned())?, endpoint: "phone".into(), caller: "100".into(), context: "internal".into(), extension: "100".into(), target: IncomingTarget::Stasis { application: "app".into(), arguments: Vec::new() } }).await?;
         controller.signal(Signal::Milestone { key: key.clone(), milestone: Milestone::Answered }).await?;

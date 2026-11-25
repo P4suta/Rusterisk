@@ -8,6 +8,7 @@ use rusterisk_api::{Event, EventKind};
 use rusterisk_media::Frame;
 use rusterisk_server::{rtp::SocketPair, runtime::Server, ControlError};
 use rusterisk_storage::Recorder;
+use rusterisk_test_support::Wait;
 use std::{net::SocketAddr, path::Path, time::Duration};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue};
 
@@ -50,7 +51,7 @@ async fn accepted(
 }
 
 async fn ended(events: &mut Events, expected: &str) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    Wait::Ready.bounded(async {
         for _ in 0..64 {
             let message = events
                 .next()
@@ -103,105 +104,106 @@ async fn run(root: &Path) -> Result<(), ControlError> {
     };
     let mut events = None;
     let mut phase = "event connection";
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
-        let mut event_request = format!("ws://{address}/ari/events?app=music")
-            .into_client_request()
-            .map_err(failure)?;
-        let mut authorization = HeaderValue::from_static("Basic YXBwOnRlc3QtcGFzc3dvcmQ=");
-        authorization.set_sensitive(true);
-        event_request
-            .headers_mut()
-            .insert("Authorization", authorization);
-        events = Some(
-            tokio_tungstenite::connect_async(event_request)
-                .await
-                .map_err(failure)?
-                .0,
-        );
-        let events = events.as_mut().ok_or(ControlError::Capacity)?;
-        phase = "external channels";
-        left.create(&http, address, "root").await?;
-        started(events, "root").await?;
-        right.create(&http, address, "winner").await?;
-        started(events, "winner").await?;
-        command(
-            &http,
-            address,
-            Method::POST,
-            "bridges/music",
-            &[("type", "mixing,proxy_media")],
-        )
-        .await?;
-        for channel in ["root", "winner"] {
+    let result = Wait::Ready
+        .bounded(async {
+            let mut event_request = format!("ws://{address}/ari/events?app=music")
+                .into_client_request()
+                .map_err(failure)?;
+            let mut authorization = HeaderValue::from_static("Basic YXBwOnRlc3QtcGFzc3dvcmQ=");
+            authorization.set_sensitive(true);
+            event_request
+                .headers_mut()
+                .insert("Authorization", authorization);
+            events = Some(
+                tokio_tungstenite::connect_async(event_request)
+                    .await
+                    .map_err(failure)?
+                    .0,
+            );
+            let events = events.as_mut().ok_or(ControlError::Capacity)?;
+            phase = "external channels";
+            left.create(&http, address, "root").await?;
+            started(events, "root").await?;
+            right.create(&http, address, "winner").await?;
+            started(events, "winner").await?;
             command(
                 &http,
                 address,
                 Method::POST,
-                "bridges/music/addChannel",
-                &[("channel", channel)],
+                "bridges/music",
+                &[("type", "mixing,proxy_media")],
             )
             .await?;
-        }
-        phase = "initial received bridge voice";
-        audio(&mut left, &mut right, [4000, -7000], [-7000, 4000], 4).await?;
-        phase = "explicit Main music";
-        accepted(
-            &http,
-            address,
-            Method::POST,
-            "channels/root/moh",
-            &[("mohClass", "Main")],
-        )
-        .await?;
-        audio(&mut left, &mut right, [4000, -7000], [2400, 4000], 12).await?;
-        accepted(&http, address, Method::DELETE, "channels/root/moh", &[]).await?;
-        phase = "bridge voice after explicit Main music";
-        audio(&mut left, &mut right, [5000, -6000], [-6000, 5000], 4).await?;
-        phase = "automatic default HOLD music";
-        accepted(&http, address, Method::POST, "channels/root/hold", &[]).await?;
-        audio(&mut left, &mut right, [4000, -7000], [1200, 0], 12).await?;
-        phase = "muted default HOLD music";
-        accepted(
-            &http,
-            address,
-            Method::POST,
-            "channels/root/mute",
-            &[("direction", "out")],
-        )
-        .await?;
-        audio(&mut left, &mut right, [4000, -7000], [0, 0], 4).await?;
-        phase = "unmuted default HOLD music";
-        accepted(
-            &http,
-            address,
-            Method::DELETE,
-            "channels/root/mute",
-            &[("direction", "out")],
-        )
-        .await?;
-        audio(&mut left, &mut right, [4000, -7000], [1200, 0], 12).await?;
-        phase = "UNHOLD received bridge voice";
-        accepted(&http, address, Method::DELETE, "channels/root/hold", &[]).await?;
-        audio(&mut left, &mut right, [9000, -5000], [-5000, 9000], 4).await?;
-        phase = "HOLD before terminal release";
-        accepted(&http, address, Method::POST, "channels/root/hold", &[]).await?;
-        audio(&mut left, &mut right, [4000, -7000], [1200, 0], 4).await?;
-        phase = "terminal release during HOLD music";
-        accepted(&http, address, Method::DELETE, "channels/root", &[]).await?;
-        ended(events, "root").await?;
-        let status = request(&http, address, Method::GET, "channels/root", &[])
-            .await?
-            .status();
-        if status != reqwest::StatusCode::NOT_FOUND {
-            return Err(ControlError::Invalid(
-                "Ended HOLD channel remained available",
-            ));
-        }
-        Ok(())
-    })
-    .await
-    .map_err(failure)
-    .and_then(|result| result);
+            for channel in ["root", "winner"] {
+                command(
+                    &http,
+                    address,
+                    Method::POST,
+                    "bridges/music/addChannel",
+                    &[("channel", channel)],
+                )
+                .await?;
+            }
+            phase = "initial received bridge voice";
+            audio(&mut left, &mut right, [4000, -7000], [-7000, 4000], 4).await?;
+            phase = "explicit Main music";
+            accepted(
+                &http,
+                address,
+                Method::POST,
+                "channels/root/moh",
+                &[("mohClass", "Main")],
+            )
+            .await?;
+            audio(&mut left, &mut right, [4000, -7000], [2400, 4000], 12).await?;
+            accepted(&http, address, Method::DELETE, "channels/root/moh", &[]).await?;
+            phase = "bridge voice after explicit Main music";
+            audio(&mut left, &mut right, [5000, -6000], [-6000, 5000], 4).await?;
+            phase = "automatic default HOLD music";
+            accepted(&http, address, Method::POST, "channels/root/hold", &[]).await?;
+            audio(&mut left, &mut right, [4000, -7000], [1200, 0], 12).await?;
+            phase = "muted default HOLD music";
+            accepted(
+                &http,
+                address,
+                Method::POST,
+                "channels/root/mute",
+                &[("direction", "out")],
+            )
+            .await?;
+            audio(&mut left, &mut right, [4000, -7000], [0, 0], 4).await?;
+            phase = "unmuted default HOLD music";
+            accepted(
+                &http,
+                address,
+                Method::DELETE,
+                "channels/root/mute",
+                &[("direction", "out")],
+            )
+            .await?;
+            audio(&mut left, &mut right, [4000, -7000], [1200, 0], 12).await?;
+            phase = "UNHOLD received bridge voice";
+            accepted(&http, address, Method::DELETE, "channels/root/hold", &[]).await?;
+            audio(&mut left, &mut right, [9000, -5000], [-5000, 9000], 4).await?;
+            phase = "HOLD before terminal release";
+            accepted(&http, address, Method::POST, "channels/root/hold", &[]).await?;
+            audio(&mut left, &mut right, [4000, -7000], [1200, 0], 4).await?;
+            phase = "terminal release during HOLD music";
+            accepted(&http, address, Method::DELETE, "channels/root", &[]).await?;
+            ended(events, "root").await?;
+            let status = request(&http, address, Method::GET, "channels/root", &[])
+                .await?
+                .status();
+            if status != reqwest::StatusCode::NOT_FOUND {
+                return Err(ControlError::Invalid(
+                    "Ended HOLD channel remained available",
+                ));
+            }
+            Ok(())
+        })
+        .await
+        .map_err(failure)
+        .and_then(|result| result);
     if result.is_err() {
         eprintln!("Music HOLD boundary failed: phase={phase}");
     }

@@ -1,7 +1,7 @@
 use rusterisk_api::ChannelId;
 use rusterisk_config::Config;
 use rusterisk_server::{Action, ControlError, Controller, Credentials, IncomingCall};
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 
 // The control loop ends each request's turn, so the public interface can't fill one turn.
 // The unit tests beside the control loop cover a full turn.
@@ -56,7 +56,8 @@ async fn global_shutdown_cancels_effects_when_the_owned_signaling_scope_closes(
     }
     controller.shutdown();
     drop(effects);
-    tokio::time::timeout(Duration::from_secs(2), task)
+    Wait::Ready
+        .bounded(task)
         .await
         .map_err(|error| ControlError::Adapter(error.to_string()))?
         .map_err(|error| ControlError::Adapter(error.to_string()))??;

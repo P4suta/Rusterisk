@@ -12,7 +12,8 @@ use rusterisk_server::{
     media::MediaHub, signaling::Signaling, Action, ControlError, Controller, Credentials,
 };
 use rusterisk_sip::{parse_registration_contacts, RegistrationContacts};
-use std::{net::SocketAddr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -21,7 +22,8 @@ fn failure(error: impl std::fmt::Display) -> ControlError {
 
 async fn response(socket: &UdpSocket) -> Result<rsipstack::sip::Response, ControlError> {
     let mut bytes = [0; 16_385];
-    let (size, _) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))
+    let (size, _) = Wait::Ready
+        .bounded(socket.recv_from(&mut bytes))
         .await
         .map_err(failure)?
         .map_err(failure)?;
@@ -96,28 +98,28 @@ async fn register(
 }
 
 async fn wait_state(controller: &Controller, expected: EndpointState) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let outcome = controller
-                .execute(
-                    Credentials::new("app".into(), "test-password".into())?,
-                    None,
-                    Action::GetEndpoint {
-                        technology: "PJSIP".into(),
-                        resource: "phone".into(),
-                    },
-                )
-                .await?;
-            let endpoint: Endpoint =
-                serde_json::from_value(outcome.body.ok_or(ControlError::Capacity)?)?;
-            if endpoint.state == Some(expected) {
-                return Ok(());
+    Wait::Ready
+        .bounded(async {
+            loop {
+                let outcome = controller
+                    .execute(
+                        Credentials::new("app".into(), "test-password".into())?,
+                        None,
+                        Action::GetEndpoint {
+                            technology: "PJSIP".into(),
+                            resource: "phone".into(),
+                        },
+                    )
+                    .await?;
+                let endpoint: Endpoint =
+                    serde_json::from_value(outcome.body.ok_or(ControlError::Capacity)?)?;
+                if endpoint.state == Some(expected) {
+                    return Ok(());
+                }
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .map_err(failure)?
+        })
+        .await
+        .map_err(failure)?
 }
 
 #[tokio::test]

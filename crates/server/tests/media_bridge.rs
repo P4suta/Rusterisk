@@ -7,8 +7,8 @@ use rusterisk_media::{
 use rusterisk_server::media::{MediaHub, MediaNotice};
 use rusterisk_server::rtp::{RtpSession, SocketPair};
 use rusterisk_server::CallKey;
+use rusterisk_test_support::Wait;
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
 
 fn failure(error: impl std::fmt::Display) -> MediaError {
     MediaError::Transport(error.to_string())
@@ -22,23 +22,24 @@ fn key(id: &str) -> Result<CallKey, MediaError> {
 
 async fn receives(peer: &SocketPair, expected: i32) -> Result<(), MediaError> {
     let mut bytes = [0; 1501];
-    tokio::time::timeout(Duration::from_secs(2), async {
-        for _ in 0..100 {
-            let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
-            let packet = RtpPacket::parse(&bytes[..size])?;
-            if packet.payload().len() == 160
-                && packet
-                    .payload()
-                    .iter()
-                    .all(|byte| (i32::from(mulaw_decode(*byte)) - expected).abs() < 300)
-            {
-                return Ok(());
+    Wait::Ready
+        .bounded(async {
+            for _ in 0..100 {
+                let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
+                let packet = RtpPacket::parse(&bytes[..size])?;
+                if packet.payload().len() == 160
+                    && packet
+                        .payload()
+                        .iter()
+                        .all(|byte| (i32::from(mulaw_decode(*byte)) - expected).abs() < 300)
+                {
+                    return Ok(());
+                }
             }
-        }
-        Err(MediaError::InvalidFrame)
-    })
-    .await
-    .map_err(failure)?
+            Err(MediaError::InvalidFrame)
+        })
+        .await
+        .map_err(failure)?
 }
 
 #[tokio::test]
@@ -61,14 +62,14 @@ async fn initial_inactive_direction_prevents_audio_and_stale_updates_cannot_disa
         let packet = sender.packet(Frame::new(&[4000; 160], 8000)?)?.encode()?;
         peer.data().send_to(&packet, address).await.map_err(failure)?;
         let mut bytes = [0; 1501];
-        assert!(tokio::time::timeout(Duration::from_millis(150), peer.data().recv_from(&mut bytes)).await.is_err());
+        assert!(Wait::Quiet.bounded(peer.data().recv_from(&mut bytes)).await.is_err());
         assert!(notices.try_recv().is_err());
         assert!(media.peer_direction(key.clone(), PeerMediaDirection::SendReceive, rusterisk_media::Gate::Open).await?);
         assert!(!media.peer_direction(CallKey { generation: key.generation + 1, ..key.clone() }, PeerMediaDirection::Inactive, rusterisk_media::Gate::Closed).await?);
-        tokio::time::timeout(Duration::from_secs(2), peer.data().recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
+        Wait::Ready.bounded(peer.data().recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
         let packet = sender.packet(Frame::new(&[4000; 160], 8000)?)?.encode()?;
         peer.data().send_to(&packet, address).await.map_err(failure)?;
-        assert!(matches!(tokio::time::timeout(Duration::from_secs(2), notices.recv()).await.map_err(failure)?, Some(MediaNotice::Connected { key: connected }) if connected == key));
+        assert!(matches!(Wait::Ready.bounded(notices.recv()).await.map_err(failure)?, Some(MediaNotice::Connected { key: connected }) if connected == key));
         Ok(())
     }.await;
     stop.send_replace(true);
@@ -123,9 +124,7 @@ async fn owned_workers_bridge_real_received_audio_and_stop_together() -> Result<
         tokio::try_join!(receives(&alice, -7000), receives(&bob, 4000))?;
         for _ in 0..2 {
             assert!(matches!(
-                tokio::time::timeout(Duration::from_secs(2), notices.recv())
-                    .await
-                    .map_err(failure)?,
+                Wait::Ready.bounded(notices.recv()).await.map_err(failure)?,
                 Some(MediaNotice::Connected { .. })
             ));
         }
@@ -172,9 +171,7 @@ async fn telephone_datagrams_emit_one_digit_without_claiming_an_audio_connection
             let bytes = RtpPacket::new(101, sequence, 1000, 7, &event.encode())?.encode()?;
             peer.data().send_to(&bytes, local).await.map_err(failure)?;
         }
-        let notice = tokio::time::timeout(Duration::from_secs(2), notices.recv())
-            .await
-            .map_err(failure)?;
+        let notice = Wait::Ready.bounded(notices.recv()).await.map_err(failure)?;
         assert!(matches!(notice, Some(MediaNotice::Dtmf { key: call, tone })
             if call == key("alice")? && tone.digit == DtmfDigit::Hash && tone.duration_ms == 120));
         peer.data()
@@ -184,9 +181,7 @@ async fn telephone_datagrams_emit_one_digit_without_claiming_an_audio_connection
             )
             .await
             .map_err(failure)?;
-        let notice = tokio::time::timeout(Duration::from_secs(2), notices.recv())
-            .await
-            .map_err(failure)?;
+        let notice = Wait::Ready.bounded(notices.recv()).await.map_err(failure)?;
         assert!(matches!(notice, Some(MediaNotice::Connected { .. })));
         assert!(notices.try_recv().is_err());
         media
@@ -198,27 +193,28 @@ async fn telephone_datagrams_emit_one_digit_without_claiming_an_audio_connection
                 },
             )
             .await?;
-        tokio::time::timeout(Duration::from_secs(2), async {
-            let mut bytes = [0; 1501];
-            let mut ends = 0;
-            for _ in 0..100 {
-                let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
-                let packet = RtpPacket::parse(&bytes[..size])?;
-                if packet.payload_type() == 101 {
-                    let tone = TelephoneEvent::parse(packet.payload())?;
-                    assert_eq!(tone.digit(), DtmfDigit::One);
-                    if tone.ended() {
-                        ends += 1;
-                    }
-                    if ends == 3 {
-                        return Ok(());
+        Wait::Ready
+            .bounded(async {
+                let mut bytes = [0; 1501];
+                let mut ends = 0;
+                for _ in 0..100 {
+                    let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
+                    let packet = RtpPacket::parse(&bytes[..size])?;
+                    if packet.payload_type() == 101 {
+                        let tone = TelephoneEvent::parse(packet.payload())?;
+                        assert_eq!(tone.digit(), DtmfDigit::One);
+                        if tone.ended() {
+                            ends += 1;
+                        }
+                        if ends == 3 {
+                            return Ok(());
+                        }
                     }
                 }
-            }
-            Err(MediaError::InvalidPacket)
-        })
-        .await
-        .map_err(failure)??;
+                Err(MediaError::InvalidPacket)
+            })
+            .await
+            .map_err(failure)??;
         Ok(())
     }
     .await;

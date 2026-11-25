@@ -7,6 +7,7 @@ use reqwest::{Client, StatusCode};
 use rusterisk_api::{Channel, Event, EventKind};
 use rusterisk_config::Config;
 use rusterisk_server::{rtp::SocketPair, runtime::Server, ControlError, Controller};
+use rusterisk_test_support::Wait;
 use std::{net::SocketAddr, path::Path, time::Duration};
 use tokio::{net::TcpStream, task::JoinHandle};
 use tokio_tungstenite::{
@@ -53,7 +54,7 @@ fn combine<T>(
 }
 
 async fn joined(mut task: JoinHandle<Result<(), ControlError>>) -> Result<(), ControlError> {
-    match tokio::time::timeout(Duration::from_secs(20), &mut task).await {
+    match Wait::Shutdown.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?,
         Err(primary) => {
             task.abort();
@@ -99,14 +100,15 @@ struct KeepAlive {
 
 impl KeepAlive {
     async fn connect(address: SocketAddr) -> Result<Self, ControlError> {
-        let (sender, connection) = tokio::time::timeout(Duration::from_secs(2), async {
-            let stream = TcpStream::connect(address).await.map_err(failure)?;
-            hyper::client::conn::http1::handshake(TokioIo::new(stream))
-                .await
-                .map_err(failure)
-        })
-        .await
-        .map_err(failure)??;
+        let (sender, connection) = Wait::Ready
+            .bounded(async {
+                let stream = TcpStream::connect(address).await.map_err(failure)?;
+                hyper::client::conn::http1::handshake(TokioIo::new(stream))
+                    .await
+                    .map_err(failure)
+            })
+            .await
+            .map_err(failure)??;
         Ok(Self {
             address,
             sender,
@@ -115,30 +117,31 @@ impl KeepAlive {
     }
 
     async fn ping(&mut self, access: Access) -> Result<StatusCode, ControlError> {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            let request = Request::builder()
-                .uri("/ari/asterisk/ping")
-                .header("Host", self.address.to_string())
-                .header("Origin", access.origin)
-                .header("Authorization", authorization(access)?)
-                .body(Empty::new())
-                .map_err(failure)?;
-            let response = self.sender.send_request(request).await.map_err(failure)?;
-            let status = response.status();
-            let mut body = response.into_body();
-            let mut size = 0usize;
-            while let Some(frame) = body.frame().await {
-                if let Some(data) = frame.map_err(failure)?.data_ref() {
-                    size = size.checked_add(data.len()).ok_or(ControlError::Capacity)?;
-                    if size > 16_384 {
-                        return Err(ControlError::Capacity);
+        Wait::Ready
+            .bounded(async {
+                let request = Request::builder()
+                    .uri("/ari/asterisk/ping")
+                    .header("Host", self.address.to_string())
+                    .header("Origin", access.origin)
+                    .header("Authorization", authorization(access)?)
+                    .body(Empty::new())
+                    .map_err(failure)?;
+                let response = self.sender.send_request(request).await.map_err(failure)?;
+                let status = response.status();
+                let mut body = response.into_body();
+                let mut size = 0usize;
+                while let Some(frame) = body.frame().await {
+                    if let Some(data) = frame.map_err(failure)?.data_ref() {
+                        size = size.checked_add(data.len()).ok_or(ControlError::Capacity)?;
+                        if size > 16_384 {
+                            return Err(ControlError::Capacity);
+                        }
                     }
                 }
-            }
-            Ok(status)
-        })
-        .await
-        .map_err(failure)?
+                Ok(status)
+            })
+            .await
+            .map_err(failure)?
     }
 
     async fn close(self) -> Result<(), ControlError> {
@@ -166,26 +169,27 @@ async fn body(mut response: reqwest::Response) -> Result<Vec<u8>, ControlError> 
 }
 
 async fn close_events(socket: &mut Events) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        socket.close(None).await.map_err(failure)?;
-        for _ in 0..64 {
-            match socket.next().await.transpose().map_err(failure)? {
-                Some(Message::Close(_)) => {
-                    return verify(
-                        socket.next().await.transpose().map_err(failure)?.is_none(),
-                        "Event connection remained open after Close",
-                    );
-                }
-                Some(Message::Text(_) | Message::Pong(_) | Message::Ping(_)) => {}
-                Some(Message::Binary(_) | Message::Frame(_)) | None => {
-                    return Err(ControlError::Invalid("Event Close response missing"));
+    Wait::Ready
+        .bounded(async {
+            socket.close(None).await.map_err(failure)?;
+            for _ in 0..64 {
+                match socket.next().await.transpose().map_err(failure)? {
+                    Some(Message::Close(_)) => {
+                        return verify(
+                            socket.next().await.transpose().map_err(failure)?.is_none(),
+                            "Event connection remained open after Close",
+                        );
+                    }
+                    Some(Message::Text(_) | Message::Pong(_) | Message::Ping(_)) => {}
+                    Some(Message::Binary(_) | Message::Frame(_)) | None => {
+                        return Err(ControlError::Invalid("Event Close response missing"));
+                    }
                 }
             }
-        }
-        Err(ControlError::Capacity)
-    })
-    .await
-    .map_err(failure)?
+            Err(ControlError::Capacity)
+        })
+        .await
+        .map_err(failure)?
 }
 
 struct Fixture {
@@ -306,12 +310,10 @@ impl Fixture {
         request
             .headers_mut()
             .insert("Sec-WebSocket-Protocol", HeaderValue::from_static("ari"));
-        let result = tokio::time::timeout(
-            Duration::from_secs(2),
-            tokio_tungstenite::connect_async(request),
-        )
-        .await
-        .map_err(failure)?;
+        let result = Wait::Ready
+            .bounded(tokio_tungstenite::connect_async(request))
+            .await
+            .map_err(failure)?;
         match result {
             Ok((mut socket, response)) => {
                 let admitted = verify(
@@ -378,7 +380,7 @@ impl Fixture {
             .events
             .get_mut(observer)
             .ok_or(ControlError::Capacity)?;
-        tokio::time::timeout(Duration::from_secs(2), async {
+        Wait::Ready.bounded(async {
             for _ in 0..64 {
                 match events.next().await.transpose().map_err(failure)? {
                     Some(Message::Text(text)) => {
@@ -403,7 +405,7 @@ impl Fixture {
             .await
             .map_err(failure)?;
         let local = socket.local_addr().map_err(failure)?;
-        let result = tokio::time::timeout(Duration::from_secs(2), async {
+        let result = Wait::Ready.bounded(async {
             let packet = format!("OPTIONS sip:probe@{} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK-reload-{identity}\r\nFrom: <sip:probe@localhost>;tag=probe\r\nTo: <sip:probe@localhost>\r\nCall-ID: reload-{identity}\r\nCSeq: 1 OPTIONS\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", self.sip);
             let sent = socket.send_to(packet.as_bytes(), self.sip).await.map_err(failure)?;
             verify(sent == packet.len(), "Incomplete SIP probe")?;
@@ -609,15 +611,16 @@ async fn run(data: &Path, scenario: Scenario) -> Result<(), ControlError> {
     std::fs::create_dir_all(data.join("music/invalid")).map_err(failure)?;
     std::fs::write(data.join("music/invalid/bad.wav"), b"invalid wave asset").map_err(failure)?;
     let mut fixture = Fixture::start(data).await?;
-    let result = tokio::time::timeout(Duration::from_secs(20), async {
-        match scenario {
-            Scenario::Publication => publish(&mut fixture).await,
-            Scenario::Rejection => reject(&mut fixture).await,
-        }
-    })
-    .await
-    .map_err(failure)
-    .and_then(|result| result);
+    let result = Wait::Shutdown
+        .bounded(async {
+            match scenario {
+                Scenario::Publication => publish(&mut fixture).await,
+                Scenario::Rejection => reject(&mut fixture).await,
+            }
+        })
+        .await
+        .map_err(failure)
+        .and_then(|result| result);
     fixture.finish(result, data).await
 }
 

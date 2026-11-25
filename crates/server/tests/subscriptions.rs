@@ -1,7 +1,7 @@
 use rusterisk_api::{ChannelId, EventKind};
 use rusterisk_config::Config;
 use rusterisk_server::{CallKey, ControlError, Controller, Credentials, Effect, Milestone, Signal};
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 
 fn credentials() -> Result<Credentials, ControlError> {
     Credentials::new("app".into(), "test-password".into())
@@ -62,7 +62,8 @@ async fn replacement_and_ingestion_do_not_wait_for_an_event_consumer() -> Result
     let second = controller
         .subscribe(credentials()?, None, "app".into())
         .await?;
-    let replaced = tokio::time::timeout(Duration::from_secs(1), first.events.recv())
+    let replaced = Wait::Ready
+        .bounded(first.events.recv())
         .await
         .map_err(|error| ControlError::Adapter(error.to_string()))?
         .ok_or(ControlError::Capacity)?;
@@ -79,7 +80,7 @@ async fn replacement_and_ingestion_do_not_wait_for_an_event_consumer() -> Result
         })
         .await?;
     assert!(matches!(
-        tokio::time::timeout(Duration::from_secs(1), effects.recv())
+        Wait::Ready.bounded(effects.recv())
             .await
             .map_err(|error| ControlError::Adapter(error.to_string()))?,
         Some(Effect::Release { key: released }) if released == key

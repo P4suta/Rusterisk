@@ -6,6 +6,7 @@ use rusterisk_server::{
     http::router, Action, ControlError, Controller, Credentials, IncomingCall, IncomingTarget,
     Milestone, Signal,
 };
+use rusterisk_test_support::Wait;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -40,17 +41,18 @@ async fn read_after_signal(
     path: &str,
     applied: impl Fn(&Value) -> bool,
 ) -> Result<Value, ControlError> {
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            let observed = read(app, path).await?;
-            if applied(&observed) {
-                return Ok(observed);
+    Wait::Ready
+        .bounded(async {
+            loop {
+                let observed = read(app, path).await?;
+                if applied(&observed) {
+                    return Ok(observed);
+                }
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| ControlError::Adapter(format!("Signal did not reach {path}")))?
+        })
+        .await
+        .map_err(|_| ControlError::Adapter(format!("Signal did not reach {path}")))?
 }
 
 #[tokio::test]

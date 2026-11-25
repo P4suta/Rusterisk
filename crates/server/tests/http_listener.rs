@@ -1,6 +1,7 @@
 use rusterisk_config::{Config, TlsFiles};
 use rusterisk_server::listener::HttpServer;
 use rusterisk_server::{ControlError, Controller};
+use rusterisk_test_support::Wait;
 use std::time::Duration;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -34,9 +35,9 @@ async fn connection_admission_resumes_when_an_existing_socket_is_released(
         let mut waiting = tokio::net::TcpStream::connect(address).await.map_err(failure)?;
         waiting.write_all(b"GET /ari/asterisk/ping HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YXBwOnRlc3QtcGFzc3dvcmQ=\r\nConnection: close\r\n\r\n").await.map_err(failure)?;
         let mut status = [0; 12];
-        assert!(tokio::time::timeout(Duration::from_millis(150), waiting.read_exact(&mut status)).await.is_err());
+        assert!(Wait::Quiet.bounded(waiting.read_exact(&mut status)).await.is_err());
         drop(occupied.pop());
-        tokio::time::timeout(Duration::from_secs(2), waiting.read_exact(&mut status)).await.map_err(failure)?.map_err(failure)?;
+        Wait::Ready.bounded(waiting.read_exact(&mut status)).await.map_err(failure)?.map_err(failure)?;
         assert_eq!(&status, b"HTTP/1.1 200");
         Ok(())
     }.await;
@@ -62,7 +63,8 @@ async fn silent_connections_expire_before_protocol_detection_can_hold_a_slot_for
             .await
             .map_err(failure)?;
         let mut byte = [0; 1];
-        let read = tokio::time::timeout(Duration::from_millis(5500), socket.read(&mut byte))
+        let read = Wait::Ready
+            .bounded(socket.read(&mut byte))
             .await
             .map_err(failure)?
             .map_err(failure)?;

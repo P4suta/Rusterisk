@@ -11,7 +11,7 @@ use rusterisk_server::media::MediaHub;
 use rusterisk_server::signaling::Signaling;
 use rusterisk_server::storage::StorageWorker;
 use rusterisk_server::{http::router, Action, ControlError, Controller, Credentials};
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tower::ServiceExt;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -43,7 +43,8 @@ async fn recording(response: Response) -> Result<LiveRecording, ControlError> {
 async fn event(
     events: &mut tokio::sync::mpsc::Receiver<rusterisk_api::Event>,
 ) -> Result<EventKind, ControlError> {
-    Ok(tokio::time::timeout(Duration::from_secs(2), events.recv())
+    Ok(Wait::Ready
+        .bounded(events.recv())
         .await
         .map_err(failure)?
         .ok_or(ControlError::Capacity)?
@@ -133,7 +134,7 @@ async fn http_recording_admission_reports_conflicts_and_preserves_pause_stop_and
         let response = app.clone().oneshot(request("POST", "/ari/bridges/mix/record?name=limited&format=wav&maxDurationSeconds=1", "app")?).await.map_err(failure)?;
         assert_eq!(response.status(), StatusCode::CREATED);
         assert!(matches!(event(&mut subscription.events).await?, EventKind::RecordingStarted { .. }));
-        let finished = tokio::time::timeout(Duration::from_secs(5), subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
+        let finished = Wait::Ready.bounded(subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
         assert!(matches!(finished.kind, EventKind::RecordingFinished { recording } if recording.name == "limited" && recording.state == RecordingState::Done));
         assert_eq!(app.clone().oneshot(request("GET", "/ari/recordings/live/limited", "app")?).await.map_err(failure)?.status(), StatusCode::NOT_FOUND);
         assert!(directory.path().join("recordings/limited.wav").exists());

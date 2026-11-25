@@ -3,6 +3,7 @@ use rusterisk_config::Config;
 use rusterisk_media::Frame;
 use rusterisk_server::runtime::Server;
 use rusterisk_server::ControlError;
+use rusterisk_test_support::Wait;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
@@ -79,12 +80,13 @@ async fn startup_with_valid_music_serves_and_releases_every_owned_listener(
             controller.shutdown();
             result
         };
-        tokio::time::timeout(Duration::from_secs(22), async {
-            let (serving, exercised) = tokio::join!(server.run(), exercise);
-            combine(exercised, serving)
-        })
-        .await
-        .map_err(failure)?
+        Wait::Shutdown
+            .bounded(async {
+                let (serving, exercised) = tokio::join!(server.run(), exercise);
+                combine(exercised, serving)
+            })
+            .await
+            .map_err(failure)?
     }
     .await;
     let cleanup =
@@ -124,7 +126,8 @@ fn wave(root: &Path, relative: &str) -> Result<(), ControlError> {
 
 async fn stop(server: Server) -> Result<(), ControlError> {
     server.controller().shutdown();
-    tokio::time::timeout(Duration::from_secs(20), server.run())
+    Wait::Shutdown
+        .bounded(server.run())
         .await
         .map_err(failure)?
 }

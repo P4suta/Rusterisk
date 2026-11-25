@@ -8,7 +8,7 @@ use rusterisk_config::Config;
 use rusterisk_server::{
     http::router, ControlError, Controller, Credentials, IncomingCall, IncomingTarget,
 };
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tower::ServiceExt;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -83,22 +83,24 @@ async fn http_continuation_validates_positions_before_leaving_and_resumes_withou
                 .await
                 .map_err(failure)?;
             assert_eq!(response.status(), StatusCode::NO_CONTENT);
-            let ended = tokio::time::timeout(Duration::from_secs(1), subscription.events.recv())
+            let ended = Wait::Ready
+                .bounded(subscription.events.recv())
                 .await
                 .map_err(failure)?
                 .ok_or(ControlError::Capacity)?;
             assert!(matches!(ended.kind, EventKind::StasisEnd { .. }));
-            tokio::time::timeout(Duration::from_secs(1), async {
-                while let Some(event) = subscription.events.recv().await {
-                    if let EventKind::StasisStart { args, .. } = event.kind {
-                        assert_eq!(args, [expected]);
-                        return Ok(());
+            Wait::Ready
+                .bounded(async {
+                    while let Some(event) = subscription.events.recv().await {
+                        if let EventKind::StasisStart { args, .. } = event.kind {
+                            assert_eq!(args, [expected]);
+                            return Ok(());
+                        }
                     }
-                }
-                Err(ControlError::Capacity)
-            })
-            .await
-            .map_err(failure)??;
+                    Err(ControlError::Capacity)
+                })
+                .await
+                .map_err(failure)??;
         }
         Ok(())
     }
@@ -141,7 +143,7 @@ async fn http_move_routes_events_and_cleanup_to_the_current_stasis_app() -> Resu
         controller.execute(credentials.clone(), None, rusterisk_server::Action::GetChannel(key.id.clone())).await?;
         assert!(effects.try_recv().is_err());
         drop(destination);
-        let released = tokio::time::timeout(Duration::from_secs(1), effects.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
+        let released = Wait::Ready.bounded(effects.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
         assert!(matches!(released, rusterisk_server::Effect::Release { key: ended } if ended == key));
         Ok(())
     }.await;
