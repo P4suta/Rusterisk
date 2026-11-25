@@ -37,9 +37,9 @@ fn worker() -> Result<(), std::io::Error> {
         .map_err(std::io::Error::other)?
         .parse()
         .map_err(std::io::Error::other)?;
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let mut stream = TcpStream::connect_timeout(&address, Wait::Io.duration())?;
+    stream.set_read_timeout(Some(Wait::Io.duration()))?;
+    stream.set_write_timeout(Some(Wait::Io.duration()))?;
     stream.write_all(b"R")?;
     std::io::stderr().write_all(b"R")?;
     std::io::stderr().flush()?;
@@ -158,8 +158,8 @@ fn accept(listener: &TcpListener) -> Result<TcpStream, std::io::Error> {
 
 fn ready(stream: &mut TcpStream) -> Result<(), std::io::Error> {
     stream.set_nonblocking(false)?;
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_read_timeout(Some(Wait::Io.duration()))?;
+    stream.set_write_timeout(Some(Wait::Io.duration()))?;
     let mut byte = [0];
     stream.read_exact(&mut byte)?;
     if byte != *b"R" {

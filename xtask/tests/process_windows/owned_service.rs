@@ -9,7 +9,7 @@ use std::{
     os::windows::io::AsHandle,
     path::{Path, PathBuf},
     task::{Context, Poll, Waker},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::signal::windows::{ctrl_c, CtrlC};
 use windows_spawn::{Child, Command, CreationFlags, DropPolicy, Job, SpawnOptions, Stdio};
@@ -25,7 +25,7 @@ const OBSERVER: &str = "RUSTERISK_OWNED_SERVICE_OBSERVER";
 const ADDRESS: &str = "RUSTERISK_OWNED_SERVICE_ADDRESS";
 const WORKER: &str = "owned_service::owned_service_worker";
 const HELPER: &str = env!("CARGO_BIN_EXE_xtask");
-const IO_BUDGET: Duration = Duration::from_secs(2);
+const IO_BUDGET: Duration = Wait::Io.duration();
 
 fn checked<T>(result: Result<T, impl std::fmt::Display>) -> io::Result<T> {
     result.map_err(|error| io::Error::other(error.to_string()))
@@ -47,12 +47,6 @@ fn combine<T>(operation: io::Result<T>, cleanup: io::Result<()>) -> io::Result<T
             "{operation}; owned service cleanup failed: {cleanup}"
         ))),
     }
-}
-
-fn deadline(budget: Duration) -> io::Result<Instant> {
-    Instant::now()
-        .checked_add(budget)
-        .ok_or_else(|| io::Error::other("Owned service fixture deadline overflow"))
 }
 
 fn reserve_directory() -> io::Result<PathBuf> {
@@ -325,44 +319,42 @@ fn parent(root: &Path) -> io::Result<()> {
 }
 
 fn descendant(root: &Path) -> io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut interruption = ctrl_c()?;
     verify(
         !signal(&mut interruption)?,
         "Owned service descendant was interrupted before readiness",
     )?;
-    let mut stream = TcpStream::connect_timeout(&address(OBSERVER)?, IO_BUDGET)?;
-    stream.set_read_timeout(Some(Duration::from_millis(50)))?;
-    stream.set_write_timeout(Some(IO_BUDGET))?;
-    stream.write_all(b"R")?;
-    publish(root, "descendant-ready", b"1")?;
-    let deadline = deadline(Duration::from_secs(30))?;
-    loop {
-        let mut byte = [0];
-        match stream.read(&mut byte) {
-            Ok(0) => {
-                return Err(io::Error::other(
-                    "Owned service observer closed before Job cleanup",
-                ))
+    rusterisk_test_support::block_on(async {
+        let mut stream = Wait::Io
+            .bounded(tokio::net::TcpStream::connect(address(OBSERVER)?))
+            .await
+            .map_err(io::Error::other)??;
+        Wait::Io
+            .bounded(stream.write_all(b"R"))
+            .await
+            .map_err(io::Error::other)??;
+        publish(root, "descendant-ready", b"1")?;
+        let probes = async {
+            let mut byte = [0];
+            loop {
+                tokio::select! {
+                    signal = interruption.recv() => {
+                        signal.ok_or_else(|| io::Error::other("Owned service signal receiver closed"))?;
+                    }
+                    read = stream.read(&mut byte) => {
+                        verify(read? == 1, "Owned service observer closed before Job cleanup")?;
+                        verify(byte == *b"P", "Owned service descendant probe differs")?;
+                        stream.write_all(b"A").await?;
+                    }
+                }
             }
-            Ok(_) => {
-                verify(byte == *b"P", "Owned service descendant probe differs")?;
-                stream.write_all(b"A")?;
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) => {}
-            Err(error) => return Err(error),
-        }
-        signal(&mut interruption)?;
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Owned service descendant outlived its cleanup budget",
-            ));
-        }
-    }
+        };
+        Wait::Shutdown
+            .bounded(probes)
+            .await
+            .map_err(io::Error::other)?
+    })
 }
 
 fn service(root: &Path) -> io::Result<()> {

@@ -4,7 +4,6 @@ use std::{
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -107,9 +106,9 @@ fn env(name: &str) -> io::Result<String> {
 }
 
 pub(super) fn request(address: SocketAddr, byte: u8) -> io::Result<()> {
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(1))?;
-    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+    let mut stream = TcpStream::connect_timeout(&address, Wait::Responsive.duration())?;
+    stream.set_read_timeout(Some(Wait::Responsive.duration()))?;
+    stream.set_write_timeout(Some(Wait::Responsive.duration()))?;
     stream.write_all(&[byte])?;
     let mut response = [0];
     stream.read_exact(&mut response)?;
@@ -152,8 +151,8 @@ fn serve(root: &Path, args: &[String], stdout: &Path, case: &str) -> io::Result<
     trace(root, "serve")?;
     loop {
         let mut stream = rusterisk_test_support::accept(&listener, Wait::Shutdown)?;
-        stream.set_read_timeout(Some(Duration::from_secs(1)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+        stream.set_read_timeout(Some(Wait::Responsive.duration()))?;
+        stream.set_write_timeout(Some(Wait::Responsive.duration()))?;
         let mut request = [0];
         stream.read_exact(&mut request)?;
         stream.write_all(&request)?;

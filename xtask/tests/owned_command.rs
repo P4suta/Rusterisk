@@ -110,7 +110,7 @@ struct Output {
 #[cfg(unix)]
 fn output_pair() -> io::Result<(UnixStream, CommandStream)> {
     let (reader, writer) = UnixStream::pair()?;
-    reader.set_read_timeout(Some(Duration::from_millis(250)))?;
+    reader.set_read_timeout(Some(Wait::Observation.duration()))?;
     Ok((
         reader,
         CommandStream::File(File::from(OwnedFd::from(writer))),
@@ -160,14 +160,14 @@ fn address(name: &str) -> io::Result<SocketAddr> {
 }
 
 fn descendant() -> io::Result<()> {
-    let mut stream = TcpStream::connect_timeout(&address(ADDRESS)?, Duration::from_secs(2))?;
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let mut stream = TcpStream::connect_timeout(&address(ADDRESS)?, Wait::Io.duration())?;
+    stream.set_read_timeout(Some(Wait::Scenario.duration()))?;
+    stream.set_write_timeout(Some(Wait::Io.duration()))?;
     stream.write_all(b"R")?;
     let mut byte = [0];
     stream.read_exact(&mut byte)?;
     verify(byte == *b"R", "Owned descendant readiness was not observed")?;
-    let mut ready = TcpStream::connect_timeout(&address(READY)?, Duration::from_secs(2))?;
+    let mut ready = TcpStream::connect_timeout(&address(READY)?, Wait::Io.duration())?;
     ready.write_all(b"R")?;
     drop(ready);
     stream.read_exact(&mut byte)?;

@@ -34,7 +34,7 @@ fn stop_service_fixture() -> io::Result<()> {
     std::fs::write(&pending, listener.local_addr()?.to_string())?;
     std::fs::rename(pending, ready)?;
     let mut stream = rusterisk_test_support::accept(&listener, Wait::Shutdown)?;
-    stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+    stream.set_read_timeout(Some(Wait::Responsive.duration()))?;
     let mut request = [0; 1];
     stream.read_exact(&mut request)?;
     if request != *b"Q" {
@@ -54,8 +54,8 @@ fn stop_command_fixture() -> io::Result<()> {
             let address =
                 std::env::var("RUSTERISK_STOP_COMMAND_ADDRESS").map_err(io::Error::other)?;
             let address = address.parse().map_err(io::Error::other)?;
-            let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(1))?;
-            stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+            let mut stream = TcpStream::connect_timeout(&address, Wait::Responsive.duration())?;
+            stream.set_write_timeout(Some(Wait::Responsive.duration()))?;
             stream.write_all(b"Q")
         }
         Ok("failure") => Err(io::Error::other("requested fixture stop failure")),
