@@ -3,6 +3,7 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::Method;
 use rusterisk_client::{api::ApiError, Error};
 use rusterisk_media::{mulaw_decode, mulaw_encode};
+use rusterisk_server::test_time::Wait;
 use serde::Deserialize;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::{
@@ -144,9 +145,8 @@ impl Gateway {
         if request.headers().contains_key("Sec-WebSocket-Protocol") {
             return Err(invalid());
         }
-        let (peer, response) = tokio::time::timeout(
-            Duration::from_secs(5),
-            tokio_tungstenite::connect_async_with_config(
+        let (peer, response) = Wait::Ready
+            .bounded(tokio_tungstenite::connect_async_with_config(
                 request,
                 Some(
                     WebSocketConfig::default()
@@ -154,10 +154,9 @@ impl Gateway {
                         .max_frame_size(Some(512 * 1024)),
                 ),
                 false,
-            ),
-        )
-        .await
-        .map_err(|_| Error::Timeout)??;
+            ))
+            .await
+            .map_err(|_| Error::Timeout)??;
         if response.headers().contains_key("Sec-WebSocket-Protocol") {
             return Err(invalid());
         }
@@ -212,24 +211,25 @@ async fn event(peer: &mut Peer) -> Result<Event, Error> {
 }
 
 async fn stasis(peer: &mut Peer, expected: &str) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        for _ in 0..128 {
-            match event(peer).await? {
-                Event::StasisStart { channel, args }
-                    if channel.matches(expected) && args.is_empty() =>
-                {
-                    return Ok(())
+    Wait::Ready
+        .bounded(async {
+            for _ in 0..128 {
+                match event(peer).await? {
+                    Event::StasisStart { channel, args }
+                        if channel.matches(expected) && args.is_empty() =>
+                    {
+                        return Ok(())
+                    }
+                    Event::StasisStart { .. }
+                    | Event::StasisEnd { .. }
+                    | Event::ChannelDestroyed { .. }
+                    | Event::Other => {}
                 }
-                Event::StasisStart { .. }
-                | Event::StasisEnd { .. }
-                | Event::ChannelDestroyed { .. }
-                | Event::Other => {}
             }
-        }
-        Err(Error::Capacity)
-    })
-    .await
-    .map_err(|_| Error::Timeout)?
+            Err(Error::Capacity)
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
 }
 
 async fn retired(
@@ -237,30 +237,31 @@ async fn retired(
     channels: &[String; 2],
     expected: [bool; 2],
 ) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        let mut ended = [false; 2];
-        for _ in 0..128 {
-            if expected
-                .iter()
-                .enumerate()
-                .all(|(index, required)| !required || ended[index])
-            {
-                return Ok(());
-            }
-            if let Event::StasisEnd { channel } | Event::ChannelDestroyed { channel } =
-                event(peer).await?
-            {
-                for (index, id) in channels.iter().enumerate() {
-                    if channel.matches(id) {
-                        ended[index] = true;
+    Wait::Ready
+        .bounded(async {
+            let mut ended = [false; 2];
+            for _ in 0..128 {
+                if expected
+                    .iter()
+                    .enumerate()
+                    .all(|(index, required)| !required || ended[index])
+                {
+                    return Ok(());
+                }
+                if let Event::StasisEnd { channel } | Event::ChannelDestroyed { channel } =
+                    event(peer).await?
+                {
+                    for (index, id) in channels.iter().enumerate() {
+                        if channel.matches(id) {
+                            ended[index] = true;
+                        }
                     }
                 }
             }
-        }
-        Err(Error::Capacity)
-    })
-    .await
-    .map_err(|_| Error::Timeout)?
+            Err(Error::Capacity)
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
 }
 
 async fn media_started(peer: &mut Peer, channel: &str, connection: &str) -> Result<(), Error> {
@@ -273,7 +274,8 @@ async fn media_started(peer: &mut Peer, channel: &str, connection: &str) -> Resu
         optimal_frame_size: u16,
         ptime: u16,
     }
-    let message = tokio::time::timeout(Duration::from_secs(3), peer.next())
+    let message = Wait::Ready
+        .bounded(peer.next())
         .await
         .map_err(|_| Error::Timeout)?
         .ok_or(Error::Closed)??;
@@ -308,32 +310,33 @@ fn received(
 }
 
 async fn audio(left: &mut Peer, right: &mut Peer) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        let mut clock = tokio::time::interval(Duration::from_millis(20));
-        clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut sent = 0;
-        let mut known = [0; 2];
-        loop {
-            tokio::select! {
-                _instant = clock.tick(), if sent < 150 => {
-                    left.send(Message::Binary(vec![mulaw_encode(4000); 160].into())).await?;
-                    right.send(Message::Binary(vec![mulaw_encode(-7000); 160].into())).await?;
-                    sent += 1;
+    Wait::Ready
+        .bounded(async {
+            let mut clock = tokio::time::interval(Duration::from_millis(20));
+            clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut sent = 0;
+            let mut known = [0; 2];
+            loop {
+                tokio::select! {
+                    _instant = clock.tick(), if sent < 150 => {
+                        left.send(Message::Binary(vec![mulaw_encode(4000); 160].into())).await?;
+                        right.send(Message::Binary(vec![mulaw_encode(-7000); 160].into())).await?;
+                        sent += 1;
+                    }
+                    message = left.next() => {
+                        known[0] = if received(message, -7000)? { known[0] + 1 } else { 0 };
+                    }
+                    message = right.next() => {
+                        known[1] = if received(message, 4000)? { known[1] + 1 } else { 0 };
+                    }
                 }
-                message = left.next() => {
-                    known[0] = if received(message, -7000)? { known[0] + 1 } else { 0 };
-                }
-                message = right.next() => {
-                    known[1] = if received(message, 4000)? { known[1] + 1 } else { 0 };
+                if sent >= 30 && known.iter().all(|count| *count >= 4) {
+                    return Ok(());
                 }
             }
-            if sent >= 30 && known.iter().all(|count| *count >= 4) {
-                return Ok(());
-            }
-        }
-    })
-    .await
-    .map_err(|_| Error::Timeout)?
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
 }
 
 #[tokio::test]
@@ -370,29 +373,29 @@ async fn gateway_keeps_sending_until_both_delayed_audio_paths_are_observed() -> 
         }
         Ok::<(), Error>(())
     };
-    tokio::time::timeout(Duration::from_secs(4), async {
-        tokio::try_join!(audio(&mut left, &mut right), bridge)
-    })
-    .await
-    .map_err(|_| Error::Timeout)??;
+    Wait::Ready
+        .bounded(async { tokio::try_join!(audio(&mut left, &mut right), bridge) })
+        .await
+        .map_err(|_| Error::Timeout)??;
     Ok(())
 }
 
 async fn close(peer: &mut Peer) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        peer.close(None).await?;
-        for _ in 0..128 {
-            match peer.next().await.transpose()? {
-                None | Some(Message::Close(_)) => return Ok(()),
-                Some(Message::Text(_) | Message::Binary(_) | Message::Pong(_)) => {}
-                Some(Message::Ping(bytes)) => peer.send(Message::Pong(bytes)).await?,
-                Some(Message::Frame(_)) => return Err(invalid()),
+    Wait::Ready
+        .bounded(async {
+            peer.close(None).await?;
+            for _ in 0..128 {
+                match peer.next().await.transpose()? {
+                    None | Some(Message::Close(_)) => return Ok(()),
+                    Some(Message::Text(_) | Message::Binary(_) | Message::Pong(_)) => {}
+                    Some(Message::Ping(bytes)) => peer.send(Message::Pong(bytes)).await?,
+                    Some(Message::Frame(_)) => return Err(invalid()),
+                }
             }
-        }
-        Err(Error::Capacity)
-    })
-    .await
-    .map_err(|_| Error::Timeout)?
+            Err(Error::Capacity)
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
 }
 
 struct Fixture {
@@ -525,7 +528,8 @@ impl Fixture {
 pub async fn compare(address: &str) -> Result<(), Error> {
     let mut fixture = Fixture::new(address).await?;
     let result = phase(
-        tokio::time::timeout(Duration::from_secs(10), fixture.run())
+        Wait::Ready
+            .bounded(fixture.run())
             .await
             .map_err(|_| Error::Timeout),
         "call deadline",

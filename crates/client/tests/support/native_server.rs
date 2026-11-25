@@ -1,6 +1,7 @@
 use rusterisk_client::{api::ChannelId, Client, Error, Session};
+use rusterisk_server::test_time::Wait;
 use rusterisk_server::{media::MediaHub, signaling::Signaling, storage::StorageWorker, Controller};
-use std::{future::IntoFuture, net::Ipv4Addr, path::Path, time::Duration};
+use std::{future::IntoFuture, net::Ipv4Addr, path::Path};
 
 fn failure(error: impl std::fmt::Display) -> Error {
     Error::Io(std::io::Error::other(error.to_string()))
@@ -19,7 +20,7 @@ fn combine(primary: Result<(), Error>, cleanup: Result<(), Error>) -> Result<(),
 async fn joined<E: std::fmt::Display>(
     mut task: tokio::task::JoinHandle<Result<(), E>>,
 ) -> Result<(), Error> {
-    match tokio::time::timeout(Duration::from_secs(3), &mut task).await {
+    match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?.map_err(failure),
         Err(primary) => {
             task.abort();
@@ -84,23 +85,24 @@ pub async fn run(
         )
         .into_future(),
     );
-    let result = tokio::time::timeout(Duration::from_secs(15), async {
-        let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
-        let application = ChannelId::try_from(application.to_owned())?;
-        let mut session = client.subscribe(&application).await?;
-        let result = compare(
-            &client,
-            &mut session,
-            application.as_str(),
-            Ipv4Addr::LOCALHOST,
-            &format!("http://{address}"),
-        )
-        .await;
-        combine(result, session.shutdown().await)
-    })
-    .await
-    .map_err(|_| Error::Timeout)
-    .and_then(|result| result);
+    let result = Wait::Shutdown
+        .bounded(async {
+            let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
+            let application = ChannelId::try_from(application.to_owned())?;
+            let mut session = client.subscribe(&application).await?;
+            let result = compare(
+                &client,
+                &mut session,
+                application.as_str(),
+                Ipv4Addr::LOCALHOST,
+                &format!("http://{address}"),
+            )
+            .await;
+            combine(result, session.shutdown().await)
+        })
+        .await
+        .map_err(|_| Error::Timeout)
+        .and_then(|result| result);
     controller.shutdown();
     let result = combine(result, joined(signaling).await);
     let result = combine(result, joined(hub).await);
