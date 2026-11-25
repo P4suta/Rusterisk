@@ -1,4 +1,5 @@
-use super::{failure, AudioSocketLink, Channels, DigitCommand, LinkStats};
+use super::{failure, AudioSocketLink, Channels, LinkStats};
+use crate::media_link::DigitCommand;
 use rusterisk_core::{DtmfToken, DtmfTone, PeerMediaDirection};
 use rusterisk_media::{AudioSocket, Frame, MediaError};
 use std::{future::Future, time::Duration};

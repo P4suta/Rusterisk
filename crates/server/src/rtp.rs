@@ -1,4 +1,5 @@
 pub use crate::media_link::{Channels as RtpChannels, DigitCommand as RtpDigitCommand, LinkStats};
+use crate::media_link::{DigitSchedule, DigitStep};
 use rusterisk_core::{DtmfToken, DtmfTone, PeerMediaDirection};
 use rusterisk_media::{
     AudioFormat, MediaError, RtpPacket, RtpReceiver, RtpSender, SourceReport, TelephoneFormat,
@@ -125,7 +126,7 @@ pub struct RtpLeg {
     started: Instant,
     report_at: Instant,
     sources: Vec<SentSource>,
-    active: Option<RtpDigitCommand>,
+    digits: DigitSchedule,
     commands: VecDeque<RtpDigitCommand>,
     stats: LinkStats,
 }
@@ -339,7 +340,7 @@ impl RtpLeg {
             started,
             report_at: started + report_delay(true)?,
             sources: Vec::with_capacity(2),
-            active: None,
+            digits: DigitSchedule::default(),
             commands: VecDeque::with_capacity(DIGIT_COMMANDS),
             stats: LinkStats::default(),
         })
@@ -508,8 +509,10 @@ impl RtpLeg {
         finished: &mut Vec<DtmfToken>,
     ) -> Result<Option<rusterisk_media::Frame>, MediaError> {
         let mut frame = None;
-        if self.active.is_none() && self.telephone.is_some() {
-            self.active = self.commands.pop_front();
+        if self.digits.idle() && self.telephone.is_some() {
+            if let Some(command) = self.commands.pop_front() {
+                self.digits.admit(command)?;
+            }
         }
         let sampled = Instant::now();
         let now = self.elapsed(sampled);
@@ -539,31 +542,10 @@ impl RtpLeg {
                     self.stats.dropped += 1;
                 }
             }
-            if let Some(command) = &mut self.active {
-                match command {
-                    RtpDigitCommand::Tone(tone) => {
-                        if telephone.sender.ready() {
-                            telephone.sender.start(*tone, now, &self.sender)?;
-                            self.active = None;
-                        }
-                    }
-                    RtpDigitCommand::Sequence(command) => {
-                        let mut sequence = command.sequence;
-                        let tone = sequence.advance(now).map_err(|error| {
-                            MediaError::Transport(format!("digit schedule: {error:?}"))
-                        })?;
-                        if tone.is_none() || telephone.sender.ready() {
-                            if let Some(tone) = tone {
-                                telephone.sender.start(tone, now, &self.sender)?;
-                            }
-                            command.sequence = sequence;
-                            if sequence.finished() {
-                                finished.push(command.token);
-                                self.active = None;
-                            }
-                        }
-                    }
-                }
+            match self.digits.advance(now, telephone.sender.ready())? {
+                DigitStep::Send(tone) => telephone.sender.start(tone, now, &self.sender)?,
+                DigitStep::Finished(token) => finished.push(token),
+                DigitStep::Waiting => {}
             }
         }
         match self.receiver.pop() {

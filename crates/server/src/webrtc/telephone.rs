@@ -1,4 +1,4 @@
-use crate::media_link::DigitCommand;
+use crate::media_link::{DigitCommand, DigitSchedule, DigitStep};
 use rusterisk_core::{DtmfToken, DtmfTone};
 use rusterisk_media::{
     MediaError, RtpPacket, RtpSender, TelephoneEvent, TelephoneEvents, TelephoneFormat,
@@ -14,7 +14,7 @@ pub(super) struct TelephoneTransport {
     format: TelephoneFormat,
     sender: TelephoneSender,
     receivers: Vec<Reception>,
-    active: Option<DigitCommand>,
+    digits: DigitSchedule,
 }
 
 pub(super) struct TelephoneOutput {
@@ -52,7 +52,7 @@ impl TelephoneTransport {
             format,
             sender: TelephoneSender::with_format(audio, format, seed)?,
             receivers,
-            active: None,
+            digits: DigitSchedule::default(),
         })
     }
 
@@ -99,23 +99,16 @@ impl TelephoneTransport {
     }
 
     pub(super) fn idle(&self) -> bool {
-        self.active.is_none()
+        self.digits.idle()
     }
 
     pub(super) fn admit(&mut self, command: DigitCommand) -> Result<(), MediaError> {
-        if self.active.is_some() {
-            return Err(MediaError::Capacity);
-        }
-        self.active = Some(command);
-        Ok(())
+        self.digits.admit(command)
     }
 
     pub(super) fn cancel(&mut self) -> Option<DtmfToken> {
         self.sender.cancel();
-        match self.active.take() {
-            Some(DigitCommand::Sequence(command)) => Some(command.token),
-            Some(DigitCommand::Tone(_)) | None => None,
-        }
+        self.digits.cancel()
     }
 
     pub(super) fn timestamp_at(&self, now: u64, audio: &RtpSender) -> u32 {
@@ -131,33 +124,14 @@ impl TelephoneTransport {
         audio: &mut RtpSender,
     ) -> Result<TelephoneOutput, MediaError> {
         let packets = self.sender.poll(now, audio)?;
-        let mut completed = None;
-        if let Some(command) = &mut self.active {
-            match command {
-                DigitCommand::Tone(tone) => {
-                    if self.sender.ready() {
-                        self.sender.start(*tone, now, audio)?;
-                        self.active = None;
-                    }
-                }
-                DigitCommand::Sequence(command) => {
-                    let mut sequence = command.sequence;
-                    let tone = sequence.advance(now).map_err(|error| {
-                        MediaError::Transport(format!("Invalid digit schedule: {error:?}"))
-                    })?;
-                    if tone.is_none() || self.sender.ready() {
-                        if let Some(tone) = tone {
-                            self.sender.start(tone, now, audio)?;
-                        }
-                        command.sequence = sequence;
-                        if sequence.finished() {
-                            completed = Some(command.token);
-                            self.active = None;
-                        }
-                    }
-                }
+        let completed = match self.digits.advance(now, self.sender.ready())? {
+            DigitStep::Send(tone) => {
+                self.sender.start(tone, now, audio)?;
+                None
             }
-        }
+            DigitStep::Finished(token) => Some(token),
+            DigitStep::Waiting => None,
+        };
         Ok(TelephoneOutput { packets, completed })
     }
 }

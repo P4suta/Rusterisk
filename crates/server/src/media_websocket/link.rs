@@ -1,5 +1,6 @@
 use super::{BufferItem, BufferNotice, FlowNotice, MediaBuffer, MediaSocket, SocketMessage};
-use crate::media_link::{Channels, DigitCommand, LinkStats};
+use crate::clock::Clock;
+use crate::media_link::{Channels, DigitSchedule, DigitStep, LinkStats};
 use rusterisk_api::{
     ChannelId, MediaCommand, MediaCommandError, MediaControlFormat, MediaDirection, MediaEvent,
     MediaFormat,
@@ -281,7 +282,8 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
         let started = tokio::time::Instant::now();
         let mut tick = tokio::time::interval_at(started + period, period);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut active: Option<DigitCommand> = None;
+        let clock = Clock::start();
+        let mut digits = DigitSchedule::default();
         loop {
             if *self.channels.stop.borrow() || self.channels.incoming.is_closed() {
                 break;
@@ -320,18 +322,19 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
                     let Some(frame) = frame else { break; };
                     if self.options.direction != MediaDirection::Out && self.channels.direction.borrow().can_receive() { let bytes = self.encoded(frame)?; self.send(SocketMessage::Binary(bytes)).await?; stats.packets_sent += 1; }
                 }
-                command = self.channels.commands.recv(), if active.is_none() && (!self.channels.commands.is_closed() || !self.channels.commands.is_empty()) => active = command,
+                Some(command) = self.channels.commands.recv(), if digits.idle() => digits.admit(command)?,
+                () = clock.reached(digits.wake()) => {
+                    match digits.advance(clock.now_ms().map_err(failure)?, true)? {
+                        DigitStep::Send(tone) => self.event(MediaEvent::DtmfEnd {
+                            channel_id: self.options.channel_id.clone(),
+                            digit: tone.digit.symbol(),
+                        }).await?,
+                        DigitStep::Finished(token) => self.channels.completed.try_send(token).map_err(|_| MediaError::Capacity)?,
+                        DigitStep::Waiting => {}
+                    }
+                }
                 _instant = tick.tick() => {
                     if self.options.direction != MediaDirection::In { self.tick(&mut stats).await?; }
-                    if let Some(command) = &mut active {
-                        let (tone, finished, completion) = match command {
-                            DigitCommand::Tone(tone) => (Some(*tone), true, None),
-                            DigitCommand::Sequence(command) => { let tone = command.sequence.advance(started.elapsed().as_millis() as u64).map_err(|error| failure(format!("digit schedule: {error:?}")))?; let finished = command.sequence.finished(); (tone, finished, finished.then_some(command.token)) },
-                        };
-                        if let Some(tone) = tone { self.event(MediaEvent::DtmfEnd { channel_id: self.options.channel_id.clone(), digit: tone.digit.symbol() }).await?; }
-                        if let Some(token) = completion { self.channels.completed.try_send(token).map_err(|_| MediaError::Capacity)?; }
-                        if finished { active = None; }
-                    }
                 }
             }
         }
