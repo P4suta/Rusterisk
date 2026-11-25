@@ -1,3 +1,4 @@
+use super::stream_frames::{with_stream_port, FramePair, TaskFrames};
 use super::{
     AudioSocketLink, Connection, DigitSupport, Gate, Io, MediaError, MediaHub, PeerMediaDirection,
     Port, RtpChannels, TaskIo,
@@ -18,10 +19,19 @@ pub(super) struct WebSocketAttachment<S> {
 }
 
 impl Port {
+    #[cfg(test)]
     pub(super) fn new(
         initial_direction: PeerMediaDirection,
         digit_support: DigitSupport,
     ) -> (Self, RtpChannels) {
+        Self::with_frames(initial_direction, digit_support, TaskFrames::Hz48000)
+    }
+
+    fn with_frames<const N: usize>(
+        initial_direction: PeerMediaDirection,
+        digit_support: DigitSupport,
+        pair: fn(FramePair<N>) -> TaskFrames,
+    ) -> (Self, RtpChannels<N>) {
         let (incoming, input) = mpsc::channel(1);
         let (digits, digit_input) = mpsc::channel(16);
         let (outgoing, output) = mpsc::channel(1);
@@ -32,9 +42,11 @@ impl Port {
         (
             Self {
                 io: Io::Task(TaskIo {
-                    incoming: input,
+                    audio: pair(FramePair {
+                        incoming: input,
+                        outgoing,
+                    }),
                     digits: digit_input,
-                    outgoing,
                     commands,
                     completed: completions,
                     stop,
@@ -129,13 +141,14 @@ impl MediaHub {
         rate: u32,
     ) -> Result<(), MediaError> {
         self.check_link(&key)?;
-        let (port, channels) = Port::new(PeerMediaDirection::SendReceive, DigitSupport::Stream);
-        let link = AudioSocketLink::new(socket, channels, rate)?;
-        self.install_link(key.clone(), port, Gate::Open, rate)?;
-        self.stream_releases
-            .insert(key.handle(), super::StreamRelease::Running);
-        self.workers.spawn(async move { (key, link.run().await) });
-        Ok(())
+        with_stream_port!(rate, |port, channels| {
+            let link = AudioSocketLink::new(socket, channels, rate)?;
+            self.install_link(key.clone(), port, Gate::Open, rate)?;
+            self.stream_releases
+                .insert(key.handle(), super::StreamRelease::Running);
+            self.workers.spawn(async move { (key, link.run().await) });
+            Ok(())
+        })
     }
 
     pub(super) fn attach_websocket<S: MediaSocket + 'static>(
@@ -155,17 +168,19 @@ impl MediaHub {
         if options.channel_id != key.id {
             return Err(MediaError::InvalidRoute);
         }
-        let (mut port, channels) = Port::new(PeerMediaDirection::SendReceive, DigitSupport::Stream);
-        let (answer, answers) = mpsc::channel(8);
-        port.answers = Some(answers);
-        port.connection_lease = lease;
         let rate = options.format.rate();
-        let link = WebSocketMediaLink::new(socket, channels, options, answer)?;
-        self.install_link(key.clone(), port, Gate::Open, rate)?;
-        self.stream_releases
-            .insert(key.handle(), super::StreamRelease::Running);
-        self.workers.spawn(async move { (key, link.run().await) });
-        Ok(())
+        with_stream_port!(rate, |port, channels| {
+            let mut port = port;
+            let (answer, answers) = mpsc::channel(8);
+            port.answers = Some(answers);
+            port.connection_lease = lease;
+            let link = WebSocketMediaLink::new(socket, channels, options, answer)?;
+            self.install_link(key.clone(), port, Gate::Open, rate)?;
+            self.stream_releases
+                .insert(key.handle(), super::StreamRelease::Running);
+            self.workers.spawn(async move { (key, link.run().await) });
+            Ok(())
+        })
     }
 }
 

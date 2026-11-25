@@ -1,11 +1,11 @@
 use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone, PeerMediaDirection, Wake};
-use rusterisk_media::{Frame, MediaError};
+use rusterisk_media::{MediaError, PcmFrame, MAX_SAMPLES};
 use tokio::sync::{mpsc, watch};
 
-pub struct Channels {
-    pub incoming: mpsc::Sender<Frame>,
+pub struct Channels<const N: usize = MAX_SAMPLES> {
+    pub incoming: mpsc::Sender<PcmFrame<N>>,
     pub digits: mpsc::Sender<DtmfTone>,
-    pub outgoing: mpsc::Receiver<Frame>,
+    pub outgoing: mpsc::Receiver<PcmFrame<N>>,
     pub commands: mpsc::Receiver<DigitCommand>,
     pub completed: mpsc::Sender<DtmfToken>,
     pub stop: watch::Receiver<bool>,

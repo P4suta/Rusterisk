@@ -5,7 +5,7 @@ use rusterisk_api::{
     ChannelId, MediaCommand, MediaCommandError, MediaControlFormat, MediaDirection, MediaEvent,
     MediaFormat,
 };
-use rusterisk_media::{alaw_encode, mulaw_encode, Frame, MediaError, OpusCodec};
+use rusterisk_media::{alaw_encode, mulaw_encode, Frame, MediaError, OpusCodec, MAX_SAMPLES};
 use std::{collections::BTreeMap, time::Duration};
 use tokio::sync::mpsc;
 
@@ -21,9 +21,9 @@ pub struct MediaLinkOptions {
     pub channel_variables: BTreeMap<String, String>,
 }
 
-pub struct WebSocketMediaLink<S> {
+pub struct WebSocketMediaLink<S, const N: usize = MAX_SAMPLES> {
     socket: S,
-    channels: Channels,
+    channels: Channels<N>,
     options: MediaLinkOptions,
     audio: MediaBuffer,
     encoder: Option<OpusCodec>,
@@ -39,10 +39,10 @@ fn failure(error: impl std::fmt::Display) -> MediaError {
     MediaError::Transport(error.to_string())
 }
 
-impl<S: MediaSocket> WebSocketMediaLink<S> {
+impl<S: MediaSocket, const N: usize> WebSocketMediaLink<S, N> {
     pub fn new(
         socket: S,
-        channels: Channels,
+        channels: Channels<N>,
         options: MediaLinkOptions,
         answer: mpsc::Sender<()>,
     ) -> Result<Self, MediaError> {
@@ -179,7 +179,7 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
             self.flow(output.flow).await?;
             let audio = match output.item {
                 Some(BufferItem::Frame(frame)) => {
-                    match self.channels.incoming.try_send(frame) {
+                    match self.channels.incoming.try_send(frame.fit()?) {
                         Ok(()) => {}
                         Err(mpsc::error::TrySendError::Full(_)) => stats.dropped += 1,
                         Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -320,7 +320,7 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
                     if self.options.direction != MediaDirection::In && self.channels.incoming.capacity() > 0 {
                         self.tick(&mut stats).await?;
                     }
-                    if self.options.direction != MediaDirection::Out && self.channels.direction.borrow().can_receive() { let bytes = self.encoded(frame)?; self.send(SocketMessage::Binary(bytes)).await?; stats.packets_sent += 1; }
+                    if self.options.direction != MediaDirection::Out && self.channels.direction.borrow().can_receive() { let bytes = self.encoded(frame.expanded())?; self.send(SocketMessage::Binary(bytes)).await?; stats.packets_sent += 1; }
                 }
                 Some(command) = self.channels.commands.recv(), if digits.idle() => digits.admit(command)?,
                 () = clock.reached(digits.wake()) => {

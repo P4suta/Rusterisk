@@ -152,3 +152,33 @@ async fn sixty_four_active_rtp_disconnects_finish_within_one_frame() -> std::io:
     assert!(elapsed <= Duration::from_millis(20), "{elapsed:?}");
     Ok(())
 }
+
+#[tokio::test]
+async fn each_stream_handoff_stores_one_negotiated_period() -> Result<(), MediaError> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .map_err(transport)?;
+    for rate in [8000, 12000, 16000, 24000, 32000, 44100, 48000] {
+        let (_media, mut hub, _notices) = MediaHub::new(1);
+        let (peer, (stream, _)) = tokio::try_join!(
+            TcpStream::connect(listener.local_addr().map_err(transport)?),
+            listener.accept()
+        )
+        .map_err(transport)?;
+        let call = key(1)?;
+        hub.attach_audiosocket(call.clone(), stream, rate)?;
+        let port = hub.ports.get(&call).ok_or(MediaError::UnknownStream)?;
+        let super::Io::Task(io) = &port.io else {
+            return Err(MediaError::InvalidRoute);
+        };
+        let bytes = io.audio.frame_bytes();
+        let pcm_bytes = 2 * (rate as usize / 50);
+        assert!(
+            (pcm_bytes..=pcm_bytes + 16).contains(&bytes),
+            "{rate} Hz reserved {bytes} bytes"
+        );
+        drop(peer);
+        hub.close().await?;
+    }
+    Ok(())
+}

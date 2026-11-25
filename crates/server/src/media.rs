@@ -29,6 +29,7 @@ pub(crate) use probe::Progress as ProbeProgress;
 pub(crate) use queued::Queued;
 mod playback;
 mod recording;
+mod stream_frames;
 mod streams;
 mod webrtc;
 pub(crate) use orders::Order;
@@ -669,9 +670,8 @@ struct SavedMusic {
 }
 // The channels of a link that runs its own task.
 struct TaskIo {
-    incoming: mpsc::Receiver<Frame>,
+    audio: stream_frames::TaskFrames,
     digits: mpsc::Receiver<DtmfTone>,
-    outgoing: mpsc::Sender<Frame>,
     commands: mpsc::Sender<RtpDigitCommand>,
     completed: mpsc::Receiver<DtmfToken>,
     stop: watch::Sender<bool>,
@@ -1429,7 +1429,7 @@ impl MediaHub {
                     ) => break,
                 }
             }
-            match io.incoming.try_recv() {
+            match io.audio.receive() {
                 Ok(frame) => {
                     if let Some(challenge) = self.probes.get_mut(key) {
                         challenge.receive(&frame)?;
@@ -1512,12 +1512,13 @@ impl MediaHub {
                 _ => *frame,
             };
             match &port.io {
-                Io::Task(io) => match io.outgoing.try_send(frame) {
+                Io::Task(io) => match io.audio.send(&frame) {
                     Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(_)) => self.dropped += 1,
-                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                    Err(MediaError::Capacity) => self.dropped += 1,
+                    Err(MediaError::UnknownStream) => {
                         io.stop.send_replace(true);
                     }
+                    Err(error) => self.failed.push((key.clone(), error)),
                 },
                 Io::Owned => {
                     let sent = match (self.legs.get_mut(key), self.webrtc_legs.get_mut(key)) {

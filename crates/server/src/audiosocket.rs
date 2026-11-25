@@ -1,7 +1,7 @@
 use crate::clock::Clock;
 use crate::media_link::{Channels, DigitSchedule, DigitStep, LinkStats};
 use rusterisk_core::{DtmfDigit, DtmfTone};
-use rusterisk_media::{AudioSocket, AudioSocketDecoder, MediaError, PcmFramer};
+use rusterisk_media::{AudioSocket, AudioSocketDecoder, MediaError, PcmFramer, MAX_SAMPLES};
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -17,9 +17,9 @@ enum LinkTermination {
     Peer(LinkStats),
 }
 
-pub struct AudioSocketLink {
+pub struct AudioSocketLink<const N: usize = MAX_SAMPLES> {
     socket: TcpStream,
-    channels: Channels,
+    channels: Channels<N>,
     decoder: AudioSocketDecoder,
     audio: PcmFramer,
     rate: u32,
@@ -37,8 +37,8 @@ async fn send(socket: &mut TcpStream, message: AudioSocket) -> Result<(), MediaE
         .map_err(failure)
 }
 
-impl AudioSocketLink {
-    pub fn new(socket: TcpStream, channels: Channels, rate: u32) -> Result<Self, MediaError> {
+impl<const N: usize> AudioSocketLink<N> {
+    pub fn new(socket: TcpStream, channels: Channels<N>, rate: u32) -> Result<Self, MediaError> {
         Ok(Self {
             socket,
             channels,
@@ -96,12 +96,12 @@ impl AudioSocketLink {
                 frame = self.channels.outgoing.recv() => {
                     let Some(frame) = frame else { break; };
                     match self.channels.incoming.try_reserve() {
-                        Ok(permit) => if let Some(received) = self.audio.pop() { permit.send(received); },
+                        Ok(permit) => if let Some(received) = self.audio.pop() { permit.send(received.fit()?); },
                         Err(mpsc::error::TrySendError::Full(())) => {}
                         Err(mpsc::error::TrySendError::Closed(())) => break,
                     }
                     if self.channels.direction.borrow().can_receive() {
-                        send(&mut self.socket, AudioSocket::Audio(frame.resample(self.rate)?)).await?;
+                        send(&mut self.socket, AudioSocket::Audio(frame.expanded().resample(self.rate)?)).await?;
                         stats.packets_sent += 1;
                     }
                 }
