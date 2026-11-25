@@ -44,7 +44,12 @@ impl Fixture {
 
     async fn turn_within(&mut self, limit: Duration) -> Result<Option<Duration>, MediaError> {
         let started = Instant::now();
-        match tokio::time::timeout(limit, self.hub.turn(&mut self.stop, &mut self.frames)).await {
+        match rusterisk_test_support::virtual_window(
+            limit,
+            self.hub.turn(&mut self.stop, &mut self.frames),
+        )
+        .await
+        {
             Ok(turn) => match turn? {
                 Turn::Continue => Ok(Some(started.elapsed())),
                 Turn::Stop => Err(failure("the hub stopped serving")),

@@ -10,7 +10,6 @@ use rusterisk_api::{Endpoint, EndpointState};
 use rusterisk_config::Config;
 use rusterisk_core::ContactPresence;
 use rusterisk_sip::{Output, SipEvent};
-use std::time::Duration;
 
 #[derive(Clone, Copy)]
 enum Observation {
@@ -123,7 +122,8 @@ impl Fixture {
         } = self;
         drop((controller, publication));
         async move {
-            let cleanup = tokio::time::timeout(Duration::from_secs(3), signaling.run(stopped))
+            let cleanup = rusterisk_test_support::Wait::Ready
+                .bounded(signaling.run(stopped))
                 .await
                 .map_err(failure)
                 .and_then(std::convert::identity);
@@ -149,39 +149,40 @@ impl Fixture {
 
 async fn exercise(observation: Observation, presence: ContactPresence) -> Result<(), ControlError> {
     let mut fixture = Fixture::new(observation).await?;
-    let primary = tokio::time::timeout(Duration::from_secs(5), async {
-        let previous = match presence {
-            ContactPresence::Present => ContactPresence::Absent,
-            ContactPresence::Absent => ContactPresence::Present,
-        };
-        let key = fixture.runner().control.endpoint_key("phone")?;
-        fixture.runner().apply_signal(
-            Signal::EndpointContact {
-                key,
-                presence: previous,
-            },
-            0,
-        )?;
-        let config = fixture.config.clone();
-        let settings = CallSettings::configured(&config);
-        let candidate = fixture
-            .runner()
-            .control
-            .prepare_configuration(config, settings)?;
-        fixture.output(presence).await?;
-        fixture.runner().control.commit_configuration(candidate)?;
-        let expected = match presence {
-            ContactPresence::Present => EndpointState::Online,
-            ContactPresence::Absent => EndpointState::Offline,
-        };
-        require(
-            state(fixture.runner())? == expected,
-            "Prepared commit lost a completed native contact observation",
-        )
-    })
-    .await
-    .map_err(failure)
-    .and_then(std::convert::identity);
+    let primary = rusterisk_test_support::Wait::Ready
+        .bounded(async {
+            let previous = match presence {
+                ContactPresence::Present => ContactPresence::Absent,
+                ContactPresence::Absent => ContactPresence::Present,
+            };
+            let key = fixture.runner().control.endpoint_key("phone")?;
+            fixture.runner().apply_signal(
+                Signal::EndpointContact {
+                    key,
+                    presence: previous,
+                },
+                0,
+            )?;
+            let config = fixture.config.clone();
+            let settings = CallSettings::configured(&config);
+            let candidate = fixture
+                .runner()
+                .control
+                .prepare_configuration(config, settings)?;
+            fixture.output(presence).await?;
+            fixture.runner().control.commit_configuration(candidate)?;
+            let expected = match presence {
+                ContactPresence::Present => EndpointState::Online,
+                ContactPresence::Absent => EndpointState::Offline,
+            };
+            require(
+                state(fixture.runner())? == expected,
+                "Prepared commit lost a completed native contact observation",
+            )
+        })
+        .await
+        .map_err(failure)
+        .and_then(std::convert::identity);
     fixture.finish(primary).await
 }
 

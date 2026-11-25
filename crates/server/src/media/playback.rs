@@ -361,16 +361,17 @@ mod tests {
     use tokio::sync::oneshot;
 
     async fn next_audio(playbacks: &mut Playbacks) -> Result<Frame, MediaError> {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if let Some((_, frame)) = playbacks.tick()?.first() {
-                    return Ok::<_, MediaError>(*frame);
+        rusterisk_test_support::Wait::Ready
+            .bounded(async {
+                loop {
+                    if let Some((_, frame)) = playbacks.tick()?.first() {
+                        return Ok::<_, MediaError>(*frame);
+                    }
+                    tokio::task::yield_now().await;
                 }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .map_err(failure)?
+            })
+            .await
+            .map_err(failure)?
     }
 
     // A playback that waits for its source ends after five seconds of runtime time.

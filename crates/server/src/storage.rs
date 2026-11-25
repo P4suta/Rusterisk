@@ -532,7 +532,7 @@ mod tests {
     use super::{serve, Command, StoragePort, StorageWorker, StoredCommand, WorkerError};
     use rusterisk_api::ChannelId;
     use rusterisk_storage::Store;
-    use std::time::Duration;
+
     use tokio::sync::{mpsc, watch};
 
     #[test]
@@ -698,7 +698,8 @@ mod tests {
         let completed = worker.completed.take().ok_or(WorkerError::Thread)?;
         drop(worker);
         assert!(matches!(port.recordings().await, Err(WorkerError::Closed)));
-        tokio::time::timeout(Duration::from_secs(2), completed)
+        rusterisk_test_support::Wait::Ready
+            .bounded(completed)
             .await
             .map_err(|_| WorkerError::Timeout)?
             .map_err(|_| WorkerError::Thread)?;

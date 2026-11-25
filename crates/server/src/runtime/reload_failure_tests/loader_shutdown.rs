@@ -23,7 +23,8 @@ fn checkpoint_failure(error: impl std::fmt::Display) -> ConfigError {
 async fn bounded<T>(
     future: impl std::future::Future<Output = Result<T, ControlError>>,
 ) -> Result<T, ControlError> {
-    tokio::time::timeout(Duration::from_secs(3), future)
+    rusterisk_test_support::Wait::Ready
+        .bounded(future)
         .await
         .map_err(failure)?
 }
@@ -75,11 +76,9 @@ async fn exercise(data: &Path) -> Result<(), ControlError> {
             expired,
             "Shutdown deadline was not crossed by the fixture clock",
         )?;
-        let observed = tokio::time::timeout(
-            Duration::from_millis(100),
-            caller.as_mut().ok_or(ControlError::Capacity)?,
-        )
-        .await;
+        let observed = rusterisk_test_support::Wait::Shutdown
+            .bounded(caller.as_mut().ok_or(ControlError::Capacity)?)
+            .await;
         if let Ok(result) = observed {
             drop(caller.take());
             return Err(failure(format!(

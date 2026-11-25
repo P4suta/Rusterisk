@@ -1,6 +1,7 @@
 use super::*;
 use rusterisk_api::ChannelId;
 use rusterisk_media::AudioFormat;
+use rusterisk_test_support::Wait;
 use std::net::Ipv4Addr;
 use tokio::net::{TcpListener, TcpStream};
 
@@ -561,6 +562,11 @@ async fn one_failing_leg_ends_while_another_keeps_its_audio() -> Result<(), Medi
 // Runs media turns until the leg has read the given number of packets.
 // A loopback datagram can reach its socket after the sender returns, so one turn may come too early.
 async fn received(hub: &mut MediaHub, key: &CallKey, count: u64) -> Result<(), MediaError> {
+    let socket = hub
+        .legs
+        .get(key)
+        .ok_or(MediaError::UnknownStream)?
+        .input_observer()?;
     for _ in 0..100 {
         hub.tick()?;
         let read = hub
@@ -573,7 +579,11 @@ async fn received(hub: &mut MediaHub, key: &CallKey, count: u64) -> Result<(), M
         if read >= count {
             return Ok(());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        Wait::Ready
+            .bounded(socket.peek_from(&mut [0; 1]))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
     }
     Err(MediaError::Transport(
         "the leg never read the packet".into(),

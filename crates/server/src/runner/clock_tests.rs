@@ -42,7 +42,9 @@ async fn an_originated_channel_ends_at_its_timeout_on_virtual_time() -> Result<(
     let Some(Effect::Start { key, .. }) = effects.recv().await else {
         return Err(ControlError::Invalid("Expected the call to start"));
     };
-    let released = tokio::time::timeout(Duration::from_secs(5), effects.recv()).await;
+    let released = rusterisk_test_support::Wait::Ready
+        .bounded(effects.recv())
+        .await;
     let waited = begun.elapsed();
     controller.shutdown();
     task.await.map_err(failure)??;

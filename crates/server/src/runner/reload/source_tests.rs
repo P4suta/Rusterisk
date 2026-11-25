@@ -2,6 +2,7 @@ use super::{load_startup_configuration, DirectoryReloadRequest};
 use crate::{ControlError, Controller, Credentials, Runner};
 use rusterisk_config::{Config, ConfigError};
 use rusterisk_core::Wake;
+use rusterisk_test_support::Wait;
 use std::{future::Future, path::Path, sync::mpsc, time::Duration};
 use tokio::{sync::oneshot, time::Instant};
 
@@ -34,9 +35,7 @@ fn combine<T>(
 async fn bounded<T>(
     future: impl Future<Output = Result<T, ControlError>>,
 ) -> Result<T, ControlError> {
-    tokio::time::timeout(Duration::from_secs(3), future)
-        .await
-        .map_err(failure)?
+    Wait::Ready.bounded(future).await.map_err(failure)?
 }
 
 fn users(password: &str, origin: &str) -> String {
