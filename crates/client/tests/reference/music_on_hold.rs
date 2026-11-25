@@ -153,7 +153,7 @@ impl Peer {
 #[derive(Clone, Copy)]
 enum Wanted<'a> {
     Ended(&'a ChannelId),
-    Finished(&'a ChannelId),
+    Finished(&'a rusterisk_client::PlaybackId),
 }
 
 async fn observed(session: &mut Session, wanted: Wanted<'_>) -> Result<(), Error> {
@@ -187,9 +187,9 @@ async fn observed(session: &mut Session, wanted: Wanted<'_>) -> Result<(), Error
 
 struct Resources {
     peers: [Peer; 2],
-    bridge: ChannelId,
+    bridge: rusterisk_client::BridgeId,
     bridge_lifetime: Lifetime,
-    playback: ChannelId,
+    playback: rusterisk_client::PlaybackId,
     playback_lifetime: Lifetime,
 }
 
@@ -200,9 +200,9 @@ impl Resources {
                 Peer::new("music-output", local_ip)?,
                 Peer::new("music-clock", local_ip)?,
             ],
-            bridge: ChannelId::try_from("music-bridge".to_owned())?,
+            bridge: rusterisk_client::BridgeId::try_from("music-bridge".to_owned())?,
             bridge_lifetime: Lifetime::Unused,
-            playback: ChannelId::try_from("music-interruption".to_owned())?,
+            playback: rusterisk_client::PlaybackId::try_from("music-interruption".to_owned())?,
             playback_lifetime: Lifetime::Unused,
         })
     }
@@ -561,7 +561,7 @@ async fn exercise(
     session: &mut Session,
     peers: &[Peer; 2],
     server: ComparisonServer,
-    playback_id: &ChannelId,
+    playback_id: &rusterisk_client::PlaybackId,
     playback_lifetime: &mut Lifetime,
 ) -> Result<(), Error> {
     let id = peers[0].id.clone();

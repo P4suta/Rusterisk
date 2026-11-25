@@ -1,7 +1,4 @@
-use rusterisk_client::{
-    api::{ApiError, ChannelId, Playback},
-    Client, Error,
-};
+use rusterisk_client::{api::ApiError, Client, Error, Playback, PlaybackId};
 use std::{collections::BTreeMap, future::IntoFuture};
 
 #[tokio::test]
@@ -21,7 +18,7 @@ async fn playback_queries_and_controls_preserve_wire_operations_and_errors() -> 
     let serving = tokio::spawn(axum::serve(listener, app).into_future());
     let result = async {
         let client = Client::new(&format!("http://{address}"),"app","password")?;
-        let id = ChannelId::try_from("announcement".to_owned())?;
+        let id = PlaybackId::try_from("announcement".to_owned())?;
         let playback: Playback = client.playback(&id).await?;
         assert_eq!(playback.state, rusterisk_client::api::PlaybackState::Playing);
         client.pause_playback(&id).await?;
@@ -35,7 +32,7 @@ async fn playback_queries_and_controls_preserve_wire_operations_and_errors() -> 
         client.reverse_playback(&id).await?;
         if commands.recv().await.as_deref() != Some("reverse") { return Err(Error::Invalid("incorrect reverse request")); }
         client.stop_playback(&id).await?;
-        assert!(matches!(client.playback(&ChannelId::try_from("missing".to_owned())?).await, Err(Error::Api { status:404, message }) if message.message == "Playback not found"));
+        assert!(matches!(client.playback(&PlaybackId::try_from("missing".to_owned())?).await, Err(Error::Api { status:404, message }) if message.message == "Playback not found"));
         Ok(())
     }.await;
     serving.abort();

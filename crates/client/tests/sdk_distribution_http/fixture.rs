@@ -220,7 +220,8 @@ pub async fn run(
     let operation = async {
         let client = Client::new(&format!("http://{address}"), "api", "fixture-password")
             .map_err(std::io::Error::other)?;
-        let identifier = api::ChannelId::try_from(ID.to_owned()).map_err(std::io::Error::other)?;
+        let identifier =
+            rusterisk_client::BridgeId::try_from(ID.to_owned()).map_err(std::io::Error::other)?;
         Ok::<_, std::io::Error>(crate::http_contract::verify(&client, "0.1.0", &identifier).await)
     }
     .await;

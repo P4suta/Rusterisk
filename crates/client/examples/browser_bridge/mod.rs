@@ -8,7 +8,7 @@ use std::{future::Future, time::Duration};
 mod tests;
 
 struct Bridge {
-    id: ChannelId,
+    id: rusterisk_client::BridgeId,
     name: String,
 }
 
@@ -73,7 +73,7 @@ impl Conversation {
         }
         let identity = uuid::Uuid::new_v4().to_string();
         self.bridge = Some(Bridge {
-            id: ChannelId::try_from(identity.clone())?,
+            id: rusterisk_client::BridgeId::try_from(identity.clone())?,
             name: format!("browser-{identity}"),
         });
         let bridge = self.bridge.as_ref().ok_or(Error::Closed)?;

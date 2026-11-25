@@ -25,7 +25,7 @@ async fn subscription_is_ready_before_return_and_its_driver_receives_while_the_c
     let result = async {
         let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
         let mut session = client.subscribe(&ChannelId::try_from("app".to_owned())?).await?;
-        client.create_bridge(&ChannelId::try_from("first".to_owned())?, "Conversation").await?;
+        client.create_bridge(&rusterisk_client::BridgeId::try_from("first".to_owned())?, "Conversation").await?;
         let event = tokio::time::timeout(Duration::from_secs(2), session.next_event()).await.map_err(|_| Error::Timeout)??;
         assert!(matches!(event.kind, EventKind::BridgeCreated { bridge } if bridge.id.as_str() == "first"));
         session.shutdown().await?;

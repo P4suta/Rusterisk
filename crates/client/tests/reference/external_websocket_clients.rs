@@ -216,7 +216,7 @@ pub async fn compare(
         true,
     )
     .await?;
-    let bridge = ChannelId::try_from("client-bridge".to_owned())?;
+    let bridge = rusterisk_client::BridgeId::try_from("client-bridge".to_owned())?;
     client
         .create_bridge(&bridge, "Configured WebSocket comparison")
         .await?;

@@ -77,7 +77,8 @@ pub async fn compare(
             destinations.push(local(channel)?);
             started(session, id).await?;
         }
-        let bridge = ChannelId::try_from(format!("audio-bridge-{}", codec.as_str()))?;
+        let bridge =
+            rusterisk_client::BridgeId::try_from(format!("audio-bridge-{}", codec.as_str()))?;
         client.create_bridge(&bridge, "Audio comparison").await?;
         client.add_channels(&bridge, &ids).await?;
         let send = async {

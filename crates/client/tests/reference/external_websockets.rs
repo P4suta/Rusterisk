@@ -419,7 +419,7 @@ pub async fn compare(
         MediaFormat::Pcmu,
     )
     .await?;
-    let bridge = ChannelId::try_from("websocket-bridge".to_owned())?;
+    let bridge = rusterisk_client::BridgeId::try_from("websocket-bridge".to_owned())?;
     client
         .create_bridge(&bridge, "WebSocket comparison")
         .await?;

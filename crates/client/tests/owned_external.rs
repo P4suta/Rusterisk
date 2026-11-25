@@ -122,7 +122,7 @@ async fn owned_rtp_and_audio_socket_calls_exchange_received_audio_and_close_thei
             }
             let destination = rtp_address.ok_or(Error::Invalid("missing RTP transport"))?;
             let ids = [left.id().clone(), right.id().clone()];
-            let bridge = ChannelId::try_from("owned-external-bridge".to_owned())?;
+            let bridge = rusterisk_client::BridgeId::try_from("owned-external-bridge".to_owned())?;
             client
                 .create_bridge(&bridge, "Owned external audio")
                 .await?;

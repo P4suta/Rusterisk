@@ -23,8 +23,8 @@ fn main() -> Result<(), std::io::Error> {
     let username = setting("RUSTERISK_SDK_HTTP_USERNAME", 128)?;
     let password = setting("RUSTERISK_SDK_HTTP_PASSWORD", 1024)?;
     let version = setting("RUSTERISK_SDK_HTTP_VERSION", 128)?;
-    let identifier: rusterisk_client::api::ChannelId =
-        rusterisk_api::ChannelId::try_from(setting("RUSTERISK_SDK_HTTP_BRIDGE", 128)?)
+    let identifier: rusterisk_client::BridgeId =
+        rusterisk_client::BridgeId::try_from(setting("RUSTERISK_SDK_HTTP_BRIDGE", 128)?)
             .map_err(|_| std::io::Error::other("SDK HTTP fixture bridge identifier is invalid"))?;
     let client = rusterisk_client::Client::new(&format!("http://{socket}"), &username, &password)
         .map_err(|_| std::io::Error::other("SDK HTTP fixture client setup failed"))?;

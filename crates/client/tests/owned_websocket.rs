@@ -66,7 +66,7 @@ async fn owned_media_calls_receive_audio_and_release_channels_when_their_handles
                 call.wait(CallMilestone::Answered, Duration::from_secs(1))
                     .await?;
             }
-            let bridge = ChannelId::try_from("audio".to_owned())?;
+            let bridge = rusterisk_client::BridgeId::try_from("audio".to_owned())?;
             client.create_bridge(&bridge, "SDK audio").await?;
             client
                 .add_channels(&bridge, &[left.id().clone(), right.id().clone()])

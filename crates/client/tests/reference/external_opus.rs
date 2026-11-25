@@ -114,7 +114,7 @@ pub async fn compare(
         )
         .await?;
     }
-    let bridge = ChannelId::try_from("opus-bridge".to_owned())?;
+    let bridge = rusterisk_client::BridgeId::try_from("opus-bridge".to_owned())?;
     client.create_bridge(&bridge, "Opus comparison").await?;
     client.add_channels(&bridge, &ids).await?;
     let mut left_audio = OpusCodec::new().map_err(invalid)?;

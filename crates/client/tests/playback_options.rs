@@ -52,7 +52,8 @@ async fn typed_playback_timing_reaches_both_public_target_routes() -> Result<(),
     let operation = async {
         let client = Client::new(&format!("http://{address}"), "app", "password")?;
         let target = ChannelId::try_from("phone".to_owned())?;
-        let playback = ChannelId::try_from("timed".to_owned())?;
+        let bridge_id = rusterisk_client::BridgeId::try_from("phone".to_owned())?;
+        let playback = rusterisk_client::PlaybackId::try_from("timed".to_owned())?;
         let language = ChannelId::try_from("ja".to_owned())?;
         let media = MediaUri::Sound(
             SoundId::try_from("digits/one".to_owned())
@@ -68,7 +69,7 @@ async fn typed_playback_timing_reaches_both_public_target_routes() -> Result<(),
             .play_channel_with_options(&target, &playback, &media, Some(&language), options)
             .await?;
         let bridge = client
-            .play_bridge_with_options(&target, &playback, &media, Some(&language), options)
+            .play_bridge_with_options(&bridge_id, &playback, &media, Some(&language), options)
             .await?;
         if channel.id != playback
             || bridge.id != playback

@@ -105,7 +105,8 @@ pub(super) async fn download_recording(
     destination: &Path,
 ) -> Result<(), ControlError> {
     let mut audio = AudioBuffer(Vec::new());
-    let name = ChannelId::try_from(RECORDING_NAME.to_owned()).map_err(failure)?;
+    let name =
+        rusterisk_client::RecordingName::try_from(RECORDING_NAME.to_owned()).map_err(failure)?;
     tokio::time::timeout(
         Duration::from_secs(10),
         client.download_stored_recording(&name, &mut audio),
@@ -130,7 +131,7 @@ pub(super) async fn download_recording(
 
 pub(super) fn recording_complete(event: &EventKind) -> Result<bool, ControlError> {
     if let EventKind::RecordingFinished { recording } = event {
-        return if recording.name != RECORDING_NAME {
+        return if recording.name.as_str() != RECORDING_NAME {
             Ok(false)
         } else if recording.state == RecordingState::Done && recording.format == "wav" {
             Ok(true)
@@ -140,7 +141,7 @@ pub(super) fn recording_complete(event: &EventKind) -> Result<bool, ControlError
             ))
         };
     }
-    if matches!(event, EventKind::RecordingFailed { recording } if recording.name == RECORDING_NAME)
+    if matches!(event, EventKind::RecordingFailed { recording } if recording.name.as_str() == RECORDING_NAME)
     {
         return Err(failure("browser recording failed before download"));
     }

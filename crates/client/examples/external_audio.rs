@@ -14,7 +14,7 @@ async fn main() -> Result<(), Error> {
     run_audio(
         client,
         ChannelId::try_from(setting("RUSTERISK_APP", Some("calls"))?)?,
-        ChannelId::try_from(setting("RUSTERISK_BRIDGE", None)?)?,
+        rusterisk_client::BridgeId::try_from(setting("RUSTERISK_BRIDGE", None)?)?,
         async { tokio::signal::ctrl_c().await.map_err(Error::from) },
     )
     .await
@@ -35,7 +35,7 @@ fn setting(name: &'static str, default: Option<&str>) -> Result<String, Error> {
 async fn run_audio(
     client: Client,
     application: ChannelId,
-    bridge: ChannelId,
+    bridge: rusterisk_client::BridgeId,
     stop: impl Future<Output = Result<(), Error>>,
 ) -> Result<(), Error> {
     let session = client.subscribe(&application).await?;
@@ -71,7 +71,11 @@ fn tone_frame(phase: u32) -> [u8; 640] {
     bytes
 }
 
-async fn exchange(client: &Client, call: &mut OwnedCall, bridge: &ChannelId) -> Result<(), Error> {
+async fn exchange(
+    client: &Client,
+    call: &mut OwnedCall,
+    bridge: &rusterisk_client::BridgeId,
+) -> Result<(), Error> {
     let accepted = call
         .wait(CallMilestone::Accepted, Duration::from_secs(30))
         .await?;
@@ -149,7 +153,7 @@ mod tests {
         );
         let result = tokio::time::timeout(Duration::from_secs(5), async {
             let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
-            let bridge = ChannelId::try_from("existing".to_owned())?;
+            let bridge = rusterisk_client::BridgeId::try_from("existing".to_owned())?;
             client.create_bridge(&bridge, "Existing audio").await?;
             let (stop, stopped) = tokio::sync::oneshot::channel();
             let observe = async {

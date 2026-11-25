@@ -22,7 +22,7 @@ async fn bridge_membership_uses_bounded_channel_lists_and_public_operations() ->
     let server = tokio::spawn(axum::serve(listener, router).into_future());
     let result = async {
         let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
-        let bridge = ChannelId::try_from("mix".to_owned())?;
+        let bridge = rusterisk_client::BridgeId::try_from("mix".to_owned())?;
         let channels = [
             ChannelId::try_from("left".to_owned())?,
             ChannelId::try_from("right".to_owned())?,

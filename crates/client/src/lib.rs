@@ -1,6 +1,13 @@
 use base64::Engine;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
-pub use rusterisk_api as api;
+pub mod api {
+    pub use rusterisk_api::*;
+    pub type Event = rusterisk_api::Event<crate::BridgeId, crate::PlaybackId, crate::RecordingName>;
+    pub type EventKind =
+        rusterisk_api::EventKind<crate::BridgeId, crate::PlaybackId, crate::RecordingName>;
+    pub type EventSource = rusterisk_api::ResourceEventSource<crate::BridgeId>;
+}
+pub use api::{Event, EventKind, EventSource};
 use serde::de::DeserializeOwned;
 use std::time::Duration;
 
@@ -12,6 +19,13 @@ pub use owned_call::{CallFailure, CallSnapshot, Cleanup, Originate, OwnedCall};
 pub use rusterisk_core::{CallCompletion, CallMilestone, OwnedCallProgress};
 pub use rusterisk_core::{DtmfDigit, DtmfTiming, MuteDirection};
 mod bridges;
+pub mod resource_ids;
+pub use resource_ids::{BridgeId, ChannelId, PlaybackId, RecordingName};
+pub type Bridge = api::Bridge<BridgeId>;
+pub type Application = api::Application<BridgeId>;
+pub type Playback = api::Playback<PlaybackId>;
+pub type LiveRecording = api::LiveRecording<RecordingName>;
+pub type StoredRecording = api::StoredRecording<RecordingName>;
 mod controls;
 mod external_media;
 mod media_session;
@@ -301,10 +315,10 @@ impl Client {
         self.request("sounds.get", &[("soundId", name.as_str())], &[])
             .await
     }
-    pub async fn applications(&self) -> Result<Vec<api::Application>, Error> {
+    pub async fn applications(&self) -> Result<Vec<Application>, Error> {
         self.request("applications.list", &[], &[]).await
     }
-    pub async fn application(&self, name: &str) -> Result<api::Application, Error> {
+    pub async fn application(&self, name: &str) -> Result<Application, Error> {
         self.request("applications.get", &[("applicationName", name)], &[])
             .await
     }
@@ -312,7 +326,7 @@ impl Client {
         &self,
         name: &str,
         update: &api::EventFilterRequest,
-    ) -> Result<api::Application, Error> {
+    ) -> Result<Application, Error> {
         let body = serde_json::to_vec(update)?;
         if body.len() > 16384 {
             return Err(Error::Capacity);
@@ -330,7 +344,7 @@ impl Client {
         &self,
         application: &str,
         sources: &[api::EventSource],
-    ) -> Result<api::Application, Error> {
+    ) -> Result<Application, Error> {
         self.resource_subscription("applications.subscribe", application, sources)
             .await
     }
@@ -338,7 +352,7 @@ impl Client {
         &self,
         application: &str,
         sources: &[api::EventSource],
-    ) -> Result<api::Application, Error> {
+    ) -> Result<Application, Error> {
         self.resource_subscription("applications.unsubscribe", application, sources)
             .await
     }
@@ -347,7 +361,7 @@ impl Client {
         operation: &str,
         application: &str,
         sources: &[api::EventSource],
-    ) -> Result<api::Application, Error> {
+    ) -> Result<Application, Error> {
         if sources.is_empty() {
             return Err(Error::Invalid("event sources are required"));
         }
@@ -393,18 +407,14 @@ impl Client {
         self.request("channels.hangup", &[("channelId", id.as_str())], &[])
             .await
     }
-    pub async fn bridges(&self) -> Result<Vec<api::Bridge>, Error> {
+    pub async fn bridges(&self) -> Result<Vec<Bridge>, Error> {
         self.request("bridges.list", &[], &[]).await
     }
-    pub async fn bridge(&self, id: &api::ChannelId) -> Result<api::Bridge, Error> {
+    pub async fn bridge(&self, id: &BridgeId) -> Result<Bridge, Error> {
         self.request("bridges.get", &[("bridgeId", id.as_str())], &[])
             .await
     }
-    pub async fn create_bridge(
-        &self,
-        id: &api::ChannelId,
-        name: &str,
-    ) -> Result<api::Bridge, Error> {
+    pub async fn create_bridge(&self, id: &BridgeId, name: &str) -> Result<Bridge, Error> {
         self.request(
             "bridges.createWithId",
             &[("bridgeId", id.as_str())],
@@ -412,7 +422,7 @@ impl Client {
         )
         .await
     }
-    pub async fn destroy_bridge(&self, id: &api::ChannelId) -> Result<(), Error> {
+    pub async fn destroy_bridge(&self, id: &BridgeId) -> Result<(), Error> {
         self.request("bridges.destroy", &[("bridgeId", id.as_str())], &[])
             .await
     }

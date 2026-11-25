@@ -38,8 +38,8 @@ fn destination(channel: Channel) -> Result<SocketAddr, Error> {
 
 enum Observation<'a> {
     Stasis(&'a ChannelId),
-    RecordingStarted(&'a ChannelId),
-    RecordingFinished(&'a ChannelId),
+    RecordingStarted(&'a rusterisk_client::RecordingName),
+    RecordingFinished(&'a rusterisk_client::RecordingName),
 }
 
 async fn observed(session: &mut Session, wanted: Observation<'_>) -> Result<(), Error> {
@@ -52,14 +52,14 @@ async fn observed(session: &mut Session, wanted: Observation<'_>) -> Result<(), 
                     return Ok(())
                 }
                 (Observation::RecordingStarted(id), EventKind::RecordingStarted { recording })
-                    if recording.name == id.as_str() =>
+                    if recording.name == **id =>
                 {
                     return Ok(())
                 }
                 (
                     Observation::RecordingFinished(id),
                     EventKind::RecordingFinished { recording },
-                ) if recording.name == id.as_str() => {
+                ) if recording.name == **id => {
                     return if recording.state == RecordingState::Done {
                         Ok(())
                     } else {
@@ -145,7 +145,8 @@ pub async fn compare(
             Target::Channel => 1,
             Target::Bridge => 2,
         };
-        let recording = ChannelId::try_from(format!("recorded-{label}"))?;
+        let recording = rusterisk_client::RecordingName::try_from(format!("recorded-{label}"))?;
+        let bridge = rusterisk_client::BridgeId::try_from(format!("recorded-{label}"))?;
         let mut peers = Vec::with_capacity(2);
         let mut ids = Vec::with_capacity(2);
         for index in 0..count {
@@ -168,13 +169,13 @@ pub async fn compare(
                     .await?
             }
             Target::Bridge => {
-                client.create_bridge(&recording, "Recording audio").await?;
-                client.add_channels(&recording, &ids).await?;
+                client.create_bridge(&bridge, "Recording audio").await?;
+                client.add_channels(&bridge, &ids).await?;
                 client
-                    .subscribe_resources(application, &[EventSource::Bridge(recording.clone())])
+                    .subscribe_resources(application, &[EventSource::from(bridge.clone())])
                     .await?;
                 client
-                    .record_bridge(&recording, &recording, "wav", Default::default())
+                    .record_bridge(&bridge, &recording, "wav", Default::default())
                     .await?
             }
         };
@@ -182,7 +183,7 @@ pub async fn compare(
             Target::Channel => format!("channel:{}", ids[0]),
             Target::Bridge => format!("bridge:{recording}"),
         };
-        if accepted.name != recording.as_str()
+        if accepted.name != recording
             || accepted.format != "wav"
             || accepted.target_uri != uri
             || !matches!(
@@ -216,9 +217,9 @@ pub async fn compare(
         }
         if matches!(target, Target::Bridge) {
             client
-                .unsubscribe_resources(application, &[EventSource::Bridge(recording.clone())])
+                .unsubscribe_resources(application, &[EventSource::from(bridge.clone())])
                 .await?;
-            client.destroy_bridge(&recording).await?;
+            client.destroy_bridge(&bridge).await?;
         }
     }
     Ok(())

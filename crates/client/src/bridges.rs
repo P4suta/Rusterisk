@@ -3,7 +3,7 @@ use crate::{api, Client, Error};
 impl Client {
     pub async fn add_channels(
         &self,
-        bridge: &api::ChannelId,
+        bridge: &crate::BridgeId,
         channels: &[api::ChannelId],
     ) -> Result<(), Error> {
         self.bridge_membership("bridges.addChannel", bridge, channels)
@@ -12,7 +12,7 @@ impl Client {
 
     pub async fn remove_channels(
         &self,
-        bridge: &api::ChannelId,
+        bridge: &crate::BridgeId,
         channels: &[api::ChannelId],
     ) -> Result<(), Error> {
         self.bridge_membership("bridges.removeChannel", bridge, channels)
@@ -22,7 +22,7 @@ impl Client {
     async fn bridge_membership(
         &self,
         operation: &str,
-        bridge: &api::ChannelId,
+        bridge: &crate::BridgeId,
         channels: &[api::ChannelId],
     ) -> Result<(), Error> {
         if channels.is_empty() {

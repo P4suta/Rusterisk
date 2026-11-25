@@ -60,7 +60,7 @@ pub async fn compare(
         super::external_audio::started(session, id).await?;
         peers.push(peer);
     }
-    let bridge = ChannelId::try_from("stream-bridge".to_owned())?;
+    let bridge = rusterisk_client::BridgeId::try_from("stream-bridge".to_owned())?;
     client.create_bridge(&bridge, "Stream comparison").await?;
     client.add_channels(&bridge, &ids).await?;
     let mut left = peers.remove(0);

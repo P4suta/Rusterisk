@@ -1,9 +1,9 @@
 use rusterisk_client::{
     api::{
-        ChannelId, EventKind, EventSource, ExternalRtpTarget, MediaUri, Playback,
-        PlaybackMilliseconds, PlaybackOptions, PlaybackState, SoundId, StaticRtpCodec,
+        ChannelId, EventKind, EventSource, ExternalRtpTarget, MediaUri, PlaybackMilliseconds,
+        PlaybackOptions, PlaybackState, SoundId, StaticRtpCodec,
     },
-    Client, Error, Session,
+    Client, Error, Playback, Session,
 };
 use rusterisk_media::{mulaw_decode, RtpPacket};
 use rusterisk_server::rtp::SocketPair;
@@ -19,7 +19,7 @@ const SEEK_STEP_MS: u32 = 7000;
 pub(super) const INTERRUPTION_OFFSET_MS: u32 = 24_000;
 
 pub(super) async fn removed<F: std::future::Future<Output = Result<Playback, Error>>>(
-    id: &ChannelId,
+    id: &rusterisk_client::PlaybackId,
     mut lookup: impl FnMut() -> F,
 ) -> Result<(), Error> {
     tokio::time::timeout(Duration::from_secs(3), async {
@@ -181,7 +181,7 @@ async fn received_by(
 #[derive(Clone, Copy, Debug)]
 enum Observation<'a> {
     Stasis(&'a ChannelId),
-    Finished(&'a ChannelId),
+    Finished(&'a rusterisk_client::PlaybackId),
 }
 
 async fn observed(session: &mut Session, wanted: Observation<'_>) -> Result<(), Error> {
@@ -259,8 +259,8 @@ pub async fn compare(
             Target::Bridge => "bridge",
         };
         let id = ChannelId::try_from(format!("position-{label}"))?;
-        let bridge = ChannelId::try_from(format!("position-mix-{label}"))?;
-        let playback = ChannelId::try_from(format!("position-play-{label}"))?;
+        let bridge = rusterisk_client::BridgeId::try_from(format!("position-mix-{label}"))?;
+        let playback = rusterisk_client::PlaybackId::try_from(format!("position-play-{label}"))?;
         let peer = SocketPair::bind(Ipv4Addr::UNSPECIFIED.into(), 0, 0)?;
         let destination = SocketAddr::new(callback.into(), peer.local_addr()?.port());
         let destination = ExternalRtpTarget::new(destination, StaticRtpCodec::Pcmu)
@@ -279,7 +279,7 @@ pub async fn compare(
                         .add_channels(&bridge, std::slice::from_ref(&id))
                         .await?;
                     client
-                        .subscribe_resources(application, &[EventSource::Bridge(bridge.clone())])
+                        .subscribe_resources(application, &[EventSource::from(bridge.clone())])
                         .await?;
                     client.play_bridge(&bridge, &playback, &media, None).await?
                 }
@@ -354,7 +354,7 @@ pub async fn compare(
                 let operation = combine(
                     operation,
                     client
-                        .unsubscribe_resources(application, &[EventSource::Bridge(bridge.clone())])
+                        .unsubscribe_resources(application, &[EventSource::from(bridge.clone())])
                         .await
                         .map(|_| ()),
                 );
@@ -373,8 +373,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_finished_playback_must_disappear_after_its_terminal_snapshot() -> Result<(), Error> {
-        use rusterisk_client::api::{ApiError, ChannelId, Playback, PlaybackState};
-        let id = ChannelId::try_from("completed".to_owned())?;
+        use rusterisk_client::{
+            api::{ApiError, PlaybackState},
+            Playback, PlaybackId,
+        };
+        let id = PlaybackId::try_from("completed".to_owned())?;
         let snapshot = Playback {
             id: id.clone(),
             media_uri: "sound:hello".into(),
@@ -395,7 +398,7 @@ mod tests {
         })
         .await?;
         assert!(replies.next().is_none());
-        let wrong = ChannelId::try_from("different".to_owned())?;
+        let wrong = PlaybackId::try_from("different".to_owned())?;
         assert!(
             super::removed(&wrong, || std::future::ready(Ok(snapshot.clone())))
                 .await

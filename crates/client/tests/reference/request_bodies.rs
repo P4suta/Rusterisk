@@ -1,6 +1,6 @@
 use rusterisk_client::{
-    api::{Bridge, BridgeVideoMode, Channel, ChannelId, MediaControlFormat, MediaEvent},
-    Client, Error,
+    api::{BridgeVideoMode, Channel, ChannelId, MediaControlFormat, MediaEvent},
+    Bridge, Client, Error,
 };
 use std::time::Duration;
 

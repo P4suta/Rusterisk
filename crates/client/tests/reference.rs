@@ -1,9 +1,9 @@
 use rusterisk_client::{
     api::{
-        ApiError, Bridge, BridgeVideoMode, ChannelId, EventFilter, EventFilterRequest, EventKind,
+        ApiError, BridgeVideoMode, ChannelId, EventFilter, EventFilterRequest, EventKind,
         EventSource, ExternalRtpTarget, StaticRtpCodec,
     },
-    Client, Error,
+    Bridge, Client, Error,
 };
 use std::{net::Ipv4Addr, time::Duration};
 #[path = "reference/ari_routes.rs"]
@@ -94,7 +94,7 @@ fn audio_bridge(mut bridge: Bridge, expected_mode: BridgeVideoMode) -> Bridge {
 }
 
 async fn compare_bridges(actual: &Client, reference: &Client) -> Result<(), Error> {
-    let id = ChannelId::try_from("compat-bridge".to_owned())?;
+    let id = rusterisk_client::BridgeId::try_from("compat-bridge".to_owned())?;
     let created = actual.create_bridge(&id, "Conversation").await?;
     let expected = reference.create_bridge(&id, "Conversation").await?;
     assert_eq!(
@@ -148,7 +148,7 @@ async fn compare_subscriptions(
     reference: &Client,
     app: &str,
 ) -> Result<(), Error> {
-    let id = ChannelId::try_from("observed".to_owned())?;
+    let id = rusterisk_client::BridgeId::try_from("observed".to_owned())?;
     for text in ["endpoint:PJSIP/phone", "endpoint:PJSIP"] {
         let endpoint =
             EventSource::try_from(text).map_err(|_| Error::Invalid("endpoint source"))?;
@@ -181,7 +181,7 @@ async fn compare_subscriptions(
     );
     actual.create_bridge(&id, "Observed").await?;
     reference.create_bridge(&id, "Observed").await?;
-    let source = EventSource::Bridge(id.clone());
+    let source = EventSource::from(id.clone());
     for _ in 0..2 {
         assert_eq!(
             actual
@@ -214,7 +214,7 @@ async fn compare_subscriptions(
                 .await
         )?
     );
-    let missing = EventSource::Bridge(ChannelId::try_from("missing".to_owned())?);
+    let missing = EventSource::Bridge(rusterisk_client::BridgeId::try_from("missing".to_owned())?);
     let batch = [source.clone(), missing];
     assert_eq!(
         rejection(actual.subscribe_resources(app, &batch).await)?,
