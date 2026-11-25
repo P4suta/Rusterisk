@@ -19,6 +19,7 @@ pub mod reference;
 pub mod regular_archive;
 pub mod release_check;
 pub mod server_distribution;
+pub mod test_time_policy;
 pub mod timer_policy;
 pub const WORKSPACE_FORMAT_CHECK: &[&str] = &["fmt", "--", "--check"];
 mod sip_domain_policy;

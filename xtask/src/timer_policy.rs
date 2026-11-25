@@ -89,7 +89,7 @@ fn requires_test(condition: &syn::Meta) -> bool {
     }
 }
 
-fn test_only(attributes: &[syn::Attribute]) -> bool {
+pub(crate) fn test_only(attributes: &[syn::Attribute]) -> bool {
     attributes.iter().any(|attribute| {
         attribute.path().is_ident("cfg")
             && attribute
