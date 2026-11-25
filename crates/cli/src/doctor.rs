@@ -3,8 +3,23 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::time::Duration;
 
 pub enum Doctor {
+    Runtime,
     Extension { context: String, extension: String },
     Channel(String),
+}
+
+#[derive(Serialize, Deserialize)]
+struct RuntimeActivity {
+    control: Activity,
+    signaling: Activity,
+    media: Activity,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Activity {
+    turns: u64,
+    late_turns: u64,
+    drops: u64,
 }
 
 #[derive(Deserialize)]
@@ -306,6 +321,25 @@ async fn channel(remote: &Remote<'_>, id: &str) -> Result<Report, Error> {
 impl Doctor {
     pub(super) async fn read(&self, remote: &Remote<'_>, json: bool) -> Result<String, Error> {
         match self {
+            Self::Runtime => {
+                let runtime: RuntimeActivity =
+                    remote.get(&["rusterisk", "diagnostics", "runtime"]).await?;
+                if json {
+                    return encode(&runtime);
+                }
+                let mut lines = vec!["component  turns  late turns  drops".to_owned()];
+                for (name, activity) in [
+                    ("control", runtime.control),
+                    ("signaling", runtime.signaling),
+                    ("media", runtime.media),
+                ] {
+                    lines.push(format!(
+                        "{name}  {}  {}  {}",
+                        activity.turns, activity.late_turns, activity.drops
+                    ));
+                }
+                Ok(lines.join("\n"))
+            }
             Self::Channel(id) => {
                 let report = channel(remote, id).await?;
                 if json {

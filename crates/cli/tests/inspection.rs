@@ -26,6 +26,9 @@ fn fixture(
         return (StatusCode::FORBIDDEN, "");
     }
     let body = match uri.path() {
+        "/rusterisk/diagnostics/runtime" => {
+            r#"{"control":{"turns":3,"late_turns":1,"drops":0},"signaling":{"turns":5,"late_turns":0,"drops":1},"media":{"turns":21,"late_turns":2,"drops":4}}"#
+        }
         "/rusterisk/diagnostics/channels/leg-a" => {
             r#"{"id":"leg-a","generation":8,"creationtime":"t1","endpoint":"desk","state":"Up","held":true}"#
         }
@@ -204,5 +207,16 @@ async fn either_packet_read_can_be_unavailable_while_authentication_errors_remai
             assert!(String::from_utf8_lossy(&out.stderr).contains(status.as_str()));
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn runtime_diagnosis_shows_each_processing_loop() -> io::Result<()> {
+    let report = document(&["doctor", "runtime", "--json"], true).await?;
+    assert_eq!(report["media"]["late_turns"], 2);
+    let output = inspect(&["doctor", "runtime"], true).await?;
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).map_err(io::Error::other)?;
+    assert!(text.contains("media") && text.contains("21") && text.contains("drops"));
     Ok(())
 }

@@ -13,6 +13,7 @@ const HELP: &str = concat!(
     "  channels                List active call legs and their bridges.\n",
     "  channel ID              Inspect one call leg and its bridges.\n",
     "  doctor extension CONTEXT NUMBER  Diagnose a dialplan route.\n",
+    "  doctor runtime          Show processing turns, late deadlines, and drops.\n",
     "  doctor channel ID       Diagnose signaling and sample packet traffic.\n",
     "  watch channel ID        Follow one call leg until it ends.\n",
     "  watch endpoint TECH/RESOURCE  Follow an endpoint and its call legs.\n",
@@ -142,13 +143,20 @@ fn execute(arguments: impl Iterator<Item = OsString>) -> Result<(), UsageError> 
         "status" => Command::Inspect(Inspection::Status),
         "doctor" => {
             let resource = target(&mut arguments)?;
-            let first = target(&mut arguments)?;
-            if !segment(&first) {
-                return Err((2, "Invalid diagnosis target".to_owned()));
-            }
             match resource.as_str() {
-                "channel" => Command::Diagnose(Doctor::Channel(first)),
+                "runtime" => Command::Diagnose(Doctor::Runtime),
+                "channel" => {
+                    let channel = target(&mut arguments)?;
+                    if !segment(&channel) {
+                        return Err((2, "Invalid diagnosis target".to_owned()));
+                    }
+                    Command::Diagnose(Doctor::Channel(channel))
+                }
                 "extension" => {
+                    let first = target(&mut arguments)?;
+                    if !segment(&first) {
+                        return Err((2, "Invalid diagnosis target".to_owned()));
+                    }
                     let extension = target(&mut arguments)?;
                     if !segment(&extension) {
                         return Err((2, "Invalid extension".to_owned()));
@@ -158,7 +166,12 @@ fn execute(arguments: impl Iterator<Item = OsString>) -> Result<(), UsageError> 
                         extension,
                     })
                 }
-                _ => return Err((2, "Select a channel or an extension to diagnose".to_owned())),
+                _ => {
+                    return Err((
+                        2,
+                        "Select runtime, channel, or extension to diagnose".to_owned(),
+                    ))
+                }
             }
         }
         "endpoints" => Command::Inspect(Inspection::Endpoints),
