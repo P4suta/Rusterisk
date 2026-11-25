@@ -1,5 +1,5 @@
 use super::{failure, Signaling};
-use crate::media::{RecordingEnd, RecordingTarget};
+use crate::media::{RecordingEnd, RecordingTarget, Reservation};
 use crate::storage::{PlaybackMedia, WorkerError};
 use crate::{ControlError, MediaOwner, Signal};
 use rusterisk_api::{ChannelId, RecordingOptions};
@@ -55,11 +55,10 @@ impl Signaling {
                 }
                 MediaOwner::Bridge { generation, .. } => RecordingTarget::Bridge(*generation),
             };
-            let completed = self
-                .media
-                .reserve_recording(target, token)
-                .await
-                .map_err(failure)?;
+            let Reservation {
+                admission,
+                completed,
+            } = self.media.queue_recording(target, token).map_err(failure)?;
             let prompt = if options.beep {
                 let target = match &owner {
                     MediaOwner::Channel(key) => AudioTarget::Channel(key.clone()),
@@ -67,17 +66,16 @@ impl Signaling {
                 };
                 Some(
                     self.media
-                        .reserve_playback(target, token)
-                        .await
+                        .queue_playback(target, token, Default::default())
                         .map_err(failure)?,
                 )
             } else {
                 None
             };
-            Ok((storage, completed, prompt))
+            Ok((storage, admission, completed, prompt))
         }
         .await;
-        let (storage, completed, prompt) = match admitted {
+        let (storage, reserved, completed, prompt) = match admitted {
             Ok(admitted) => admitted,
             Err(error) => {
                 self.notify(Signal::RecordingAdmitted {
@@ -93,6 +91,17 @@ impl Signaling {
         let controller = self.controller.clone();
         self.recordings.spawn(async move {
             let admission = async {
+                reserved.wait().await.map_err(failure)?;
+                let prompt = match prompt {
+                    Some(Reservation {
+                        admission,
+                        completed,
+                    }) => {
+                        admission.wait().await.map_err(failure)?;
+                        Some(completed)
+                    }
+                    None => None,
+                };
                 let sink = storage.record_with_policy(name, 8000, options.if_exists).await.map_err(storage_error)?;
                 let source = if options.beep {
                     match storage.play(PlaybackMedia::Sound(ChannelId::try_from("beep".to_owned())?.into())).await {

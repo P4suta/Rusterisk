@@ -14,7 +14,11 @@ mod admission_tests;
 mod frame_timing_tests;
 mod measurements;
 mod probe;
+#[cfg(test)]
+mod queued;
 pub(crate) use probe::Progress as ProbeProgress;
+#[cfg(test)]
+pub(crate) use queued::Queued;
 mod playback;
 mod recording;
 mod streams;
@@ -65,12 +69,21 @@ impl AttachmentMode {
     }
 }
 
-pub(crate) struct AttachmentReceipt {
-    response: oneshot::Receiver<Result<(), MediaError>>,
+// The media task's answer to a command that its sender queued without waiting.
+pub(crate) struct Receipt<T> {
+    response: oneshot::Receiver<Result<T, MediaError>>,
 }
 
-impl AttachmentReceipt {
-    pub(crate) async fn wait(self) -> Result<(), MediaError> {
+pub(crate) type AttachmentReceipt = Receipt<()>;
+
+// A queued reservation: the answer to its admission and the end of the admitted operation.
+pub(crate) struct Reservation<T, E> {
+    pub(crate) admission: Receipt<T>,
+    pub(crate) completed: oneshot::Receiver<Result<(), E>>,
+}
+
+impl<T> Receipt<T> {
+    pub(crate) async fn wait(self) -> Result<T, MediaError> {
         tokio::time::timeout(Duration::from_secs(5), self.response)
             .await
             .map_err(|error| MediaError::Transport(error.to_string()))?
@@ -188,18 +201,12 @@ pub struct MediaPort {
 }
 
 impl MediaPort {
-    pub(crate) async fn reserve_music(
+    pub(crate) fn queue_music(
         &self,
         key: CallKey,
         token: MediaTaskToken,
         class: String,
-    ) -> Result<
-        (
-            Option<MusicCursor>,
-            oneshot::Receiver<Result<(), MediaError>>,
-        ),
-        MediaError,
-    > {
+    ) -> Result<Reservation<Option<MusicCursor>, MediaError>, MediaError> {
         let (completed, completion) = oneshot::channel();
         let (reply, response) = oneshot::channel();
         self.commands
@@ -211,11 +218,10 @@ impl MediaPort {
                 reply,
             })
             .map_err(|_| MediaError::Capacity)?;
-        let cursor = tokio::time::timeout(Duration::from_secs(5), response)
-            .await
-            .map_err(|error| MediaError::Transport(error.to_string()))?
-            .map_err(|error| MediaError::Transport(error.to_string()))??;
-        Ok((cursor, completion))
+        Ok(Reservation {
+            admission: Receipt { response },
+            completed: completion,
+        })
     }
     pub async fn received_digit(
         &self,
@@ -257,6 +263,17 @@ impl MediaPort {
         token: MediaTaskToken,
         options: rusterisk_api::PlaybackOptions,
     ) -> Result<oneshot::Receiver<Result<(), MediaError>>, MediaError> {
+        let reservation = self.queue_playback(target, token, options)?;
+        reservation.admission.wait().await?;
+        Ok(reservation.completed)
+    }
+
+    pub(crate) fn queue_playback(
+        &self,
+        target: AudioTarget<CallKey>,
+        token: MediaTaskToken,
+        options: rusterisk_api::PlaybackOptions,
+    ) -> Result<Reservation<(), MediaError>, MediaError> {
         let (completed, completion) = oneshot::channel();
         let (reply, response) = oneshot::channel();
         self.commands
@@ -268,11 +285,10 @@ impl MediaPort {
                 reply,
             })
             .map_err(|_| MediaError::Capacity)?;
-        tokio::time::timeout(Duration::from_secs(5), response)
-            .await
-            .map_err(|error| MediaError::Transport(error.to_string()))?
-            .map_err(|error| MediaError::Transport(error.to_string()))??;
-        Ok(completion)
+        Ok(Reservation {
+            admission: Receipt { response },
+            completed: completion,
+        })
     }
 
     pub async fn attach_playback(
@@ -324,6 +340,16 @@ impl MediaPort {
         target: RecordingTarget,
         token: MediaTaskToken,
     ) -> Result<oneshot::Receiver<Result<(), WorkerError>>, MediaError> {
+        let reservation = self.queue_recording(target, token)?;
+        reservation.admission.wait().await?;
+        Ok(reservation.completed)
+    }
+
+    pub(crate) fn queue_recording(
+        &self,
+        target: RecordingTarget,
+        token: MediaTaskToken,
+    ) -> Result<Reservation<(), WorkerError>, MediaError> {
         let (completed, completion) = oneshot::channel();
         let (reply, response) = oneshot::channel();
         self.commands
@@ -334,11 +360,10 @@ impl MediaPort {
                 reply,
             })
             .map_err(|_| MediaError::Capacity)?;
-        tokio::time::timeout(Duration::from_secs(5), response)
-            .await
-            .map_err(|error| MediaError::Transport(error.to_string()))?
-            .map_err(|error| MediaError::Transport(error.to_string()))??;
-        Ok(completion)
+        Ok(Reservation {
+            admission: Receipt { response },
+            completed: completion,
+        })
     }
 
     pub async fn attach_recording(
