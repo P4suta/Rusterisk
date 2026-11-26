@@ -300,8 +300,7 @@ fn exact_archive_blob_entry_and_total_expansion_limits_accept_the_complete_expor
 }
 
 #[test]
-fn expected_inventory_stops_after_the_tenth_entry_and_layer_gzip_has_no_trailing_member(
-) -> io::Result<()> {
+fn excess_candidate_files_and_trailing_layer_bytes_are_rejected() -> io::Result<()> {
     let mut image = Image::new(ServerTarget::LinuxArm64)?;
     let bytes = image.bytes()?;
     let mut extra = 0;
