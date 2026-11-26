@@ -21,10 +21,15 @@ fn failure(error: WorkerError) -> ControlError {
         | WorkerError::Timeout
         | WorkerError::Storage(StorageError::Capacity) => ControlError::Capacity,
         WorkerError::Invalid => ControlError::Invalid("Invalid sound query"),
-        error @ (WorkerError::Storage(_) | WorkerError::Closed | WorkerError::Thread) => {
-            ControlError::Adapter(error.to_string())
-        }
+        WorkerError::Closed | WorkerError::Thread => ControlError::ServiceClosed,
+        error @ WorkerError::Storage(_) => ControlError::Adapter(error.to_string()),
     }
+}
+
+#[test]
+fn a_closed_sound_store_reports_service_closure() {
+    assert_eq!(failure(WorkerError::Closed), ControlError::ServiceClosed);
+    assert_eq!(failure(WorkerError::Capacity), ControlError::Capacity);
 }
 
 async fn execute(storage: StoragePort, query: Query) -> Result<Outcome, ControlError> {
