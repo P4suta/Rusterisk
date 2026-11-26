@@ -156,6 +156,8 @@ impl ChildServer {
             .spawn()
             .map_err(failure)?;
         let mut changes = rusterisk_test_support::DirectoryChanges::new(&log).map_err(failure)?;
+        #[cfg(windows)]
+        let mut recheck = tokio::time::interval(Wait::Quiet.duration());
         let ready = Wait::Ready
             .bounded(async {
                 loop {
@@ -165,11 +167,17 @@ impl ChildServer {
                     if let Some(address) = ready_line(&log)? {
                         return Ok(address);
                     }
+                    #[cfg(windows)]
+                    tokio::select! {
+                        changed = changes.changed() => changed.map_err(failure)?,
+                        _ = recheck.tick() => {}
+                    }
+                    #[cfg(not(windows))]
                     changes.changed().await.map_err(failure)?;
                 }
             })
             .await
-            .map_err(failure)
+            .map_err(|error| failure(format!("server startup log: {error}")))
             .and_then(|result| result);
         match ready {
             Ok(address) => Ok(Self { child, address }),
