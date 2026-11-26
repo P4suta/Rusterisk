@@ -197,17 +197,51 @@ async fn two_registered_phones_exchange_audio_on_the_shipped_extensions() -> Res
 }
 
 pub(super) async fn native(path: CallPath) -> Result<(), ControlError> {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
+    run(
+        path,
+        &source,
+        Path::new(env!("CARGO_BIN_EXE_rusterisk")),
+        None,
+    )
+    .await
+}
+
+async fn packaged(root: &Path) -> Result<(), ControlError> {
+    let bin = root.join("bin");
+    let executable = |name: &str| bin.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    let cli = executable("rusterisk-cli");
+    run(
+        CallPath::RegisteredExtensions,
+        &root.join("config"),
+        &executable("rusterisk"),
+        Some(cli),
+    )
+    .await
+}
+
+async fn run(
+    path: CallPath,
+    source: &Path,
+    binary: &Path,
+    cli: Option<std::path::PathBuf>,
+) -> Result<(), ControlError> {
     let ip = Ipv4Addr::LOCALHOST.into();
     let phones = Phones::bind(ip, ip).await?;
-    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
-    let config = Config::load(&source).map_err(failure)?;
+    let config = Config::load(source).map_err(failure)?;
     let root = tempfile::tempdir().map_err(failure)?;
     let settings = root.path().join("config");
     fs::create_dir(&settings).map_err(failure)?;
     for name in ["ari.conf", "rtp.conf"] {
         fs::copy(source.join(name), settings.join(name)).map_err(failure)?;
     }
-    let (sip, extensions) = phones.settings()?;
+    let (sip, extensions) = match path {
+        CallPath::RegisteredExtensions => (
+            fs::read_to_string(source.join("pjsip.conf")).map_err(failure)?,
+            fs::read_to_string(source.join("extensions.conf")).map_err(failure)?,
+        ),
+        CallPath::IncomingTrunk | CallPath::OutgoingTrunk => phones.settings()?,
+    };
     fs::write(settings.join("extensions.conf"), extensions).map_err(failure)?;
     let address = config
         .transports
@@ -226,7 +260,12 @@ pub(super) async fn native(path: CallPath) -> Result<(), ControlError> {
         .map_err(failure)?;
         drop(reservation);
         let log = root.path().join(format!("call-{attempt}.log"));
-        let mut server = match ChildServer::start(&settings, &data, log).await {
+        let started = if cli.is_some() {
+            ChildServer::start_from(binary, &settings, &data, log).await
+        } else {
+            ChildServer::start(&settings, &data, log).await
+        };
+        let mut server = match started {
             Ok(server) => server,
             Err(error)
                 if std::net::UdpSocket::bind(target)
@@ -241,7 +280,13 @@ pub(super) async fn native(path: CallPath) -> Result<(), ControlError> {
         let management = server.address();
         let scenario = tokio::spawn(async move {
             Wait::Scenario
-                .bounded(exercise(phones, &config, target, management, path))
+                .bounded(async {
+                    exercise(phones, &config, target, management, path).await?;
+                    if let Some(cli) = cli {
+                        check_cli(&cli, &config, management).await?;
+                    }
+                    Ok(())
+                })
                 .await
                 .map_err(failure)?
         });
@@ -250,4 +295,81 @@ pub(super) async fn native(path: CallPath) -> Result<(), ControlError> {
         break;
     }
     combine(result, root.close().map_err(failure))
+}
+
+#[tokio::test]
+#[ignore = "Requires an extracted native server distribution."]
+async fn the_packaged_phones_and_cli_complete_the_first_call() -> Result<(), ControlError> {
+    let root = std::env::var_os("RUSTERISK_PACKAGED_ROOT")
+        .map(std::path::PathBuf::from)
+        .ok_or(ControlError::Invalid(
+            "An extracted server distribution is required",
+        ))?;
+    packaged(&root).await
+}
+
+async fn check_cli(cli: &Path, config: &Config, address: SocketAddr) -> Result<(), ControlError> {
+    use std::process::Stdio;
+    use tokio::{io::AsyncWriteExt, process::Command};
+    let version = Command::new(cli)
+        .arg("--version")
+        .kill_on_drop(true)
+        .output()
+        .await
+        .map_err(failure)?;
+    if !version.status.success()
+        || !version.stdout.starts_with(b"rusterisk-cli ")
+        || !version.stderr.is_empty()
+    {
+        return Err(ControlError::Invalid("Packaged CLI version failed"));
+    }
+    let user = config
+        .users
+        .first()
+        .ok_or(ControlError::Invalid("Missing management account"))?;
+    for command in [
+        &["doctor", "extension", "internal", "101"][..],
+        &["doctor", "runtime"],
+    ] {
+        let mut child = Command::new(cli)
+            .args(command)
+            .args([
+                "--server",
+                &format!("http://{address}"),
+                "--username",
+                &user.name,
+                "--password-stdin",
+                "--json",
+            ])
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(failure)?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or(ControlError::Invalid("CLI input is unavailable"))?;
+        stdin
+            .write_all(user.password.expose().as_bytes())
+            .await
+            .map_err(failure)?;
+        drop(stdin);
+        let output = child.wait_with_output().await.map_err(failure)?;
+        if !output.status.success() || !output.stderr.is_empty() {
+            return Err(failure(format!(
+                "Packaged CLI diagnosis failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        if command.get(1) == Some(&"extension") {
+            assert_eq!(report["destinations"][0]["endpoint"], "alice");
+        } else {
+            assert_eq!(report["call_slots"]["active"], 0);
+            assert_eq!(report["call_slots"]["limit"], 64);
+        }
+    }
+    Ok(())
 }
