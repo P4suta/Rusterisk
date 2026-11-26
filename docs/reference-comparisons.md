@@ -121,4 +121,25 @@ SIPp matches the response to the `BYE` transaction by its Via branch.
 The runner requires complete native SIPp call statistics before proceeding to the remaining server cases.
 The paired browser campaign verifies received tones and completed recordings on both servers with [the same browser app](browser-calls.md).
 Broader signaling coverage remains unverified.
-The capability response keeps `call_verified=false` until the required call and audio comparisons pass.
+The phone comparison registers both endpoints, calls each extension, and verifies received audio at both ends.
+Separate calls originate from the test trunk and dial out through the trunk.
+Each call sends a delayed Real-time Transport Protocol (RTP) packet after its successor, then changes the signal and checks both receivers before hangup.
+The management API reports the compared paths, codecs, transports, and conditions in `verified_call_paths`.
+The `call_verified` field describes the full scope of one API operation.
+
+## Compare server load
+
+Set `RUSTERISK_BASELINE_SERVER` and `RUSTERISK_CANDIDATE_SERVER` to the absolute paths of the extracted executables.
+Run both in one Linux container with a two-CPU quota, affinity to two processors, and the same bounded temporary filesystem.
+
+```sh
+cargo test --locked -p rusterisk-server --test process_recovery compare_five_alternating -- --ignored --nocapture
+cargo test --locked -p rusterisk-config --test route_index_cpu -- --ignored --nocapture
+cargo test --locked -p rusterisk-server --lib sixty_four_active_rtp_disconnects -- --ignored --nocapture
+```
+
+The comparison alternates five fresh processes per build at zero, two, 16, and 64 RTP legs.
+Each pair sends distinct G.711 signals and measures the time from its first channel request until each receiver hears the other signal.
+The test samples process CPU time over one second of steady traffic and reads resident memory before hangup and after the server releases its ports.
+The candidate median for each measurement must fit within the largest baseline observation at the same load.
+The Linux ARM64 package also limits median resident memory before and after hangup to 14.5, 15.5, 16, and 18 MiB at the four loads.
