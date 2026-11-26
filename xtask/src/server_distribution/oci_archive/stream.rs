@@ -198,7 +198,7 @@ fn application<R: Read>(
             .strip_prefix("opt/rusterisk/")
             .ok_or(OciArchiveError::Application)?;
         let expected = expected.get(relative).ok_or(OciArchiveError::Application)?;
-        let mode = if relative == profile.target().binary_path() {
+        let mode = if profile.target().is_executable(relative) {
             0o755
         } else {
             0o644
@@ -229,7 +229,7 @@ fn application<R: Read>(
         }
         files += 1;
     }
-    if files != 9 || !names.contains("opt/rusterisk/data") {
+    if files != expected.len() || !names.contains("opt/rusterisk/data") {
         return Err(OciArchiveError::Application);
     }
     Ok(())

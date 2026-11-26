@@ -91,11 +91,12 @@ fn explicit_native_build_limits_reach_cargo_and_preserve_windows_candidate_clean
                             std::fs::write(state.join("build.txt"), b"injected build timeout\n")?;
                             return Err(ProcessError::Timeout);
                         }
-                        write(
-                            &target,
+                        for path in [
                             "x86_64-pc-windows-msvc/release/rusterisk.exe",
-                            &windows_binary(),
-                        )?;
+                            "x86_64-pc-windows-msvc/release/rusterisk-cli.exe",
+                        ] {
+                            write(&target, path, &windows_binary())?;
+                        }
                     }
                     _ => return Err(ProcessError::InvalidOutput),
                 }
@@ -165,11 +166,12 @@ fn server_builds_archive_only_the_executable_produced_from_captured_source(
                         .find(|(name, _)| *name == "CARGO_TARGET_DIR")
                         .and_then(|(_, value)| value)
                         .ok_or(ProcessError::InvalidOutput)?;
-                    write(
-                        &PathBuf::from(state),
+                    for path in [
                         "aarch64-apple-darwin/release/rusterisk",
-                        &binary(),
-                    )?;
+                        "aarch64-apple-darwin/release/rusterisk-cli",
+                    ] {
+                        write(&PathBuf::from(state), path, &binary())?;
+                    }
                 }
                 Ok(())
             })
@@ -178,10 +180,11 @@ fn server_builds_archive_only_the_executable_produced_from_captured_source(
         assert!(!execution
             .ok_or_else(|| io::Error::other("execution directory missing"))?
             .exists());
-        let payload = ServerPayload::capture(ServerTarget::MacOsArm64, binary(), |path| {
-            std::fs::read(destination.join("source").join(path))
-        })
-        .map_err(io::Error::other)?;
+        let payload =
+            ServerPayload::capture(ServerTarget::MacOsArm64, binary(), binary(), |path| {
+                std::fs::read(destination.join("source").join(path))
+            })
+            .map_err(io::Error::other)?;
         let archive = std::fs::read(destination.join(payload.name().file_name()))?;
         check_server_tar_gzip(&payload, &archive)?;
         assert!(destination.join("fetch.txt").is_file());
@@ -277,11 +280,12 @@ fn build_output_for_another_target_cannot_be_packaged_as_the_selected_target(
                     .ok_or(ProcessError::InvalidOutput)?;
                 let mut bytes = binary();
                 bytes[4..8].copy_from_slice(&0x01000007u32.to_le_bytes());
-                write(
-                    &PathBuf::from(target),
+                for path in [
                     "aarch64-apple-darwin/release/rusterisk",
-                    &bytes,
-                )?;
+                    "aarch64-apple-darwin/release/rusterisk-cli",
+                ] {
+                    write(&PathBuf::from(target), path, &bytes)?;
+                }
             }
             Ok(())
         });

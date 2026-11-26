@@ -127,7 +127,7 @@ impl Image {
             let mut entry = Entry::file(&format!("opt/rusterisk/{path}"), bytes);
             entry.uid = 65532;
             entry.gid = 65532;
-            entry.mode = if path == target.binary_path() {
+            entry.mode = if target.is_executable(path) {
                 0o755
             } else {
                 0o644

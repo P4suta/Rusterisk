@@ -43,11 +43,12 @@ fn image_contexts_copy_only_verified_candidate_bytes_and_remove_owned_files(
                     .find(|(name, _)| *name == "CARGO_TARGET_DIR")
                     .and_then(|(_, value)| value)
                     .ok_or(ProcessError::InvalidOutput)?;
-                write(
-                    &PathBuf::from(state),
+                for path in [
                     "aarch64-unknown-linux-gnu/release/rusterisk",
-                    &binary(),
-                )?;
+                    "aarch64-unknown-linux-gnu/release/rusterisk-cli",
+                ] {
+                    write(&PathBuf::from(state), path, &binary())?;
+                }
             }
             Ok(())
         })?;

@@ -49,6 +49,11 @@ fn server_candidates_bind_five_native_targets_to_the_expected_archive_and_execut
             target.required_files(),
             [
                 binary,
+                if target == ServerTarget::WindowsX86_64 {
+                    "bin/rusterisk-cli.exe"
+                } else {
+                    "bin/rusterisk-cli"
+                },
                 "README.md",
                 "LICENSE-MIT",
                 "LICENSE-APACHE",

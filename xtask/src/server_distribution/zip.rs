@@ -9,7 +9,7 @@ pub fn write_server_zip(payload: &ServerPayload, writer: impl Write) -> io::Resu
     let mut archive = ZipWriter::new_stream(Bounded::new(writer));
     let time = DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0).map_err(io::Error::other)?;
     for (path, bytes) in payload.files() {
-        let mode = if path == payload.name().target().binary_path() {
+        let mode = if payload.name().target().is_executable(path) {
             0o755
         } else {
             0o644

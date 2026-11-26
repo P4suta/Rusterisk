@@ -130,11 +130,12 @@ fn candidate_checks_bind_exported_images_to_the_loaded_source_and_file_bytes(
                 binary[20..24].copy_from_slice(&1_u32.to_le_bytes());
                 binary[24..32].copy_from_slice(&4096_u64.to_le_bytes());
                 binary[52..54].copy_from_slice(&64_u16.to_le_bytes());
-                project::write(
-                    &std::path::PathBuf::from(state),
+                for path in [
                     "aarch64-unknown-linux-gnu/release/rusterisk",
-                    &binary,
-                )?;
+                    "aarch64-unknown-linux-gnu/release/rusterisk-cli",
+                ] {
+                    project::write(&std::path::PathBuf::from(state), path, &binary)?;
+                }
             }
             Ok(())
         })?;

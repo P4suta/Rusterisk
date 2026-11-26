@@ -134,7 +134,10 @@ impl<'a> ServerOciContext<'a> {
                 ("LICENSE-APACHE", false),
             ],
         )?;
-        directory(&payload.join("bin"), &[("rusterisk", false)])?;
+        directory(
+            &payload.join("bin"),
+            &[("rusterisk", false), ("rusterisk-cli", false)],
+        )?;
         directory(
             &payload.join("config"),
             &[
@@ -150,13 +153,13 @@ impl<'a> ServerOciContext<'a> {
             &root.join("Dockerfile"),
             self.profile.dockerfile().as_bytes(),
         )?;
-        for (path, bytes) in self.candidate.files() {
-            let path = payload.join(path);
+        for (relative, bytes) in self.candidate.files() {
+            let path = payload.join(relative);
             super::extraction::check_file(&path, bytes)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let expected = if path == payload.join("bin/rusterisk") {
+                let expected = if self.profile.target().is_executable(relative) {
                     0o755
                 } else {
                     0o644

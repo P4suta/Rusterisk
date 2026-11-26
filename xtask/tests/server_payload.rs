@@ -42,9 +42,14 @@ fn server_payload_captures_exact_license_configuration_documentation_and_binary_
 ) -> std::io::Result<()> {
     let mut source = inputs();
     let binary = executable();
-    let capture = ServerPayload::capture(ServerTarget::MacOsArm64, binary.clone(), |path| {
-        read(&source, path)
-    })
+    let mut cli = executable();
+    cli.extend_from_slice(b"CLI");
+    let capture = ServerPayload::capture(
+        ServerTarget::MacOsArm64,
+        binary.clone(),
+        cli.clone(),
+        |path| read(&source, path),
+    )
     .map_err(std::io::Error::other)?;
     source.insert("LICENSE-MIT", b"changed after capture".to_vec());
     assert_eq!(capture.name().version(), "0.1.0");
@@ -53,7 +58,11 @@ fn server_payload_captures_exact_license_configuration_documentation_and_binary_
         "rusterisk-0.1.0-aarch64-apple-darwin.tar.gz"
     );
     let captured: BTreeMap<_, _> = capture.files().collect();
-    assert_eq!(captured.len(), 9);
+    assert_eq!(
+        captured.get("bin/rusterisk-cli").copied(),
+        Some(cli.as_slice())
+    );
+    assert_eq!(captured.len(), 10);
     assert_eq!(
         captured.get("bin/rusterisk").copied(),
         Some(binary.as_slice())
@@ -104,26 +113,37 @@ fn payload_capture_rejects_missing_empty_nontext_and_oversize_inputs_and_wrong_b
                 }
             }
             assert!(
-                ServerPayload::capture(ServerTarget::MacOsArm64, executable(), |path| read(
-                    &source, path
-                ))
+                ServerPayload::capture(
+                    ServerTarget::MacOsArm64,
+                    executable(),
+                    executable(),
+                    |path| read(&source, path)
+                )
                 .is_err(),
                 "{path}"
             );
         }
     }
     for binary in [Vec::new(), b"not an executable".to_vec()] {
+        assert!(ServerPayload::capture(
+            ServerTarget::MacOsArm64,
+            executable(),
+            binary.clone(),
+            |path| read(&original, path)
+        )
+        .is_err());
         assert!(
-            ServerPayload::capture(ServerTarget::MacOsArm64, binary, |path| read(
+            ServerPayload::capture(ServerTarget::MacOsArm64, binary, executable(), |path| read(
                 &original, path
             ))
             .is_err()
         );
     }
-    assert!(
-        ServerPayload::capture(ServerTarget::LinuxArm64, executable(), |path| read(
-            &original, path
-        ))
-        .is_err()
-    );
+    assert!(ServerPayload::capture(
+        ServerTarget::LinuxArm64,
+        executable(),
+        executable(),
+        |path| read(&original, path)
+    )
+    .is_err());
 }

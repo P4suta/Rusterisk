@@ -47,7 +47,7 @@ impl fmt::Display for OciArchiveError {
             Self::Io(_) => "OCI archive input failed",
             Self::Json(_) => "OCI metadata has invalid JSON",
             Self::Path(_) => "OCI archive has an unsafe path",
-            Self::ExpectedFiles => "OCI verification requires the nine bounded candidate files",
+            Self::ExpectedFiles => "OCI verification requires the bounded candidate files",
             Self::Layout => "OCI candidate layout is incomplete or unsupported",
             Self::Entry => "OCI candidate has an unsupported archive entry",
             Self::Duplicate => "OCI candidate has duplicate archive entries",
@@ -167,12 +167,12 @@ fn expected<'a>(
     let required = profile.target().required_files();
     let mut expected = BTreeMap::new();
     for (index, (path, bytes)) in files.enumerate() {
-        let limit = if path == profile.target().binary_path() {
+        let limit = if profile.target().is_executable(path) {
             256 * 1024 * 1024
         } else {
             65_536
         };
-        if index >= 9
+        if index >= required.len()
             || !required.contains(&path)
             || bytes.is_empty()
             || bytes.len() > limit

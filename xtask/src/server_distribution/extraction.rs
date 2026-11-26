@@ -71,7 +71,7 @@ impl ServerCandidate {
                     std::fs::set_permissions(
                         &path,
                         std::fs::Permissions::from_mode(
-                            if relative == self.name().target().binary_path() {
+                            if self.name().target().is_executable(relative) {
                                 0o755
                             } else {
                                 0o644

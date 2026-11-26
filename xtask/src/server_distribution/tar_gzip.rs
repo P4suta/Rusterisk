@@ -17,7 +17,7 @@ pub fn write_server_tar_gzip(payload: &ServerPayload, writer: impl Write) -> io:
         let mut header = tar::Header::new_ustar();
         header.set_path(format!("{}/{path}", payload.name().root()))?;
         header.set_entry_type(tar::EntryType::Regular);
-        header.set_mode(if path == payload.name().target().binary_path() {
+        header.set_mode(if payload.name().target().is_executable(path) {
             0o755
         } else {
             0o644
@@ -53,13 +53,13 @@ pub fn check_server_tar_gzip(payload: &ServerPayload, bytes: &[u8]) -> io::Resul
     let root = ArchiveRoot::new(payload.name().root()).map_err(io::Error::other)?;
     let archive = read_regular_gzip(io::Cursor::new(bytes), &root, ArchiveLimits::SERVER)
         .map_err(io::Error::other)?;
-    if archive.files().len() != 9 {
+    if archive.files().len() != super::SERVER_FILE_COUNT {
         return Err(io::Error::other(
-            "server archive requires nine regular files",
+            "server archive file count differs from the candidate",
         ));
     }
     for ((path, expected), file) in payload.files().zip(archive.files()) {
-        let mode = if path == payload.name().target().binary_path() {
+        let mode = if payload.name().target().is_executable(path) {
             0o755
         } else {
             0o644

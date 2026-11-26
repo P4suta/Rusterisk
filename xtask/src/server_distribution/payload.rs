@@ -69,19 +69,22 @@ fn file(
 
 pub struct ServerPayload {
     name: ServerCandidateName,
-    files: [File; 9],
+    files: [File; super::SERVER_FILE_COUNT],
 }
 
 impl ServerPayload {
     pub fn capture(
         target: ServerTarget,
         binary: Vec<u8>,
+        cli: Vec<u8>,
         mut read: impl FnMut(&str) -> io::Result<Vec<u8>>,
     ) -> Result<Self, PayloadError> {
-        if binary.is_empty() || binary.len() > 256 * 1024 * 1024 {
-            return Err(PayloadError::Input("server executable"));
+        for (path, bytes) in [(target.binary_path(), &binary), (target.cli_path(), &cli)] {
+            if bytes.is_empty() || bytes.len() > 256 * 1024 * 1024 {
+                return Err(PayloadError::Input(path));
+            }
+            check_binary_target_header(target, bytes).map_err(PayloadError::Binary)?;
         }
-        check_binary_target_header(target, &binary).map_err(PayloadError::Binary)?;
         let manifest = input("Cargo.toml", &mut read)?;
         let manifest: toml::Value = toml::from_str(
             std::str::from_utf8(&manifest).map_err(|_| PayloadError::Input("Cargo.toml"))?,
@@ -98,6 +101,10 @@ impl ServerPayload {
             File {
                 path: target.binary_path(),
                 bytes: binary,
+            },
+            File {
+                path: target.cli_path(),
+                bytes: cli,
             },
             File {
                 path: "README.md",

@@ -15,13 +15,18 @@ fn payload() -> io::Result<ServerPayload> {
     binary[88..90].copy_from_slice(&0x20bu16.to_le_bytes());
     binary[104..108].copy_from_slice(&4096u32.to_le_bytes());
     binary[156..158].copy_from_slice(&3u16.to_le_bytes());
-    ServerPayload::capture(ServerTarget::WindowsX86_64, binary, |path| {
-        Ok(if path == "Cargo.toml" {
-            b"[workspace.package]\nversion='0.1.0'\n".to_vec()
-        } else {
-            format!("captured {path}\n").into_bytes()
-        })
-    })
+    ServerPayload::capture(
+        ServerTarget::WindowsX86_64,
+        binary.clone(),
+        binary,
+        |path| {
+            Ok(if path == "Cargo.toml" {
+                b"[workspace.package]\nversion='0.1.0'\n".to_vec()
+            } else {
+                format!("captured {path}\n").into_bytes()
+            })
+        },
+    )
     .map_err(io::Error::other)
 }
 
@@ -189,7 +194,7 @@ fn server_archive_writers_reject_the_other_target_format_before_output() -> io::
     binary[..4].copy_from_slice(&0xfeedfacfu32.to_le_bytes());
     binary[4..8].copy_from_slice(&0x0100000cu32.to_le_bytes());
     binary[12..16].copy_from_slice(&2u32.to_le_bytes());
-    let unix = ServerPayload::capture(ServerTarget::MacOsArm64, binary, |path| {
+    let unix = ServerPayload::capture(ServerTarget::MacOsArm64, binary.clone(), binary, |path| {
         Ok(if path == "Cargo.toml" {
             b"[workspace.package]\nversion='0.1.0'\n".to_vec()
         } else {
@@ -212,7 +217,7 @@ fn windows_server_archives_use_deflate_and_preserve_owned_files_with_fixed_metad
     write_server_zip(&payload, &mut again)?;
     assert_eq!(bytes, again);
     let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).map_err(io::Error::other)?;
-    assert_eq!(archive.len(), 9);
+    assert_eq!(archive.len(), 10);
     let time = zip::DateTime::from_date_and_time(1980, 1, 1, 0, 0, 0).map_err(io::Error::other)?;
     for (index, (path, expected)) in payload.files().enumerate() {
         let mut file = archive.by_index(index).map_err(io::Error::other)?;
@@ -227,11 +232,13 @@ fn windows_server_archives_use_deflate_and_preserve_owned_files_with_fixed_metad
         assert_eq!(file.last_modified(), Some(time));
         assert_eq!(
             file.unix_mode().map(|mode| mode & 0o7777),
-            Some(if path == "bin/rusterisk.exe" {
-                0o755
-            } else {
-                0o644
-            })
+            Some(
+                if matches!(path, "bin/rusterisk.exe" | "bin/rusterisk-cli.exe") {
+                    0o755
+                } else {
+                    0o644
+                }
+            )
         );
         let mut found = Vec::new();
         file.read_to_end(&mut found)?;

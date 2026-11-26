@@ -40,18 +40,19 @@ fn server_candidates_bind_archive_checksum_source_and_executable_bytes(
                     .find(|(name, _)| *name == "CARGO_TARGET_DIR")
                     .and_then(|(_, value)| value)
                     .ok_or(ProcessError::InvalidOutput)?;
-                write(
-                    &PathBuf::from(target),
+                for path in [
                     "aarch64-apple-darwin/release/rusterisk",
-                    &binary(),
-                )?;
+                    "aarch64-apple-darwin/release/rusterisk-cli",
+                ] {
+                    write(&PathBuf::from(target), path, &binary())?;
+                }
             }
             Ok(())
         })?;
         let candidate = ServerCandidate::read(&directory, ServerTarget::MacOsArm64)?;
         assert_eq!(candidate.name().file_name(), capture.name().file_name());
         assert_eq!(candidate.source_digest(), capture.source_digest());
-        assert_eq!(candidate.files().count(), 9);
+        assert_eq!(candidate.files().count(), 10);
         assert!(candidate
             .files()
             .any(|(path, bytes)| path == "bin/rusterisk" && bytes == binary()));
@@ -137,11 +138,12 @@ fn windows_candidates_check_zip_contents_even_when_the_supplied_checksum_matches
                 binary[88..90].copy_from_slice(&0x20bu16.to_le_bytes());
                 binary[104..108].copy_from_slice(&4096u32.to_le_bytes());
                 binary[156..158].copy_from_slice(&3u16.to_le_bytes());
-                write(
-                    &PathBuf::from(target),
+                for path in [
                     "x86_64-pc-windows-msvc/release/rusterisk.exe",
-                    &binary,
-                )?;
+                    "x86_64-pc-windows-msvc/release/rusterisk-cli.exe",
+                ] {
+                    write(&PathBuf::from(target), path, &binary)?;
+                }
             }
             Ok(())
         })?;
