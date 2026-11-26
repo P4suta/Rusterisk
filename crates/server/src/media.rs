@@ -697,7 +697,7 @@ struct Delivery<'a> {
     recordings: &'a mut Recordings,
     mixer: &'a mut Mixer<CallKey>,
     probes: &'a mut BTreeMap<CallKey, probe::Challenge>,
-    notices: &'a mpsc::Sender<MediaNotice>,
+    notices: &'a NoticeSender,
     ports: &'a mut BTreeMap<CallKey, Port>,
     dropped: &'a mut u64,
 }
