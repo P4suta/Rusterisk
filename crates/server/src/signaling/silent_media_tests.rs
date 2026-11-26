@@ -89,14 +89,18 @@ impl Silent {
         let credentials = Credentials::new("app".into(), "test-password".into())?;
         self.requests
             .spawn(async move { requester.execute(credentials, None, action).await });
-        let effect = self
-            .signaling
-            .effects
-            .recv()
-            .await
-            .ok_or(ControlError::Capacity)?;
+        let effect = self.signaling.next_effect_for_test().await?;
         self.turn(effect.clone()).await?;
         Ok(effect)
+    }
+
+    // Requests an action and serves the call decisions until its answer arrives.
+    async fn request(&mut self, action: Action) -> Result<crate::Outcome, ControlError> {
+        let controller = self.controller.clone();
+        let credentials = Credentials::new("app".into(), "test-password".into())?;
+        self.signaling
+            .control_until(controller.execute(credentials, None, action))
+            .await?
     }
 
     async fn turn(&mut self, effect: Effect) -> Result<(), ControlError> {
@@ -164,10 +168,9 @@ async fn silent(
                     .await
                     .map_err(failure)?
                     .select("default");
-                let (controller, runner, effects) = Controller::new(config.clone(), 2);
-                let runner = tokio::spawn(runner.run());
+                let (controller, runner, _effects) = Controller::new(config.clone(), 2);
                 let (port, media, notices) = MediaHub::new(2);
-                let bound = Signaling::bind(config, controller.clone(), effects, port, notices)
+                let bound = Signaling::bind(config, controller.clone(), runner, port, notices)
                     .await
                     .map(|signaling| signaling.with_storage(storage));
                 let result = match bound {
@@ -199,14 +202,7 @@ async fn silent(
                     Err(error) => Err(error),
                 };
                 controller.shutdown();
-                combine(
-                    result,
-                    tokio::time::timeout(Duration::from_secs(3), runner)
-                        .await
-                        .map_err(failure)
-                        .and_then(|joined| joined.map_err(failure))
-                        .and_then(|served| served),
-                )
+                result
             }
             .await;
             combine(result, worker.close().await.map_err(failure))
@@ -236,14 +232,7 @@ fn playback() -> Result<Action, ControlError> {
 #[tokio::test]
 async fn a_playback_reservation_leaves_the_turn_free() -> Result<(), ControlError> {
     silent(async |fixture: &mut Silent| {
-        fixture
-            .controller
-            .execute(
-                Credentials::new("app".into(), "test-password".into())?,
-                None,
-                bridge()?,
-            )
-            .await?;
+        fixture.request(bridge()?).await?;
         fixture.apply(playback()?).await?;
         fixture.registers().await
     })
@@ -254,14 +243,7 @@ async fn a_playback_reservation_leaves_the_turn_free() -> Result<(), ControlErro
 async fn a_recording_reservation_with_its_prompt_leaves_the_turn_free() -> Result<(), ControlError>
 {
     silent(async |fixture: &mut Silent| {
-        fixture
-            .controller
-            .execute(
-                Credentials::new("app".into(), "test-password".into())?,
-                None,
-                bridge()?,
-            )
-            .await?;
+        fixture.request(bridge()?).await?;
         fixture
             .apply(Action::RecordBridge {
                 bridge: id("held")?,
@@ -280,14 +262,7 @@ async fn a_recording_reservation_with_its_prompt_leaves_the_turn_free() -> Resul
 #[tokio::test]
 async fn a_stop_after_a_reservation_stays_behind_it_in_the_queue() -> Result<(), ControlError> {
     silent(async |fixture: &mut Silent| {
-        fixture
-            .controller
-            .execute(
-                Credentials::new("app".into(), "test-password".into())?,
-                None,
-                bridge()?,
-            )
-            .await?;
+        fixture.request(bridge()?).await?;
         let Effect::PlayMedia { token, .. } = fixture.apply(playback()?).await? else {
             return Err(ControlError::Invalid("Expected the playback effect"));
         };
@@ -443,17 +418,18 @@ async fn a_refused_digit_command_reports_its_finish() -> Result<(), ControlError
 async fn a_full_command_queue_fails_one_digit_delivery_and_keeps_signaling_running(
 ) -> Result<(), ControlError> {
     silent(async |fixture: &mut Silent| {
+        let controller = fixture.controller.clone();
         let _subscription = fixture
-            .controller
-            .subscribe(
+            .signaling
+            .control_until(controller.subscribe(
                 Credentials::new("app".into(), "test-password".into())?,
                 None,
                 "app".into(),
-            )
-            .await?;
+            ))
+            .await??;
         let key = fixture
-            .controller
-            .incoming(IncomingCall {
+            .signaling
+            .control_until(controller.incoming(IncomingCall {
                 id: id("digits")?,
                 endpoint: "phone".into(),
                 caller: "100".into(),
@@ -463,8 +439,8 @@ async fn a_full_command_queue_fails_one_digit_delivery_and_keeps_signaling_runni
                     application: "app".into(),
                     arguments: Vec::new(),
                 },
-            })
-            .await?;
+            }))
+            .await??;
         fixture.signaling.calls.insert(
             key.clone(),
             Active {
@@ -505,13 +481,14 @@ async fn dialed(
     fixture: &mut Silent,
 ) -> Result<(CallKey, crate::Subscription, SipEvent), ControlError> {
     let credentials = Credentials::new("app".into(), "test-password".into())?;
+    let controller = fixture.controller.clone();
     let subscription = fixture
-        .controller
-        .subscribe(credentials.clone(), None, "app".into())
-        .await?;
+        .signaling
+        .control_until(controller.subscribe(credentials.clone(), None, "app".into()))
+        .await??;
     fixture
-        .controller
-        .execute(
+        .signaling
+        .control_until(controller.execute(
             credentials,
             None,
             Action::Originate {
@@ -522,15 +499,9 @@ async fn dialed(
                 caller: "100".into(),
                 timeout: 30,
             },
-        )
-        .await?;
-    let Effect::Start { key, .. } = fixture
-        .signaling
-        .effects
-        .recv()
-        .await
-        .ok_or(ControlError::Capacity)?
-    else {
+        ))
+        .await??;
+    let Effect::Start { key, .. } = fixture.signaling.next_effect_for_test().await? else {
         return Err(ControlError::Invalid("Expected the start effect"));
     };
     let sockets = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
@@ -582,8 +553,8 @@ async fn a_recording_stop_waits_with_its_channel_reservation() -> Result<(), Con
     silent(async |fixture: &mut Silent| {
         let (key, _subscription, answered) = dialed(fixture).await?;
         fixture
-            .controller
-            .signal(crate::Signal::Milestone {
+            .signaling
+            .notify(crate::Signal::Milestone {
                 key: key.clone(),
                 milestone: crate::Milestone::Answered,
             })
@@ -954,6 +925,46 @@ async fn a_release_for_a_waiting_call_follows_its_answer() -> Result<(), Control
         .await
         .map_err(failure)?;
         answered
+    })
+    .await
+}
+
+impl Silent {
+    // Serves the composed task until a control request finishes within the time an unrelated response allows.
+    async fn answers(&mut self, action: Action) -> Result<crate::Outcome, ControlError> {
+        let controller = self.controller.clone();
+        let credentials = Credentials::new("app".into(), "test-password".into())?;
+        let (stop, mut stopped) = watch::channel(false);
+        let clock = self.signaling.controller.clock();
+        let mut serving = std::pin::pin!(self.signaling.serve(&mut stopped, clock));
+        let answered =
+            tokio::time::timeout(UNRELATED, controller.execute(credentials, None, action));
+        let result = tokio::select! {
+            result = answered => result.map_err(|_| ControlError::Invalid("The request waited for the media task"))?,
+            result = &mut serving => {
+                return combine(Err(ControlError::Invalid("Signaling stopped before the answer")), result).map(|()| crate::Outcome::empty());
+            }
+        };
+        stop.send_replace(true);
+        let served = serving.await;
+        match (result, served) {
+            (Ok(outcome), Ok(())) => Ok(outcome),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_control_request_finishes_while_an_attachment_waits_for_a_silent_media_task(
+) -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (key, _subscription, answered) = dialed(fixture).await?;
+        fixture.receive(answered, 0).await?;
+        assert!(fixture.signaling.waits(&key));
+        let created = fixture.answers(bridge()?).await?;
+        assert!((200..300).contains(&created.status));
+        assert!(fixture.signaling.waits(&key));
+        Ok(())
     })
     .await
 }

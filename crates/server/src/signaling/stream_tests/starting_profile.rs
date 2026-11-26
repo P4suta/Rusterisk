@@ -35,7 +35,6 @@ fn require(condition: bool, message: &'static str) -> Result<(), ControlError> {
 
 struct Fixture {
     signaling: Signaling,
-    runner: JoinHandle<Result<(), ControlError>>,
     hub: JoinHandle<Result<(), rusterisk_media::MediaError>>,
     subscription: Option<Subscription>,
     peer: UdpSocket,
@@ -68,9 +67,9 @@ impl Fixture {
             .first_mut()
             .ok_or(ControlError::Capacity)?
             .dtmf = Dtmf::Info;
-        let (controller, runner, effects) = Controller::new(config.clone(), 4);
+        let (controller, runner, _effects) = Controller::new(config.clone(), 4);
         let (port, hub, notices) = MediaHub::new(4);
-        let signaling = Signaling::bind(config, controller.clone(), effects, port, notices).await?;
+        let signaling = Signaling::bind(config, controller.clone(), runner, port, notices).await?;
         let local = signaling.network.local_addr(0)?;
         let addresses = [
             local,
@@ -84,7 +83,6 @@ impl Fixture {
         ];
         Ok(Self {
             signaling,
-            runner: tokio::spawn(runner.run()),
             hub: tokio::spawn(hub.run(controller.shutdown_signal())),
             subscription: None,
             peer,
@@ -98,15 +96,18 @@ impl Fixture {
     }
 
     async fn subscribe(&mut self) -> Result<(), ControlError> {
+        let controller = self.signaling.controller.clone();
         self.subscription = Some(
             tokio::time::timeout(
                 Duration::from_secs(2),
-                self.signaling
-                    .controller
-                    .subscribe(credentials()?, None, "calls".into()),
+                self.signaling.control_until(controller.subscribe(
+                    credentials()?,
+                    None,
+                    "calls".into(),
+                )),
             )
             .await
-            .map_err(failure)??,
+            .map_err(failure)???,
         );
         Ok(())
     }
@@ -317,7 +318,6 @@ impl Fixture {
             primary,
             joined(tokio::spawn(self.signaling.run(stopped))).await,
         );
-        result = combine(result, joined(self.runner).await);
         result = combine(result, joined(self.hub).await);
         drop((
             self.subscription,

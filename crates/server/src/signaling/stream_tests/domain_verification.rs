@@ -31,10 +31,9 @@ async fn initial_tls_invites_authenticate_uri_only_domain_certificates() -> Resu
     let target = format!("sip:phone@localhost:{}", address.port());
     let mut config = configuration("tls", &files)?;
     config.aors[0].contact = Some(target.clone());
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
-    let runner = tokio::spawn(runner.run());
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let result: Result<(), ControlError> = async {
@@ -72,7 +71,6 @@ async fn initial_tls_invites_authenticate_uri_only_domain_certificates() -> Resu
     }
     .await;
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     result

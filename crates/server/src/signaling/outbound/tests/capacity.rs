@@ -1,5 +1,5 @@
 use super::{failure, Config, ControlError, Controller, MediaHub, Signaling};
-use crate::{CallKey, Runner};
+use crate::CallKey;
 use rsipstack::sip::{
     headers::{
         auth::{Algorithm, AuthQop},
@@ -13,21 +13,16 @@ use std::num::NonZeroU64;
 
 struct Fixture {
     signaling: Signaling,
-    runner: Runner,
     hub: MediaHub,
 }
 
 impl Fixture {
     async fn new() -> Result<Self, ControlError> {
         let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test\n", "[stream]\ntype=transport\nprotocol=tcp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=password\n[static]\ntype=aor\ncontact=sip:phone@127.0.0.1:5070\n[phone]\ntype=endpoint\ntransport=stream\nauth=auth\naors=static\nallow=ulaw\n", "", "").map_err(failure)?;
-        let (controller, runner, effects) = Controller::new(config.clone(), 64);
+        let (controller, runner, _effects) = Controller::new(config.clone(), 64);
         let (media, hub, notices) = MediaHub::new(64);
-        let signaling = Signaling::bind(config, controller, effects, media, notices).await?;
-        Ok(Self {
-            signaling,
-            runner,
-            hub,
-        })
+        let signaling = Signaling::bind(config, controller, runner, media, notices).await?;
+        Ok(Self { signaling, hub })
     }
 
     async fn finish(mut self) -> Result<(), ControlError> {
@@ -43,7 +38,7 @@ impl Fixture {
             cleanup = crate::signaling::cleanup::combine(cleanup, result);
         }
         cleanup = crate::signaling::cleanup::combine(cleanup, self.signaling.network.close().await);
-        drop((self.runner, self.hub));
+        drop(self.hub);
         crate::signaling::cleanup::combine(primary, cleanup)
     }
 }
@@ -85,9 +80,9 @@ async fn native_shutdown_drains_every_failed_job_and_recovers_known_setup_slots(
 
 async fn registered_fixture() -> Result<Fixture, ControlError> {
     let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=password\n[registered]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=registered\nallow=ulaw\n", "", "").map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 64);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 64);
     let (media, hub, notices) = MediaHub::new(64);
-    let mut signaling = Signaling::bind(config, controller, effects, media, notices).await?;
+    let mut signaling = Signaling::bind(config, controller, runner, media, notices).await?;
     let local = signaling.network.local_addr(0)?;
     let peer = "127.0.0.2:5070".parse().map_err(failure)?;
     let uri = Uri::try_from(format!("sip:{local}")).map_err(failure)?;
@@ -144,11 +139,7 @@ async fn registered_fixture() -> Result<Fixture, ControlError> {
             "Registration did not establish the call route",
         ));
     }
-    Ok(Fixture {
-        signaling,
-        runner,
-        hub,
-    })
+    Ok(Fixture { signaling, hub })
 }
 
 fn key(id: &str, generation: u64) -> Result<CallKey, ControlError> {

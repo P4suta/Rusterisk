@@ -346,9 +346,9 @@ async fn a_service_unavailable_response_advances_to_the_next_resolved_registrar(
     registration.expiration = 11;
     registration.retry_interval = 60;
     registration.max_retries = 0;
-    let (controller, _runner, effects) = Controller::new(settings.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(settings.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let mut signaling = Signaling::bind(settings, controller, effects, media, notices).await?;
+    let mut signaling = Signaling::bind(settings, controller, runner, media, notices).await?;
     signaling.resolver = Ok(resolver);
     signaling
         .resolution_cache

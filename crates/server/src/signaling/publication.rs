@@ -232,8 +232,4 @@ impl Signaling {
             http: self.config.http.bind,
         }
     }
-
-    pub(crate) fn websocket_profiles(&self) -> websocket::PreparedClients {
-        self.websocket_clients.clone()
-    }
 }

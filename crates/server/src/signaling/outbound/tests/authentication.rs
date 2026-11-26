@@ -27,9 +27,9 @@ async fn actual_udp_origination_retries_with_the_shared_integrity_challenge(
     let peer = UdpSocket::bind("127.0.0.1:0").await.map_err(failure)?;
     let target = peer.local_addr().map_err(failure)?;
     let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test\n", &format!("[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[incoming]\ntype=auth\nusername=incoming\npassword=sample\n[remote]\ntype=auth\nusername=remote-user\npassword=remote-password\nrealm=provider.example\n[phone]\ntype=aor\ncontact=sip:phone@{target}\n[phone]\ntype=endpoint\ntransport=udp\nauth=incoming\noutbound_auth=remote\naors=phone\nallow=ulaw\n"), "", "").map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 8);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 8);
     let (media, hub, notices) = MediaHub::new(8);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let local = signaling
         .listeners()?
         .first()
@@ -37,7 +37,6 @@ async fn actual_udp_origination_retries_with_the_shared_integrity_challenge(
         .1;
     let signal_stop = controller.shutdown_signal();
     let media_stop = controller.shutdown_signal();
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(media_stop));
     let signaling = tokio::spawn(signaling.run(signal_stop));
     let result: Result<(), ControlError> = async {
@@ -68,7 +67,6 @@ async fn actual_udp_origination_retries_with_the_shared_integrity_challenge(
         Ok(())
     }.await;
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     result?;

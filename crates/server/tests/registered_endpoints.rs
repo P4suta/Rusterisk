@@ -124,9 +124,9 @@ async fn wait_state(controller: &Controller, expected: EndpointState) -> Result<
 async fn actual_registration_removal_and_expiration_reach_endpoint_queries(
 ) -> Result<(), ControlError> {
     let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[phone]\ntype=aor\nmax_contacts=2\nminimum_expiration=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=phone\nallow=ulaw\n", "", "").map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let target = signaling
         .listeners()?
         .first()
@@ -134,7 +134,6 @@ async fn actual_registration_removal_and_expiration_reach_endpoint_queries(
         .1;
     let signal_stop = controller.shutdown_signal();
     let media_stop = controller.shutdown_signal();
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(media_stop));
     let signaling = tokio::spawn(signaling.run(signal_stop));
     let result = async {
@@ -156,7 +155,6 @@ async fn actual_registration_removal_and_expiration_reach_endpoint_queries(
     }
     .await;
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     result

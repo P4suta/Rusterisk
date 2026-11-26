@@ -312,12 +312,10 @@ async fn native_tcp_and_tls_reuse_registered_flows_for_calls_and_release_disconn
             String::new()
         };
         let config = configuration(protocol, &files)?;
-        let (controller, runner, effects) = Controller::new(config.clone(), 4);
+        let (controller, runner, _effects) = Controller::new(config.clone(), 4);
         let (media, hub, notices) = MediaHub::new(4);
-        let signaling =
-            Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+        let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
         let address = signaling.listeners()?[0].1;
-        let runner = tokio::spawn(runner.run());
         let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
         let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
         let result = async {
@@ -338,7 +336,6 @@ async fn native_tcp_and_tls_reuse_registered_flows_for_calls_and_release_disconn
         }
         .await;
         controller.shutdown();
-        runner.await.map_err(failure)??;
         signaling.await.map_err(failure)??;
         hub.await.map_err(failure)?.map_err(failure)?;
         let listener = tokio::net::TcpListener::bind(address)
@@ -439,11 +436,9 @@ async fn initial_outbound_connections_use_tcp_or_verified_tls_and_fail_closed(
             format!("sip:phone@{peer_address}")
         };
         config.aors[0].contact = Some(target.clone());
-        let (controller, runner, effects) = Controller::new(config.clone(), 4);
+        let (controller, runner, _effects) = Controller::new(config.clone(), 4);
         let (media, hub, notices) = MediaHub::new(4);
-        let signaling =
-            Signaling::bind(config, controller.clone(), effects, media, notices).await?;
-        let runner = tokio::spawn(runner.run());
+        let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
         let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
         let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
         let result = async {
@@ -500,7 +495,6 @@ async fn initial_outbound_connections_use_tcp_or_verified_tls_and_fail_closed(
         }
         .await;
         controller.shutdown();
-        runner.await.map_err(failure)??;
         signaling.await.map_err(failure)??;
         hub.await.map_err(failure)?.map_err(failure)?;
         result?;

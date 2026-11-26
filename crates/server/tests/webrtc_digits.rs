@@ -78,12 +78,11 @@ async fn exchange(clock: Clock) -> Result<Observed, MediaError> {
         UdpSocket::bind("127.0.0.1:0").await.map_err(failure)?,
     ];
     let config = peer::configuration(&peers, clock)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices)
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices)
         .await
         .map_err(failure)?;
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let mut applications = Vec::with_capacity(2);
@@ -267,7 +266,6 @@ async fn exchange(clock: Clock) -> Result<Observed, MediaError> {
         }
     }
     controller.shutdown();
-    cleanup = peer::combine(cleanup, peer::finish(runner).await);
     cleanup = peer::combine(cleanup, peer::finish(signaling).await);
     cleanup = peer::combine(cleanup, peer::finish(hub).await);
     match (result, cleanup) {

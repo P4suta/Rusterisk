@@ -48,9 +48,9 @@ async fn run(scenario: Scenario) -> Result<(), ControlError> {
     registration.server_uri = RegistrarUri::parse(Protocol::Udp, uri).map_err(failure)?;
     registration.retry_interval = 1;
     registration.max_retries = 0;
-    let (controller, _runner, effects) = Controller::new(settings.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(settings.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let mut signaling = Signaling::bind(settings, controller, effects, media, notices).await?;
+    let mut signaling = Signaling::bind(settings, controller, runner, media, notices).await?;
     signaling.resolver = Ok(resolver);
     signaling
         .resolution_cache

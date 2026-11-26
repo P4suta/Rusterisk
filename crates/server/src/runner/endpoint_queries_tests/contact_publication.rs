@@ -10,8 +10,7 @@ use rusterisk_api::{Endpoint, EndpointState};
 use rusterisk_config::Config;
 use rusterisk_core::ContactPresence;
 use rusterisk_sip::{Output, SipEvent};
-use std::{task::Poll, time::Duration};
-use tokio::sync::mpsc::error::TryRecvError;
+use std::time::Duration;
 
 #[derive(Clone, Copy)]
 enum Observation {
@@ -38,32 +37,6 @@ fn combine(
     }
 }
 
-fn requests(runner: &mut Runner) -> Result<(), ControlError> {
-    for _ in 0..128 {
-        match runner.requests.try_recv() {
-            Ok(request) => runner.request(request, 0)?,
-            Err(TryRecvError::Empty) => return Ok(()),
-            Err(TryRecvError::Disconnected) => {
-                return Err(ControlError::Invalid("Endpoint request scope ended"))
-            }
-        }
-    }
-    Err(ControlError::Capacity)
-}
-
-fn signals(runner: &mut Runner) -> Result<(), ControlError> {
-    for _ in 0..128 {
-        match runner.signals.try_recv() {
-            Ok(signal) => runner.apply_signal(signal, 0)?,
-            Err(TryRecvError::Empty) => return Ok(()),
-            Err(TryRecvError::Disconnected) => {
-                return Err(ControlError::Invalid("Endpoint signal scope ended"))
-            }
-        }
-    }
-    Err(ControlError::Capacity)
-}
-
 fn state(runner: &mut Runner) -> Result<EndpointState, ControlError> {
     let outcome = runner.control.apply(
         Action::GetEndpoint {
@@ -82,7 +55,6 @@ fn state(runner: &mut Runner) -> Result<EndpointState, ControlError> {
 struct Fixture {
     config: Config,
     controller: Controller,
-    runner: Runner,
     signaling: Signaling,
     publication: Option<PublicationPort<NativePreparedSignaling>>,
 }
@@ -96,18 +68,14 @@ impl Fixture {
             .ok_or(ControlError::Capacity)?
             .bind
             .set_port(0);
-        let (controller, runner, effects) = Controller::new(config.clone(), 4);
+        let (controller, runner, _effects) = Controller::new(config.clone(), 4);
         let (media, _hub, notices) = MediaHub::new(4);
         let signaling =
-            Signaling::bind(config.clone(), controller.clone(), effects, media, notices).await?;
-        let mut runner = runner
-            .with_native_profiles(signaling.native_profiles())?
-            .with_websocket_profiles(signaling.websocket_profiles())?;
-        requests(&mut runner)?;
+            Signaling::bind(config.clone(), controller.clone(), runner, media, notices).await?;
         let (signaling, publication) = match observation {
             Observation::Scoped => {
                 let (port, receiver) = PublicationPort::channel();
-                let generation = runner.configuration_generation();
+                let generation = signaling.configuration_generation();
                 (signaling.with_publication(receiver, generation), Some(port))
             }
             Observation::Legacy => (signaling, None),
@@ -115,14 +83,18 @@ impl Fixture {
         Ok(Self {
             config,
             controller,
-            runner,
             signaling,
             publication,
         })
     }
 
+    fn runner(&mut self) -> &mut Runner {
+        self.signaling.control_for_test()
+    }
+
+    // The composed task applies the observation inside the same call.
     async fn output(&mut self, presence: ContactPresence) -> Result<(), ControlError> {
-        let key = self.runner.control.endpoint_key("phone")?;
+        let key = self.runner().control.endpoint_key("phone")?;
         let output = Output {
             datagrams: Vec::new(),
             events: [SipEvent::EndpointContact {
@@ -133,23 +105,7 @@ impl Fixture {
             .into_iter()
             .collect(),
         };
-        let output = self.signaling.output_for_test(0, output, 0);
-        tokio::pin!(output);
-        for _ in 0..128 {
-            match futures_util::poll!(output.as_mut()) {
-                Poll::Ready(result) => return result,
-                Poll::Pending => {
-                    let request = self
-                        .runner
-                        .requests
-                        .recv()
-                        .await
-                        .ok_or(ControlError::Invalid("Endpoint request scope ended"))?;
-                    self.runner.request(request, 0)?;
-                }
-            }
-        }
-        Err(ControlError::Capacity)
+        self.signaling.output_for_test(0, output, 0).await
     }
 
     fn finish(
@@ -161,12 +117,11 @@ impl Fixture {
         self.controller.shutdown();
         let Self {
             signaling,
-            runner,
             controller,
             publication,
             ..
         } = self;
-        drop((runner, controller, publication));
+        drop((controller, publication));
         async move {
             let cleanup = tokio::time::timeout(Duration::from_secs(3), signaling.run(stopped))
                 .await
@@ -199,31 +154,28 @@ async fn exercise(observation: Observation, presence: ContactPresence) -> Result
             ContactPresence::Present => ContactPresence::Absent,
             ContactPresence::Absent => ContactPresence::Present,
         };
-        let key = fixture.runner.control.endpoint_key("phone")?;
-        fixture.runner.apply_signal(
+        let key = fixture.runner().control.endpoint_key("phone")?;
+        fixture.runner().apply_signal(
             Signal::EndpointContact {
                 key,
                 presence: previous,
             },
             0,
         )?;
-        let candidate = fixture.runner.control.prepare_configuration(
-            fixture.config.clone(),
-            CallSettings::configured(&fixture.config),
-        )?;
+        let config = fixture.config.clone();
+        let settings = CallSettings::configured(&config);
+        let candidate = fixture
+            .runner()
+            .control
+            .prepare_configuration(config, settings)?;
         fixture.output(presence).await?;
-        match observation {
-            Observation::Scoped => {}
-            Observation::Legacy => signals(&mut fixture.runner)?,
-        }
-        fixture.runner.control.commit_configuration(candidate)?;
-        signals(&mut fixture.runner)?;
+        fixture.runner().control.commit_configuration(candidate)?;
         let expected = match presence {
             ContactPresence::Present => EndpointState::Online,
             ContactPresence::Absent => EndpointState::Offline,
         };
         require(
-            state(&mut fixture.runner)? == expected,
+            state(fixture.runner())? == expected,
             "Prepared commit lost a completed native contact observation",
         )
     })

@@ -361,9 +361,9 @@ async fn native_on(operation: Exercise, layout: CallListeners) -> Result<(), Con
     }
     config.rtp.start = 0;
     config.rtp.end = 0;
-    let (controller, runner, effects) = Controller::new(config.clone(), 8);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 8);
     let (media, hub, notices) = MediaHub::new(8);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let listeners = signaling.listeners()?;
     let target = listeners
         .iter()
@@ -387,7 +387,6 @@ async fn native_on(operation: Exercise, layout: CallListeners) -> Result<(), Con
     for peer in [&first, &bob, &second, &charlie] {
         addresses.extend(peer.addresses()?);
     }
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let (media_ports, mut server_ports) = mpsc::channel(4);
@@ -425,12 +424,8 @@ async fn native_on(operation: Exercise, layout: CallListeners) -> Result<(), Con
     }
     controller.shutdown();
     let limit = Duration::from_secs(2);
-    let (runner, signaling, hub) = tokio::join!(
-        finish(runner, limit),
-        finish(signaling, limit),
-        finish(hub, limit),
-    );
-    for cleanup in [runner, signaling, hub] {
+    let (signaling, hub) = tokio::join!(finish(signaling, limit), finish(hub, limit),);
+    for cleanup in [signaling, hub] {
         result = combine(result, cleanup);
     }
     for _ in 0..4 {

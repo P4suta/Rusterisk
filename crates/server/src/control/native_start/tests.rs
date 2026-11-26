@@ -103,25 +103,6 @@ fn startup_identity_is_shared_with_the_settings_domain() -> Result<(), ControlEr
 }
 
 #[test]
-fn a_foreign_capsule_cannot_replace_a_claimed_local_profile() -> Result<(), ControlError> {
-    let mut control = configured()?;
-    let mut foreign = configured()?;
-    let (key, generation) = start(&mut control)?;
-    let (foreign_key, foreign_generation) = start(&mut foreign)?;
-    let local = control.take_native_profile(&key, generation)?;
-    let other = foreign.take_native_profile(&foreign_key, foreign_generation)?;
-    assert!(control
-        .restore_native_profile(&key, generation, other)
-        .is_err());
-    control.restore_native_profile(&key, generation, local)?;
-    assert!(control
-        .take_native_profile(&key, generation)?
-        .into_profile()
-        .is_ok());
-    Ok(())
-}
-
-#[test]
 fn dial_children_and_their_parent_release_the_starting_settings_together(
 ) -> Result<(), ControlError> {
     let mut control = configured()?;

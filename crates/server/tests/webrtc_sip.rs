@@ -144,9 +144,9 @@ async fn bridge_calls(
     .map_err(failure)?;
     config.rtp.start = 0;
     config.rtp.end = 0;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices)
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices)
         .await
         .map_err(failure)?;
     let target = signaling
@@ -155,7 +155,6 @@ async fn bridge_calls(
         .first()
         .ok_or(MediaError::InvalidRoute)?
         .1;
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let mut applications = Vec::with_capacity(2);
@@ -250,14 +249,12 @@ async fn bridge_calls(
         }
     }
     controller.shutdown();
-    let runner = runner.await.map_err(failure);
     let signaling = signaling.await.map_err(failure);
     let hub = hub.await.map_err(failure);
     result??;
     if let Some(error) = peer_failure {
         return Err(error);
     }
-    runner?.map_err(failure)?;
     signaling?.map_err(failure)?;
     hub??;
     Ok(())

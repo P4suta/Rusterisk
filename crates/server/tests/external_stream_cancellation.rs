@@ -24,9 +24,9 @@ async fn pending_stream_admission_keeps_registration_progress_and_cancellation_c
         .await
         .map_err(failure)?;
     let config = Config::parse("[general]\nbindaddr=127.0.0.1\n", "[app]\ntype=user\npassword=test-password\n", "[udp]\ntype=transport\nprotocol=udp\nbind=127.0.0.1:0\n[auth]\ntype=auth\nusername=phone\npassword=test-password\n[phone]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=phone\nallow=ulaw\n", "", "").map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let signaling_address = signaling
         .listeners()?
         .first()
@@ -41,7 +41,6 @@ async fn pending_stream_admission_keeps_registration_progress_and_cancellation_c
         }
         hub.run(media_stop).await.map_err(failure)
     });
-    let runner = tokio::spawn(runner.run());
     let signaling = tokio::spawn(signaling.run(signal_stop));
     let result = async {
         let _subscription = controller.subscribe(credentials()?, None, "calls".into()).await?;
@@ -80,7 +79,6 @@ async fn pending_stream_admission_keeps_registration_progress_and_cancellation_c
     }.await;
     resume.send_replace(true);
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)??;
     result

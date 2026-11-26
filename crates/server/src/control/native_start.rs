@@ -164,23 +164,6 @@ impl Control {
             .ok_or(ControlError::Conflict("Native profile already claimed"))
     }
 
-    pub(crate) fn restore_native_profile(
-        &mut self,
-        key: &CallKey,
-        generation: SettingsGeneration,
-        capsule: NativeStartCapsule,
-    ) -> Result<(), ControlError> {
-        if !capsule.matches(key, generation) {
-            return Err(ControlError::Conflict("Native capsule generation changed"));
-        }
-        let entry = self.native_entry(key, generation)?;
-        if entry.pending_native.is_some() {
-            return Err(ControlError::Conflict("Native profile already pending"));
-        }
-        entry.pending_native = Some(capsule);
-        Ok(())
-    }
-
     pub(super) fn release_settings(
         &mut self,
         references: impl IntoIterator<Item = SettingsReference>,

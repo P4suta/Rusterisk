@@ -97,10 +97,9 @@ async fn finish(
 async fn retirement_keeps_the_trying_route_when_peer_lookup_points_at_another_generation(
 ) -> Result<(), ControlError> {
     let config = configuration()?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let mut signaling =
-        Signaling::bind(config.clone(), controller, effects, media, notices).await?;
+    let mut signaling = Signaling::bind(config.clone(), controller, runner, media, notices).await?;
     let primary = async {
         let mut original = signaling.network.reserve(0, PEER)?;
         let captured = signaling.network.capture(0, PEER)?;

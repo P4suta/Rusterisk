@@ -73,9 +73,9 @@ async fn a_primary_retry_deadline_survives_backup_success_failure_and_fresh_reso
     registration.expiration = 11;
     registration.retry_interval = 1;
     registration.max_retries = 1;
-    let (controller, _runner, effects) = Controller::new(settings.clone(), 16);
+    let (controller, runner, _effects) = Controller::new(settings.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
-    let mut signaling = Signaling::bind(settings, controller, effects, media, notices).await?;
+    let mut signaling = Signaling::bind(settings, controller, runner, media, notices).await?;
     signaling.resolver = Ok(dns::resolver(&dns_socket)?);
     let local = signaling
         .listeners()?

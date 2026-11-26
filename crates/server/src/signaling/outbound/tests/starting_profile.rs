@@ -202,7 +202,6 @@ impl Peer {
 
 struct Fixture {
     signaling: Signaling,
-    runner: JoinHandle<Result<(), ControlError>>,
     hub: MediaHub,
     subscription: Option<crate::Subscription>,
     protocol: Protocol,
@@ -212,13 +211,12 @@ struct Fixture {
 
 impl Fixture {
     async fn new(config: Config, protocol: Protocol) -> Result<Self, ControlError> {
-        let (controller, runner, effects) = Controller::new(config.clone(), 8);
+        let (controller, runner, _effects) = Controller::new(config.clone(), 8);
         let (media, hub, notices) = MediaHub::new(8);
-        let signaling = Signaling::bind(config, controller, effects, media, notices).await?;
+        let signaling = Signaling::bind(config, controller, runner, media, notices).await?;
         let local = signaling.network.local_addr(0)?;
         Ok(Self {
             signaling,
-            runner: tokio::spawn(runner.run()),
             hub,
             subscription: None,
             protocol,
@@ -228,18 +226,18 @@ impl Fixture {
     }
 
     async fn accepted(&mut self) -> Result<(Effect, CallKey), ControlError> {
-        let controller = &self.signaling.controller;
+        let controller = self.signaling.controller.clone();
         self.subscription = Some(
-            controller
-                .subscribe(
+            self.signaling
+                .control_until(controller.subscribe(
                     Credentials::new("app".into(), "test".into())?,
                     None,
                     "app".into(),
-                )
-                .await?,
+                ))
+                .await??,
         );
-        controller
-            .execute(
+        self.signaling
+            .control_until(controller.execute(
                 Credentials::new("app".into(), "test".into())?,
                 None,
                 Action::Originate {
@@ -250,12 +248,14 @@ impl Fixture {
                     caller: "displayed-caller".into(),
                     timeout: 30,
                 },
-            )
-            .await?;
-        let effect = tokio::time::timeout(Duration::from_secs(2), self.signaling.effects.recv())
-            .await
-            .map_err(failure)?
-            .ok_or(ControlError::Capacity)?;
+            ))
+            .await??;
+        let effect = tokio::time::timeout(
+            Duration::from_secs(2),
+            self.signaling.next_effect_for_test(),
+        )
+        .await
+        .map_err(failure)??;
         let Effect::Start { key, .. } = &effect else {
             return Err(ControlError::Invalid("Expected accepted native start"));
         };
@@ -264,16 +264,14 @@ impl Fixture {
     }
 
     async fn resolved(&mut self) -> Result<(), ControlError> {
-        let completed = tokio::time::timeout(
-            Duration::from_secs(3),
-            self.signaling.native_jobs.join_next(),
-        )
-        .await
-        .map_err(failure)?
-        .ok_or(ControlError::Invalid(
-            "Accepted starting profile did not retain owned resolution",
-        ))?
-        .map_err(failure)?;
+        let completed =
+            tokio::time::timeout(Duration::from_secs(3), self.signaling.native_job_for_test())
+                .await
+                .map_err(failure)??
+                .ok_or(ControlError::Invalid(
+                    "Accepted starting profile did not retain owned resolution",
+                ))?
+                .map_err(failure)?;
         self.signaling.native_completed(completed, 1).await
     }
 
@@ -333,7 +331,6 @@ impl Fixture {
             primary,
             joined(tokio::spawn(self.signaling.run(stop))).await,
         );
-        result = cleanup::combine(result, joined(self.runner).await);
         drop(self.subscription);
         drop(self.hub);
         let rebound = match self.protocol {
@@ -560,11 +557,15 @@ async fn a_dns_wait_keeps_the_accepted_profile_when_current_native_settings_are_
         let (effect, key) = fixture.accepted().await?;
         fixture.signaling.effect(effect, 0).await?;
         let mut bytes = [0; 2048];
-        let (size, client) =
-            tokio::time::timeout(Duration::from_secs(2), dns.recv_from(&mut bytes))
-                .await
-                .map_err(failure)?
-                .map_err(failure)?;
+        let (size, client) = fixture
+            .signaling
+            .control_until(tokio::time::timeout(
+                Duration::from_secs(2),
+                dns.recv_from(&mut bytes),
+            ))
+            .await?
+            .map_err(failure)?
+            .map_err(failure)?;
         let request = Message::from_vec(&bytes[..size]).map_err(failure)?;
         let query = request
             .queries

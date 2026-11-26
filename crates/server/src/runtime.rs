@@ -3,7 +3,7 @@ use crate::listener::HttpServer;
 use crate::media::MediaHub;
 use crate::signaling::Signaling;
 use crate::storage::StorageWorker;
-use crate::{ControlError, Controller, Runner};
+use crate::{ControlError, Controller};
 use rusterisk_config::Config;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,6 @@ mod reload_failure_tests;
 
 #[derive(Clone, Copy, Debug)]
 enum Component {
-    Control,
     Signaling,
     Media,
     Http,
@@ -26,7 +25,6 @@ enum Component {
 
 pub struct Server {
     controller: Controller,
-    control: Runner,
     signaling: Signaling,
     media: MediaHub,
     http: HttpServer,
@@ -140,7 +138,7 @@ impl Server {
         let (storage_port, storage) = StorageWorker::start(data_directory)
             .await
             .map_err(failure)?;
-        let (controller, control, effects) = Controller::new(config.clone(), capacity);
+        let (controller, control, _effects) = Controller::new(config.clone(), capacity);
         let (media_port, media, notices) = MediaHub::new(capacity);
         let music = match storage_port
             .prepare_music(config.music_on_hold.clone())
@@ -170,7 +168,7 @@ impl Server {
         let signaling = match Signaling::bind(
             config.clone(),
             controller.clone(),
-            effects,
+            control,
             media_port.clone(),
             notices,
         )
@@ -182,44 +180,24 @@ impl Server {
                 return Err(close_startup(storage, primary).await);
             }
         };
-        let control = match control.with_native_profiles(signaling.native_profiles()) {
-            Ok(control) => control,
-            Err(primary) => {
-                drop(signaling);
-                drop(http);
-                return Err(close_startup(storage, primary).await);
-            }
-        };
-        let control = match control.with_websocket_profiles(signaling.websocket_profiles()) {
-            Ok(control) => control,
-            Err(primary) => {
-                drop(signaling);
-                drop(http);
-                return Err(close_startup(storage, primary).await);
-            }
-        };
-        let generation = control.configuration_generation();
+        let generation = signaling.configuration_generation();
         let (http_publication, http_receiver) = crate::reload::PublicationPort::channel();
         let (native_publication, native_receiver) = crate::reload::PublicationPort::channel();
-        let control = match directory {
+        let preparation = signaling.native_preparation();
+        let signaling = signaling.with_control(|control| match directory {
             Some(directory) => control.with_reload_source(
-                signaling.native_preparation(),
+                preparation,
                 http_publication,
                 native_publication,
                 Some(directory),
             ),
-            None => control.with_reload(
-                signaling.native_preparation(),
-                http_publication,
-                native_publication,
-            ),
-        };
+            None => control.with_reload(preparation, http_publication, native_publication),
+        });
         let signaling = signaling.with_publication(native_receiver, generation);
         let http = http.with_signaling(signaling.websocket_port());
         let http = http.with_publication(http_receiver, generation);
         Ok(Self {
             controller,
-            control,
             signaling,
             media,
             http,
@@ -242,7 +220,6 @@ impl Server {
     pub async fn run(self) -> Result<(), ControlError> {
         let Self {
             controller,
-            control,
             signaling,
             media,
             http,
@@ -251,15 +228,14 @@ impl Server {
             shutdown_checkpoint,
         } = self;
         let mut tasks = JoinSet::new();
-        tasks.spawn(async move { (Component::Control, control.run().await) });
         let stopped = controller.shutdown_signal();
-        let signaling_task =
-            tasks.spawn(async move { (Component::Signaling, signaling.run(stopped).await) });
+        tasks.spawn(async move { (Component::Signaling, signaling.run(stopped).await) });
         let stopped = controller.shutdown_signal();
         let media_task = tasks
             .spawn(async move { (Component::Media, media.run(stopped).await.map_err(failure)) });
         let http_task = tasks.spawn(async move { (Component::Http, http.run().await) });
-        let cancellable = [signaling_task, media_task, http_task];
+        // The composed task owns the call decisions, which keep a started settings loader until it ends.
+        let cancellable = [media_task, http_task];
         let mut primary = match tasks.join_next().await {
             Some(Ok((component, Ok(())))) => {
                 if controller.is_stopping() {

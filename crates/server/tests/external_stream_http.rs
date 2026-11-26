@@ -124,12 +124,11 @@ async fn stream_http_requests_admit_the_transport_and_keep_reference_validation_
         "",
     )
     .map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let media_stop = controller.shutdown_signal();
     let signal_stop = controller.shutdown_signal();
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(media_stop));
     let signaling = tokio::spawn(signaling.run(signal_stop));
     let mut peer = None;
@@ -157,13 +156,12 @@ async fn stream_http_requests_admit_the_transport_and_keep_reference_validation_
         Ok(Observations { admitted, channel, identity, rejected, error })
     }.await;
     controller.shutdown();
-    let (runner, signaling, hub, drained) = tokio::join!(
-        finish("runner", runner),
+    let (signaling, hub, drained) = tokio::join!(
         finish("signaling", signaling),
         finish("media", hub),
         termination(peer.as_mut()),
     );
-    let cleanup = combine(combine(combine(runner, signaling), hub), drained);
+    let cleanup = combine(combine(signaling, hub), drained);
     let observed = match (result, cleanup) {
         (Ok(observed), Ok(())) => observed,
         (Err(error), Ok(())) | (Ok(_), Err(error)) => return Err(error),

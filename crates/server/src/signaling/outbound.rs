@@ -378,7 +378,11 @@ impl Signaling {
         }
     }
 
-    async fn native_failed(&self, key: CallKey, error: ControlError) -> Result<(), ControlError> {
+    async fn native_failed(
+        &mut self,
+        key: CallKey,
+        error: ControlError,
+    ) -> Result<(), ControlError> {
         tracing::debug!(channel = %key.id.as_str(), generation = key.generation, %error, "outgoing signaling setup failed");
         self.notify(Signal::Terminated { key, cause: 21 }).await
     }

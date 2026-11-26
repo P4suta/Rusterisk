@@ -518,12 +518,11 @@ async fn control_requests_establish_two_sip_calls_and_bridge_received_audio(
         "",
     )
     .map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let signal_stop = controller.shutdown_signal();
     let media_stop = controller.shutdown_signal();
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(media_stop));
     let signaling = tokio::spawn(signaling.run(signal_stop));
     let result = async {
@@ -646,7 +645,6 @@ async fn control_requests_establish_two_sip_calls_and_bridge_received_audio(
     }
     .await;
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     result
@@ -826,11 +824,10 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
         .find(|endpoint| endpoint.name == "bob")
         .ok_or(ControlError::Capacity)?
         .dtmf = Dtmf::Info;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let target = signaling.listeners()?[0].1;
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let result = async {
@@ -942,7 +939,6 @@ async fn authenticated_incoming_calls_enter_stasis_before_answer_and_exchange_au
         Ok(())
     }.await;
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     result
@@ -964,11 +960,10 @@ async fn disconnecting_the_stasis_app_rejects_an_unanswered_invitation() -> Resu
         "[internal]\nexten => 100,1,Stasis(app)\n",
     )
     .map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let target = signaling.listeners()?[0].1;
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let result = async {
@@ -998,7 +993,6 @@ async fn disconnecting_the_stasis_app_rejects_an_unanswered_invitation() -> Resu
     }
     .await;
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     result
@@ -1020,11 +1014,10 @@ async fn dialplan_answer_wait_and_hangup_finish_a_real_invitation_without_stasis
         "[internal]\nexten => 100,1,Answer()\nsame => n,Wait(1)\nsame => n,Hangup()\n",
     )
     .map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let target = signaling.listeners()?[0].1;
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let result = async {
@@ -1047,7 +1040,6 @@ async fn dialplan_answer_wait_and_hangup_finish_a_real_invitation_without_stasis
         Ok(())
     }.await;
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     result
@@ -1108,13 +1100,12 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
         "[internal]\nexten => 100,1,Playback(missing)\nsame => n,Playback(welcome)\nsame => n,Stasis(app,${PLAYBACKSTATUS})\n",
     )
     .map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices)
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices)
         .await?
         .with_storage(storage);
     let target = signaling.listeners()?[0].1;
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let result = async {
@@ -1269,7 +1260,6 @@ async fn dialplan_and_http_playback_deliver_sound_and_recording_audio_before_com
         Ok(())
     }.await;
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     worker.close().await.map_err(failure)?;
@@ -1326,11 +1316,10 @@ async fn parallel_dial_bridges_received_audio_to_the_first_peer_and_cancels_the_
         "[internal]\nexten => 100,1,Dial(PJSIP/bob&PJSIP/charlie,5)\nsame => n,Hangup()\n",
     )
     .map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let target = signaling.listeners()?[0].1;
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let result = async {
@@ -1366,7 +1355,6 @@ async fn parallel_dial_bridges_received_audio_to_the_first_peer_and_cancels_the_
         Ok(())
     }.await;
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     result

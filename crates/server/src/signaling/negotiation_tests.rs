@@ -26,10 +26,10 @@ async fn direction_answers_wait_for_the_current_transport_and_ignore_cached_retr
         "",
     )
     .map_err(failure)?;
-    let (controller, _runner, effects) = Controller::new(config.clone(), 1);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 1);
     let (media, hub, notices) = MediaHub::new(1);
     let mut signaling =
-        Signaling::bind(config, controller.clone(), effects, media.clone(), notices).await?;
+        Signaling::bind(config, controller.clone(), runner, media.clone(), notices).await?;
     let peer = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
         .await
         .map_err(failure)?;

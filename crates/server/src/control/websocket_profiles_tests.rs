@@ -101,18 +101,16 @@ fn wrong_websocket_keys_preserve_the_pending_start() -> Result<(), ControlError>
 }
 
 #[test]
-fn startup_websocket_binding_is_idempotent_and_cancelled_replies_restore_custody(
-) -> Result<(), ControlError> {
+fn startup_websocket_binding_is_idempotent_and_a_profile_leaves_once() -> Result<(), ControlError> {
     let (mut control, config) = configured()?;
     let current = control.settings.current();
     control.bind_websocket_profiles(PreparedWebSocketProfiles::new(&config.websocket.clients)?)?;
     assert_eq!(control.settings.current(), current);
     let (key, generation) = start(&mut control)?;
-    let capsule = control.take_websocket_profile(&key, generation)?;
-    control.restore_websocket_profile(&key, generation, capsule)?;
     assert!(control
         .take_websocket_profile(&key, generation)?
         .into_profile()
         .is_ok());
+    assert!(control.take_websocket_profile(&key, generation).is_err());
     Ok(())
 }

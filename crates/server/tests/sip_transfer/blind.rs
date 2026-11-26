@@ -54,16 +54,15 @@ async fn native_transfer(departure: Departure) -> Result<ObservedTransfer, Contr
     ).map_err(failure)?;
     config.rtp.start = 0;
     config.rtp.end = 0;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let target = signaling.listeners()?[0].1;
     let mut addresses = Vec::with_capacity(16);
     addresses.push(target);
     for peer in [&alice, &bob, &charlie] {
         addresses.extend(peer.addresses()?);
     }
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let (media_ports, mut server_ports) = mpsc::channel(3);
@@ -77,15 +76,7 @@ async fn native_transfer(departure: Departure) -> Result<ObservedTransfer, Contr
     let mut result = finish(exchange, Duration::from_secs(8)).await;
     controller.shutdown();
     let limit = Duration::from_secs(2);
-    let (runner, signaling, hub) = tokio::join!(
-        finish(runner, limit),
-        finish(signaling, limit),
-        finish(hub, limit)
-    );
-    result = combine(
-        result,
-        runner.map_err(|error| failure(format!("control shutdown: {error}"))),
-    );
+    let (signaling, hub) = tokio::join!(finish(signaling, limit), finish(hub, limit));
     result = combine(
         result,
         signaling.map_err(|error| failure(format!("signaling shutdown: {error}"))),

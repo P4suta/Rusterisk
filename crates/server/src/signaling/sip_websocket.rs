@@ -39,6 +39,12 @@ impl SipWebSocketPort {
         Self { requests }
     }
 
+    // Whether signaling stopped taking upgrades, which it does at the end of its cleanup.
+    #[cfg(test)]
+    pub(super) fn is_closed(&self) -> bool {
+        self.requests.is_closed()
+    }
+
     async fn reserve(
         &self,
         scheme: Scheme,

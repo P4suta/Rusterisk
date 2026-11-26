@@ -1,11 +1,8 @@
 use super::{Controller, Runner};
-use crate::{control::CallSettings, Action, ControlError, Credentials};
+use crate::{control::CallSettings, Action, ControlError};
+use rusterisk_api::{Endpoint, EndpointState};
 use rusterisk_config::Config;
 use rusterisk_core::{ContactPresence, SettingsLifetimes};
-use std::time::Duration;
-
-#[path = "endpoint_queries_tests/shutdown.rs"]
-mod shutdown;
 
 #[path = "endpoint_queries_tests/contact_publication.rs"]
 mod contact_publication;
@@ -25,23 +22,6 @@ fn configuration() -> Result<Config, ControlError> {
     .map_err(failure)
 }
 
-async fn joined(
-    mut task: tokio::task::JoinHandle<Result<(), ControlError>>,
-) -> Result<(), ControlError> {
-    match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
-        Ok(result) => result.map_err(failure)?,
-        Err(primary) => {
-            task.abort();
-            match task.await {
-                Err(error) if error.is_cancelled() => Err(failure(primary)),
-                Err(error) => Err(failure(format!("{primary}; query cleanup failed: {error}"))),
-                Ok(Ok(())) => Err(failure(primary)),
-                Ok(Err(error)) => Err(failure(format!("{primary}; query cleanup failed: {error}"))),
-            }
-        }
-    }
-}
-
 fn replace(runner: &mut Runner) -> Result<(), ControlError> {
     let replacement = configuration()?;
     let settings = CallSettings::configured(&replacement);
@@ -52,54 +32,36 @@ fn replace(runner: &mut Runner) -> Result<(), ControlError> {
     Ok(())
 }
 
-#[tokio::test]
-async fn endpoint_observations_reject_old_and_foreign_settings_before_mutation(
+fn state(runner: &mut Runner) -> Result<EndpointState, ControlError> {
+    let outcome = runner.control.apply(
+        Action::GetEndpoint {
+            technology: "PJSIP".into(),
+            resource: "phone".into(),
+        },
+        "endpoint observation",
+        0,
+    )?;
+    let endpoint: Endpoint = serde_json::from_value(outcome.body.ok_or(ControlError::Capacity)?)?;
+    endpoint
+        .state
+        .ok_or(ControlError::Invalid("Endpoint state missing"))
+}
+
+#[test]
+fn endpoint_observations_reject_old_and_foreign_settings_before_mutation(
 ) -> Result<(), ControlError> {
-    let (controller, mut runner, _effects) = Controller::new(configuration()?, 4);
+    let (_controller, mut runner, _effects) = Controller::new(configuration()?, 4);
     let starting = runner.configuration_generation();
     replace(&mut runner)?;
     let current = runner.configuration_generation();
     let foreign = SettingsLifetimes::new(2).current();
-    let task = tokio::spawn(runner.run());
-    let primary = async {
-        for generation in [starting, foreign] {
-            if controller
-                .observe_endpoint(generation, "phone".into(), ContactPresence::Present)
-                .await
-                .is_ok()
-            {
-                return Err(ControlError::Invalid(
-                    "Endpoint observation accepted stale settings",
-                ));
-            }
-        }
-        let endpoint = controller
-            .execute(
-                Credentials::new("app".into(), "test-password".into())?,
-                None,
-                Action::GetEndpoint {
-                    technology: "PJSIP".into(),
-                    resource: "phone".into(),
-                },
-            )
-            .await?;
-        if endpoint.body.ok_or(ControlError::Capacity)?["state"] != "offline" {
-            return Err(ControlError::Invalid(
-                "Rejected endpoint observations changed availability",
-            ));
-        }
-        controller
-            .observe_endpoint(current, "phone".into(), ContactPresence::Present)
-            .await?;
-        Ok(())
+    for generation in [starting, foreign] {
+        let refused =
+            runner.endpoint_observation(generation, "phone".into(), ContactPresence::Present, 0)?;
+        assert!(refused.is_err());
     }
-    .await;
-    controller.shutdown();
-    match (primary, joined(task).await) {
-        (primary, Ok(())) => primary,
-        (Ok(()), Err(cleanup)) => Err(cleanup),
-        (Err(primary), Err(cleanup)) => Err(failure(format!(
-            "{primary}; query cleanup failed: {cleanup}"
-        ))),
-    }
+    assert_eq!(state(&mut runner)?, EndpointState::Offline);
+    runner.endpoint_observation(current, "phone".into(), ContactPresence::Present, 0)??;
+    assert_eq!(state(&mut runner)?, EndpointState::Online);
+    Ok(())
 }

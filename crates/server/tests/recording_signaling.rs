@@ -44,12 +44,11 @@ async fn recording_jobs_report_file_conflicts_and_finish_active_files_before_shu
         "",
     )
     .map_err(failure)?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices)
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices)
         .await?
         .with_storage(storage.clone());
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let result: Result<(), ControlError> = async {
@@ -70,7 +69,6 @@ async fn recording_jobs_report_file_conflicts_and_finish_active_files_before_shu
         Ok(())
     }.await;
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     worker.close().await.map_err(failure)?;

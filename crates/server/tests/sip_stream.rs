@@ -139,11 +139,10 @@ async fn state(controller: &Controller, expected: EndpointState) -> Result<(), C
 async fn tcp_registration_uses_fragmented_messages_and_disconnect_releases_presence_and_listener(
 ) -> Result<(), ControlError> {
     let config = configuration()?;
-    let (controller, runner, effects) = Controller::new(config.clone(), 4);
+    let (controller, runner, _effects) = Controller::new(config.clone(), 4);
     let (media, hub, notices) = MediaHub::new(4);
-    let signaling = Signaling::bind(config, controller.clone(), effects, media, notices).await?;
+    let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let address = signaling.listeners()?[0].1;
-    let runner = tokio::spawn(runner.run());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let result = async {
@@ -164,7 +163,6 @@ async fn tcp_registration_uses_fragmented_messages_and_disconnect_releases_prese
     }
     .await;
     controller.shutdown();
-    runner.await.map_err(failure)??;
     signaling.await.map_err(failure)??;
     hub.await.map_err(failure)?.map_err(failure)?;
     let listener = tokio::net::TcpListener::bind(address)
