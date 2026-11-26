@@ -91,8 +91,13 @@ impl Signaling {
         } else {
             profile.bind_ip()
         };
-        let sockets =
-            SocketPair::bind(bind, profile.rtp.start, profile.rtp.end).map_err(failure)?;
+        let sockets = SocketPair::bind_for_slot(
+            bind,
+            profile.rtp.start,
+            profile.rtp.end,
+            key.handle().slot(),
+        )
+        .map_err(failure)?;
         let local = sockets.local_addr().map_err(failure)?;
         let advertised = profile.advertised(local);
         let (admission, answer) = match &offered.security {

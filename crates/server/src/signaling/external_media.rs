@@ -163,8 +163,13 @@ impl Signaling {
         route.connect(target.remote()).map_err(failure)?;
         let ip = route.local_addr().map_err(failure)?.ip();
         drop(route);
-        let sockets =
-            SocketPair::bind(ip, self.config.rtp.start, self.config.rtp.end).map_err(failure)?;
+        let sockets = SocketPair::bind_for_slot(
+            ip,
+            self.config.rtp.start,
+            self.config.rtp.end,
+            key.handle().slot(),
+        )
+        .map_err(failure)?;
         let local = sockets.local_addr().map_err(failure)?;
         let format = match target.codec() {
             StaticRtpCodec::Pcmu => AudioFormat::Pcmu,
