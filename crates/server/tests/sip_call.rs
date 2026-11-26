@@ -766,11 +766,18 @@ async fn invite(
 }
 
 async fn final_response(signal: &UdpSocket) -> Result<rsipstack::sip::Response, ControlError> {
+    final_response_matching(signal, |_| Ok(true)).await
+}
+
+async fn final_response_matching(
+    signal: &UdpSocket,
+    matches: impl Fn(&rsipstack::sip::Response) -> Result<bool, ControlError>,
+) -> Result<rsipstack::sip::Response, ControlError> {
     Wait::Ready
         .bounded(async {
             for _ in 0..8 {
                 let response = response(signal).await?;
-                if response.status_code.code() >= 200 {
+                if response.status_code.code() >= 200 && matches(&response)? {
                     return Ok(response);
                 }
             }

@@ -26,14 +26,14 @@ async fn dialog_request(
     answer: &Response,
     method: Method,
     sequence: u32,
-) -> Result<(), ControlError> {
+) -> Result<String, ControlError> {
     let remote = answer
         .contact_header()
         .map_err(failure)?
         .typed()
         .map_err(failure)?
         .uri;
-    let branch = BranchNamespace::random()?.branch(0);
+    let branch = BranchNamespace::random()?.branch(0).to_string();
     let packet = format!("{method} {remote} SIP/2.0\r\nVia: SIP/2.0/UDP {};branch={branch};rport\r\nFrom: {}\r\nTo: {}\r\nCall-ID: {}\r\nCSeq: {sequence} {method}\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
         phone.contact()?, answer.from_header().map_err(failure)?.value(),
         answer.to_header().map_err(failure)?.value(), answer.call_id_header().map_err(failure)?.value());
@@ -42,7 +42,63 @@ async fn dialog_request(
         .send_to(packet.as_bytes(), target)
         .await
         .map_err(failure)?;
+    Ok(branch)
+}
+
+#[tokio::test]
+async fn a_hangup_waits_for_the_matching_final_response() -> Result<(), ControlError> {
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0")
+        .await
+        .map_err(failure)?;
+    let destination = socket.local_addr().map_err(failure)?;
+    let expected = "z9hG4bK-current";
+    for (status, sequence, branch, call_id) in [
+        ("200 OK", "2 INVITE", expected, "call"),
+        ("200 OK", "3 BYE", "z9hG4bK-delayed", "call"),
+        ("200 OK", "4 BYE", expected, "call"),
+        ("200 OK", "3 BYE", expected, "other"),
+        ("180 Ringing", "3 BYE", expected, "call"),
+        ("202 Accepted", "3 BYE", expected, "call"),
+    ] {
+        let reply = format!("SIP/2.0 {status}\r\nVia: SIP/2.0/UDP {destination};branch={branch}\r\nFrom: <sip:a@localhost>;tag=a\r\nTo: <sip:b@localhost>;tag=b\r\nCall-ID: {call_id}\r\nCSeq: {sequence}\r\nContent-Length: 0\r\n\r\n");
+        socket
+            .send_to(reply.as_bytes(), destination)
+            .await
+            .map_err(failure)?;
+    }
+    assert_eq!(
+        bye_response(&socket, "call", 3, expected)
+            .await?
+            .status_code
+            .code(),
+        202
+    );
     Ok(())
+}
+
+async fn bye_response(
+    signal: &tokio::net::UdpSocket,
+    call_id: &str,
+    sequence: u32,
+    branch: &str,
+) -> Result<Response, ControlError> {
+    super::final_response_matching(signal, |response| {
+        let cseq = response
+            .cseq_header()
+            .map_err(failure)?
+            .typed()
+            .map_err(failure)?;
+        let via = response
+            .top_via_header()
+            .map_err(failure)?
+            .typed()
+            .map_err(failure)?;
+        Ok(cseq.method == Method::Bye
+            && cseq.seq == sequence
+            && via.branch().is_some_and(|sent| sent.value() == branch)
+            && response.call_id_header().map_err(failure)?.value() == call_id)
+    })
+    .await
 }
 
 pub(super) async fn call(
@@ -113,9 +169,13 @@ pub(super) async fn call(
         .await
         .map_err(|error| failure(format!("RTP {number}: {error}")))?;
     recover_after_reordered_audio(&mut left, &mut right).await?;
-    dialog_request(caller, target, &answer, Method::Bye, 3).await?;
-    let (reply, ()) = tokio::try_join!(final_response(&caller.signal), finish_bye(&callee.signal))
-        .map_err(|error| failure(format!("BYE {number}: {error}")))?;
+    let branch = dialog_request(caller, target, &answer, Method::Bye, 3).await?;
+    let call_id = answer.call_id_header().map_err(failure)?.value();
+    let (reply, ()) = tokio::try_join!(
+        bye_response(&caller.signal, call_id, 3, &branch),
+        finish_bye(&callee.signal)
+    )
+    .map_err(|error| failure(format!("BYE {number}: {error}")))?;
     if reply.status_code.code() != 200 {
         return Err(ControlError::Invalid(
             "Expected the caller's hangup to succeed",
