@@ -16,7 +16,8 @@ This replaces the two tasks of [Serialize call decisions in a pure core](seriali
 Let one task own the signaling engine and the control decisions, and apply every effect of an input in its turn.
 Both stay separate types that take time as a value.
 The integration budget for one turn is 20 ms.
-In a two-processor container, the median of five trial maxima was 1.2 ms, for one decision that ends 64 calls.
+Each trial reloads the configuration with 64 active calls before one shutdown decision ends them.
+In a two-processor container, the longest turn was 1.249 ms and the median of five trial maxima was 0.851 ms.
 
 ## Alternatives
 
