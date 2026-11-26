@@ -7,17 +7,18 @@ status: accepted
 
 ## Context
 
-The signaling task and the control task exchange effects and signals through bounded queues.
-A handover needs a round trip, and a full queue suspends admission.
-This replaces the two tasks of [Serialize call decisions in a pure core](serialize-call-decisions-in-a-pure-core.md) and sets its open budget.
+The signaling and control tasks exchange effects and signals through bounded queues.
+Each handover takes a round trip, and full queues suspend admission.
+The decision revises [Serialize call decisions in a pure core](serialize-call-decisions-in-a-pure-core.md).
 
 ## Decision
 
-Let one task own the signaling engine and the control decisions, and apply every effect of an input in its turn.
-Both stay separate types that take time as a value.
-The integration budget for one turn is 20 ms.
-Each trial reloads the configuration with 64 active calls before one shutdown decision ends them.
-In a two-processor container, the longest turn was 1.249 ms and the median of five trial maxima was 0.851 ms.
+One task owns the signaling engine and control decisions and applies each input's effects in one turn.
+Both types take time as an input.
+Choose one task when the median of five trial maxima is below the 20 ms budget.
+Each trial reloads with 64 active calls.
+During another reload, one decision ends all 64 calls between validation and publication.
+In a two-processor container, the longest turn took 2.378 ms and the median of the five maxima was 1.674 ms.
 
 ## Alternatives
 
@@ -31,5 +32,5 @@ Reconsider when a measured turn reaches 20 ms.
 
 ## Confirmation
 
-The fast gate must run one trial of the measurement.
-The composed task must pass the call compatibility tests.
+The fast gate runs one trial.
+The task must pass the call compatibility tests.
