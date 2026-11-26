@@ -1110,6 +1110,42 @@ async fn a_full_owed_queue_uses_the_slot_the_media_task_just_freed() -> Result<(
     .await
 }
 
+// An external connection fails while the task owes orders, so that it never passes them.
+#[tokio::test]
+async fn an_external_connection_never_passes_owed_orders() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let filled = fixture.fill()?;
+        let owed = CallKey {
+            id: id("owed")?,
+            generation: 1,
+        };
+        fixture.turn(Effect::Release { key: owed }).await?;
+        assert_eq!(fixture.queued(), Some(Queued::Release));
+        let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+        let target =
+            ExternalRtpTarget::new(peer.local_addr().map_err(failure)?, StaticRtpCodec::Pcmu)
+                .map_err(failure)?;
+        fixture
+            .turn(Effect::ConnectExternalRtp {
+                key: CallKey {
+                    id: id("external")?,
+                    generation: 9,
+                },
+                target,
+            })
+            .await?;
+        let mut taken = fixture.drains(filled).await?;
+        assert_eq!(taken.last(), Some(&Queued::Release));
+        taken.extend(std::iter::from_fn(|| fixture.queued()));
+        assert!(
+            !taken.contains(&Queued::Other),
+            "an attachment passed: {taken:?}"
+        );
+        Ok(())
+    })
+    .await
+}
+
 // A media task that takes no orders stops signaling once the owed queue holds a second queue.
 #[tokio::test]
 async fn owed_orders_beyond_one_more_queue_stop_signaling() -> Result<(), ControlError> {

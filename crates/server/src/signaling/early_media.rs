@@ -49,6 +49,9 @@ impl Signaling {
         &mut self,
         key: &CallKey,
     ) -> Result<(PreparedAnswer, AttachmentRelease), ControlError> {
+        if !self.owed.is_empty() {
+            return Err(ControlError::Capacity);
+        }
         let (admission, answer, offered) = self.incoming_media(key)?;
         let serial = self.next_serial();
         let release = admission
