@@ -254,7 +254,7 @@ impl Candidates {
             let mut entry = oci_fixture::Entry::file(&format!("opt/rusterisk/{path}"), bytes);
             entry.uid = 65532;
             entry.gid = 65532;
-            entry.mode = if path == self.target.binary_path() {
+            entry.mode = if self.target.is_executable(path) {
                 0o755
             } else {
                 0o644
@@ -311,16 +311,16 @@ pub(super) fn using(
                     .find(|(name, _)| *name == "CARGO_TARGET_DIR")
                     .and_then(|(_, value)| value)
                     .ok_or(crate::process::ProcessError::InvalidOutput)?;
-                let executable = target
-                    .binary_path()
-                    .rsplit('/')
-                    .next()
-                    .ok_or(crate::process::ProcessError::InvalidOutput)?;
-                captured_fixture::write(
-                    Path::new(state),
-                    &format!("{}/release/{executable}", target.triple()),
-                    &binary(target),
-                )?;
+                for path in [target.binary_path(), target.cli_path()] {
+                    let executable = path
+                        .strip_prefix("bin/")
+                        .ok_or(crate::process::ProcessError::InvalidOutput)?;
+                    captured_fixture::write(
+                        Path::new(state),
+                        &format!("{}/release/{executable}", target.triple()),
+                        &binary(target),
+                    )?;
+                }
             }
             Ok(())
         })?;
