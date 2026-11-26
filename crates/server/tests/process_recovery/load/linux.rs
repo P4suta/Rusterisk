@@ -359,6 +359,14 @@ pub(super) async fn compare() -> Result<(), ControlError> {
         {
             let baseline = samples.map(|row| row[0][index]);
             let candidate = samples.map(|row| row[1][index]);
+            if cfg!(target_arch = "aarch64")
+                && matches!(*label, "rss_kib" | "released_kib")
+                && !super::within_arm64_rss(count, candidate)
+            {
+                regressions.push(format!(
+                    "{count} legs {label} exceeded the ARM64 memory budget: {candidate:?}"
+                ));
+            }
             if !super::within_baseline(baseline, candidate) {
                 regressions.push(format!(
                     "{count} legs {label}: baseline {baseline:?}, candidate {candidate:?}"
