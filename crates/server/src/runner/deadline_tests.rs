@@ -358,6 +358,39 @@ async fn an_external_admission_reports_its_deadline_and_falls_due_when_its_chann
 }
 
 #[tokio::test]
+async fn a_stopped_control_service_is_distinct_from_full_admission_queues(
+) -> Result<(), ControlError> {
+    let (controller, runner, _effects) = Controller::new(configuration()?, 1);
+    let mut reservations = Vec::new();
+    while let Ok(slot) = controller.requests.clone().try_reserve_owned() {
+        reservations.push(slot);
+    }
+    assert!(matches!(
+        controller.server_info(None).await,
+        Err(ControlError::Capacity)
+    ));
+    drop(reservations);
+    drop(runner);
+    let expected = "Service stopped";
+    let error = controller
+        .server_info(None)
+        .await
+        .err()
+        .ok_or(ControlError::Invalid("Expected closed service"))?;
+    assert_eq!(error.to_string(), expected);
+    assert_eq!(error.status(), 503);
+    let error = controller
+        .authorize(credentials()?, None, true)
+        .await
+        .err()
+        .ok_or(ControlError::Invalid(
+            "Expected closed authorization service",
+        ))?;
+    assert_eq!(error.to_string(), expected);
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_recording_admission_needs_a_wake_at_its_deadline_and_none_after_it(
 ) -> Result<(), ControlError> {
     let (_controller, mut runner, _effects) = Controller::new(configuration()?, 4);

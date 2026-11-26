@@ -247,14 +247,14 @@ impl Controller {
             .answered(Duration::from_secs(5), receiver)
             .await
             .map_err(|_| ControlError::Capacity)?
-            .map_err(|_| ControlError::Adapter("Control task stopped".into()))?
+            .map_err(|_| ControlError::ServiceClosed)?
     }
 
     pub async fn incoming(&self, call: IncomingCall) -> Result<CallKey, ControlError> {
         let (reply, receiver) = oneshot::channel();
         self.requests
             .try_send(Request::Incoming { call, reply })
-            .map_err(|_| ControlError::Capacity)?;
+            .map_err(ControlError::queue)?;
         self.receive(receiver).await
     }
 
@@ -326,7 +326,7 @@ impl Controller {
                 only: only.map(str::to_owned),
                 reply,
             })
-            .map_err(|_| ControlError::Capacity)?;
+            .map_err(ControlError::queue)?;
         self.receive(receiver).await
     }
 
@@ -339,9 +339,7 @@ impl Controller {
     }
 
     pub async fn signal(&self, signal: Signal) -> Result<(), ControlError> {
-        self.signals
-            .try_send(signal)
-            .map_err(|_| ControlError::Capacity)
+        self.signals.try_send(signal).map_err(ControlError::queue)
     }
 
     pub async fn authorize(
@@ -358,7 +356,7 @@ impl Controller {
                 read_only,
                 reply,
             })
-            .map_err(|_| ControlError::Capacity)?;
+            .map_err(ControlError::queue)?;
         self.receive(receiver).await
     }
 
@@ -388,7 +386,7 @@ impl Controller {
                 variables,
                 reply,
             })
-            .map_err(|_| ControlError::Capacity)?;
+            .map_err(ControlError::queue)?;
         self.receive(receiver).await
     }
 
@@ -433,7 +431,7 @@ impl Controller {
                 kind,
                 reply,
             })
-            .map_err(|_| ControlError::Capacity)?;
+            .map_err(ControlError::queue)?;
         let token = self.receive(response).await?;
         Ok(Subscription {
             application,

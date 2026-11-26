@@ -50,7 +50,7 @@ impl Controller {
                 channel,
                 reply,
             })
-            .map_err(|_| ControlError::Capacity)?;
+            .map_err(ControlError::queue)?;
         self.receive(receiver).await
     }
 }

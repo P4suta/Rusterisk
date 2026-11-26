@@ -59,6 +59,7 @@ pub enum ControlError {
     InvalidState(&'static str),
     Unprocessable(&'static str),
     Capacity,
+    ServiceClosed,
     Unauthorized,
     Forbidden,
     Unsupported,
@@ -68,6 +69,13 @@ pub enum ControlError {
 }
 
 impl ControlError {
+    pub(crate) fn queue<T>(error: tokio::sync::mpsc::error::TrySendError<T>) -> Self {
+        match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => Self::Capacity,
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => Self::ServiceClosed,
+        }
+    }
+
     pub const fn status(&self) -> u16 {
         match self {
             Self::Invalid(_) => 400,
@@ -75,7 +83,7 @@ impl ControlError {
             Self::Conflict(_) | Self::BridgeExists(_) => 409,
             Self::InvalidState(_) => 412,
             Self::Unprocessable(_) | Self::Configuration(_) => 422,
-            Self::Capacity => 503,
+            Self::Capacity | Self::ServiceClosed => 503,
             Self::Unauthorized => 401,
             Self::Forbidden => 403,
             Self::Unsupported => 501,
@@ -97,6 +105,7 @@ impl std::fmt::Display for ControlError {
             }
             Self::BridgeExists(id) => write!(f, "Bridge with id '{id}' already exists"),
             Self::Capacity => f.write_str("Resource capacity exceeded"),
+            Self::ServiceClosed => f.write_str("Service stopped"),
             Self::Unauthorized => f.write_str("Authentication required"),
             Self::Forbidden => f.write_str("Operation forbidden"),
             Self::Unsupported => f.write_str("Operation not supported"),

@@ -707,6 +707,7 @@ impl Signaling {
                                 | ControlError::BridgeExists(_)
                                 | ControlError::Unauthorized
                                 | ControlError::Forbidden
+                                | ControlError::ServiceClosed
                                 | ControlError::Configuration(_)
                                 | ControlError::Encoding(_)
                                 | ControlError::Adapter(_) => RejectReason::Rejected,

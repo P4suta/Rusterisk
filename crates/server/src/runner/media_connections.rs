@@ -37,7 +37,7 @@ impl Controller {
                 lifetime,
                 reply,
             })
-            .map_err(|_| ControlError::Capacity)?;
+            .map_err(ControlError::queue)?;
         let (key, options) = self.receive(response).await?;
         Ok(ClaimedMediaConnection {
             key,

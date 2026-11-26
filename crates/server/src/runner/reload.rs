@@ -316,7 +316,7 @@ impl Controller {
             .answered(RELOAD_BUDGET, receiver)
             .await
             .map_err(failure)?
-            .map_err(|_| ControlError::Adapter("Settings coordinator stopped".into()))?
+            .map_err(|_| ControlError::ServiceClosed)?
     }
 
     pub async fn reload(&self, replacement: Config) -> Result<(), ControlError> {
@@ -326,7 +326,7 @@ impl Controller {
         let (reply, receiver) = oneshot::channel();
         self.reload_requests
             .try_send(ReloadRequest { replacement, reply })
-            .map_err(|_| ControlError::Capacity)?;
+            .map_err(ControlError::queue)?;
         self.reload_response(receiver).await
     }
 
@@ -345,7 +345,7 @@ impl Controller {
                 origin,
                 reply,
             })
-            .map_err(|_| ControlError::Capacity)?;
+            .map_err(ControlError::queue)?;
         self.reload_response(receiver).await
     }
 }
