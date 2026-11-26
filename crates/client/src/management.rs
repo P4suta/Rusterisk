@@ -160,10 +160,23 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let address = listener.local_addr()?;
         let route = api::ManagementOperation::Capabilities.metadata().path;
-        let app = Router::new().route(route, get(|headers: axum::http::HeaderMap| async move {
-            assert!(headers.contains_key(axum::http::header::AUTHORIZATION));
-            Json(serde_json::json!({"reference": api::REFERENCE_VERSION, "operations": [], "verified_call_paths": [{"path":"registered_extensions","signaling":"SIP over UDP","media":"RTP","codec":"PCMU","conditions":["Two registered phones"]}]}))
-        }));
+        let app = Router::new().route(
+            route,
+            get(|headers: axum::http::HeaderMap| async move {
+                assert!(headers.contains_key(axum::http::header::AUTHORIZATION));
+                Json(api::capabilities::Capabilities {
+                    reference: api::REFERENCE_VERSION.into(),
+                    operations: Vec::new(),
+                    verified_call_paths: Vec::from([api::capabilities::VerifiedCallPath {
+                        path: "registered_extensions".into(),
+                        signaling: "SIP over UDP".into(),
+                        media: "RTP".into(),
+                        codec: "PCMU".into(),
+                        conditions: Vec::from(["Two registered phones".into()]),
+                    }]),
+                })
+            }),
+        );
         let task = tokio::spawn(axum::serve(listener, app).into_future());
         let result = Client::new(&format!("http://{address}"), "reader", "password")?
             .capabilities()
