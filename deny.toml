@@ -18,7 +18,7 @@ confidence-threshold = 0.95
 
 [[licenses.exceptions]]
 name = "notify"
-version = "=8.2.0"
+version = "=8.2.2"
 allow = ["CC0-1.0"]
 
 [[licenses.exceptions]]
