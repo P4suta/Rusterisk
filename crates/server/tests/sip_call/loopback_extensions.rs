@@ -336,21 +336,21 @@ async fn run(
             }
             Err(error) => return Err(error),
         };
-        let config = Config::load(&settings).map_err(failure)?;
         let management = server.address();
-        let observed = Wait::Scenario
-            .bounded(async {
-                exercise(phones, &config, target, management, path).await?;
+        let mut loaded = None;
+        result = server
+            .supervise(async {
+                let config = loaded.insert(Config::load(&settings).map_err(failure)?);
+                exercise(phones, config, target, management, path).await?;
                 if let Some(cli) = cli.as_deref() {
-                    check_cli(cli, &config, management).await?;
+                    check_cli(cli, config, management).await?;
                 }
                 Ok(())
             })
-            .await
-            .map_err(failure)
-            .and_then(|result| result);
-        result = combine(observed, server.terminate().await.map(|_| ()));
-        result = combine(result, super::normal_logs::files(root.path(), &config));
+            .await;
+        if let Some(config) = loaded {
+            result = combine(result, super::normal_logs::files(root.path(), &config));
+        }
         break;
     }
     combine(result, root.close().map_err(failure))

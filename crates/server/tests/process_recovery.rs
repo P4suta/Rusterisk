@@ -310,7 +310,7 @@ async fn recovery(previous: Option<&Path>, next: &Path) -> Result<(), ControlErr
                 })
                 .await
                 .map_err(failure)??;
-            let status = first.terminate().await?;
+            let status = first.terminate()?;
             if status.success() {
                 return Err(ControlError::Adapter(
                     "server exited without forced termination".into(),
@@ -332,7 +332,7 @@ async fn recovery(previous: Option<&Path>, next: &Path) -> Result<(), ControlErr
         .await
         .map_err(failure)
         .and_then(|result| result);
-    let first_cleanup = first.terminate().await.map(|_| ());
+    let first_cleanup = first.terminate().map(|_| ());
     combine(first_operation, first_cleanup)?;
     let audio = std::fs::read(data.join("recordings/complete.wav")).map_err(failure)?;
     if previous.is_some() {
@@ -380,89 +380,125 @@ async fn verify_install(
         root.join("restarted.log"),
     )
     .await?;
-    let recovered = async {
-        if history(&data, "completed-call")? != "completed"
-            || history(&data, "interrupted-call")? != "interrupted"
-        {
-            return Err(ControlError::Adapter(
-                "server restart did not recover call history".into(),
-            ));
-        }
-        let channels: Vec<Channel> = request(
-            client,
-            restarted.address(),
-            reqwest::Method::GET,
-            "channels",
-            &[],
-        )
-        .await?
-        .json()
-        .await
-        .map_err(failure)?;
-        if !channels.is_empty() {
-            return Err(ControlError::Adapter("restart restored live calls".into()));
-        }
-        let recordings: Vec<StoredRecording> = request(
-            client,
-            restarted.address(),
-            reqwest::Method::GET,
-            "recordings/stored",
-            &[],
-        )
-        .await?
-        .json()
-        .await
-        .map_err(failure)?;
-        if recordings.len() != 2
-            || !["complete", "interrupted"].iter().all(|name| {
-                recordings
-                    .iter()
-                    .any(|recording| recording.name.as_str() == *name)
-            })
-        {
-            return Err(ControlError::Adapter(
-                "restart did not publish recovered recordings".into(),
-            ));
-        }
-        for name in ["complete", "interrupted"] {
-            verify_signal(&data.join(format!("recordings/{name}.wav")))?;
-        }
-        let downloaded = request(
-            client,
-            restarted.address(),
-            reqwest::Method::GET,
-            "recordings/stored/complete/file",
-            &[],
-        )
-        .await?
-        .bytes()
-        .await
-        .map_err(failure)?;
-        assert_eq!(downloaded.as_ref(), audio);
-        let route: serde_json::Value = client
-            .get(format!(
-                "http://{}/rusterisk/diagnostics/extensions/installed/707",
-                restarted.address()
-            ))
-            .basic_auth("app", Some("test-password"))
-            .send()
-            .await
-            .map_err(failure)?
-            .error_for_status()
-            .map_err(failure)?
+    let address = restarted.address();
+    restarted
+        .supervise(async {
+            if history(&data, "completed-call")? != "completed"
+                || history(&data, "interrupted-call")? != "interrupted"
+            {
+                return Err(ControlError::Adapter(
+                    "server restart did not recover call history".into(),
+                ));
+            }
+            let channels: Vec<Channel> =
+                request(client, address, reqwest::Method::GET, "channels", &[])
+                    .await?
+                    .json()
+                    .await
+                    .map_err(failure)?;
+            if !channels.is_empty() {
+                return Err(ControlError::Adapter("restart restored live calls".into()));
+            }
+            let recordings: Vec<StoredRecording> = request(
+                client,
+                address,
+                reqwest::Method::GET,
+                "recordings/stored",
+                &[],
+            )
+            .await?
             .json()
             .await
             .map_err(failure)?;
-        assert_eq!(route["application"], "recovery");
-        if data.join("recordings/interrupted.partial").exists() {
-            return Err(ControlError::Adapter(
-                "partial recording survived recovery".into(),
-            ));
+            if recordings.len() != 2
+                || !["complete", "interrupted"].iter().all(|name| {
+                    recordings
+                        .iter()
+                        .any(|recording| recording.name.as_str() == *name)
+                })
+            {
+                return Err(ControlError::Adapter(
+                    "restart did not publish recovered recordings".into(),
+                ));
+            }
+            for name in ["complete", "interrupted"] {
+                verify_signal(&data.join(format!("recordings/{name}.wav")))?;
+            }
+            let downloaded = request(
+                client,
+                address,
+                reqwest::Method::GET,
+                "recordings/stored/complete/file",
+                &[],
+            )
+            .await?
+            .bytes()
+            .await
+            .map_err(failure)?;
+            if downloaded.as_ref() != audio {
+                return Err(ControlError::Invalid(
+                    "The recovered recording differs from the saved audio",
+                ));
+            }
+            let route: serde_json::Value = client
+                .get(format!(
+                    "http://{address}/rusterisk/diagnostics/extensions/installed/707"
+                ))
+                .basic_auth("app", Some("test-password"))
+                .send()
+                .await
+                .map_err(failure)?
+                .error_for_status()
+                .map_err(failure)?
+                .json()
+                .await
+                .map_err(failure)?;
+            if route["application"] != "recovery" {
+                return Err(ControlError::Invalid(
+                    "The restored extension uses a different application",
+                ));
+            }
+            if data.join("recordings/interrupted.partial").exists() {
+                return Err(ControlError::Adapter(
+                    "partial recording survived recovery".into(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
+async fn a_failed_or_panicking_scenario_reaps_its_server() -> Result<(), ControlError> {
+    for unexpected_status in [false, true] {
+        let root = tempfile::tempdir().map_err(failure)?;
+        std::fs::write(
+            root.path().join("ari.conf"),
+            "[app]\ntype=user\npassword=test-password\n",
+        )
+        .map_err(failure)?;
+        for name in ["pjsip.conf", "rtp.conf", "extensions.conf"] {
+            std::fs::write(root.path().join(name), "").map_err(failure)?;
         }
-        Ok(())
+        let mut server = ChildServer::start(
+            root.path(),
+            &root.path().join("data"),
+            root.path().join("scenario.log"),
+        )
+        .await?;
+        let result = server
+            .supervise(async {
+                assert!(!unexpected_status, "unexpected registration status");
+                Err::<(), _>(ControlError::Invalid("configuration read failed"))
+            })
+            .await;
+        let reaped = server.child.try_wait().map_err(failure)?.is_some();
+        server.terminate()?;
+        assert!(result.is_err());
+        assert!(reaped);
+        root.close().map_err(failure)?;
     }
-    .await;
-    combine(recovered, restarted.terminate().await.map(|_| ()))
+    Ok(())
 }
 
 #[tokio::test]

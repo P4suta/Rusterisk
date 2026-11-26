@@ -396,7 +396,7 @@ async fn trial(binary: &Path, count: u8) -> Result<Metrics, ControlError> {
             }
         }
     }
-    let cleanup = server.terminate().await.map(|_| ());
+    let cleanup = server.terminate().map(|_| ());
     combine(result, cleanup)
 }
 
