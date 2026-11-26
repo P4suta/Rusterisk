@@ -1,6 +1,86 @@
-use crate::{validate_name, StorageError, MAX_DIRECTORY_ENTRIES};
+use crate::{validate_name, StorageError, Store, MAX_DIRECTORY_ENTRIES};
 use rusqlite::Connection;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+pub(super) struct Operation {
+    database: PathBuf,
+    id: i64,
+}
+
+impl Operation {
+    pub(super) fn start(
+        store: &Store,
+        name: &str,
+        operation: &str,
+        source: Option<&str>,
+    ) -> Result<Self, StorageError> {
+        let database = store.recordings.with_file_name("calls.sqlite3");
+        let id = begin(&store.connection, name, operation, "writing", source)?;
+        Ok(Self { database, id })
+    }
+
+    fn connect(&self) -> Result<Connection, StorageError> {
+        let connection = Connection::open_with_flags(
+            &self.database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        connection.busy_timeout(std::time::Duration::from_secs(2))?;
+        connection.pragma_update(None, "synchronous", "FULL")?;
+        Ok(connection)
+    }
+
+    pub(super) fn publishing(&self, rate: u32, bytes: u32) -> Result<(), StorageError> {
+        let changed = self.connect()?.execute(
+            "UPDATE recording_operations SET phase='publishing',sample_rate=?2,final_bytes=?3 WHERE id=?1 AND phase='writing'",
+            (self.id, rate, bytes)
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidState);
+        }
+        Ok(())
+    }
+
+    pub(super) fn cancelling(&self) -> Result<(), StorageError> {
+        let changed = self.connect()?.execute(
+            "UPDATE recording_operations SET phase='cancelling' WHERE id=?1 AND phase='writing'",
+            [self.id],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::InvalidState);
+        }
+        Ok(())
+    }
+
+    pub(super) fn forget(&self) -> Result<(), StorageError> {
+        self.connect()?
+            .execute("DELETE FROM recording_operations WHERE id=?1", [self.id])?;
+        Ok(())
+    }
+
+    pub(super) fn completed(&self) -> Result<(), StorageError> {
+        publish_catalog(&mut self.connect()?, self.id, "completed")
+    }
+}
+
+fn publish_catalog(
+    connection: &mut Connection,
+    id: i64,
+    outcome: &str,
+) -> Result<(), StorageError> {
+    let tx = connection.transaction()?;
+    if tx.execute(
+        "INSERT INTO recordings (name,format,outcome)
+                   SELECT name,'wav',?2 FROM recording_operations WHERE id=?1
+                   ON CONFLICT(name) DO UPDATE SET outcome=excluded.outcome",
+        (id, outcome),
+    )? != 1
+    {
+        return Err(StorageError::InvalidState);
+    }
+    tx.execute("DELETE FROM recording_operations WHERE id=?1", [id])?;
+    tx.commit()?;
+    Ok(())
+}
 
 pub(super) fn migrate(connection: &mut Connection) -> Result<(), StorageError> {
     let transaction = connection.transaction()?;

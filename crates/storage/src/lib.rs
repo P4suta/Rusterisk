@@ -399,6 +399,7 @@ fn read_header(file: &mut File) -> Result<(u32, u32), StorageError> {
 }
 
 pub struct Recorder {
+    operation: Option<journal::Operation>,
     file: File,
     path: PathBuf,
     rate: u32,
@@ -505,6 +506,7 @@ impl Recorder {
         file.sync_all()?;
         Ok((
             Self {
+                operation: None,
                 file,
                 path,
                 rate,
@@ -543,6 +545,10 @@ impl Recorder {
         let samples = milliseconds.saturating_mul(u64::from(self.rate)) / 1000;
         let trim = samples.saturating_mul(2).min(u64::from(maximum));
         self.bytes -= trim as u32;
+        if let Some(operation) = &self.operation {
+            self.file.sync_all()?;
+            operation.publishing(self.rate, self.bytes)?;
+        }
         self.file.set_len(u64::from(self.bytes) + 44)?;
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&header(self.rate, self.bytes))?;
@@ -556,12 +562,25 @@ impl Recorder {
             }
             Publication::Replace => std::fs::rename(&self.path, &destination)?,
         }
+        if let Some(operation) = self.operation {
+            #[cfg(unix)]
+            File::open(destination.parent().ok_or(StorageError::InvalidState)?)?.sync_all()?;
+            operation.completed()?;
+        }
         Ok(destination)
     }
 
     pub fn cancel(self) -> Result<(), StorageError> {
+        if let Some(operation) = &self.operation {
+            operation.cancelling()?;
+        }
         drop(self.file);
-        std::fs::remove_file(self.path)?;
+        std::fs::remove_file(&self.path)?;
+        if let Some(operation) = self.operation {
+            #[cfg(unix)]
+            File::open(self.path.parent().ok_or(StorageError::InvalidState)?)?.sync_all()?;
+            operation.forget()?;
+        }
         Ok(())
     }
 }

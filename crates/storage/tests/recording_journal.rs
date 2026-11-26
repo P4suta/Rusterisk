@@ -1,6 +1,69 @@
 use rusterisk_storage::{StorageError, Store};
 
 #[test]
+fn admitted_recordings_journal_the_policy_and_commit_the_catalog_before_reporting_completion(
+) -> Result<(), StorageError> {
+    use rusterisk_api::RecordingIfExists::{Append, Fail, Overwrite};
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    let store = Store::open(root)?;
+    let db = rusqlite::Connection::open(root.join("calls.sqlite3"))?;
+    for (policy, operation, sample) in [
+        (Fail, "create", 11),
+        (Overwrite, "overwrite", 22),
+        (Append, "append", 33),
+    ] {
+        let mut recording = store.prepare_recording("clip", 8000, policy)?;
+        let pending: (String, String) = db.query_row(
+            "SELECT operation,phase FROM recording_operations WHERE name='clip'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(pending, (operation.into(), "writing".into()));
+        while !recording.is_ready() {
+            recording.advance()?;
+        }
+        recording.write(rusterisk_media::Frame::new(&[sample; 160], 8000)?)?;
+        recording.finish()?;
+        assert_eq!(
+            db.query_row(
+                "SELECT outcome FROM recordings WHERE name='clip'",
+                [],
+                |row| row.get::<_, String>(0)
+            )?,
+            "completed"
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM recording_operations", [], |row| row
+                .get::<_, u32>(
+                0
+            ))?,
+            0
+        );
+    }
+    let mut reader = rusterisk_storage::WaveReader::open(&root.join("recordings/clip.wav"))?;
+    for sample in [22, 33] {
+        assert_eq!(
+            reader
+                .read_frame()?
+                .ok_or(StorageError::InvalidWave)?
+                .samples(),
+            &[sample; 160]
+        );
+    }
+    assert!(reader.read_frame()?.is_none());
+    store.prepare_recording("clip", 8000, Overwrite)?.cancel()?;
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM recording_operations", [], |row| row
+            .get::<_, u32>(
+            0
+        ))?,
+        0
+    );
+    Ok(())
+}
+
+#[test]
 fn deletion_replays_before_and_after_unlink_and_keeps_its_intent_until_catalog_commit(
 ) -> Result<(), StorageError> {
     let directory = tempfile::tempdir()?;
