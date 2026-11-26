@@ -23,14 +23,17 @@ pub(super) fn check(log: &[u8], config: &Config) -> Result<(), ControlError> {
         }
     }
     for sample in [4000, -7000, -3000, 8000] {
-        let payload = [rusterisk_media::mulaw_encode(sample); 160];
+        let encoded = rusterisk_media::mulaw_encode(sample);
+        let payload = [encoded; 160];
         if contains(&payload)
             || contains(STANDARD.encode(payload).as_bytes())
-            || [",", ", "].iter().any(|separator| {
-                contains(
-                    format!("{sample}{separator}{sample}{separator}{sample}{separator}{sample}")
-                        .as_bytes(),
-                )
+            || [sample, i16::from(encoded)].iter().any(|value| {
+                [",", ", "].iter().any(|separator| {
+                    contains(
+                        format!("{value}{separator}{value}{separator}{value}{separator}{value}")
+                            .as_bytes(),
+                    )
+                })
             })
         {
             return Err(ControlError::Invalid("A call log contains received audio"));
@@ -75,6 +78,8 @@ fn normal_logs_reject_credentials_and_received_audio() -> Result<(), ControlErro
         STANDARD.encode("operator:log-test-pass").as_bytes(),
         &payload,
         STANDARD.encode(payload).as_bytes(),
+        format!("{payload:?}").as_bytes(),
+        format!("{payload:?}").replace(' ', "").as_bytes(),
         b"[-7000,-7000,-7000,-7000]",
     ] {
         assert!(check(log, &config).is_err());
