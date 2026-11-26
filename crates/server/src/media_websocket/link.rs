@@ -255,7 +255,8 @@ impl<S: MediaSocket> WebSocketMediaLink<S> {
                 .encoder
                 .as_mut()
                 .ok_or(MediaError::InvalidRoute)?
-                .encode(frame)?,
+                .encode(frame)?
+                .to_vec(),
         };
         Ok(bytes.into())
     }

@@ -70,7 +70,9 @@ impl WireAudio {
                             / 48000.0)
                             .sin()) as i16;
                 }
-                codec.encode(Frame::new(&samples, 48000)?)
+                codec
+                    .encode(Frame::new(&samples, 48000)?)
+                    .map(|encoded| encoded.to_vec())
             }
         }
     }

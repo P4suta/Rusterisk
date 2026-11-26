@@ -1,6 +1,6 @@
 use bytes::{Bytes, BytesMut};
 use rtc_crypto::providers::RingCrypto;
-use rtc_shared::marshal::{Marshal, Unmarshal};
+use rtc_shared::marshal::Unmarshal;
 mod audiosocket_stream;
 mod mixing;
 mod pcm_framing;
@@ -176,6 +176,47 @@ pub fn alaw_encode(sample: i16) -> u8 {
     ((segment as u8) << 4 | (quantized as u8 & 0x0f)) ^ mask
 }
 
+// The largest encoded frame, which an Opus packet bounds.
+const MAX_ENCODED_AUDIO: usize = 1275;
+
+// One encoded audio frame in a fixed buffer, which the sender borrows as bytes.
+pub struct EncodedAudio {
+    bytes: [u8; MAX_ENCODED_AUDIO],
+    length: usize,
+}
+
+impl EncodedAudio {
+    // Encodes each sample into one byte.
+    pub(crate) fn bytes_of(
+        samples: &[i16],
+        encode: impl Fn(i16) -> u8,
+    ) -> Result<Self, MediaError> {
+        let mut bytes = [0; MAX_ENCODED_AUDIO];
+        let slots = bytes.get_mut(..samples.len()).ok_or(MediaError::Capacity)?;
+        for (slot, sample) in slots.iter_mut().zip(samples) {
+            *slot = encode(*sample);
+        }
+        Ok(Self {
+            bytes,
+            length: samples.len(),
+        })
+    }
+}
+
+impl AsRef<[u8]> for EncodedAudio {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes[..self.length]
+    }
+}
+
+impl std::ops::Deref for EncodedAudio {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.as_ref()
+    }
+}
+
 pub struct OpusCodec {
     encoder: opus::Encoder,
     decoder: opus::Decoder,
@@ -191,14 +232,14 @@ impl OpusCodec {
         })
     }
 
-    pub fn encode(&mut self, frame: Frame) -> Result<Vec<u8>, MediaError> {
+    pub fn encode(&mut self, frame: Frame) -> Result<EncodedAudio, MediaError> {
         let frame = frame.resample(48000)?;
-        let mut output = [0u8; 1275];
-        let count = self
+        let mut bytes = [0u8; MAX_ENCODED_AUDIO];
+        let length = self
             .encoder
-            .encode(frame.samples(), &mut output)
+            .encode(frame.samples(), &mut bytes)
             .map_err(|error| MediaError::Codec(error.to_string()))?;
-        Ok(output[..count].to_vec())
+        Ok(EncodedAudio { bytes, length })
     }
 
     pub fn decode(&mut self, bytes: &[u8]) -> Result<Frame, MediaError> {
@@ -229,8 +270,111 @@ impl OpusCodec {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RtpPacket(rtc_rtp::packet::Packet);
+// The fixed part of a Real-time Transport Protocol header.
+const RTP_HEADER: usize = 12;
+
+// Whether the elements of a one-byte or two-byte header extension stay inside it (RFC 8285).
+// A receiver ignores their contents, and refuses a packet whose element runs past the extension.
+fn extension_elements_fit(profile: u16, elements: &[u8]) -> bool {
+    let mut offset = 0;
+    match profile {
+        0xbede => {
+            while let Some(&first) = elements.get(offset) {
+                offset += 1;
+                if first == 0 {
+                    continue;
+                }
+                if first >> 4 == 0x0f {
+                    return true;
+                }
+                let length = usize::from(first & 0x0f) + 1;
+                if length > elements.len() - offset {
+                    return false;
+                }
+                offset += length;
+            }
+            true
+        }
+        0x1000 => {
+            while let Some(&first) = elements.get(offset) {
+                offset += 1;
+                if first == 0 {
+                    continue;
+                }
+                let Some(&length) = elements.get(offset) else {
+                    return false;
+                };
+                offset += 1;
+                if usize::from(length) > elements.len() - offset {
+                    return false;
+                }
+                offset += usize::from(length);
+            }
+            true
+        }
+        _ => true,
+    }
+}
+const MAX_RTP_PAYLOAD: usize = MAX_PACKET - RTP_HEADER;
+
+// A Real-time Transport Protocol packet in a fixed buffer.
+// A sender builds it, and a receiver keeps the fields it reads.
+#[derive(Clone)]
+pub struct RtpPacket {
+    payload_type: u8,
+    marker: bool,
+    sequence: u16,
+    timestamp: u32,
+    ssrc: u32,
+    length: usize,
+    payload: [u8; MAX_RTP_PAYLOAD],
+}
+
+impl std::fmt::Debug for RtpPacket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RtpPacket")
+            .field("payload_type", &self.payload_type)
+            .field("marker", &self.marker)
+            .field("sequence", &self.sequence)
+            .field("timestamp", &self.timestamp)
+            .field("ssrc", &self.ssrc)
+            .field("payload", &self.payload())
+            .finish()
+    }
+}
+
+impl PartialEq for RtpPacket {
+    fn eq(&self, other: &Self) -> bool {
+        self.payload_type == other.payload_type
+            && self.marker == other.marker
+            && self.sequence == other.sequence
+            && self.timestamp == other.timestamp
+            && self.ssrc == other.ssrc
+            && self.payload() == other.payload()
+    }
+}
+
+impl Eq for RtpPacket {}
+
+// An encoded packet in a fixed buffer, which the sender borrows as bytes.
+pub struct EncodedRtp {
+    bytes: [u8; MAX_PACKET],
+    length: usize,
+}
+
+impl AsRef<[u8]> for EncodedRtp {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes[..self.length]
+    }
+}
+
+impl std::ops::Deref for EncodedRtp {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        self.as_ref()
+    }
+}
 
 impl RtpPacket {
     pub fn new(
@@ -240,40 +384,49 @@ impl RtpPacket {
         ssrc: u32,
         payload: &[u8],
     ) -> Result<Self, MediaError> {
-        if payload.len() > MAX_PACKET - 12 || payload_type > 127 {
+        if payload.len() > MAX_RTP_PAYLOAD || payload_type > 127 {
             return Err(MediaError::Capacity);
         }
-        Ok(Self(rtc_rtp::packet::Packet {
-            header: rtc_rtp::header::Header {
-                version: 2,
-                payload_type,
-                sequence_number: sequence,
-                timestamp,
-                ssrc,
-                ..Default::default()
-            },
-            payload: Bytes::copy_from_slice(payload),
-        }))
+        let mut stored = [0; MAX_RTP_PAYLOAD];
+        stored[..payload.len()].copy_from_slice(payload);
+        Ok(Self {
+            payload_type,
+            marker: false,
+            sequence,
+            timestamp,
+            ssrc,
+            length: payload.len(),
+            payload: stored,
+        })
     }
 
+    // Reads a received packet, skipping contributing sources and a header extension and dropping padding.
     pub fn parse(bytes: &[u8]) -> Result<Self, MediaError> {
-        use rtc_rtp::header::{Header, CC_MASK, CSRC_LENGTH, CSRC_OFFSET};
-        if bytes.len() > MAX_PACKET || bytes.len() < CSRC_OFFSET || bytes[0] >> 6 != 2 {
+        let Some([first, second, sequence_high, sequence_low, t0, t1, t2, t3, s0, s1, s2, s3, ..]) =
+            bytes.get(..)
+        else {
+            return Err(MediaError::InvalidPacket);
+        };
+        if bytes.len() > MAX_PACKET || first >> 6 != 2 {
             return Err(MediaError::InvalidPacket);
         }
-        let mut header_len = CSRC_OFFSET + usize::from(bytes[0] & CC_MASK) * CSRC_LENGTH;
-        if bytes[0] & 0x10 != 0 {
-            let Some([_, _, high, low, ..]) = bytes.get(header_len..) else {
+        let mut header_len = RTP_HEADER + usize::from(first & 0x0f) * 4;
+        if first & 0x10 != 0 {
+            let Some([profile_high, profile_low, high, low, ..]) = bytes.get(header_len..) else {
                 return Err(MediaError::InvalidPacket);
             };
-            header_len += 4 + 4 * usize::from(u16::from_be_bytes([*high, *low]));
+            let start = header_len + 4;
+            header_len = start + 4 * usize::from(u16::from_be_bytes([*high, *low]));
+            let elements = bytes
+                .get(start..header_len)
+                .ok_or(MediaError::InvalidPacket)?;
+            if !extension_elements_fit(u16::from_be_bytes([*profile_high, *profile_low]), elements)
+            {
+                return Err(MediaError::InvalidPacket);
+            }
         }
-        let (mut header_bytes, payload) = bytes
-            .split_at_checked(header_len)
-            .ok_or(MediaError::InvalidPacket)?;
-        let mut header = Header::unmarshal(&mut header_bytes)
-            .map_err(|error| MediaError::Transport(error.to_string()))?;
-        let padding = if header.padding {
+        let payload = bytes.get(header_len..).ok_or(MediaError::InvalidPacket)?;
+        let padding = if first & 0x20 != 0 {
             let count = payload.last().copied().filter(|&count| count != 0);
             usize::from(count.ok_or(MediaError::InvalidPacket)?)
         } else {
@@ -282,45 +435,51 @@ impl RtpPacket {
         if payload.len() <= padding {
             return Err(MediaError::InvalidPacket);
         }
-        if header.extension {
-            // The writer aligns the decoded elements to the next word.
-            let size = header.get_extension_payload_len();
-            header.extensions_padding = size.next_multiple_of(4) - size;
-        }
-        Ok(Self(rtc_rtp::packet::Packet {
-            header,
-            payload: Bytes::copy_from_slice(&payload[..payload.len() - padding]),
-        }))
+        let packet = Self::new(
+            second & 0x7f,
+            u16::from_be_bytes([*sequence_high, *sequence_low]),
+            u32::from_be_bytes([*t0, *t1, *t2, *t3]),
+            u32::from_be_bytes([*s0, *s1, *s2, *s3]),
+            &payload[..payload.len() - padding],
+        )?;
+        Ok(packet.with_marker(second & 0x80 != 0))
     }
 
-    pub fn encode(&self) -> Result<Bytes, MediaError> {
-        self.0
-            .marshal()
-            .map(BytesMut::freeze)
-            .map_err(|error| MediaError::Transport(error.to_string()))
+    // Writes the packet with the fixed header that a sender uses.
+    pub fn encode(&self) -> Result<EncodedRtp, MediaError> {
+        let mut bytes = [0; MAX_PACKET];
+        let length = RTP_HEADER + self.length;
+        let (header, rest) = bytes.split_at_mut(RTP_HEADER);
+        header[0] = 0x80;
+        header[1] = u8::from(self.marker) << 7 | self.payload_type;
+        header[2..4].copy_from_slice(&self.sequence.to_be_bytes());
+        header[4..8].copy_from_slice(&self.timestamp.to_be_bytes());
+        header[8..12].copy_from_slice(&self.ssrc.to_be_bytes());
+        rest[..self.length].copy_from_slice(self.payload());
+        Ok(EncodedRtp { bytes, length })
     }
     pub fn payload(&self) -> &[u8] {
-        &self.0.payload
+        &self.payload[..self.length]
     }
     pub fn with_marker(mut self, marker: bool) -> Self {
-        self.0.header.marker = marker;
+        self.marker = marker;
         self
     }
 
     pub fn marker(&self) -> bool {
-        self.0.header.marker
+        self.marker
     }
     pub const fn sequence(&self) -> u16 {
-        self.0.header.sequence_number
+        self.sequence
     }
     pub const fn timestamp(&self) -> u32 {
-        self.0.header.timestamp
+        self.timestamp
     }
     pub const fn ssrc(&self) -> u32 {
-        self.0.header.ssrc
+        self.ssrc
     }
     pub const fn payload_type(&self) -> u8 {
-        self.0.header.payload_type
+        self.payload_type
     }
 }
 
