@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 mod dialplan_pattern;
+pub use dialplan_pattern::CompiledDialplan;
 mod digest_algorithms;
 mod expansion;
 mod ini_comments;
