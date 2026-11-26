@@ -71,7 +71,7 @@ impl MediaPort {
         let command = self
             .commands
             .try_reserve()
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(super::notices::service_queue_error)?;
         for (index, slot) in self.webrtc.iter().enumerate() {
             match slot.try_send(attachment) {
                 Ok(()) => {
@@ -80,7 +80,7 @@ impl MediaPort {
                 }
                 Err(std::sync::mpsc::TrySendError::Full(waiting)) => attachment = waiting,
                 Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                    return Err(MediaError::Capacity)
+                    return Err(MediaError::ServiceClosed)
                 }
             }
         }

@@ -391,6 +391,7 @@ impl Signaling {
                 | MediaError::InvalidPacket
                 | MediaError::InvalidRoute
                 | MediaError::UnknownStream
+                | MediaError::ServiceClosed
                 | MediaError::Unsupported
                 | MediaError::Codec(_)
                 | MediaError::Transport(_)

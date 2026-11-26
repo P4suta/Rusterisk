@@ -258,10 +258,10 @@ impl MediaPort {
     fn completion<T>(&self, serial: u64) -> Result<Completion<T>, MediaError> {
         self.notices
             .upgrade()
-            .ok_or(MediaError::UnknownStream)?
+            .ok_or(MediaError::ServiceClosed)?
             .try_reserve_owned()
             .map(|slot| Completion::Notice(serial, slot))
-            .map_err(|_| MediaError::Capacity)
+            .map_err(notices::service_queue_error)
     }
 
     pub(crate) fn reserve_attachment_release(
@@ -272,7 +272,7 @@ impl MediaPort {
             .commands
             .clone()
             .try_reserve_owned()
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         Ok(AttachmentRelease { serial, command })
     }
 
@@ -292,7 +292,7 @@ impl MediaPort {
                 completed,
                 reply,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         Ok(Reservation {
             admission: Receipt { response },
             completed: completion,
@@ -305,7 +305,7 @@ impl MediaPort {
     ) -> Result<(), MediaError> {
         self.commands
             .try_send(Command::ReceivedDigit { key, digit })
-            .map_err(|_| MediaError::Capacity)
+            .map_err(notices::service_queue_error)
     }
 
     pub async fn play(
@@ -355,7 +355,7 @@ impl MediaPort {
                 options,
                 reply,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         Ok(Reservation {
             admission: Receipt { response },
             completed: completion,
@@ -374,7 +374,7 @@ impl MediaPort {
                 source,
                 reply,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         tokio::time::timeout(Duration::from_secs(5), response)
             .await
             .map_err(|error| MediaError::Transport(error.to_string()))?
@@ -392,7 +392,7 @@ impl MediaPort {
     ) -> Result<(), MediaError> {
         self.commands
             .try_send(Command::ControlPlayback { token, operation })
-            .map_err(|_| MediaError::Capacity)
+            .map_err(notices::service_queue_error)
     }
 
     pub async fn record(
@@ -430,7 +430,7 @@ impl MediaPort {
                 completed,
                 reply,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         Ok(Reservation {
             admission: Receipt { response },
             completed: completion,
@@ -462,7 +462,7 @@ impl MediaPort {
                 prompt,
                 reply,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         tokio::time::timeout(Duration::from_secs(5), response)
             .await
             .map_err(|error| MediaError::Transport(error.to_string()))?
@@ -476,7 +476,7 @@ impl MediaPort {
     ) -> Result<(), MediaError> {
         self.commands
             .try_send(Command::ControlRecording { token, operation })
-            .map_err(|_| MediaError::Capacity)
+            .map_err(notices::service_queue_error)
     }
 
     pub fn stop_recording(
@@ -502,7 +502,7 @@ impl MediaPort {
                 command: RtpDigitCommand::Sequence(command),
                 reply: None,
             })
-            .map_err(|_| MediaError::Capacity)
+            .map_err(notices::service_queue_error)
     }
 
     async fn send_digits(&self, key: CallKey, command: RtpDigitCommand) -> Result<(), MediaError> {
@@ -513,7 +513,7 @@ impl MediaPort {
                 command,
                 reply: Some(reply),
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         tokio::time::timeout(Duration::from_secs(5), response)
             .await
             .map_err(|error| MediaError::Transport(error.to_string()))?
@@ -549,7 +549,7 @@ impl MediaPort {
                 mode,
                 reply: Completion::Reply(reply),
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         Ok(AttachmentReceipt { response })
     }
 
@@ -573,7 +573,7 @@ impl MediaPort {
                 mode,
                 reply: self.completion(serial)?,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         Ok(release)
     }
 
@@ -594,7 +594,7 @@ impl MediaPort {
                 rate,
                 reply,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         tokio::time::timeout(Duration::from_secs(5), response)
             .await
             .map_err(|error| MediaError::Transport(error.to_string()))?
@@ -647,7 +647,7 @@ impl MediaPort {
                 generated_audio_gate,
                 reply: Completion::Reply(reply),
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         tokio::time::timeout(Duration::from_secs(5), response)
             .await
             .map_err(|error| MediaError::Transport(error.to_string()))?
@@ -727,20 +727,16 @@ impl Delivery<'_> {
         for tone in tones.drain(..) {
             self.recordings
                 .received_digit(key, self.mixer.bridge_for(key), tone.digit);
-            self.notices
-                .try_send(MediaNotice::Dtmf {
-                    key: key.clone(),
-                    tone,
-                })
-                .map_err(|_| MediaError::Capacity)?;
+            self.notices.try_send(MediaNotice::Dtmf {
+                key: key.clone(),
+                tone,
+            })?;
         }
         for token in finished.drain(..) {
-            self.notices
-                .try_send(MediaNotice::DtmfFinished {
-                    key: key.clone(),
-                    token,
-                })
-                .map_err(|_| MediaError::Capacity)?;
+            self.notices.try_send(MediaNotice::DtmfFinished {
+                key: key.clone(),
+                token,
+            })?;
         }
         let Some(frame) = frame else {
             return Ok(());
@@ -755,8 +751,7 @@ impl Delivery<'_> {
                     if matches!(port.connection, Connection::Waiting) {
                         port.connection = Connection::Connected;
                         self.notices
-                            .try_send(MediaNotice::Connected { key: key.clone() })
-                            .map_err(|_| MediaError::Capacity)?;
+                            .try_send(MediaNotice::Connected { key: key.clone() })?;
                     }
                 }
             }
@@ -910,7 +905,7 @@ impl MediaHub {
                     self.release_notices.insert(slot, key);
                 }
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => return Err(MediaError::UnknownStream),
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(MediaError::ServiceClosed),
         }
         Ok(())
     }
@@ -1215,10 +1210,14 @@ impl MediaHub {
                                 return Err(MediaError::Unsupported);
                             }
                             match &port.io {
-                                Io::Task(io) => io
-                                    .commands
-                                    .try_send(command)
-                                    .map_err(|_| MediaError::Capacity),
+                                Io::Task(io) => {
+                                    io.commands.try_send(command).map_err(|error| match error {
+                                        mpsc::error::TrySendError::Full(_) => MediaError::Capacity,
+                                        mpsc::error::TrySendError::Closed(_) => {
+                                            MediaError::UnknownStream
+                                        }
+                                    })
+                                }
                                 Io::Owned => {
                                     match (self.legs.get_mut(&key), self.webrtc_legs.get_mut(&key))
                                     {
@@ -1241,8 +1240,7 @@ impl MediaHub {
                             tracing::warn!(channel = %key.id, generation = key.generation, %error, "digit command refused");
                             if let Some(token) = finished {
                                 self.notices
-                                    .try_send(MediaNotice::DtmfFinished { key, token })
-                                    .map_err(|_| MediaError::Capacity)?;
+                                    .try_send(MediaNotice::DtmfFinished { key, token })?;
                             }
                         }
                     }
@@ -1389,8 +1387,7 @@ impl MediaHub {
                     match answers.try_recv() {
                         Ok(()) => self
                             .notices
-                            .try_send(MediaNotice::Answer { key: key.clone() })
-                            .map_err(|_| MediaError::Capacity)?,
+                            .try_send(MediaNotice::Answer { key: key.clone() })?,
                         Err(
                             mpsc::error::TryRecvError::Empty
                             | mpsc::error::TryRecvError::Disconnected,
@@ -1400,13 +1397,10 @@ impl MediaHub {
             }
             for _ in 0..8 {
                 match io.completed.try_recv() {
-                    Ok(token) => self
-                        .notices
-                        .try_send(MediaNotice::DtmfFinished {
-                            key: key.clone(),
-                            token,
-                        })
-                        .map_err(|_| MediaError::Capacity)?,
+                    Ok(token) => self.notices.try_send(MediaNotice::DtmfFinished {
+                        key: key.clone(),
+                        token,
+                    })?,
                     Err(
                         mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
                     ) => break,
@@ -1417,12 +1411,10 @@ impl MediaHub {
                     Ok(tone) => {
                         self.recordings
                             .received_digit(key, self.mixer.bridge_for(key), tone.digit);
-                        self.notices
-                            .try_send(MediaNotice::Dtmf {
-                                key: key.clone(),
-                                tone,
-                            })
-                            .map_err(|_| MediaError::Capacity)?;
+                        self.notices.try_send(MediaNotice::Dtmf {
+                            key: key.clone(),
+                            tone,
+                        })?;
                     }
                     Err(
                         mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
@@ -1440,8 +1432,7 @@ impl MediaHub {
                             if matches!(port.connection, Connection::Waiting) {
                                 port.connection = Connection::Connected;
                                 self.notices
-                                    .try_send(MediaNotice::Connected { key: key.clone() })
-                                    .map_err(|_| MediaError::Capacity)?;
+                                    .try_send(MediaNotice::Connected { key: key.clone() })?;
                             }
                         }
                         Err(_) => self.dropped += 1,
@@ -1571,7 +1562,7 @@ impl MediaHub {
                 None => return Ok(Turn::Stop),
             },
             slot = self.notices.ordinary.clone().reserve_owned(), if !self.release_notices.is_empty() => {
-                let slot = slot.map_err(|_| MediaError::UnknownStream)?;
+                let slot = slot.map_err(|_| MediaError::ServiceClosed)?;
                 if let Some((_, key)) = self.release_notices.pop_first() {
                     self.notices.send_reserved(slot, MediaNotice::Released { key })?;
                 }

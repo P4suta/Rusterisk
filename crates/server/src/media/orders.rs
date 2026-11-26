@@ -99,7 +99,7 @@ impl MediaPort {
                 Ok(None)
             }
             Err(mpsc::error::TrySendError::Full(())) => Ok(Some(order)),
-            Err(mpsc::error::TrySendError::Closed(())) => Err(MediaError::Capacity),
+            Err(mpsc::error::TrySendError::Closed(())) => Err(MediaError::ServiceClosed),
         }
     }
 
@@ -117,6 +117,6 @@ impl MediaPort {
             .reserve()
             .await
             .map(drop)
-            .map_err(|_| MediaError::Capacity)
+            .map_err(|_| MediaError::ServiceClosed)
     }
 }

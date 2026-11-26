@@ -2,6 +2,13 @@ use super::MediaNotice;
 use rusterisk_media::MediaError;
 use tokio::sync::mpsc;
 
+pub(super) fn service_queue_error<T>(error: mpsc::error::TrySendError<T>) -> MediaError {
+    match error {
+        mpsc::error::TrySendError::Full(_) => MediaError::Capacity,
+        mpsc::error::TrySendError::Closed(_) => MediaError::ServiceClosed,
+    }
+}
+
 const ORDINARY_CAPACITY: usize = 128;
 const COMPLETION_CAPACITY: usize = 128;
 
@@ -36,7 +43,7 @@ impl NoticeSender {
             .ordinary
             .clone()
             .try_reserve_owned()
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(service_queue_error)?;
         self.send_reserved(slot, notice)
     }
 
@@ -47,7 +54,7 @@ impl NoticeSender {
     ) -> Result<(), MediaError> {
         self.events
             .try_send((notice, slot))
-            .map_err(|_| MediaError::Capacity)
+            .map_err(service_queue_error)
     }
 }
 

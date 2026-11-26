@@ -18,6 +18,25 @@ fn key(generation: u64) -> Result<CallKey, MediaError> {
 }
 
 #[tokio::test]
+async fn media_command_and_notice_queues_report_when_the_receiver_has_stopped(
+) -> Result<(), MediaError> {
+    let (port, hub, notices) = MediaHub::new(2);
+    let key = key(1)?;
+    let send = || port.received_digit(key.clone(), rusterisk_core::DtmfDigit::Five);
+    for _ in 0..hub.commands.max_capacity() {
+        send()?;
+    }
+    assert_eq!(send(), Err(MediaError::Capacity));
+    drop(notices);
+    let closed = hub.notice(MediaNotice::Connected { key: key.clone() });
+    drop(hub);
+    for result in [closed, send(), port.room().await] {
+        assert_eq!(result, Err(MediaError::ServiceClosed));
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn all_release_notices_survive_a_full_notice_channel() -> Result<(), MediaError> {
     let (_port, mut hub, mut notices) = MediaHub::new(64);
     let first = key(1)?;

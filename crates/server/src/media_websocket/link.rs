@@ -298,7 +298,7 @@ impl<S: MediaSocket, const N: usize> WebSocketMediaLink<S, N> {
                                 Ok(true) => break,
                                 Ok(false) => {},
                                 Err(MediaError::Capacity) => self.event(MediaEvent::Error { channel_id: self.options.channel_id.clone(), error_text: "media capacity exceeded".into() }).await?,
-                                Err(error @ (MediaError::InvalidFrame | MediaError::InvalidPacket | MediaError::InvalidRoute | MediaError::UnknownStream | MediaError::Unsupported | MediaError::Codec(_) | MediaError::Transport(_) | MediaError::Control(_))) => return Err(error),
+                                Err(error @ (MediaError::InvalidFrame | MediaError::InvalidPacket | MediaError::InvalidRoute | MediaError::UnknownStream | MediaError::ServiceClosed | MediaError::Unsupported | MediaError::Codec(_) | MediaError::Transport(_) | MediaError::Control(_))) => return Err(error),
                             },
                             Err(MediaCommandError::UnsupportedFormat) => self.event(MediaEvent::Error { channel_id: self.options.channel_id.clone(), error_text: "SET_MEDIA_DIRECTION only supports JSON format.\n".into() }).await?,
                             Err(MediaCommandError::Capacity | MediaCommandError::Invalid | MediaCommandError::Json(_)) => tracing::debug!(channel = %self.options.channel_id, "media command refused"),
@@ -310,7 +310,7 @@ impl<S: MediaSocket, const N: usize> WebSocketMediaLink<S, N> {
                             match self.audio.push(&bytes) {
                                 Ok(flow) => { stats.packets_received += 1; self.flow(flow).await?; },
                                 Err(MediaError::Capacity) => stats.dropped += 1,
-                                Err(error @ (MediaError::InvalidFrame | MediaError::InvalidPacket | MediaError::InvalidRoute | MediaError::UnknownStream | MediaError::Unsupported | MediaError::Codec(_) | MediaError::Transport(_) | MediaError::Control(_))) => return Err(error),
+                                Err(error @ (MediaError::InvalidFrame | MediaError::InvalidPacket | MediaError::InvalidRoute | MediaError::UnknownStream | MediaError::ServiceClosed | MediaError::Unsupported | MediaError::Codec(_) | MediaError::Transport(_) | MediaError::Control(_))) => return Err(error),
                             }
                         }
                     }

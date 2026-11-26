@@ -237,7 +237,7 @@ impl super::MediaPort {
                 lease,
                 reply,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(super::notices::service_queue_error)?;
         tokio::time::timeout(std::time::Duration::from_secs(5), response)
             .await
             .map_err(|error| MediaError::Transport(error.to_string()))?

@@ -262,6 +262,7 @@ impl WebRtcLeg {
                     | MediaError::Codec(_) => Ok(None),
                     error @ (MediaError::InvalidRoute
                     | MediaError::UnknownStream
+                    | MediaError::ServiceClosed
                     | MediaError::Unsupported
                     | MediaError::Transport(_)
                     | MediaError::Control(_)) => Err(error),
