@@ -31,6 +31,12 @@ use std::time::Duration;
 mod early_music;
 #[path = "sip_call/late_answer.rs"]
 mod late_answer;
+#[path = "sip_call/loopback_extensions.rs"]
+mod loopback_extensions;
+#[path = "process_recovery/process.rs"]
+mod process;
+#[path = "sip_call/registration.rs"]
+mod registration;
 #[path = "sip_call/test_probe.rs"]
 mod test_probe;
 use tokio::net::UdpSocket;
@@ -780,6 +786,27 @@ async fn start_invitation(
     audio: SocketAddr,
     invitation: Invitation<'_>,
 ) -> Result<(), ControlError> {
+    start_invitation_as(
+        signal,
+        target,
+        local,
+        audio,
+        invitation,
+        "phone",
+        "test-password",
+    )
+    .await
+}
+
+async fn start_invitation_as(
+    signal: &UdpSocket,
+    target: SocketAddr,
+    local: SocketAddr,
+    audio: SocketAddr,
+    invitation: Invitation<'_>,
+    username: &str,
+    password: &str,
+) -> Result<(), ControlError> {
     let Invitation {
         extension,
         call_id,
@@ -829,8 +856,8 @@ async fn start_invitation(
         nc: 1,
     };
     let digest = DigestGenerator {
-        username: "phone",
-        password: "test-password",
+        username,
+        password,
         nonce: &challenge.nonce,
         uri: &uri,
         realm: &challenge.realm,
@@ -839,7 +866,7 @@ async fn start_invitation(
         algorithm: Algorithm::Md5,
     }
     .compute();
-    let authorization = format!("Authorization: Digest username=\"phone\", realm=\"{}\", nonce=\"{}\", uri=\"{uri}\", response=\"{digest}\", algorithm=MD5, qop=auth, cnonce=\"test-client\", nc=00000001\r\n", challenge.realm, challenge.nonce);
+    let authorization = format!("Authorization: Digest username=\"{username}\", realm=\"{}\", nonce=\"{}\", uri=\"{uri}\", response=\"{digest}\", algorithm=MD5, qop=auth, cnonce=\"test-client\", nc=00000001\r\n", challenge.realm, challenge.nonce);
     signal
         .send_to(packet(2, &authorization).as_bytes(), target)
         .await
