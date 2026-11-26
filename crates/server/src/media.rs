@@ -14,6 +14,9 @@ mod admission_tests;
 #[cfg(test)]
 mod frame_timing_tests;
 mod measurements;
+mod notices;
+pub use notices::MediaNotices;
+use notices::NoticeSender;
 mod probe;
 #[cfg(test)]
 mod queued;
@@ -209,7 +212,7 @@ enum Command {
 // A notice carries the number that its sender gave the command.
 pub(crate) enum Completion<T> {
     Reply(oneshot::Sender<Result<T, MediaError>>),
-    Notice(u64, mpsc::OwnedPermit<MediaNotice>),
+    Notice(u64, mpsc::OwnedPermit<()>),
 }
 
 impl<T> Completion<T> {
@@ -236,7 +239,7 @@ impl AttachmentRelease {
 #[derive(Clone)]
 pub struct MediaPort {
     commands: mpsc::Sender<Command>,
-    notices: mpsc::WeakSender<MediaNotice>,
+    notices: mpsc::WeakSender<()>,
     websocket: mpsc::Sender<streams::WebSocketAttachment<axum::extract::ws::WebSocket>>,
     client_websocket: mpsc::Sender<streams::WebSocketAttachment<streams::ClientSocket>>,
     webrtc: [std::sync::mpsc::SyncSender<webrtc::Attachment>; webrtc::SLOTS],
@@ -744,7 +747,7 @@ pub struct MediaHub {
     websocket: mpsc::Receiver<streams::WebSocketAttachment<axum::extract::ws::WebSocket>>,
     client_websocket: mpsc::Receiver<streams::WebSocketAttachment<streams::ClientSocket>>,
     webrtc: [std::sync::mpsc::Receiver<webrtc::Attachment>; webrtc::SLOTS],
-    notices: mpsc::Sender<MediaNotice>,
+    notices: NoticeSender,
     mixer: Mixer<CallKey>,
     ports: BTreeMap<CallKey, Port>,
     workers: JoinSet<(CallKey, Result<LinkStats, MediaError>)>,
@@ -770,18 +773,18 @@ impl MediaHub {
             }
         }
     }
-    pub fn new(capacity: usize) -> (MediaPort, Self, mpsc::Receiver<MediaNotice>) {
+    pub fn new(capacity: usize) -> (MediaPort, Self, MediaNotices) {
         let (commands, receiver) = mpsc::channel(128);
         let (websocket, websocket_receiver) = mpsc::channel(8);
         let (client_websocket, client_websocket_receiver) = mpsc::channel(8);
         let slots = std::array::from_fn(|_| std::sync::mpsc::sync_channel(1));
         let webrtc = slots.each_ref().map(|(sender, _)| sender.clone());
         let webrtc_receiver = slots.map(|(_, receiver)| receiver);
-        let (notices, events) = mpsc::channel(128);
+        let (notices, events) = notices::channel();
         (
             MediaPort {
                 commands,
-                notices: notices.downgrade(),
+                notices: notices.completions.downgrade(),
                 websocket,
                 client_websocket,
                 webrtc,
@@ -806,9 +809,7 @@ impl MediaHub {
     }
 
     fn notice(&self, notice: MediaNotice) -> Result<(), MediaError> {
-        self.notices
-            .try_send(notice)
-            .map_err(|_| MediaError::Capacity)
+        self.notices.try_send(notice)
     }
 
     fn remove(&mut self, key: &CallKey) -> Result<(), MediaError> {
@@ -863,14 +864,14 @@ impl MediaHub {
     ) -> Result<(), MediaError> {
         match reply {
             Completion::Reply(reply) => self.complete_attachment(key, result, reply),
-            Completion::Notice(serial, slot) => {
-                slot.send(MediaNotice::Attached {
+            Completion::Notice(serial, slot) => self.notices.send_reserved(
+                slot,
+                MediaNotice::Attached {
                     key: key.clone(),
                     serial,
                     result,
-                });
-                Ok(())
-            }
+                },
+            ),
         }
     }
 
@@ -1167,11 +1168,14 @@ impl MediaHub {
                             }
                         }
                         Completion::Notice(serial, slot) => {
-                            slot.send(MediaNotice::DirectionApplied {
-                                key,
-                                serial,
-                                result,
-                            });
+                            self.notices.send_reserved(
+                                slot,
+                                MediaNotice::DirectionApplied {
+                                    key,
+                                    serial,
+                                    result,
+                                },
+                            )?;
                         }
                     }
                 }

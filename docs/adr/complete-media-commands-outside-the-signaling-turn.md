@@ -16,6 +16,8 @@ Omit replies used only for logging.
 The responsible job receives the reservation receipt.
 The call record holds the deadline for each pending attachment or direction change.
 A numbered media notice completes its matching wait.
+Ordinary notices and command completions each have 128 slots in one delivery queue.
+A notice holds its slot until signaling reads it.
 Expiry releases the attachment.
 Eight slots hold WebRTC sessions while the command queue orders their slot numbers with releases.
 

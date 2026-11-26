@@ -270,6 +270,50 @@ async fn an_attachment_without_a_reply_reports_its_result_as_a_notice() -> Resul
 }
 
 #[tokio::test]
+async fn ordinary_notices_keep_their_capacity_while_a_webrtc_attachment_waits(
+) -> Result<(), MediaError> {
+    let (handle, mut hub, mut notices) = MediaHub::new(4);
+    let key = key()?;
+    for _ in 0..127 {
+        hub.notice(MediaNotice::Connected { key: key.clone() })?;
+    }
+    let _release = handle.start_webrtc_attachment(
+        key.clone(),
+        browser()?,
+        PeerMediaDirection::SendReceive,
+        AttachmentMode::Answered,
+        1,
+    )?;
+    hub.notice(MediaNotice::Connected { key: key.clone() })?;
+    assert!(matches!(
+        hub.notice(MediaNotice::Connected { key: key.clone() }),
+        Err(MediaError::Capacity)
+    ));
+    let _second_release = handle.start_webrtc_attachment(
+        CallKey {
+            id: ChannelId::try_from("second".to_owned()).map_err(failure)?,
+            generation: 1,
+        },
+        browser()?,
+        PeerMediaDirection::SendReceive,
+        AttachmentMode::Answered,
+        2,
+    )?;
+    settle(&mut hub)?;
+    for _ in 0..128 {
+        assert!(
+            matches!(notices.try_recv(), Ok(MediaNotice::Connected { key: received }) if received == key)
+        );
+    }
+    for serial in [1, 2] {
+        assert!(
+            matches!(notices.try_recv(), Ok(MediaNotice::Attached { serial: received, result: Ok(()), .. }) if received == serial)
+        );
+    }
+    hub.close().await
+}
+
+#[tokio::test]
 async fn accepted_direction_keeps_its_notice_slot_under_load() -> Result<(), MediaError> {
     let (handle, mut hub, mut notices) = MediaHub::new(4);
     let key = key()?;
@@ -280,8 +324,13 @@ async fn accepted_direction_keeps_its_notice_slot_under_load() -> Result<(), Med
         Gate::Open,
         1,
     )?;
-    while let Ok(slot) = hub.notices.try_reserve() {
-        slot.send(MediaNotice::Connected { key: key.clone() });
+    let mut pending = Vec::new();
+    while let Ok(slot) = hub.notices.completions.clone().try_reserve_owned() {
+        pending.push(slot);
+    }
+    assert_eq!(pending.len(), 127);
+    for _ in 0..128 {
+        hub.notice(MediaNotice::Connected { key: key.clone() })?;
     }
     let refused = handle.start_peer_direction(
         key.clone(),

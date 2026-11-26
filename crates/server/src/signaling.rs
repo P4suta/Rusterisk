@@ -1,5 +1,5 @@
 use crate::clock::Clock;
-use crate::media::{MediaNotice, MediaPort, Reservation};
+use crate::media::{MediaNotice, MediaNotices, MediaPort, Reservation};
 use crate::rtp::SocketPair;
 use crate::storage::{PlaybackMedia, StoragePort};
 use crate::{
@@ -129,7 +129,7 @@ pub struct Signaling {
     controller: Controller,
     effects: mpsc::Receiver<Effect>,
     media: MediaPort,
-    notices: mpsc::Receiver<MediaNotice>,
+    notices: MediaNotices,
     listeners: Vec<Listener>,
     network: transport::Network,
     registrations: registrations::Registrations,
@@ -234,7 +234,7 @@ impl Signaling {
         controller: Controller,
         effects: mpsc::Receiver<Effect>,
         media: MediaPort,
-        notices: mpsc::Receiver<MediaNotice>,
+        notices: MediaNotices,
     ) -> Result<Self, ControlError> {
         if config.transports.len() > rusterisk_config::MAX_TRANSPORTS {
             return Err(ControlError::Capacity);

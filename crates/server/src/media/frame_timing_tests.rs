@@ -20,7 +20,7 @@ fn key() -> Result<CallKey, MediaError> {
 struct Fixture {
     media: MediaPort,
     hub: MediaHub,
-    _notices: mpsc::Receiver<MediaNotice>,
+    _notices: MediaNotices,
     _stopper: watch::Sender<bool>,
     stop: watch::Receiver<bool>,
     frames: FrameClock,
