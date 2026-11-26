@@ -19,17 +19,29 @@ fn key() -> Result<CallKey, MediaError> {
 async fn measurement_reply_preserves_the_capture_time_and_counts() -> Result<(), MediaError> {
     let (_handle, mut hub, _notices) = MediaHub::new(4);
     let key = key()?;
-    let (sender, reader) = watch::channel(crate::rtp::Measurements::default());
-    let (mut port, _channels) =
-        Port::new(PeerMediaDirection::SendReceive, DigitSupport::Unsupported);
-    port.measurements = Some(reader);
+    let sockets = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let mut leg = crate::rtp::RtpLeg::new(
+        sockets,
+        RtpSession {
+            remote: peer.local_addr().map_err(failure)?,
+            format: rusterisk_media::AudioFormat::Pcmu,
+            payload_type: 0,
+            telephone: None,
+        },
+        PeerMediaDirection::SendReceive,
+    )?;
+    leg.measurements_mut().local.rxcount = 7;
+    let port = Port::owned(PeerMediaDirection::SendReceive, DigitSupport::Unsupported);
     hub.install_link(key.clone(), port, Gate::Open)?;
-    sender.send_modify(|sample| sample.local.rxcount = 7);
+    hub.legs.insert(key.clone(), leg);
     let (reply, response) = oneshot::channel();
     let before = crate::utc_timestamps::now_millis();
     hub.command(Command::Measurements { key, reply })?;
     let after = crate::utc_timestamps::now_millis();
-    sender.send_modify(|sample| sample.local.rxcount = 8);
+    if let Some(leg) = hub.legs.values_mut().next() {
+        leg.measurements_mut().local.rxcount = 8;
+    }
     hub.close().await?;
     let (captured, sample) = response
         .await
@@ -74,7 +86,10 @@ async fn rejected(
     let (reply, response) = oneshot::channel();
     drop(response);
     hub.complete_attachment(key, result, reply)?;
-    let preserved = hub.ports.get(key).is_some_and(|port| !*port.stop.borrow());
+    let preserved = hub.ports.get(key).is_some_and(|port| match &port.io {
+        super::Io::Task(io) => !*io.stop.borrow(),
+        super::Io::Owned => hub.legs.contains_key(key),
+    });
     hub.close().await?;
     assert!(
         preserved,
@@ -441,4 +456,123 @@ async fn a_release_ends_the_webrtc_attachment_that_was_queued_before_it() -> Res
     hub.close().await?;
     assert!(!remaining);
     Ok(())
+}
+
+fn named(name: &str) -> Result<CallKey, MediaError> {
+    Ok(CallKey {
+        id: ChannelId::try_from(name.to_owned()).map_err(failure)?,
+        generation: 1,
+    })
+}
+
+// Attaches one protocol leg that talks to a fresh peer.
+fn owned_leg(hub: &mut MediaHub, key: &CallKey) -> Result<SocketPair, MediaError> {
+    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    hub.attach(
+        key.clone(),
+        SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?,
+        RtpSession {
+            remote: peer.local_addr().map_err(failure)?,
+            format: AudioFormat::Pcmu,
+            payload_type: 0,
+            telephone: None,
+        },
+        PeerMediaDirection::SendReceive,
+        AttachmentMode::Answered,
+    )?;
+    Ok(peer)
+}
+
+#[tokio::test]
+async fn attaching_a_protocol_leg_starts_no_task() -> Result<(), MediaError> {
+    let (_handle, mut hub, _notices) = MediaHub::new(4);
+    let key = key()?;
+    let _peer = owned_leg(&mut hub, &key)?;
+    let started = hub.workers.len();
+    hub.close().await?;
+    assert_eq!(started, 0);
+    Ok(())
+}
+
+// Sends one audio packet from a peer to the leg that it talks to.
+async fn speak(
+    peer: &SocketPair,
+    hub: &MediaHub,
+    key: &CallKey,
+    sequence: u16,
+) -> Result<(), MediaError> {
+    let local = hub
+        .legs
+        .get(key)
+        .ok_or(MediaError::UnknownStream)?
+        .local_addr()?;
+    let packet =
+        rusterisk_media::RtpPacket::new(0, sequence, u32::from(sequence) * 160, 7, &[0x55; 160])?;
+    peer.data()
+        .send_to(&packet.encode()?, local)
+        .await
+        .map_err(failure)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn one_failing_leg_ends_while_another_keeps_its_audio() -> Result<(), MediaError> {
+    let (_handle, mut hub, mut notices) = MediaHub::new(4);
+    let failing = named("failing")?;
+    let kept = named("kept")?;
+    let failing_peer = owned_leg(&mut hub, &failing)?;
+    let kept_peer = owned_leg(&mut hub, &kept)?;
+    hub.command(Command::Bridge {
+        id: 1,
+        members: Vec::from([failing.clone(), kept.clone()]),
+    })?;
+    let other_family =
+        std::net::UdpSocket::bind((std::net::Ipv6Addr::LOCALHOST, 0)).map_err(failure)?;
+    other_family.set_nonblocking(true).map_err(failure)?;
+    hub.legs
+        .get_mut(&failing)
+        .ok_or(MediaError::UnknownStream)?
+        .replace_data_socket(other_family);
+    speak(&kept_peer, &hub, &kept, 1).await?;
+    received(&mut hub, &kept, 1).await?;
+    // The failing leg can fail in a turn before the kept leg connects, so the notices come in either order.
+    let mut connected = false;
+    let mut stopped = false;
+    while let Ok(notice) = notices.try_recv() {
+        connected |= matches!(&notice, MediaNotice::Connected { key } if *key == kept);
+        stopped |=
+            matches!(&notice, MediaNotice::Stopped { key, result: Err(_) } if *key == failing);
+    }
+    assert!(
+        connected && stopped,
+        "connected {connected}, stopped {stopped}"
+    );
+    assert!(!hub.ports.contains_key(&failing));
+    speak(&kept_peer, &hub, &kept, 2).await?;
+    let result = received(&mut hub, &kept, 2).await;
+    drop(failing_peer);
+    hub.close().await?;
+    result
+}
+
+// Runs media turns until the leg has read the given number of packets.
+// A loopback datagram can reach its socket after the sender returns, so one turn may come too early.
+async fn received(hub: &mut MediaHub, key: &CallKey, count: u64) -> Result<(), MediaError> {
+    for _ in 0..100 {
+        hub.tick()?;
+        let read = hub
+            .legs
+            .get(key)
+            .ok_or(MediaError::UnknownStream)?
+            .measurements()
+            .local
+            .rxcount;
+        if read >= count {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+    Err(MediaError::Transport(
+        "the leg never read the packet".into(),
+    ))
 }

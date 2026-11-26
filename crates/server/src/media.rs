@@ -1,9 +1,9 @@
 use crate::audiosocket::AudioSocketLink;
-use crate::rtp::{LinkStats, RtpChannels, RtpDigitCommand, RtpLink, RtpSession, SocketPair};
+use crate::rtp::{LinkStats, RtpChannels, RtpDigitCommand, RtpLeg, RtpSession, SocketPair};
 use crate::storage::{MusicCursor, PlaybackSource, RecordingSink, WorkerError};
 use crate::CallKey;
 use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone, MediaTaskToken, PeerMediaDirection};
-use rusterisk_media::{AudioTarget, Frame, Gate, MediaError, Mixer, TelephoneFormat};
+use rusterisk_media::{AudioTarget, Frame, Gate, MediaError, Mixer, TelephoneFormat, MAX_PACKET};
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::time::Duration;
@@ -13,6 +13,8 @@ use tokio::task::JoinSet;
 mod admission_tests;
 #[cfg(test)]
 mod frame_timing_tests;
+#[cfg(test)]
+mod leg_tests;
 mod measurements;
 mod notices;
 pub use notices::MediaNotices;
@@ -661,19 +663,30 @@ struct SavedMusic {
     class: String,
     cursor: MusicCursor,
 }
-struct Port {
-    worker: Option<tokio::task::Id>,
-    measurements: Option<watch::Receiver<crate::rtp::Measurements>>,
-    connection_lease: Option<crate::MediaConnectionLease>,
-    answers: Option<mpsc::Receiver<()>>,
+// The channels of a link that runs its own task.
+struct TaskIo {
     incoming: mpsc::Receiver<Frame>,
     digits: mpsc::Receiver<DtmfTone>,
     outgoing: mpsc::Sender<Frame>,
     commands: mpsc::Sender<RtpDigitCommand>,
     completed: mpsc::Receiver<DtmfToken>,
-    digit_support: DigitSupport,
     stop: watch::Sender<bool>,
     direction: watch::Sender<PeerMediaDirection>,
+}
+
+// How the media task exchanges audio with a call's link.
+enum Io {
+    Task(TaskIo),
+    // A protocol leg that the media task runs in its own turn, which the hub keeps beside the port.
+    Owned,
+}
+
+struct Port {
+    worker: Option<tokio::task::Id>,
+    connection_lease: Option<crate::MediaConnectionLease>,
+    answers: Option<mpsc::Receiver<()>>,
+    io: Io,
+    digit_support: DigitSupport,
     generated_audio_gate: Gate,
     saved_music: Option<SavedMusic>,
     connection: Connection,
@@ -720,6 +733,12 @@ pub struct MediaHub {
     notices: NoticeSender,
     mixer: Mixer<CallKey>,
     ports: BTreeMap<CallKey, Port>,
+    // The protocol legs that this task runs, each beside its port.
+    legs: BTreeMap<CallKey, RtpLeg>,
+    // Room for one datagram, which every leg reads into in turn.
+    scratch: [u8; MAX_PACKET + 1],
+    tones: Vec<DtmfTone>,
+    failed: Vec<(CallKey, MediaError)>,
     workers: JoinSet<(CallKey, Result<LinkStats, MediaError>)>,
     dropped: u64,
     recordings: Recordings,
@@ -768,6 +787,10 @@ impl MediaHub {
                 notices,
                 mixer: Mixer::new(capacity),
                 ports: BTreeMap::new(),
+                legs: BTreeMap::new(),
+                scratch: [0; MAX_PACKET + 1],
+                tones: Vec::with_capacity(16),
+                failed: Vec::with_capacity(4),
                 workers: JoinSet::new(),
                 dropped: 0,
                 recordings: Recordings::new(),
@@ -787,10 +810,33 @@ impl MediaHub {
         self.recordings.release(key);
         self.playbacks.release(key);
         if let Some(port) = self.ports.remove(key) {
-            port.stop.send_replace(true);
+            match port.io {
+                Io::Task(io) => {
+                    io.stop.send_replace(true);
+                }
+                Io::Owned => {
+                    if let Some(leg) = self.legs.remove(key) {
+                        let stats = leg.finish();
+                        tracing::debug!(channel = %key.id, generation = key.generation, ?stats, "media leg released");
+                    }
+                }
+            }
             if !self.mixer.remove(key) {
                 return Err(MediaError::InvalidRoute);
             }
+        }
+        Ok(())
+    }
+
+    // Ends a leg that failed, and tells signaling that its media stopped.
+    fn fail_legs(&mut self) -> Result<(), MediaError> {
+        while let Some((key, error)) = self.failed.pop() {
+            tracing::warn!(channel = %key.id, generation = key.generation, %error, "media leg failed");
+            self.remove(&key)?;
+            self.notice(MediaNotice::Stopped {
+                key,
+                result: Err(error),
+            })?;
         }
         Ok(())
     }
@@ -808,11 +854,11 @@ impl MediaHub {
             .telephone
             .map(DigitSupport::Rfc4733)
             .unwrap_or(DigitSupport::Unsupported);
-        let (mut port, channels) = Port::new(initial_direction, support);
-        let link = RtpLink::new(sockets, session, channels)?;
-        port.measurements = Some(link.observations());
+        let leg = RtpLeg::new(sockets, session, initial_direction)?;
+        let port = Port::owned(initial_direction, support);
         self.install_link(key.clone(), port, mode.gate(initial_direction))?;
-        self.spawn_link(key, link.run())
+        self.legs.insert(key, leg);
+        Ok(())
     }
 
     fn spawn_link(
@@ -877,14 +923,9 @@ impl MediaHub {
             }
             Command::Measurements { key, reply } => {
                 let sample = self
-                    .ports
+                    .legs
                     .get(&key)
-                    .and_then(|port| port.measurements.as_ref())
-                    .filter(|reader| reader.has_changed().is_ok())
-                    .map(|reader| {
-                        let snapshot = reader.borrow();
-                        (crate::utc_timestamps::now_millis(), snapshot.clone())
-                    });
+                    .map(|leg| (crate::utc_timestamps::now_millis(), leg.measurements()));
                 if reply.send(sample).is_err() {
                     tracing::debug!("RTP statistics requester disconnected");
                 }
@@ -1035,9 +1076,17 @@ impl MediaHub {
                             if !supported {
                                 return Err(MediaError::Unsupported);
                             }
-                            port.commands
-                                .try_send(command)
-                                .map_err(|_| MediaError::Capacity)
+                            match &port.io {
+                                Io::Task(io) => io
+                                    .commands
+                                    .try_send(command)
+                                    .map_err(|_| MediaError::Capacity),
+                                Io::Owned => self
+                                    .legs
+                                    .get_mut(&key)
+                                    .ok_or(MediaError::UnknownStream)?
+                                    .queue_digits(command),
+                            }
                         });
                     match (reply, result) {
                         (Some(reply), result) => {
@@ -1125,7 +1174,16 @@ impl MediaHub {
                             .gates(&key, gate, generated_audio_gate)
                             .map(|()| {
                                 port.generated_audio_gate = generated_audio_gate;
-                                port.direction.send_replace(direction);
+                                match &port.io {
+                                    Io::Task(io) => {
+                                        io.direction.send_replace(direction);
+                                    }
+                                    Io::Owned => {
+                                        if let Some(leg) = self.legs.get_mut(&key) {
+                                            leg.set_direction(direction);
+                                        }
+                                    }
+                                }
                                 true
                             })
                     } else {
@@ -1162,14 +1220,22 @@ impl MediaHub {
     }
 
     fn tick(&mut self) -> Result<(), MediaError> {
+        // Commands that signaling queued before this turn apply before the turn reads any audio.
+        while let Ok(command) = self.commands.try_recv() {
+            self.command(command)?;
+        }
         self.probes.retain(|_, challenge| !challenge.closed());
         for (key, port) in &mut self.ports {
+            // An owned leg has no channels, and the loop below runs it.
+            let Io::Task(io) = &mut port.io else {
+                continue;
+            };
             if port
                 .connection_lease
                 .as_ref()
                 .is_some_and(crate::MediaConnectionLease::is_released)
             {
-                port.stop.send_replace(true);
+                io.stop.send_replace(true);
                 continue;
             }
             if let Some(answers) = &mut port.answers {
@@ -1187,7 +1253,7 @@ impl MediaHub {
                 }
             }
             for _ in 0..8 {
-                match port.completed.try_recv() {
+                match io.completed.try_recv() {
                     Ok(token) => self
                         .notices
                         .try_send(MediaNotice::DtmfFinished {
@@ -1201,7 +1267,7 @@ impl MediaHub {
                 }
             }
             for _ in 0..16 {
-                match port.digits.try_recv() {
+                match io.digits.try_recv() {
                     Ok(tone) => {
                         self.recordings
                             .received_digit(key, self.mixer.bridge_for(key), tone.digit);
@@ -1218,7 +1284,7 @@ impl MediaHub {
                 }
             }
             for _ in 0..3 {
-                match port.incoming.try_recv() {
+                match io.incoming.try_recv() {
                     Ok(frame) => {
                         if let Some(challenge) = self.probes.get_mut(key) {
                             challenge.receive(&frame)?;
@@ -1238,12 +1304,64 @@ impl MediaHub {
                     }
                     Err(mpsc::error::TryRecvError::Empty) => break,
                     Err(mpsc::error::TryRecvError::Disconnected) => {
-                        port.stop.send_replace(true);
+                        io.stop.send_replace(true);
                         break;
                     }
                 }
             }
         }
+        // Every owned leg reads what arrived and hands its next frame to the mixer before the mix.
+        for (key, leg) in &mut self.legs {
+            let advanced = leg
+                .receive(&mut self.scratch, &mut self.tones, |_| Ok(()))
+                .and_then(|()| leg.advance(&mut self.tones));
+            let advanced = match advanced {
+                Ok(advanced) => advanced,
+                Err(error) => {
+                    self.tones.clear();
+                    self.failed.push((key.clone(), error));
+                    continue;
+                }
+            };
+            for tone in self.tones.drain(..) {
+                self.recordings
+                    .received_digit(key, self.mixer.bridge_for(key), tone.digit);
+                self.notices
+                    .try_send(MediaNotice::Dtmf {
+                        key: key.clone(),
+                        tone,
+                    })
+                    .map_err(|_| MediaError::Capacity)?;
+            }
+            if let Some(token) = advanced.completed {
+                self.notices
+                    .try_send(MediaNotice::DtmfFinished {
+                        key: key.clone(),
+                        token,
+                    })
+                    .map_err(|_| MediaError::Capacity)?;
+            }
+            if let Some(frame) = advanced.frame {
+                if let Some(challenge) = self.probes.get_mut(key) {
+                    challenge.receive(&frame)?;
+                }
+                self.recordings.channel(key, frame);
+                match self.mixer.push(key, frame) {
+                    Ok(()) => {
+                        if let Some(port) = self.ports.get_mut(key) {
+                            if matches!(port.connection, Connection::Waiting) {
+                                port.connection = Connection::Connected;
+                                self.notices
+                                    .try_send(MediaNotice::Connected { key: key.clone() })
+                                    .map_err(|_| MediaError::Capacity)?;
+                            }
+                        }
+                    }
+                    Err(_) => self.dropped += 1,
+                }
+            }
+        }
+        self.fail_legs()?;
         self.remember_music();
         let frames = self.playbacks.tick()?;
         let mut playback = Vec::with_capacity(frames.len());
@@ -1267,15 +1385,24 @@ impl MediaHub {
                 (Some(probe), Gate::Open | Gate::IncomingMuted) => probe.transmit()?,
                 _ => *frame,
             };
-            match port.outgoing.try_send(frame) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => self.dropped += 1,
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    port.stop.send_replace(true);
+            match &port.io {
+                Io::Task(io) => match io.outgoing.try_send(frame) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => self.dropped += 1,
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        io.stop.send_replace(true);
+                    }
+                },
+                Io::Owned => {
+                    if let Some(leg) = self.legs.get_mut(key) {
+                        if let Err(error) = leg.send(frame) {
+                            self.failed.push((key.clone(), error));
+                        }
+                    }
                 }
             }
         }
-        Ok(())
+        self.fail_legs()
     }
 
     async fn serve(&mut self, stop: &mut watch::Receiver<bool>) -> Result<(), MediaError> {
@@ -1329,7 +1456,13 @@ impl MediaHub {
     async fn close(&mut self) -> Result<(), MediaError> {
         self.playbacks.close();
         for (_, port) in std::mem::take(&mut self.ports) {
-            port.stop.send_replace(true);
+            if let Io::Task(io) = port.io {
+                io.stop.send_replace(true);
+            }
+        }
+        for (key, leg) in std::mem::take(&mut self.legs) {
+            let stats = leg.finish();
+            tracing::debug!(channel = %key.id, generation = key.generation, ?stats, "media leg closed");
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut failure = self.recordings.close().await.err();

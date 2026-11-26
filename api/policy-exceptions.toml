@@ -54,12 +54,6 @@ adr = "docs/adr/wake-each-task-at-its-earliest-deadline.md"
 rationale = "Pace mixer frames while a call needs frame timing."
 
 [[timers]]
-path = "crates/server/src/rtp.rs"
-item = "serve"
-adr = "docs/adr/wake-each-task-at-its-earliest-deadline.md"
-rationale = "Pace one RTP link until the media task owns datagram links."
-
-[[timers]]
 path = "crates/server/src/webrtc/link.rs"
 item = "serve"
 adr = "docs/adr/wake-each-task-at-its-earliest-deadline.md"
