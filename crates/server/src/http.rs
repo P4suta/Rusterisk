@@ -489,7 +489,7 @@ async fn dispatch(
         .into_response());
     }
     if method == Method::GET && segments == ["rusterisk", "capabilities"] {
-        use rusterisk_api::capabilities::{Capabilities, OperationCapability};
+        use rusterisk_api::capabilities::{Capabilities, OperationCapability, VerifiedCallPath};
         let operations = rusterisk_api::OPERATIONS
             .iter()
             .map(|operation| OperationCapability {
@@ -500,7 +500,18 @@ async fn dispatch(
         return Ok(Json(Capabilities {
             reference: rusterisk_api::REFERENCE_VERSION.into(),
             operations,
-            verified_call_paths: Vec::new(),
+            verified_call_paths: [VerifiedCallPath {
+                path: "webrtc_application".into(),
+                signaling: "SIP over WebSocket".into(),
+                media: "DTLS-SRTP".into(),
+                codec: "PCMU".into(),
+                conditions: vec![
+                    "Chromium on Linux ARM64".into(),
+                    "Two registered endpoints in a Stasis mixing bridge".into(),
+                    "ICE host candidates on an isolated network".into(),
+                ],
+            }]
+            .into(),
         })
         .into_response());
     }

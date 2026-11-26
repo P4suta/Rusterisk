@@ -5,6 +5,8 @@ The public Rust models and operation catalog generate the discovery documents an
 Declaring an operation in discovery doesn't certify its call behavior.
 The authenticated `/rusterisk/capabilities` endpoint reports the reference version and each operation's `call_verified` value.
 Every operation reports `false` while complete operation coverage remains pending.
+The `verified_call_paths` array identifies call paths that exchanged audio in both directions and released their channels on both servers.
+Each entry names the signaling transport, media transport, codec, and tested conditions.
 
 ## Control interface
 

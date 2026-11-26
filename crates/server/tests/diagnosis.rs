@@ -67,7 +67,19 @@ async fn diagnosis_follows_dialplan_and_live_call_identity_with_read_only_creden
         let app = router(controller.clone());
         let capabilities = read(&app, "/rusterisk/capabilities").await?;
         assert_eq!(capabilities["reference"], rusterisk_api::REFERENCE_VERSION);
-        assert!(capabilities["verified_call_paths"].is_array());
+        let verified = capabilities["verified_call_paths"]
+            .as_array()
+            .ok_or(ControlError::Invalid("Missing call paths"))?;
+        let browser = verified
+            .iter()
+            .find(|profile| profile["path"] == "webrtc_application")
+            .ok_or(ControlError::Invalid("Missing verified browser call"))?;
+        assert_eq!(browser["codec"], "PCMU");
+        assert_eq!(browser["media"], "DTLS-SRTP");
+        assert_eq!(browser["signaling"], "SIP over WebSocket");
+        assert!(browser["conditions"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()));
         let operations = capabilities["operations"]
             .as_array()
             .ok_or(ControlError::Invalid("Missing operation capabilities"))?;
