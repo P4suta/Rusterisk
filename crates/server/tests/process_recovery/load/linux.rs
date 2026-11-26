@@ -381,23 +381,7 @@ async fn trial(binary: &Path, count: u8) -> Result<Metrics, ControlError> {
         .await
         .map_err(failure)
         .and_then(|result| result);
-    if result.is_err() {
-        match rusterisk_test_support::child_exit(&mut server.child, Wait::Responsive) {
-            Ok(status) => eprintln!("Server exited during the trial: {status}"),
-            Err(error) if error.kind() == io::ErrorKind::TimedOut => {
-                eprintln!("Server still running after the failed request")
-            }
-            Err(error) => return Err(failure(error)),
-        }
-        for name in ["server.0.log", "server.0.stderr"] {
-            let messages = fs::read_to_string(tmp.path().join(name)).map_err(failure)?;
-            for line in messages.lines().rev().take(5) {
-                eprintln!("{line}");
-            }
-        }
-    }
-    let cleanup = server.terminate().map(|_| ());
-    combine(result, cleanup)
+    super::finish_trial(&mut server, tmp.path(), result)
 }
 
 pub(super) async fn compare() -> Result<(), ControlError> {

@@ -2,6 +2,72 @@
 #[path = "load/linux.rs"]
 mod linux;
 
+use super::{combine, failure, ChildServer, ControlError};
+use std::path::Path;
+
+fn finish_trial<T>(
+    server: &mut ChildServer,
+    root: &Path,
+    result: Result<T, ControlError>,
+) -> Result<T, ControlError> {
+    if result.is_err() {
+        match rusterisk_test_support::child_exit(
+            &mut server.child,
+            rusterisk_test_support::Wait::Responsive,
+        ) {
+            Ok(status) => eprintln!("Server exited during the trial: {status}"),
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                eprintln!("Server still running after the failed request")
+            }
+            Err(error) => eprintln!("Failed to read the trial process status: {error}"),
+        }
+        for name in ["server.0.log", "server.0.stderr"] {
+            match std::fs::read_to_string(root.join(name)) {
+                Ok(messages) => {
+                    for line in messages.lines().rev().take(5) {
+                        eprintln!("{line}");
+                    }
+                }
+                Err(error) => eprintln!("Failed to read {name}: {error}"),
+            }
+        }
+    }
+    combine(result, server.terminate().map(|_| ()))
+}
+
+#[tokio::test]
+async fn a_missing_trial_log_preserves_the_failure_and_reaps_the_server() -> Result<(), ControlError>
+{
+    let root = tempfile::tempdir().map_err(failure)?;
+    std::fs::write(
+        root.path().join("ari.conf"),
+        "[app]\ntype=user\npassword=test-password\n",
+    )
+    .map_err(failure)?;
+    for file in ["pjsip.conf", "rtp.conf", "extensions.conf"] {
+        std::fs::write(root.path().join(file), "").map_err(failure)?;
+    }
+    let mut server = ChildServer::start(
+        root.path(),
+        &root.path().join("data"),
+        root.path().join("server.log"),
+    )
+    .await?;
+    let result = finish_trial(
+        &mut server,
+        &root.path().join("missing"),
+        Err::<(), _>(ControlError::Invalid("measurement failed")),
+    );
+    let reaped = server.child.try_wait().map_err(failure)?.is_some();
+    server.terminate()?;
+    assert!(matches!(
+        result,
+        Err(ControlError::Invalid("measurement failed"))
+    ));
+    assert!(reaped);
+    root.close().map_err(failure)
+}
+
 fn cpu_per_second(start: u64, end: u64, elapsed: std::time::Duration) -> Option<u64> {
     let scaled = u128::from(end.checked_sub(start)?) * 1_000_000_000;
     u64::try_from(scaled.checked_div(elapsed.as_nanos())?).ok()
