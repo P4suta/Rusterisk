@@ -188,7 +188,12 @@ impl ServerBuildPlan {
                 self.limits.build_timeout().as_secs(),
             ),
         };
-        if phase == ServerBuildPhase::Build && self.target == ServerTarget::LinuxArm64 {
+        if phase == ServerBuildPhase::Build
+            && matches!(
+                self.target,
+                ServerTarget::LinuxArm64 | ServerTarget::LinuxX86_64
+            )
+        {
             arguments.extend([
                 "--config".to_owned(),
                 r#"profile.release.package.libsqlite3-sys.opt-level="s""#.to_owned(),

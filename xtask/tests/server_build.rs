@@ -94,7 +94,7 @@ fn server_builds_select_both_release_executables_with_locked_bounded_steps() -> 
                 .to_str()
                 .ok_or_else(|| std::io::Error::other("fixture path is not UTF-8"))?,
         ]);
-        if target == ServerTarget::LinuxArm64 {
+        if matches!(target, ServerTarget::LinuxArm64 | ServerTarget::LinuxX86_64) {
             expected.extend([
                 "--config",
                 r#"profile.release.package.libsqlite3-sys.opt-level="s""#,
