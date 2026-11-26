@@ -58,7 +58,8 @@ fn native_build_limits_require_positive_jobs_and_a_positive_bounded_timeout() ->
 }
 
 #[test]
-fn server_builds_select_one_release_executable_with_locked_bounded_steps() -> std::io::Result<()> {
+fn server_builds_select_both_release_executables_with_locked_bounded_steps() -> std::io::Result<()>
+{
     let source = std::env::temp_dir().join("rusterisk-server-build-source");
     let state = std::env::temp_dir().join("rusterisk-server-build-state");
     for target in ServerTarget::ALL {
@@ -80,8 +81,12 @@ fn server_builds_select_one_release_executable_with_locked_bounded_steps() -> st
                 "--release",
                 "--package",
                 "rusterisk-server",
+                "--package",
+                "rusterisk-cli",
                 "--bin",
                 "rusterisk",
+                "--bin",
+                "rusterisk-cli",
                 "--target",
                 target.triple(),
                 "--jobs",
