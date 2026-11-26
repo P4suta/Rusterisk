@@ -1,4 +1,4 @@
-use super::{CallKey, LinkStats, MediaNotice};
+use super::{CallKey, DtmfToken, LinkStats, MediaNotice};
 use rusterisk_media::MediaError;
 use tokio::sync::mpsc;
 
@@ -44,6 +44,7 @@ pub(super) struct NoticeSender {
 pub(super) struct LegNotices {
     connected: Option<mpsc::OwnedPermit<()>>,
     stopped: mpsc::OwnedPermit<()>,
+    pub(super) digits: Vec<(DtmfToken, mpsc::OwnedPermit<()>)>,
 }
 
 impl LegNotices {
@@ -54,6 +55,29 @@ impl LegNotices {
     ) -> Result<(), MediaError> {
         if let Some(slot) = self.connected.take() {
             sender.send_reserved(slot, MediaNotice::Connected { key: key.clone() })?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn digit_finished(
+        &mut self,
+        sender: &NoticeSender,
+        key: &CallKey,
+        token: DtmfToken,
+    ) -> Result<(), MediaError> {
+        if let Some(index) = self
+            .digits
+            .iter()
+            .position(|(pending, _)| *pending == token)
+        {
+            let (_, slot) = self.digits.swap_remove(index);
+            sender.send_reserved(
+                slot,
+                MediaNotice::DtmfFinished {
+                    key: key.clone(),
+                    token,
+                },
+            )?;
         }
         Ok(())
     }
@@ -79,6 +103,7 @@ impl NoticeSender {
         Ok(LegNotices {
             connected: Some(reserve()?),
             stopped: reserve()?,
+            digits: Vec::new(),
         })
     }
 

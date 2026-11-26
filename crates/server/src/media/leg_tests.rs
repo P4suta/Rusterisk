@@ -251,10 +251,36 @@ async fn a_leg_reads_at_most_one_window_of_datagrams_in_a_turn() -> Result<(), M
     Ok(())
 }
 
+#[tokio::test]
+async fn a_refused_digit_sequence_delivers_its_reserved_completion() -> Result<(), MediaError> {
+    let (handle, mut hub, mut notices) = MediaHub::new(1);
+    let missing = key("missing")?;
+    let timing = DtmfTiming::new(0, 20, 60, 0).map_err(|_| MediaError::InvalidRoute)?;
+    let command = DtmfOutbox::new(u16::MAX)
+        .and_then(|mut outbox| outbox.admit(&[DtmfDigit::Five], timing))
+        .map_err(|_| MediaError::InvalidRoute)?;
+    handle.send_sequence(missing.clone(), command)?;
+    for _ in 0..hub.notices.ordinary.max_capacity() {
+        hub.notice(MediaNotice::Answer {
+            key: missing.clone(),
+        })?;
+    }
+    hub.tick()?;
+    let mut count = 0;
+    while let Ok(notice) = notices.try_recv() {
+        if matches!(notice, MediaNotice::DtmfFinished { key, token } if key == missing && token == command.token)
+        {
+            count += 1;
+        }
+    }
+    assert_eq!(count, 1);
+    hub.close().await
+}
+
 // Signaling sends a digit sequence to a leg that the media task owns.
 #[tokio::test(start_paused = true)]
 async fn an_owned_leg_sends_digits_and_reports_their_finish() -> Result<(), MediaError> {
-    let (_handle, mut hub, mut notices) = MediaHub::new(4);
+    let (handle, mut hub, mut notices) = MediaHub::new(4);
     let dialing = key("dialing")?;
     let format = TelephoneFormat::new(101, 8000)?;
     let peer = leg(&mut hub, &dialing, Some(format))?;
@@ -263,23 +289,23 @@ async fn an_owned_leg_sends_digits_and_reports_their_finish() -> Result<(), Medi
         .and_then(|mut outbox| outbox.admit(&[DtmfDigit::Five], timing))
         .map_err(|_| MediaError::InvalidRoute)?;
     let token = command.token;
-    let (reply, mut response) = oneshot::channel();
-    hub.command(Command::Digits {
-        key: dialing.clone(),
-        command: RtpDigitCommand::Sequence(command),
-        reply: Some(reply),
-    })?;
-    assert!(matches!(response.try_recv(), Ok(Ok(()))));
-    let mut finished = false;
+    handle.send_sequence(dialing.clone(), command)?;
+    for _ in 0..hub.notices.ordinary.max_capacity() {
+        hub.notice(MediaNotice::Answer {
+            key: dialing.clone(),
+        })?;
+    }
     for _ in 0..50 {
         hub.tick()?;
-        while let Ok(notice) = notices.try_recv() {
-            finished |= matches!(notice, MediaNotice::DtmfFinished { key, token: done } if key == dialing && done == token);
-        }
-        if finished {
-            break;
-        }
         tokio::time::advance(Duration::from_millis(20)).await;
+    }
+    let mut finished = false;
+    while let Ok(notice) = notices.try_recv() {
+        if matches!(notice, MediaNotice::DtmfFinished { key, token: done } if key == dialing && done == token)
+        {
+            assert!(!finished);
+            finished = true;
+        }
     }
     // The leg also sends the mixer's audio, so the peer looks for the first telephone event.
     let mut bytes = [0; 1501];
