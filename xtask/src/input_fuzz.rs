@@ -5,6 +5,13 @@ mod manifest;
 mod native;
 mod runner;
 mod snapshot;
+
+#[cfg(test)]
+const TEST_WORKSPACE: &str = concat!(
+    "[workspace]\nmembers=['xtask']\n[workspace.package]\nversion='",
+    env!("CARGO_PKG_VERSION"),
+    "'\n"
+);
 #[path = "../fuzz/src/targets.rs"]
 mod targets;
 pub use crate::core_proofs::Execution;

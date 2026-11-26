@@ -119,15 +119,16 @@ fn fuzz_manifest_binds_each_harness_to_the_actual_workspace_dependencies() -> Re
         manifest["dependencies"]["rusterisk-api"]
             .get("version")
             .and_then(toml::Value::as_str),
-        Some("=0.1.0")
+        Some(concat!("=", env!("CARGO_PKG_VERSION")))
     );
+    let pin = format!("version = \"={}\"", env!("CARGO_PKG_VERSION"));
     for invalid in [
         String::new(),
         "[workspace]\n".to_owned(),
         source.replace("../../crates/api", "../../crates/fake"),
         source.replace("=0.4.13", "0.4"),
-        source.replace("version = \"=0.1.0\", ", ""),
-        source.replace("version = \"=0.1.0\"", "version = \"*\""),
+        source.replace(&format!("{pin}, "), ""),
+        source.replace(&pin, "version = \"*\""),
         source.replace("fuzz_targets/settings.rs", "fuzz_targets/unused.rs"),
         source.replace("name = \"sip\"", "name = \"unknown\""),
     ] {
