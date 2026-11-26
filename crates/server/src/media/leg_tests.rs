@@ -430,3 +430,48 @@ async fn an_owned_leg_sends_digits_and_reports_their_finish() -> Result<(), Medi
     assert_eq!(goodbye.last(), Some(&ControlKind::Goodbye));
     Ok(())
 }
+
+#[tokio::test]
+async fn received_digits_wait_for_notice_capacity_without_stopping_the_phone(
+) -> Result<(), MediaError> {
+    let (_handle, mut hub, mut notices) = MediaHub::new(2);
+    let phone = key("digits")?;
+    let peer = leg(&mut hub, &phone, Some(TelephoneFormat::new(101, 8000)?))?;
+    for _ in 0..hub.notices.ordinary.max_capacity() {
+        hub.notice(MediaNotice::Answer { key: phone.clone() })?;
+    }
+    let expected = [DtmfDigit::Hash, DtmfDigit::Star];
+    for (index, digit) in [0_u16, 1].into_iter().zip(expected) {
+        let leg = hub.legs.get(&phone).ok_or(MediaError::UnknownStream)?;
+        let event = rusterisk_media::TelephoneEvent::new(digit, true, 10, 960)?;
+        let packet = RtpPacket::new(
+            101,
+            index + 1,
+            1000 + u32::from(index) * 1600,
+            7,
+            &event.encode(),
+        )?;
+        peer.data()
+            .send_to(&packet.encode()?, leg.local_addr()?)
+            .await
+            .map_err(failure)?;
+        Wait::Ready
+            .bounded(leg.input_observer()?.peek_from(&mut [0; 1]))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
+        hub.tick()?;
+        assert!(hub.legs.contains_key(&phone));
+    }
+    while let Ok(notice) = notices.try_recv() {
+        assert!(matches!(notice, MediaNotice::Answer { .. }));
+    }
+    hub.tick()?;
+    for digit in expected {
+        assert!(
+            matches!(notices.try_recv(), Ok(MediaNotice::Dtmf {key, tone}) if key == phone && tone.digit == digit)
+        );
+    }
+    assert!(notices.try_recv().is_err());
+    hub.close().await
+}

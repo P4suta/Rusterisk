@@ -725,10 +725,15 @@ impl Delivery<'_> {
         for tone in tones.drain(..) {
             self.recordings
                 .received_digit(key, self.mixer.bridge_for(key), tone.digit);
-            self.notices.try_send(MediaNotice::Dtmf {
-                key: key.clone(),
-                tone,
-            })?;
+            let port = self.ports.get_mut(key).ok_or(MediaError::UnknownStream)?;
+            match port.notices.received_digit(self.notices, key, tone) {
+                Ok(()) => {}
+                Err(MediaError::Capacity) => {
+                    failed.push((key.clone(), MediaError::Capacity));
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
         }
         for token in finished.drain(..) {
             if let Some(port) = self.ports.get_mut(key) {
@@ -1368,6 +1373,7 @@ impl MediaHub {
         }
         self.probes.retain(|_, challenge| !challenge.closed());
         for (key, port) in &mut self.ports {
+            port.notices.flush_received(&self.notices, key)?;
             // An owned leg has no channels, and the loop below runs it.
             let Io::Task(io) = &mut port.io else {
                 continue;

@@ -1,5 +1,6 @@
-use super::{CallKey, DtmfToken, LinkStats, MediaNotice};
+use super::{CallKey, DtmfToken, DtmfTone, LinkStats, MediaNotice};
 use rusterisk_media::MediaError;
+use std::collections::VecDeque;
 use tokio::sync::mpsc;
 
 pub(super) fn service_queue_error<T>(error: mpsc::error::TrySendError<T>) -> MediaError {
@@ -44,10 +45,56 @@ pub(super) struct NoticeSender {
 pub(super) struct LegNotices {
     connected: Option<mpsc::OwnedPermit<()>>,
     stopped: mpsc::OwnedPermit<()>,
+    received: VecDeque<DtmfTone>,
     pub(super) digits: Vec<(DtmfToken, mpsc::OwnedPermit<()>)>,
 }
 
 impl LegNotices {
+    pub(super) fn received_digit(
+        &mut self,
+        sender: &NoticeSender,
+        key: &CallKey,
+        tone: DtmfTone,
+    ) -> Result<(), MediaError> {
+        if self.received.is_empty() {
+            if let Some(slot) = sender.ordinary_slot()? {
+                return sender.send_reserved(
+                    slot,
+                    MediaNotice::Dtmf {
+                        key: key.clone(),
+                        tone,
+                    },
+                );
+            }
+        }
+        if self.received.len() >= 16 {
+            return Err(MediaError::Capacity);
+        }
+        self.received.push_back(tone);
+        Ok(())
+    }
+
+    pub(super) fn flush_received(
+        &mut self,
+        sender: &NoticeSender,
+        key: &CallKey,
+    ) -> Result<(), MediaError> {
+        while let Some(&tone) = self.received.front() {
+            let Some(slot) = sender.ordinary_slot()? else {
+                break;
+            };
+            sender.send_reserved(
+                slot,
+                MediaNotice::Dtmf {
+                    key: key.clone(),
+                    tone,
+                },
+            )?;
+            self.received.pop_front();
+        }
+        Ok(())
+    }
+
     pub(super) fn connected(
         &mut self,
         sender: &NoticeSender,
@@ -93,6 +140,14 @@ impl LegNotices {
 }
 
 impl NoticeSender {
+    pub(super) fn ordinary_slot(&self) -> Result<Option<mpsc::OwnedPermit<()>>, MediaError> {
+        match self.ordinary.clone().try_reserve_owned() {
+            Ok(slot) => Ok(Some(slot)),
+            Err(mpsc::error::TrySendError::Full(_)) => Ok(None),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(MediaError::ServiceClosed),
+        }
+    }
+
     pub(super) fn reserve_leg(&self) -> Result<LegNotices, MediaError> {
         let reserve = || {
             self.legs
@@ -104,6 +159,7 @@ impl NoticeSender {
             connected: Some(reserve()?),
             stopped: reserve()?,
             digits: Vec::new(),
+            received: VecDeque::new(),
         })
     }
 
