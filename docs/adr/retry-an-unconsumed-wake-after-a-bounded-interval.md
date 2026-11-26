@@ -1,6 +1,6 @@
 ---
 date: 2026-11-24
-status: proposed
+status: accepted
 ---
 
 # Retry an unconsumed wake after a bounded interval
