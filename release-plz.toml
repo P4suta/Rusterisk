@@ -1,7 +1,6 @@
 [workspace]
 allow_dirty = false
 dependencies_update = false
-git_only = true
 git_tag_name = "v{{ version }}"
 git_tag_enable = false
 git_release_enable = false
@@ -15,6 +14,7 @@ semver_check = true
 [[package]]
 name = "rusterisk-cli"
 release = true
+git_only = true
 changelog_path = "CHANGELOG.md"
 changelog_include = [
   "rusterisk-api",
