@@ -5,6 +5,7 @@ use xtask::distribution::SdkConsumerPlan;
 use xtask::server_distribution::NativeServerBuildLimits;
 mod interop;
 mod release_cli;
+mod release_publication;
 mod security;
 
 #[derive(Debug)]
@@ -293,6 +294,7 @@ fn execute() -> Result<(), TaskError> {
             xtask::process::signal_owned_console(process_id).map_err(TaskError::Io)
         }
         [task, arguments @ ..] if task == "release-check" => release_cli::execute(arguments),
+        [task, arguments @ ..] if task == "release-publication" => Ok(release_publication::execute(arguments)?),
         [task, flag, archive] if task == "vendor-patch" && flag == "--archive" => {
             let count = xtask::vendor::patch(&std::env::current_dir()?, Path::new(archive))
                 .map_err(|error| TaskError::Contract(error.to_string()))?;

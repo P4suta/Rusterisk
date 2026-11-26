@@ -1,0 +1,161 @@
+use super::{hex, invalid, Release};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::{self, Read},
+    path::{Path, PathBuf},
+};
+use xtask::{
+    regular_archive::{read_regular_gzip, ArchiveLimits, ArchiveRoot},
+    server_distribution::{ServerCandidateName, ServerTarget},
+};
+
+pub(super) fn sha256(bytes: &[u8]) -> String {
+    digest_text(&Sha256::digest(bytes))
+}
+
+fn digest_text(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn file_digest(path: &Path) -> io::Result<String> {
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(invalid(format!(
+            "expected a regular release asset at {}",
+            path.display()
+        )));
+    }
+    let mut hash = Sha256::new();
+    let mut file = fs::File::open(path)?;
+    let mut buffer = [0; 8192];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    Ok(digest_text(&hash.finalize()))
+}
+
+pub(super) fn small_file(path: &Path, maximum: u64) -> io::Result<Vec<u8>> {
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(invalid("expected a regular release file"));
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(maximum + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > maximum {
+        return Err(invalid("release input exceeds its size limit"));
+    }
+    Ok(bytes)
+}
+
+fn names(release: &Release<'_>) -> io::Result<BTreeMap<String, String>> {
+    let mut paths = BTreeMap::new();
+    for target in ServerTarget::ALL {
+        let name = ServerCandidateName::new(release.version, target).map_err(io::Error::other)?;
+        let root = name.root();
+        let cli = format!("rusterisk-cli-{}-{}", release.version, target.triple());
+        paths.insert(name.file_name().into(), name.file_name().into());
+        for name in [format!("{root}.cdx.xml"), format!("{cli}.cdx.xml")] {
+            paths.insert(name.clone(), format!("sbom/{name}"));
+        }
+        if matches!(target, ServerTarget::LinuxArm64 | ServerTarget::LinuxX86_64) {
+            let archive = format!("{root}.oci.tar");
+            paths.insert(archive.clone(), archive);
+            let name = format!("{root}.oci.cdx.xml");
+            paths.insert(name.clone(), format!("sbom/{name}"));
+        }
+    }
+    paths.insert(release.crate_name(), release.crate_name());
+    Ok(paths)
+}
+
+pub(super) fn checksums(text: &str) -> io::Result<BTreeMap<String, String>> {
+    let mut entries = BTreeMap::new();
+    for line in text.lines() {
+        let (digest, name) = line
+            .split_once("  ")
+            .ok_or_else(|| invalid("invalid checksum line"))?;
+        if !hex(digest, 64) || entries.insert(name.into(), digest.into()).is_some() {
+            return Err(invalid("invalid or duplicate asset checksum"));
+        }
+    }
+    Ok(entries)
+}
+
+pub(super) struct Local {
+    pub assets: BTreeMap<String, (PathBuf, String)>,
+    pub manifest: String,
+}
+
+impl Local {
+    pub fn verify(release: &Release<'_>, directory: &Path) -> io::Result<Self> {
+        let bytes = small_file(&directory.join("SHA256SUMS"), 16 * 1024)?;
+        let entries = checksums(std::str::from_utf8(&bytes).map_err(io::Error::other)?)?;
+        let paths = names(release)?;
+        if entries.len() != paths.len() || !paths.values().all(|path| entries.contains_key(path)) {
+            return Err(invalid(
+                "asset inventory must include all verified archives and SBOMs",
+            ));
+        }
+        let mut assets = BTreeMap::new();
+        let mut manifest = String::new();
+        for (name, relative) in paths {
+            let path = directory.join(&relative);
+            let digest = file_digest(&path)?;
+            if entries.get(&relative) != Some(&digest) {
+                return Err(invalid(format!("checksum mismatch for {relative}")));
+            }
+            manifest.push_str(&format!("{digest}  {name}\n"));
+            assets.insert(name, (path, digest));
+        }
+        let archive = small_file(&directory.join(release.crate_name()), 16 * 1024 * 1024)?;
+        check_crate(release, &archive)?;
+        Ok(Self { assets, manifest })
+    }
+
+    pub fn manifest_hash(&self) -> String {
+        sha256(self.manifest.as_bytes())
+    }
+}
+
+pub(super) fn check_crate(release: &Release<'_>, bytes: &[u8]) -> io::Result<String> {
+    let name = format!("rusterisk-cli-{}", release.version);
+    let root = ArchiveRoot::new(&name).map_err(io::Error::other)?;
+    let archive = read_regular_gzip(bytes, &root, ArchiveLimits::SDK).map_err(io::Error::other)?;
+    let file = |name: &str| {
+        archive
+            .files()
+            .iter()
+            .find(|f| f.path().as_str() == name)
+            .map(|f| f.bytes())
+            .ok_or_else(|| invalid(format!("missing CLI archive file {name}")))
+    };
+    let vcs: serde_json::Value = serde_json::from_slice(file(".cargo_vcs_info.json")?)?;
+    let manifest: toml::Table =
+        toml::from_str(std::str::from_utf8(file("Cargo.toml")?).map_err(io::Error::other)?)
+            .map_err(io::Error::other)?;
+    let package = manifest
+        .get("package")
+        .and_then(toml::Value::as_table)
+        .ok_or_else(|| invalid("missing CLI package"))?;
+    if vcs.pointer("/git/sha1").and_then(|v| v.as_str()) != Some(release.source)
+        || !matches!(
+            vcs.pointer("/git/dirty"),
+            None | Some(serde_json::Value::Bool(false))
+        )
+        || vcs["path_in_vcs"] != "crates/cli"
+        || package.get("name").and_then(toml::Value::as_str) != Some("rusterisk-cli")
+        || package.get("version").and_then(toml::Value::as_str) != Some(release.version)
+        || package.get("readme").and_then(toml::Value::as_str) != Some("README.md")
+    {
+        return Err(invalid(
+            "CLI archive version or source differs from the release",
+        ));
+    }
+    String::from_utf8(file("README.md")?.to_vec()).map_err(io::Error::other)
+}
