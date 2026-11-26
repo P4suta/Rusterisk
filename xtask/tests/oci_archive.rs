@@ -130,11 +130,12 @@ fn candidate_checks_bind_exported_images_to_the_loaded_source_and_file_bytes(
                 binary[20..24].copy_from_slice(&1_u32.to_le_bytes());
                 binary[24..32].copy_from_slice(&4096_u64.to_le_bytes());
                 binary[52..54].copy_from_slice(&64_u16.to_le_bytes());
-                project::write(
-                    &std::path::PathBuf::from(state),
+                for path in [
                     "aarch64-unknown-linux-gnu/release/rusterisk",
-                    &binary,
-                )?;
+                    "aarch64-unknown-linux-gnu/release/rusterisk-cli",
+                ] {
+                    project::write(&std::path::PathBuf::from(state), path, &binary)?;
+                }
             }
             Ok(())
         })?;
@@ -299,8 +300,7 @@ fn exact_archive_blob_entry_and_total_expansion_limits_accept_the_complete_expor
 }
 
 #[test]
-fn expected_inventory_stops_after_the_tenth_entry_and_layer_gzip_has_no_trailing_member(
-) -> io::Result<()> {
+fn excess_candidate_files_and_trailing_layer_bytes_are_rejected() -> io::Result<()> {
     let mut image = Image::new(ServerTarget::LinuxArm64)?;
     let bytes = image.bytes()?;
     let mut extra = 0;

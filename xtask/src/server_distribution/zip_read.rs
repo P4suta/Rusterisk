@@ -40,8 +40,8 @@ fn directory(bytes: &[u8]) -> io::Result<usize> {
     if !record.starts_with(b"PK\x05\x06")
         || short(record, 4)? != 0
         || short(record, 6)? != 0
-        || short(record, 8)? != 9
-        || short(record, 10)? != 9
+        || usize::from(short(record, 8)?) != super::SERVER_FILE_COUNT
+        || usize::from(short(record, 10)?) != super::SERVER_FILE_COUNT
         || short(record, 20)? != 0
     {
         return Err(invalid());
@@ -53,7 +53,7 @@ fn directory(bytes: &[u8]) -> io::Result<usize> {
     }
     let central = range(bytes, start, size)?;
     let mut position = 0;
-    for _ in 0..9 {
+    for _ in 0..super::SERVER_FILE_COUNT {
         let header = range(central, position, 46)?;
         if !header.starts_with(b"PK\x01\x02")
             || short(header, 8)? != 8
@@ -98,7 +98,10 @@ fn contents(reader: &mut impl Read, expected: &[u8]) -> io::Result<()> {
     }
 }
 
-pub(super) fn binary(name: &ServerCandidateName, bytes: &[u8]) -> io::Result<Vec<u8>> {
+pub(super) fn executables(
+    name: &ServerCandidateName,
+    bytes: &[u8],
+) -> io::Result<(Vec<u8>, Vec<u8>)> {
     directory(bytes)?;
     let mut archive = ZipArchive::with_config(
         Config {
@@ -106,24 +109,30 @@ pub(super) fn binary(name: &ServerCandidateName, bytes: &[u8]) -> io::Result<Vec
         },
         Cursor::new(bytes),
     )?;
-    let path = format!("{}/{}", name.root(), name.target().binary_path());
-    let mut file = archive.by_name(&path)?;
-    if !file.is_file()
-        || file.is_symlink()
-        || file.encrypted()
-        || file.size() == 0
-        || file.size() > 256 * 1024 * 1024
-        || file.compression() != CompressionMethod::Deflated
-    {
-        return Err(invalid());
-    }
-    let expected = file.size();
-    let mut bytes = Vec::new();
-    file.by_ref().take(expected + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 != expected {
-        return Err(invalid());
-    }
-    Ok(bytes)
+    let mut extract = |relative: &str| -> io::Result<Vec<u8>> {
+        let path = format!("{}/{relative}", name.root());
+        let mut file = archive.by_name(&path)?;
+        if !file.is_file()
+            || file.is_symlink()
+            || file.encrypted()
+            || file.size() == 0
+            || file.size() > 256 * 1024 * 1024
+            || file.compression() != CompressionMethod::Deflated
+        {
+            return Err(invalid());
+        }
+        let expected = file.size();
+        let mut bytes = Vec::new();
+        file.by_ref().take(expected + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != expected {
+            return Err(invalid());
+        }
+        Ok(bytes)
+    };
+    Ok((
+        extract(name.target().binary_path())?,
+        extract(name.target().cli_path())?,
+    ))
 }
 
 pub fn check_server_zip(payload: &ServerPayload, bytes: &[u8]) -> io::Result<()> {
@@ -137,7 +146,7 @@ pub fn check_server_zip(payload: &ServerPayload, bytes: &[u8]) -> io::Result<()>
         },
         Cursor::new(bytes),
     )?;
-    if archive.len() != 9
+    if archive.len() != super::SERVER_FILE_COUNT
         || archive.has_duplicate_names()
         || archive.central_directory_start() != directory as u64
         || archive.offset() != 0
@@ -152,7 +161,7 @@ pub fn check_server_zip(payload: &ServerPayload, bytes: &[u8]) -> io::Result<()>
     for (index, (path, expected)) in payload.files().enumerate() {
         let mut file = archive.by_index(index)?;
         let name = format!("{}/{path}", payload.name().root());
-        let mode = if path == payload.name().target().binary_path() {
+        let mode = if payload.name().target().is_executable(path) {
             0o100755
         } else {
             0o100644

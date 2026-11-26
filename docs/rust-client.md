@@ -139,6 +139,10 @@ Each channel snapshot keeps at most 128 variables and one mebibyte of variable n
 Excess metadata reports `Error::Capacity` and starts session cleanup while preserving Stasis exit responsibilities.
 At most eight originate and media state requests run together, with 16 request workers available for setup and cleanup.
 Foreground saturation rejects new originate commands with `Error::Capacity`.
+Earlier clients also returned `Error::Capacity` when the command receiver had closed.
+Starting an owned call on a closed session now returns `Error::Closed`.
+Retry a full command queue after capacity becomes available.
+Open a new session before retrying after `Error::Closed`.
 Pending cleanup stays in its call entry until a worker becomes available.
 The event queue retains 64 events.
 `next_event` reports `Error::EventLagged` when the caller falls behind.

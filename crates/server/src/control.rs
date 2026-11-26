@@ -59,6 +59,7 @@ pub enum ControlError {
     InvalidState(&'static str),
     Unprocessable(&'static str),
     Capacity,
+    ServiceClosed,
     Unauthorized,
     Forbidden,
     Unsupported,
@@ -68,6 +69,13 @@ pub enum ControlError {
 }
 
 impl ControlError {
+    pub(crate) fn queue<T>(error: tokio::sync::mpsc::error::TrySendError<T>) -> Self {
+        match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => Self::Capacity,
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => Self::ServiceClosed,
+        }
+    }
+
     pub const fn status(&self) -> u16 {
         match self {
             Self::Invalid(_) => 400,
@@ -75,7 +83,7 @@ impl ControlError {
             Self::Conflict(_) | Self::BridgeExists(_) => 409,
             Self::InvalidState(_) => 412,
             Self::Unprocessable(_) | Self::Configuration(_) => 422,
-            Self::Capacity => 503,
+            Self::Capacity | Self::ServiceClosed => 503,
             Self::Unauthorized => 401,
             Self::Forbidden => 403,
             Self::Unsupported => 501,
@@ -97,6 +105,7 @@ impl std::fmt::Display for ControlError {
             }
             Self::BridgeExists(id) => write!(f, "Bridge with id '{id}' already exists"),
             Self::Capacity => f.write_str("Resource capacity exceeded"),
+            Self::ServiceClosed => f.write_str("Service stopped"),
             Self::Unauthorized => f.write_str("Authentication required"),
             Self::Forbidden => f.write_str("Operation forbidden"),
             Self::Unsupported => f.write_str("Operation not supported"),
@@ -129,6 +138,24 @@ impl From<DtmfError> for ControlError {
         }
     }
 }
+impl From<rusterisk_media::MediaError> for ControlError {
+    fn from(error: rusterisk_media::MediaError) -> Self {
+        use rusterisk_media::MediaError;
+        match error {
+            MediaError::Capacity => Self::Capacity,
+            MediaError::ServiceClosed => Self::ServiceClosed,
+            error @ (MediaError::InvalidFrame
+            | MediaError::InvalidPacket
+            | MediaError::InvalidRoute
+            | MediaError::UnknownStream
+            | MediaError::Unsupported
+            | MediaError::Codec(_)
+            | MediaError::Transport(_)
+            | MediaError::Control(_)) => Self::Adapter(error.to_string()),
+        }
+    }
+}
+
 impl From<MediaTaskError> for ControlError {
     fn from(error: MediaTaskError) -> Self {
         match error {
@@ -754,11 +781,19 @@ struct ChannelEntry {
     media_tasks: MediaTasks,
     music: Option<music::MusicTask>,
     settings: rusterisk_core::SettingsReference,
+    route_override: Option<rusterisk_core::SettingsReference>,
     pending_native: Option<NativeStartCapsule>,
     pending_websocket: Option<WebSocketStartCapsule>,
 }
 
 impl ChannelEntry {
+    fn route_generation(&self) -> rusterisk_core::SettingsGeneration {
+        self.route_override
+            .as_ref()
+            .unwrap_or(&self.settings)
+            .generation()
+    }
+
     fn variable(&self, name: &str) -> Result<String, ControlError> {
         let value = match name {
             "EXTEN" => self.snapshot.dialplan.exten.clone(),
@@ -867,6 +902,7 @@ struct BridgeEntry {
 
 pub struct Control {
     capacity: usize,
+    call_capacity_refusals: u64,
     generation: u64,
     channels: ChannelSlots,
     bridges: BTreeMap<ChannelId, BridgeEntry>,
@@ -878,7 +914,6 @@ pub struct Control {
     pending_configuration: Option<reload::PreparedConfiguration>,
     info: crate::server_info::ServerInfo,
     recordings: BTreeMap<ChannelId, recording::RecordingEntry>,
-    dialplan_program: rusterisk_config::Dialplan,
     endpoints: Endpoints,
     media_connections: BTreeMap<ChannelId, (CallKey, crate::media_websocket::MediaLinkOptions)>,
     websocket: rusterisk_config::WebSocketConfig,
@@ -910,9 +945,7 @@ impl Control {
                 "Channel with given unique ID already exists",
             ));
         }
-        if self.channels.len() >= self.capacity {
-            return Err(ControlError::Capacity);
-        }
+        self.require_call_slots(1)?;
         let (application, arguments, app_name, app_data) = match incoming.target {
             IncomingTarget::Dialplan => (None, Vec::new(), String::new(), String::new()),
             IncomingTarget::Stasis {
@@ -1006,10 +1039,11 @@ impl Control {
                 deadline: None,
                 variables: BTreeMap::new(),
                 dtmf: None,
-                dialplan: Some(DialplanFrame::dormant(self.dialplan_program.clone())),
+                dialplan: Some(DialplanFrame::dormant()),
                 media_tasks: MediaTasks::new(call.generation()),
                 music: None,
                 settings,
+                route_override: None,
                 pending_native: None,
                 pending_websocket: None,
             },
@@ -1032,28 +1066,27 @@ impl Control {
     }
 
     pub fn with_configuration(capacity: usize, config: &rusterisk_config::Config) -> Self {
-        let mut control = Self::with_initial_settings(
-            capacity,
-            config.dialplan.clone(),
-            CallSettings::configured(config),
-        );
+        let mut control = Self::with_initial_settings(capacity, CallSettings::configured(config));
         control.endpoints = Endpoints::configured(config);
         control.websocket = config.websocket.clone();
         control
     }
 
     pub fn with_dialplan(capacity: usize, program: rusterisk_config::Dialplan) -> Self {
-        Self::with_initial_settings(capacity, program, CallSettings::empty())
+        Self::with_initial_settings(
+            capacity,
+            CallSettings {
+                routes: program.compile(),
+                ..CallSettings::empty()
+            },
+        )
     }
 
-    fn with_initial_settings(
-        capacity: usize,
-        program: rusterisk_config::Dialplan,
-        settings: CallSettings,
-    ) -> Self {
+    fn with_initial_settings(capacity: usize, settings: CallSettings) -> Self {
         let info = crate::server_info::ServerInfo::new(capacity);
         Self {
             capacity: capacity.min(64),
+            call_capacity_refusals: 0,
             generation: 0,
             channels: ChannelSlots::default(),
             bridges: BTreeMap::new(),
@@ -1065,7 +1098,6 @@ impl Control {
             pending_configuration: None,
             info,
             recordings: BTreeMap::new(),
-            dialplan_program: program,
             endpoints: Endpoints::default(),
             media_connections: BTreeMap::new(),
             websocket: rusterisk_config::WebSocketConfig::default(),
@@ -1074,10 +1106,25 @@ impl Control {
         }
     }
 
-    fn call_generation(&mut self, reserved: u64) -> Result<u64, ControlError> {
-        if self.channels.occupied() + reserved.count_ones() as usize >= self.capacity {
+    pub(crate) fn call_slots(&self) -> rusterisk_api::diagnosis::CallSlots {
+        rusterisk_api::diagnosis::CallSlots {
+            active: self.channels.len() as u64,
+            awaiting_release: (self.channels.occupied() - self.channels.len()) as u64,
+            limit: self.capacity as u64,
+            capacity_refusals: self.call_capacity_refusals,
+        }
+    }
+
+    fn require_call_slots(&mut self, count: usize) -> Result<(), ControlError> {
+        if self.channels.occupied() + count > self.capacity {
+            self.call_capacity_refusals = self.call_capacity_refusals.saturating_add(1);
             return Err(ControlError::Capacity);
         }
+        Ok(())
+    }
+
+    fn call_generation(&mut self, reserved: u64) -> Result<u64, ControlError> {
+        self.require_call_slots(reserved.count_ones() as usize + 1)?;
         for _ in 0..64 {
             let generation = self.generation()?;
             let handle = CallHandle::new(generation);
@@ -1421,9 +1468,7 @@ impl Control {
                         "Channel with given unique ID already exists",
                     ));
                 }
-                if self.channels.len() >= self.capacity {
-                    return Err(ControlError::Capacity);
-                }
+                self.require_call_slots(1)?;
                 let application = self
                     .applications
                     .get(&app)
@@ -1510,10 +1555,11 @@ impl Control {
                         deadline: Some(deadline),
                         variables: initial.values,
                         dtmf: None,
-                        dialplan: Some(DialplanFrame::dormant(self.dialplan_program.clone())),
+                        dialplan: Some(DialplanFrame::dormant()),
                         media_tasks: MediaTasks::new(generation),
                         music: None,
                         settings,
+                        route_override: None,
                         pending_native: Some(capsule),
                         pending_websocket: None,
                     },
@@ -1869,6 +1915,9 @@ impl Control {
         for step in teardown.by_ref() {
             match step {
                 TeardownStep::Admissions => {
+                    if let Some(reference) = entry.route_override.take() {
+                        self.settings.release(reference)?;
+                    }
                     drop(entry.pending_native.take());
                     drop(entry.pending_websocket.take());
                     self.settings.release(

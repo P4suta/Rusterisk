@@ -49,7 +49,11 @@ impl Control {
         })
     }
 
-    pub(crate) fn diagnose_extension(&self, context: String, extension: String) -> RouteDiagnosis {
+    pub(crate) fn diagnose_extension(
+        &self,
+        context: String,
+        extension: String,
+    ) -> Result<RouteDiagnosis, ControlError> {
         let channels = self
             .channels
             .iter()
@@ -68,17 +72,24 @@ impl Control {
             application: None,
             destinations: Vec::new(),
         };
-        result.disposition = self.trace_route(&mut result).unwrap_or(Disposition::Limit);
-        result
+        let routes = &self.settings.get(self.settings.current())?.routes;
+        result.disposition = self
+            .trace_route(routes, &mut result)
+            .unwrap_or(Disposition::Limit);
+        Ok(result)
     }
 
-    fn trace_route(&self, result: &mut RouteDiagnosis) -> Result<Disposition, ExpansionLimit> {
+    fn trace_route(
+        &self,
+        routes: &rusterisk_config::CompiledDialplan,
+        result: &mut RouteDiagnosis,
+    ) -> Result<Disposition, ExpansionLimit> {
         let mut site = result.context.clone();
         let mut number = result.extension.clone();
         let mut priority = 1;
         let mut seen = BTreeSet::new();
         Ok(loop {
-            let Some(index) = self.dialplan_program.position(&site, &number, priority) else {
+            let Some(index) = routes.position(&site, &number, priority) else {
                 break if result.steps.is_empty() {
                     Disposition::Missing
                 } else {
@@ -91,7 +102,7 @@ impl Control {
             if seen.len() > 128 {
                 break Disposition::Limit;
             }
-            let step = &self.dialplan_program.steps[usize::from(index)];
+            let step = &routes.program().steps[usize::from(index)];
             let operation = match step.application {
                 Application::NoOp(_) => "NoOp",
                 Application::Set { .. } => "Set",

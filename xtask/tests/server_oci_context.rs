@@ -43,11 +43,12 @@ fn image_contexts_copy_only_verified_candidate_bytes_and_remove_owned_files(
                     .find(|(name, _)| *name == "CARGO_TARGET_DIR")
                     .and_then(|(_, value)| value)
                     .ok_or(ProcessError::InvalidOutput)?;
-                write(
-                    &PathBuf::from(state),
+                for path in [
                     "aarch64-unknown-linux-gnu/release/rusterisk",
-                    &binary(),
-                )?;
+                    "aarch64-unknown-linux-gnu/release/rusterisk-cli",
+                ] {
+                    write(&PathBuf::from(state), path, &binary())?;
+                }
             }
             Ok(())
         })?;
@@ -55,6 +56,17 @@ fn image_contexts_copy_only_verified_candidate_bytes_and_remove_owned_files(
         let physical = std::fs::canonicalize(parent)?;
         let destination = physical.join("image-context");
         let context = ServerOciContext::create(&candidate, &destination)?;
+        context.check()?;
+        #[cfg(unix)]
+        for relative in ["bin", "config", "data"] {
+            use std::os::unix::fs::PermissionsExt;
+            let path = destination.join("payload").join(relative);
+            let permissions = std::fs::symlink_metadata(&path)?.permissions();
+            assert_eq!(permissions.mode() & 0o7777, 0o755, "{relative}");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))?;
+            assert!(context.check().is_err(), "{relative}");
+            std::fs::set_permissions(&path, permissions)?;
+        }
         context.check()?;
         assert_eq!(context.directory()?, destination);
         assert_eq!(context.profile().source_digest(), candidate.source_digest());
@@ -92,4 +104,20 @@ fn image_contexts_copy_only_verified_candidate_bytes_and_remove_owned_files(
         assert!(directory.is_dir());
         Ok(())
     })
+}
+
+#[cfg(unix)]
+#[test]
+fn image_contexts_preserve_directory_modes_under_a_private_umask() -> io::Result<()> {
+    xtask::process::run(
+        std::process::Command::new("sh")
+            .args(["-c", "umask 077; exec \"$@\"", "sh"])
+            .arg(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "image_contexts_copy_only_verified_candidate_bytes_and_remove_owned_files",
+            ]),
+        std::time::Duration::from_secs(30),
+    )
+    .map_err(io::Error::other)
 }

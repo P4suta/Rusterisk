@@ -10,9 +10,19 @@ pub enum Doctor {
 
 #[derive(Serialize, Deserialize)]
 struct RuntimeActivity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    call_slots: Option<CallSlots>,
     control: Activity,
     signaling: Activity,
     media: Activity,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CallSlots {
+    active: u64,
+    awaiting_release: u64,
+    limit: u64,
+    capacity_refusals: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -338,10 +348,12 @@ impl Doctor {
                         activity.turns, activity.late_turns, activity.drops
                     )
                 });
-                Ok(format!(
-                    "component  turns  late turns  drops\n{}",
-                    rows.join("\n")
-                ))
+                let report = format!("component  turns  late turns  drops\n{}", rows.join("\n"));
+                Ok(match runtime.call_slots {
+                    Some(slots) => format!("{report}\nCall slots  {} active, {} awaiting release, limit {}, {} capacity refusals",
+                        slots.active, slots.awaiting_release, slots.limit, slots.capacity_refusals),
+                    None => report,
+                })
             }
             Self::Channel(id) => {
                 let report = channel(remote, id).await?;

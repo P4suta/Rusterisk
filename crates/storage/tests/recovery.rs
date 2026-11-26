@@ -68,6 +68,40 @@ fn completed_audio_and_call_metadata_survive_restart() -> Result<(), rusterisk_s
 }
 
 #[test]
+fn reopening_an_existing_store_reconciles_published_and_deleted_files_with_its_catalog(
+) -> Result<(), rusterisk_storage::StorageError> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    let mut store = Store::open(root)?;
+    let mut recording = Recorder::create(root, "published", 8000)?;
+    recording.write(Frame::new(&[1777; 160], 8000)?)?;
+    recording.finish()?;
+    let deleted = Recorder::create(root, "deleted", 8000)?.finish()?;
+    store.recording_finished("deleted")?;
+    std::fs::remove_file(deleted)?;
+    drop(store);
+    for _ in 0..2 {
+        let store = Store::open(root)?;
+        let database = rusqlite::Connection::open(root.join("calls.sqlite3"))?;
+        let mut query = database.prepare("SELECT name, outcome FROM recordings ORDER BY name")?;
+        let rows = query
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(rows, [("published".to_owned(), "completed".to_owned())]);
+        let mut audio =
+            rusterisk_storage::WaveReader::open(&root.join("recordings/published.wav"))?;
+        let frame = audio
+            .read_frame()?
+            .ok_or(rusterisk_storage::StorageError::InvalidWave)?;
+        assert_eq!(frame.samples(), &[1777; 160]);
+        assert_eq!(store.recordings()?.len(), 1);
+    }
+    Ok(())
+}
+
+#[test]
 fn malformed_wave_sizes_and_rates_are_rejected_without_arithmetic_overflow(
 ) -> Result<(), rusterisk_storage::StorageError> {
     let directory = tempfile::tempdir()?;

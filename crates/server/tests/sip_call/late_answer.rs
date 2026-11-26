@@ -387,6 +387,8 @@ async fn served(scenario: Scenario) -> Result<(), ControlError> {
     )
     .map_err(failure)?;
     config.http.bind.set_port(0);
+    config.rtp.start = 0;
+    config.rtp.end = 0;
     let server = Server::bind(config, 8, directory.path().to_owned()).await?;
     let client = Client::new(
         &format!("http://{}", server.local_addr()?),

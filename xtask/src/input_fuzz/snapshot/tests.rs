@@ -1,5 +1,5 @@
 use super::{FuzzError, Snapshot};
-use crate::process::ProcessError;
+use crate::{input_fuzz::TEST_WORKSPACE, process::ProcessError};
 use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
@@ -20,10 +20,7 @@ fn fixture(
     std::fs::create_dir(&directory)?;
     let root = directory.join("root");
     let result = (|| {
-        super::write_new(
-            &root.join("Cargo.toml"),
-            b"[workspace]\nmembers=['xtask']\n",
-        )?;
+        super::write_new(&root.join("Cargo.toml"), TEST_WORKSPACE.as_bytes())?;
         for file in ["Cargo.lock", "xtask/fuzz/Cargo.lock"] {
             super::write_new(
                 &root.join(file),
@@ -57,8 +54,41 @@ fn fixture(
     }
 }
 
-const PATCHED: &[u8] =
-    b"[workspace]\nmembers=['xtask']\n[patch.crates-io]\nstr0m={path='vendor/str0m'}\n";
+const VENDOR_PATCH: &str = "[patch.crates-io]\nstr0m={path='vendor/str0m'}\n";
+
+#[test]
+fn fuzz_dependencies_follow_the_captured_release_version() -> Result<(), FuzzError> {
+    fixture("release-version", |root, _| {
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers=['xtask']\n[workspace.package]\nversion='3.2.1'\n",
+        )?;
+        let path = root.join("xtask/fuzz/Cargo.toml");
+        let pinned = std::fs::read_to_string(&path)?
+            .replace(&format!("\"={}\"", env!("CARGO_PKG_VERSION")), "\"=3.2.1\"");
+        std::fs::write(&path, &pinned)?;
+        Snapshot::read(root)?;
+
+        for name in [
+            "rusterisk-api",
+            "rusterisk-config",
+            "rusterisk-sip",
+            "rusterisk-media",
+        ] {
+            let mut wrong: toml::Value = toml::from_str(&pinned).map_err(FuzzError::Toml)?;
+            wrong["dependencies"][name]["version"] = "=3.2.0".into();
+            std::fs::write(
+                &path,
+                toml::to_string(&wrong).map_err(|_| FuzzError::Manifest)?,
+            )?;
+            assert!(
+                matches!(Snapshot::read(root), Err(FuzzError::Manifest)),
+                "{name}"
+            );
+        }
+        Ok(())
+    })
+}
 
 #[test]
 fn project_and_vendor_file_budgets_accept_each_complete_bounded_source_tree(
@@ -145,7 +175,10 @@ fn vendored_dependency_is_captured_only_for_the_exact_workspace_patch() -> Resul
             .files
             .iter()
             .all(|file| !file.path.starts_with("vendor")));
-        std::fs::write(root.join("Cargo.toml"), PATCHED)?;
+        std::fs::write(
+            root.join("Cargo.toml"),
+            format!("{TEST_WORKSPACE}{VENDOR_PATCH}"),
+        )?;
         let snapshot = Snapshot::read(root)?;
         for file in [
             "vendor/str0m/src/lib.rs",
@@ -190,9 +223,7 @@ fn vendored_dependency_is_captured_only_for_the_exact_workspace_patch() -> Resul
         for path in ["other/str0m", "../str0m", "/tmp/str0m"] {
             std::fs::write(
                 root.join("Cargo.toml"),
-                format!(
-                    "[workspace]\nmembers=['xtask']\n[patch.crates-io]\nstr0m={{path='{path}'}}\n"
-                ),
+                format!("{TEST_WORKSPACE}[patch.crates-io]\nstr0m={{path='{path}'}}\n"),
             )?;
             assert!(Snapshot::read(root).is_err());
         }
@@ -201,7 +232,10 @@ fn vendored_dependency_is_captured_only_for_the_exact_workspace_patch() -> Resul
 }
 
 fn vendor(root: &Path) -> Result<(), FuzzError> {
-    std::fs::write(root.join("Cargo.toml"), PATCHED)?;
+    std::fs::write(
+        root.join("Cargo.toml"),
+        format!("{TEST_WORKSPACE}{VENDOR_PATCH}"),
+    )?;
     for file in [
         "vendor/str0m/Cargo.toml",
         "vendor/str0m-source.toml",

@@ -21,7 +21,7 @@ fn unix_archive_readback_checks_captured_files_and_regular_metadata() -> io::Res
         changed[offset] ^= 1;
         assert!(check_server_tar_gzip(&payload, &changed).is_err());
     }
-    for changed in 0..8 {
+    for changed in 0..=8 {
         let gzip = flate2::GzBuilder::new()
             .mtime(0)
             .operating_system(255)
@@ -34,7 +34,11 @@ fn unix_archive_readback_checks_captured_files_and_regular_metadata() -> io::Res
             let mut header = tar::Header::new_ustar();
             header.set_path(format!("{}/{path}", payload.name().root()))?;
             header.set_entry_type(tar::EntryType::Regular);
-            header.set_mode(if index == 0 { 0o755 } else { 0o644 });
+            header.set_mode(if matches!(path, "bin/rusterisk" | "bin/rusterisk-cli") {
+                0o755
+            } else {
+                0o644
+            });
             header.set_size(original.len() as u64);
             header.set_uid(0);
             header.set_gid(0);
@@ -47,7 +51,7 @@ fn unix_archive_readback_checks_captured_files_and_regular_metadata() -> io::Res
                     2 => header.set_gid(1),
                     3 => header.set_mtime(1),
                     4 => bytes[0] ^= 1,
-                    5 => {}
+                    5 | 8 => {}
                     6 => header.set_path(format!("{}/bin/another", payload.name().root()))?,
                     7 => header.set_entry_type(tar::EntryType::Symlink),
                     _ => return Err(io::Error::other("fixture mutation is outside its range")),
@@ -57,8 +61,9 @@ fn unix_archive_readback_checks_captured_files_and_regular_metadata() -> io::Res
             archive.append(&header, bytes.as_slice())?;
         }
         let bytes = archive.into_inner()?.finish()?;
-        assert!(
-            check_server_tar_gzip(&payload, &bytes).is_err(),
+        assert_eq!(
+            check_server_tar_gzip(&payload, &bytes).is_ok(),
+            changed == 8,
             "case {changed}"
         );
     }
@@ -73,7 +78,7 @@ fn payload_with_binary_size(version: &str, size: usize) -> io::Result<ServerPayl
     binary[..4].copy_from_slice(&0xfeedfacfu32.to_le_bytes());
     binary[4..8].copy_from_slice(&0x0100000cu32.to_le_bytes());
     binary[12..16].copy_from_slice(&2u32.to_le_bytes());
-    ServerPayload::capture(ServerTarget::MacOsArm64, binary, |path| {
+    ServerPayload::capture(ServerTarget::MacOsArm64, binary.clone(), binary, |path| {
         Ok(if path == "Cargo.toml" {
             format!("[workspace.package]\nversion='{version}'\n").into_bytes()
         } else {
@@ -96,7 +101,7 @@ fn unix_server_archives_preserve_owned_bytes_and_reproducible_regular_file_metad
         let root = ArchiveRoot::new(payload.name().root()).map_err(io::Error::other)?;
         let archive = read_regular_gzip(Cursor::new(&first), &root, ArchiveLimits::SERVER)
             .map_err(io::Error::other)?;
-        assert_eq!(archive.files().len(), 9);
+        assert_eq!(archive.files().len(), 10);
         for ((expected_path, expected), actual) in payload.files().zip(archive.files()) {
             assert_eq!(actual.path().as_str(), expected_path);
             assert_eq!(actual.bytes(), expected);
@@ -118,11 +123,11 @@ fn unix_server_archives_preserve_owned_bytes_and_reproducible_regular_file_metad
             assert_eq!(entry.header().gid()?, 0);
             assert_eq!(entry.header().mtime()?, 0);
             let path = entry.path()?;
-            let binary = path.ends_with("bin/rusterisk");
+            let binary = path.ends_with("bin/rusterisk") || path.ends_with("bin/rusterisk-cli");
             assert_eq!(entry.header().mode()?, if binary { 0o755 } else { 0o644 });
             io::copy(&mut entry, &mut io::sink())?;
         }
-        assert_eq!(count, 9);
+        assert_eq!(count, 10);
     }
     Ok(())
 }
@@ -178,7 +183,7 @@ fn server_binary_limits_preserve_the_smaller_sdk_archive_profile() -> io::Result
             .map_err(io::Error::other)?
             .files()
             .len(),
-        9
+        10
     );
     Ok(())
 }

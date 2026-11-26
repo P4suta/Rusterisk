@@ -173,10 +173,15 @@ enum Command {
         token: MediaTaskToken,
         operation: rusterisk_core::RecordingControl,
     },
-    Digits {
+    Tone {
         key: CallKey,
-        command: RtpDigitCommand,
-        reply: Option<oneshot::Sender<Result<(), MediaError>>>,
+        tone: DtmfTone,
+        reply: oneshot::Sender<Result<(), MediaError>>,
+    },
+    DigitSequence {
+        key: CallKey,
+        command: DtmfCommand,
+        completion: mpsc::OwnedPermit<()>,
     },
     Attach {
         key: CallKey,
@@ -255,13 +260,17 @@ pub struct MediaPort {
 }
 
 impl MediaPort {
-    fn completion<T>(&self, serial: u64) -> Result<Completion<T>, MediaError> {
+    fn completion_slot(&self) -> Result<mpsc::OwnedPermit<()>, MediaError> {
         self.notices
             .upgrade()
-            .ok_or(MediaError::UnknownStream)?
+            .ok_or(MediaError::ServiceClosed)?
             .try_reserve_owned()
+            .map_err(notices::service_queue_error)
+    }
+
+    fn completion<T>(&self, serial: u64) -> Result<Completion<T>, MediaError> {
+        self.completion_slot()
             .map(|slot| Completion::Notice(serial, slot))
-            .map_err(|_| MediaError::Capacity)
     }
 
     pub(crate) fn reserve_attachment_release(
@@ -272,7 +281,7 @@ impl MediaPort {
             .commands
             .clone()
             .try_reserve_owned()
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         Ok(AttachmentRelease { serial, command })
     }
 
@@ -292,7 +301,7 @@ impl MediaPort {
                 completed,
                 reply,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         Ok(Reservation {
             admission: Receipt { response },
             completed: completion,
@@ -305,7 +314,7 @@ impl MediaPort {
     ) -> Result<(), MediaError> {
         self.commands
             .try_send(Command::ReceivedDigit { key, digit })
-            .map_err(|_| MediaError::Capacity)
+            .map_err(notices::service_queue_error)
     }
 
     pub async fn play(
@@ -355,7 +364,7 @@ impl MediaPort {
                 options,
                 reply,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         Ok(Reservation {
             admission: Receipt { response },
             completed: completion,
@@ -374,7 +383,7 @@ impl MediaPort {
                 source,
                 reply,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         tokio::time::timeout(Duration::from_secs(5), response)
             .await
             .map_err(|error| MediaError::Transport(error.to_string()))?
@@ -392,7 +401,7 @@ impl MediaPort {
     ) -> Result<(), MediaError> {
         self.commands
             .try_send(Command::ControlPlayback { token, operation })
-            .map_err(|_| MediaError::Capacity)
+            .map_err(notices::service_queue_error)
     }
 
     pub async fn record(
@@ -430,7 +439,7 @@ impl MediaPort {
                 completed,
                 reply,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         Ok(Reservation {
             admission: Receipt { response },
             completed: completion,
@@ -462,7 +471,7 @@ impl MediaPort {
                 prompt,
                 reply,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         tokio::time::timeout(Duration::from_secs(5), response)
             .await
             .map_err(|error| MediaError::Transport(error.to_string()))?
@@ -476,7 +485,7 @@ impl MediaPort {
     ) -> Result<(), MediaError> {
         self.commands
             .try_send(Command::ControlRecording { token, operation })
-            .map_err(|_| MediaError::Capacity)
+            .map_err(notices::service_queue_error)
     }
 
     pub fn stop_recording(
@@ -491,34 +500,27 @@ impl MediaPort {
         if !(1..=5000).contains(&tone.duration_ms) {
             return Err(MediaError::InvalidPacket);
         }
-        self.send_digits(key, RtpDigitCommand::Tone(tone)).await
-    }
-
-    // The media task reports a refused sequence as a finished digit command.
-    pub fn send_sequence(&self, key: CallKey, command: DtmfCommand) -> Result<(), MediaError> {
-        self.commands
-            .try_send(Command::Digits {
-                key,
-                command: RtpDigitCommand::Sequence(command),
-                reply: None,
-            })
-            .map_err(|_| MediaError::Capacity)
-    }
-
-    async fn send_digits(&self, key: CallKey, command: RtpDigitCommand) -> Result<(), MediaError> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .try_send(Command::Digits {
-                key,
-                command,
-                reply: Some(reply),
-            })
-            .map_err(|_| MediaError::Capacity)?;
+            .try_send(Command::Tone { key, tone, reply })
+            .map_err(notices::service_queue_error)?;
         tokio::time::timeout(Duration::from_secs(5), response)
             .await
             .map_err(|error| MediaError::Transport(error.to_string()))?
-            .map_err(|error| MediaError::Transport(error.to_string()))?
+            .map_err(|_| MediaError::ServiceClosed)?
     }
+
+    pub fn send_sequence(&self, key: CallKey, command: DtmfCommand) -> Result<(), MediaError> {
+        let completion = self.completion_slot()?;
+        self.commands
+            .try_send(Command::DigitSequence {
+                key,
+                command,
+                completion,
+            })
+            .map_err(notices::service_queue_error)
+    }
+
     pub async fn attach(
         &self,
         key: CallKey,
@@ -549,7 +551,7 @@ impl MediaPort {
                 mode,
                 reply: Completion::Reply(reply),
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         Ok(AttachmentReceipt { response })
     }
 
@@ -573,7 +575,7 @@ impl MediaPort {
                 mode,
                 reply: self.completion(serial)?,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         Ok(release)
     }
 
@@ -594,7 +596,7 @@ impl MediaPort {
                 rate,
                 reply,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         tokio::time::timeout(Duration::from_secs(5), response)
             .await
             .map_err(|error| MediaError::Transport(error.to_string()))?
@@ -647,7 +649,7 @@ impl MediaPort {
                 generated_audio_gate,
                 reply: Completion::Reply(reply),
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(notices::service_queue_error)?;
         tokio::time::timeout(Duration::from_secs(5), response)
             .await
             .map_err(|error| MediaError::Transport(error.to_string()))?
@@ -655,10 +657,6 @@ impl MediaPort {
     }
 }
 
-enum Connection {
-    Waiting,
-    Connected,
-}
 enum DigitSupport {
     Unsupported,
     Rfc4733(TelephoneFormat),
@@ -692,7 +690,7 @@ struct Port {
     digit_support: DigitSupport,
     generated_audio_gate: Gate,
     saved_music: Option<SavedMusic>,
-    connection: Connection,
+    notices: notices::LegNotices,
 }
 
 // The parts of the media task that take one owned leg's turn output.
@@ -727,20 +725,20 @@ impl Delivery<'_> {
         for tone in tones.drain(..) {
             self.recordings
                 .received_digit(key, self.mixer.bridge_for(key), tone.digit);
-            self.notices
-                .try_send(MediaNotice::Dtmf {
-                    key: key.clone(),
-                    tone,
-                })
-                .map_err(|_| MediaError::Capacity)?;
+            let port = self.ports.get_mut(key).ok_or(MediaError::UnknownStream)?;
+            match port.notices.received_digit(self.notices, key, tone) {
+                Ok(()) => {}
+                Err(MediaError::Capacity) => {
+                    failed.push((key.clone(), MediaError::Capacity));
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
         }
         for token in finished.drain(..) {
-            self.notices
-                .try_send(MediaNotice::DtmfFinished {
-                    key: key.clone(),
-                    token,
-                })
-                .map_err(|_| MediaError::Capacity)?;
+            if let Some(port) = self.ports.get_mut(key) {
+                port.notices.digit_finished(self.notices, key, token)?;
+            }
         }
         let Some(frame) = frame else {
             return Ok(());
@@ -752,12 +750,7 @@ impl Delivery<'_> {
         match self.mixer.push(key, frame) {
             Ok(()) => {
                 if let Some(port) = self.ports.get_mut(key) {
-                    if matches!(port.connection, Connection::Waiting) {
-                        port.connection = Connection::Connected;
-                        self.notices
-                            .try_send(MediaNotice::Connected { key: key.clone() })
-                            .map_err(|_| MediaError::Capacity)?;
-                    }
+                    port.notices.connected(self.notices, key)?;
                 }
             }
             Err(_) => *self.dropped += 1,
@@ -804,6 +797,24 @@ enum StreamRelease {
     Requested,
 }
 
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum TerminalNotice {
+    MissingStream,
+    Released,
+}
+
+impl TerminalNotice {
+    fn for_call(self, key: CallKey) -> MediaNotice {
+        match self {
+            Self::MissingStream => MediaNotice::Stopped {
+                key,
+                result: Err(MediaError::UnknownStream),
+            },
+            Self::Released => MediaNotice::Released { key },
+        }
+    }
+}
+
 pub struct MediaHub {
     capacity: usize,
     commands: mpsc::Receiver<Command>,
@@ -823,7 +834,7 @@ pub struct MediaHub {
     failed: Vec<(CallKey, MediaError)>,
     workers: JoinSet<(CallKey, Result<LinkStats, MediaError>)>,
     stream_releases: BTreeMap<rusterisk_core::CallHandle, StreamRelease>,
-    release_notices: BTreeMap<u8, CallKey>,
+    terminal_notices: BTreeMap<(u8, TerminalNotice), CallKey>,
     pub(crate) activity: crate::activity::Meter,
     dropped: u64,
     recordings: Recordings,
@@ -880,7 +891,7 @@ impl MediaHub {
                 failed: Vec::with_capacity(4),
                 workers: JoinSet::new(),
                 stream_releases: BTreeMap::new(),
-                release_notices: BTreeMap::new(),
+                terminal_notices: BTreeMap::new(),
                 activity: crate::activity::Meter::default(),
                 dropped: 0,
                 recordings: Recordings::new(),
@@ -891,26 +902,22 @@ impl MediaHub {
         )
     }
 
+    #[cfg(test)]
     fn notice(&self, notice: MediaNotice) -> Result<(), MediaError> {
         self.notices.try_send(notice)
     }
 
-    fn release_notice(&mut self, key: CallKey) -> Result<(), MediaError> {
-        match self.notices.ordinary.clone().try_reserve_owned() {
-            Ok(slot) => self
-                .notices
-                .send_reserved(slot, MediaNotice::Released { key })?,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                let slot = key.handle().slot();
-                if self
-                    .release_notices
-                    .get(&slot)
-                    .is_none_or(|pending| pending.generation < key.generation)
-                {
-                    self.release_notices.insert(slot, key);
-                }
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => return Err(MediaError::UnknownStream),
+    fn terminal_notice(&mut self, kind: TerminalNotice, key: CallKey) -> Result<(), MediaError> {
+        if let Some(slot) = self.notices.ordinary_slot()? {
+            return self.notices.send_reserved(slot, kind.for_call(key));
+        }
+        let slot = (key.handle().slot(), kind);
+        if self
+            .terminal_notices
+            .get(&slot)
+            .is_none_or(|pending| pending.generation < key.generation)
+        {
+            self.terminal_notices.insert(slot, key);
         }
         Ok(())
     }
@@ -921,10 +928,10 @@ impl MediaHub {
             *stream = StreamRelease::Requested;
             return Ok(());
         }
-        self.release_notice(key)
+        self.terminal_notice(TerminalNotice::Released, key)
     }
 
-    fn remove(&mut self, key: &CallKey) -> Result<(), MediaError> {
+    fn remove(&mut self, key: &CallKey) -> Result<Option<notices::LegNotices>, MediaError> {
         self.probes.remove(key);
         self.recordings.release(key);
         self.playbacks.release(key);
@@ -947,6 +954,18 @@ impl MediaHub {
             if !self.mixer.remove(key) {
                 return Err(MediaError::InvalidRoute);
             }
+            return Ok(Some(port.notices));
+        }
+        Ok(None)
+    }
+
+    fn stop_leg(
+        &mut self,
+        key: CallKey,
+        result: Result<LinkStats, MediaError>,
+    ) -> Result<(), MediaError> {
+        if let Some(notices) = self.remove(&key)? {
+            notices.stopped(&self.notices, key, result)?;
         }
         Ok(())
     }
@@ -963,11 +982,7 @@ impl MediaHub {
                 .remove(&key)
                 .map(crate::webrtc::WebRtcLeg::finish)
                 .unwrap_or_default();
-            self.remove(&key)?;
-            self.notice(MediaNotice::Stopped {
-                key,
-                result: Ok(stats.audio),
-            })?;
+            self.stop_leg(key, Ok(stats.audio))?;
         }
         Ok(())
     }
@@ -976,11 +991,7 @@ impl MediaHub {
     fn fail_legs(&mut self) -> Result<(), MediaError> {
         while let Some((key, error)) = self.failed.pop() {
             tracing::warn!(channel = %key.id, generation = key.generation, %error, "media leg failed");
-            self.remove(&key)?;
-            self.notice(MediaNotice::Stopped {
-                key,
-                result: Err(error),
-            })?;
+            self.stop_leg(key, Err(error))?;
         }
         Ok(())
     }
@@ -993,13 +1004,13 @@ impl MediaHub {
         initial_direction: PeerMediaDirection,
         mode: AttachmentMode,
     ) -> Result<(), MediaError> {
-        self.check_link(&key)?;
+        let notices = self.reserve_link(&key)?;
         let support = session
             .telephone
             .map(DigitSupport::Rfc4733)
             .unwrap_or(DigitSupport::Unsupported);
         let leg = RtpLeg::new(sockets, session, initial_direction)?;
-        let port = Port::owned(initial_direction, support);
+        let port = Port::owned(initial_direction, support, notices);
         self.install_link(
             key.clone(),
             port,
@@ -1040,6 +1051,38 @@ impl MediaHub {
             self.remove(key)?;
         }
         Ok(())
+    }
+
+    fn queue_digits(
+        &mut self,
+        key: &CallKey,
+        command: RtpDigitCommand,
+    ) -> Result<&mut Port, MediaError> {
+        let port = self.ports.get_mut(key).ok_or(MediaError::UnknownStream)?;
+        let events = match port.digit_support {
+            DigitSupport::Unsupported => return Err(MediaError::Unsupported),
+            DigitSupport::Rfc4733(format) => format.events(),
+            DigitSupport::Stream => u16::MAX,
+        };
+        let supported = match &command {
+            RtpDigitCommand::Tone(tone) => events & (1 << tone.digit.event()) != 0,
+            RtpDigitCommand::Sequence(command) => command.sequence.supported_by(events),
+        };
+        if !supported {
+            return Err(MediaError::Unsupported);
+        }
+        match &port.io {
+            Io::Task(io) => io.commands.try_send(command).map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => MediaError::Capacity,
+                mpsc::error::TrySendError::Closed(_) => MediaError::UnknownStream,
+            })?,
+            Io::Owned => match (self.legs.get_mut(key), self.webrtc_legs.get_mut(key)) {
+                (Some(leg), _) => leg.queue_digits(command)?,
+                (None, Some(leg)) => leg.queue_digits(command)?,
+                (None, None) => return Err(MediaError::UnknownStream),
+            },
+        }
+        Ok(port)
     }
 
     fn command(&mut self, command: Command) -> Result<(), MediaError> {
@@ -1183,68 +1226,40 @@ impl MediaHub {
                     tracing::warn!(?token, %error, "recording control failed");
                 }
             }
-            Command::Digits {
+            Command::Tone { key, tone, reply } => {
+                if !reply.is_closed() {
+                    let result = self
+                        .queue_digits(&key, RtpDigitCommand::Tone(tone))
+                        .map(|_| ());
+                    if reply.send(result).is_err() {
+                        tracing::debug!(channel = %key.id, generation = key.generation, "tone admission receiver closed");
+                    }
+                }
+            }
+            Command::DigitSequence {
                 key,
                 command,
-                reply,
+                completion,
             } => {
-                if !reply.as_ref().is_some_and(oneshot::Sender::is_closed) {
-                    let finished = match &command {
-                        RtpDigitCommand::Sequence(command) => Some(command.token),
-                        RtpDigitCommand::Tone(_) => None,
-                    };
-                    let result = self
-                        .ports
-                        .get(&key)
-                        .ok_or(MediaError::UnknownStream)
-                        .and_then(|port| {
-                            let events = match port.digit_support {
-                                DigitSupport::Unsupported => return Err(MediaError::Unsupported),
-                                DigitSupport::Rfc4733(format) => format.events(),
-                                DigitSupport::Stream => u16::MAX,
-                            };
-                            let supported = match &command {
-                                RtpDigitCommand::Tone(tone) => {
-                                    events & (1 << tone.digit.event()) != 0
-                                }
-                                RtpDigitCommand::Sequence(command) => {
-                                    command.sequence.supported_by(events)
-                                }
-                            };
-                            if !supported {
-                                return Err(MediaError::Unsupported);
-                            }
-                            match &port.io {
-                                Io::Task(io) => io
-                                    .commands
-                                    .try_send(command)
-                                    .map_err(|_| MediaError::Capacity),
-                                Io::Owned => {
-                                    match (self.legs.get_mut(&key), self.webrtc_legs.get_mut(&key))
-                                    {
-                                        (Some(leg), _) => leg.queue_digits(command),
-                                        (None, Some(leg)) => leg.queue_digits(command),
-                                        (None, None) => Err(MediaError::UnknownStream),
-                                    }
-                                }
-                            }
-                        });
-                    match (reply, result) {
-                        (Some(reply), result) => {
-                            if reply.send(result).is_err() {
-                                tracing::debug!(channel = %key.id, generation = key.generation, "tone admission receiver closed");
-                            }
-                        }
-                        (None, Ok(())) => {}
-                        // A sender without a reply learns of a refusal as a finished digit command.
-                        (None, Err(error)) => {
-                            tracing::warn!(channel = %key.id, generation = key.generation, %error, "digit command refused");
-                            if let Some(token) = finished {
-                                self.notices
-                                    .try_send(MediaNotice::DtmfFinished { key, token })
-                                    .map_err(|_| MediaError::Capacity)?;
-                            }
-                        }
+                if self.ports.get(&key).is_some_and(|port| {
+                    port.notices
+                        .digits
+                        .iter()
+                        .any(|(token, _)| *token == command.token)
+                }) {
+                    return Ok(());
+                }
+                match self.queue_digits(&key, RtpDigitCommand::Sequence(command)) {
+                    Ok(port) => port.notices.digits.push((command.token, completion)),
+                    Err(error) => {
+                        tracing::warn!(channel = %key.id, generation = key.generation, %error, "digit command refused");
+                        self.notices.send_reserved(
+                            completion,
+                            MediaNotice::DtmfFinished {
+                                key,
+                                token: command.token,
+                            },
+                        )?;
                     }
                 }
             }
@@ -1284,10 +1299,7 @@ impl MediaHub {
                     if self.ports.contains_key(&key) {
                         active.push(key);
                     } else {
-                        self.notice(MediaNotice::Stopped {
-                            key,
-                            result: Err(MediaError::UnknownStream),
-                        })?;
+                        self.terminal_notice(TerminalNotice::MissingStream, key)?;
                     }
                 }
                 self.mixer.bridge(id, &active)?;
@@ -1372,6 +1384,7 @@ impl MediaHub {
         }
         self.probes.retain(|_, challenge| !challenge.closed());
         for (key, port) in &mut self.ports {
+            port.notices.flush_received(&self.notices, key)?;
             // An owned leg has no channels, and the loop below runs it.
             let Io::Task(io) = &mut port.io else {
                 continue;
@@ -1386,48 +1399,46 @@ impl MediaHub {
             }
             if let Some(answers) = &mut port.answers {
                 for _ in 0..8 {
-                    match answers.try_recv() {
-                        Ok(()) => self
-                            .notices
-                            .try_send(MediaNotice::Answer { key: key.clone() })
-                            .map_err(|_| MediaError::Capacity)?,
-                        Err(
-                            mpsc::error::TryRecvError::Empty
-                            | mpsc::error::TryRecvError::Disconnected,
-                        ) => break,
+                    if answers.is_empty() {
+                        break;
                     }
+                    let Some(slot) = self.notices.ordinary_slot()? else {
+                        break;
+                    };
+                    if answers.try_recv().is_err() {
+                        break;
+                    }
+                    self.notices
+                        .send_reserved(slot, MediaNotice::Answer { key: key.clone() })?;
                 }
             }
             for _ in 0..8 {
                 match io.completed.try_recv() {
-                    Ok(token) => self
-                        .notices
-                        .try_send(MediaNotice::DtmfFinished {
-                            key: key.clone(),
-                            token,
-                        })
-                        .map_err(|_| MediaError::Capacity)?,
+                    Ok(token) => port.notices.digit_finished(&self.notices, key, token)?,
                     Err(
                         mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
                     ) => break,
                 }
             }
             for _ in 0..16 {
-                match io.digits.try_recv() {
-                    Ok(tone) => {
-                        self.recordings
-                            .received_digit(key, self.mixer.bridge_for(key), tone.digit);
-                        self.notices
-                            .try_send(MediaNotice::Dtmf {
-                                key: key.clone(),
-                                tone,
-                            })
-                            .map_err(|_| MediaError::Capacity)?;
-                    }
-                    Err(
-                        mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
-                    ) => break,
+                if io.digits.is_empty() {
+                    break;
                 }
+                let Some(slot) = self.notices.ordinary_slot()? else {
+                    break;
+                };
+                let Ok(tone) = io.digits.try_recv() else {
+                    break;
+                };
+                self.recordings
+                    .received_digit(key, self.mixer.bridge_for(key), tone.digit);
+                self.notices.send_reserved(
+                    slot,
+                    MediaNotice::Dtmf {
+                        key: key.clone(),
+                        tone,
+                    },
+                )?;
             }
             match io.audio.receive() {
                 Ok(frame) => {
@@ -1437,12 +1448,7 @@ impl MediaHub {
                     self.recordings.channel(key, frame);
                     match self.mixer.push(key, frame) {
                         Ok(()) => {
-                            if matches!(port.connection, Connection::Waiting) {
-                                port.connection = Connection::Connected;
-                                self.notices
-                                    .try_send(MediaNotice::Connected { key: key.clone() })
-                                    .map_err(|_| MediaError::Capacity)?;
-                            }
+                            port.notices.connected(&self.notices, key)?;
                         }
                         Err(_) => self.dropped += 1,
                     }
@@ -1489,21 +1495,19 @@ impl MediaHub {
         self.end_closed_legs()?;
         self.fail_legs()?;
         self.remember_music();
-        let frames = self.playbacks.tick()?;
-        let mut playback = Vec::with_capacity(frames.len());
-        let mut music = Vec::with_capacity(frames.len());
-        for (target, frame) in frames {
-            if self.playbacks.is_music(&target) {
-                let AudioTarget::Channel(key) = target else {
-                    return Err(MediaError::InvalidRoute);
-                };
-                let port = self.ports.get(&key).ok_or(MediaError::UnknownStream)?;
-                music.push((key, port.generated_audio_gate, frame));
-            } else {
-                playback.push((target, frame));
-            }
-        }
-        let audio = self.mixer.tick_with_music(&playback, &music)?;
+        self.playbacks.render(tokio::time::Instant::now())?;
+        let music = self.playbacks.music_frames().map(|(key, frame)| {
+            (
+                key,
+                self.ports
+                    .get(key)
+                    .map_or(Gate::Closed, |port| port.generated_audio_gate),
+                frame,
+            )
+        });
+        let audio = self
+            .mixer
+            .tick_with_sources(self.playbacks.playback_frames(), music)?;
         self.recordings.bridges(&audio.bridges)?;
         for (key, frame) in &audio.channels {
             let port = self.ports.get(key).ok_or(MediaError::UnknownStream)?;
@@ -1570,20 +1574,19 @@ impl MediaHub {
                 Some(attachment) => self.websocket_attachment(attachment)?,
                 None => return Ok(Turn::Stop),
             },
-            slot = self.notices.ordinary.clone().reserve_owned(), if !self.release_notices.is_empty() => {
-                let slot = slot.map_err(|_| MediaError::UnknownStream)?;
-                if let Some((_, key)) = self.release_notices.pop_first() {
-                    self.notices.send_reserved(slot, MediaNotice::Released { key })?;
+            slot = self.notices.ordinary.clone().reserve_owned(), if !self.terminal_notices.is_empty() => {
+                let slot = slot.map_err(|_| MediaError::ServiceClosed)?;
+                if let Some(((_, kind), key)) = self.terminal_notices.pop_first() {
+                    self.notices.send_reserved(slot, kind.for_call(key))?;
                 }
             }
             result = self.workers.join_next(), if !self.workers.is_empty() => {
                 let (key, result) = result.ok_or(MediaError::InvalidRoute)?.map_err(|error| MediaError::Transport(error.to_string()))?;
                 let release = self.stream_releases.remove(&key.handle());
                 if release == Some(StreamRelease::Requested) {
-                    self.release_notice(key)?;
+                    self.terminal_notice(TerminalNotice::Released, key)?;
                 } else if self.ports.contains_key(&key) {
-                    self.remove(&key)?;
-                    self.notice(MediaNotice::Stopped { key, result })?;
+                    self.stop_leg(key, result)?;
                 }
             }
             result = self.recordings.workers.join_next(), if !self.recordings.workers.is_empty() => {

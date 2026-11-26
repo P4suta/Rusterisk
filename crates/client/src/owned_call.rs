@@ -659,6 +659,17 @@ pub(crate) struct Requests {
     closures: ClosureLatch,
 }
 
+impl Requests {
+    fn submit(&self, command: Command) -> Result<(), Error> {
+        self.commands
+            .try_send(command)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => Error::Capacity,
+                mpsc::error::TrySendError::Closed(_) => Error::Closed,
+            })
+    }
+}
+
 async fn start(requests: &Requests, options: Start) -> Result<OwnedCall, Error> {
     let id = api::ChannelId::try_from(uuid::Uuid::new_v4().to_string())?;
     // An abandoned request drops this notice after its lifetime and progress handles.
@@ -672,16 +683,13 @@ async fn start(requests: &Requests, options: Start) -> Result<OwnedCall, Error> 
     });
     let (lifetime, dropped) = oneshot::channel();
     let (reply, accepted) = oneshot::channel();
-    requests
-        .commands
-        .try_send(Command::Create(CreateRequest {
-            id: id.clone(),
-            options,
-            progress,
-            lifetime: dropped,
-            reply,
-        }))
-        .map_err(|_| Error::Capacity)?;
+    requests.submit(Command::Create(CreateRequest {
+        id: id.clone(),
+        options,
+        progress,
+        lifetime: dropped,
+        reply,
+    }))?;
     accepted.await.map_err(|_| Error::Closed)??;
     Ok(OwnedCall {
         id,

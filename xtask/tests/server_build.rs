@@ -58,7 +58,8 @@ fn native_build_limits_require_positive_jobs_and_a_positive_bounded_timeout() ->
 }
 
 #[test]
-fn server_builds_select_one_release_executable_with_locked_bounded_steps() -> std::io::Result<()> {
+fn server_builds_select_both_release_executables_with_locked_bounded_steps() -> std::io::Result<()>
+{
     let source = std::env::temp_dir().join("rusterisk-server-build-source");
     let state = std::env::temp_dir().join("rusterisk-server-build-state");
     for target in ServerTarget::ALL {
@@ -71,27 +72,37 @@ fn server_builds_select_one_release_executable_with_locked_bounded_steps() -> st
         assert_eq!(fetch.budget, Duration::from_secs(180));
         let build = plan.step(ServerBuildPhase::Build);
         let target_dir = state.join("target");
-        assert_eq!(
-            build.arguments,
-            [
-                "build",
-                "--locked",
-                "--offline",
-                "--release",
-                "--package",
-                "rusterisk-server",
-                "--bin",
-                "rusterisk",
-                "--target",
-                target.triple(),
-                "--jobs",
-                "2",
-                "--target-dir",
-                target_dir
-                    .to_str()
-                    .ok_or_else(|| std::io::Error::other("fixture path is not UTF-8"))?,
-            ]
-        );
+        let mut expected = Vec::from([
+            "build",
+            "--locked",
+            "--offline",
+            "--release",
+            "--package",
+            "rusterisk-server",
+            "--package",
+            "rusterisk-cli",
+            "--bin",
+            "rusterisk",
+            "--bin",
+            "rusterisk-cli",
+            "--target",
+            target.triple(),
+            "--jobs",
+            "2",
+            "--target-dir",
+            target_dir
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("fixture path is not UTF-8"))?,
+        ]);
+        if matches!(target, ServerTarget::LinuxArm64 | ServerTarget::LinuxX86_64) {
+            expected.extend([
+                "--config",
+                r#"profile.release.package.libsqlite3-sys.opt-level="s""#,
+                "--config",
+                "profile.release.package.rusterisk-server.codegen-units=1",
+            ]);
+        }
+        assert_eq!(build.arguments, expected);
         assert_eq!(build.budget, Duration::from_secs(900));
         assert_eq!(plan.source(), source);
         assert_eq!(plan.state(), state);

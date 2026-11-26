@@ -146,15 +146,19 @@ impl Configuration {
         result
     }
 
+    pub(super) async fn install(&self, sip: &str, extensions: &[u8]) -> Result<(), ControlError> {
+        replace(&self.root.join(SIP_FIXTURE), sip.as_bytes()).await?;
+        replace(&self.root.join(DIALPLAN_FIXTURE), extensions).await?;
+        self.reload().await
+    }
+
     pub(super) async fn configure(
         &self,
         bob: SocketAddr,
         charlie: SocketAddr,
     ) -> Result<(), ControlError> {
         let sip = format!("[global]\ntype=global\nendpoint_identifier_order=auth_username,username,ip\n[udp]\ntype=transport\nprotocol=udp\nbind=0.0.0.0:5060\n[auth]\ntype=auth\nauth_type=userpass\nusername=phone\npassword=test-password\nsupported_algorithms_uas=MD5\n[dynamic]\ntype=aor\nmax_contacts=1\n[phone]\ntype=endpoint\ntransport=udp\nauth=auth\naors=dynamic\ncontext=internal\nidentify_by=auth_username\ndisallow=all\nallow=ulaw\ndirect_media=no\nallow_transfer=yes\nrefer_blind_progress=yes\n[spoofed]\ntype=endpoint\ntransport=udp\nauth=auth\naors=dynamic\ncontext=outside\nidentify_by=auth_username\ndisallow=all\nallow=ulaw\ndirect_media=no\n[bob-aor]\ntype=aor\ncontact=sip:bob@{bob}\n[transfer-bob]\ntype=endpoint\ntransport=udp\naors=bob-aor\ndisallow=all\nallow=ulaw\ndirect_media=no\n[charlie-aor]\ntype=aor\ncontact=sip:charlie@{charlie}\n[transfer-charlie]\ntype=endpoint\ntransport=udp\naors=charlie-aor\ndisallow=all\nallow=ulaw\ndirect_media=no\n");
-        replace(&self.root.join(SIP_FIXTURE), sip.as_bytes()).await?;
-        replace(&self.root.join(DIALPLAN_FIXTURE), b"[internal]\nexten => 100,1,Dial(PJSIP/${EXTEN}@transfer-bob,5)\nsame => n,Hangup()\nexten => 200,1,Dial(PJSIP/${EXTEN}@transfer-charlie,5)\nsame => n,Hangup()\n[outside]\nexten => 100,1,Hangup()\n").await?;
-        self.reload().await
+        self.install(&sip, b"[internal]\nexten => 100,1,Dial(PJSIP/${EXTEN}@transfer-bob,5)\nsame => n,Hangup()\nexten => 200,1,Dial(PJSIP/${EXTEN}@transfer-charlie,5)\nsame => n,Hangup()\n[outside]\nexten => 100,1,Hangup()\n").await
     }
 
     pub(super) async fn restore(&self) -> Result<(), ControlError> {

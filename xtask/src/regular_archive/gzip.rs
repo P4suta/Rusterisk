@@ -78,7 +78,7 @@ impl ArchiveLimits {
         compressed: 272 * 1024 * 1024,
         expanded: 272 * 1024 * 1024,
         file: 256 * 1024 * 1024,
-        entries: 9,
+        entries: crate::server_distribution::SERVER_FILE_COUNT,
         depth: 2,
     };
 

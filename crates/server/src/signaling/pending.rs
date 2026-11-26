@@ -1,4 +1,4 @@
-use super::{failure, media::PreparedAnswer, DigitDelivery, Signaling};
+use super::{media::PreparedAnswer, DigitDelivery, Signaling};
 use crate::media::AttachmentRelease;
 use crate::signaling::calls;
 use crate::{CallKey, ControlError, Effect, Milestone, Signal};
@@ -385,17 +385,7 @@ impl Signaling {
                 self.records.insert(calls::EXTERNAL, key.clone(), ())?;
                 Ok(local)
             }
-            Err(error) => Err(match error {
-                MediaError::Capacity => ControlError::Capacity,
-                error @ (MediaError::InvalidFrame
-                | MediaError::InvalidPacket
-                | MediaError::InvalidRoute
-                | MediaError::UnknownStream
-                | MediaError::Unsupported
-                | MediaError::Codec(_)
-                | MediaError::Transport(_)
-                | MediaError::Control(_)) => failure(error),
-            }),
+            Err(error) => Err(ControlError::from(error)),
         };
         let admitted = result.is_ok();
         self.notify(Signal::ExternalRtpAdmitted {

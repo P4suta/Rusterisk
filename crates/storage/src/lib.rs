@@ -4,6 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 mod history;
+mod journal;
 mod preparation;
 mod recording_copy;
 mod recording_file;
@@ -145,8 +146,11 @@ impl Store {
                 transaction.execute_batch("ALTER TABLE calls ADD COLUMN channel TEXT NOT NULL DEFAULT ''; ALTER TABLE calls ADD COLUMN generation TEXT NOT NULL DEFAULT '0'; UPDATE calls SET channel=id; PRAGMA user_version=2;")?;
                 transaction.commit()?;
             }
-            2 => {}
+            2 | 3 => {}
             _ => return Err(StorageError::UnknownSchema),
+        }
+        if version < 3 {
+            journal::migrate(&mut connection)?;
         }
         connection.execute("UPDATE calls SET outcome='interrupted', ended_at=COALESCE(ended_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE outcome='active'", [])?;
         let mut count = 0usize;
@@ -169,7 +173,11 @@ impl Store {
                 interrupted.push(entry.path());
             }
         }
+        journal::replay::pending(&mut connection, &recordings)?;
         for path in interrupted {
+            if !path.try_exists()? {
+                continue;
+            }
             if path.extension().is_some_and(|value| value == "copying") {
                 std::fs::remove_file(path)?;
                 continue;
@@ -183,11 +191,48 @@ impl Store {
                 .ok_or(StorageError::InvalidName)?;
             connection.execute("INSERT INTO recordings (name,format,outcome) VALUES (?1,'wav','interrupted') ON CONFLICT(name) DO UPDATE SET outcome='interrupted'", [name])?;
         }
-        Ok(Self {
+        let mut store = Self {
             connection,
             recordings,
             _lock: lock,
-        })
+        };
+        store.reconcile_recordings()?;
+        Ok(store)
+    }
+
+    fn reconcile_recordings(&mut self) -> Result<(), StorageError> {
+        let recordings = self.recordings()?;
+        if recordings.is_empty() {
+            self.connection.execute("DELETE FROM recordings", [])?;
+            return Ok(());
+        }
+        let transaction = self.connection.transaction()?;
+        transaction.execute_batch(
+            "CREATE TEMP TABLE published_recordings (name TEXT PRIMARY KEY NOT NULL)",
+        )?;
+        {
+            let mut insert = transaction.prepare("INSERT INTO published_recordings VALUES (?1)")?;
+            for recording in recordings {
+                let path = self.recordings.join(format!("{}.wav", recording.name));
+                match WaveReader::open(&path) {
+                    Ok(_) => {
+                        insert.execute([&recording.name])?;
+                    }
+                    Err(StorageError::InvalidWave) => {}
+                    Err(StorageError::Io(error))
+                        if error.kind() == std::io::ErrorKind::UnexpectedEof => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        transaction.execute_batch(
+            "INSERT OR IGNORE INTO recordings (name, format, outcome)
+                 SELECT name, 'wav', 'completed' FROM published_recordings;
+             DELETE FROM recordings WHERE name NOT IN (SELECT name FROM published_recordings);
+             DROP TABLE published_recordings;",
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn start_call(&mut self, id: &str, timestamp: &str) -> Result<(), StorageError> {
@@ -236,21 +281,8 @@ impl Store {
         Ok(())
     }
 
-    fn recording_path(&self, name: &str) -> Result<PathBuf, StorageError> {
-        validate_name(name)?;
-        let path = self.recordings.join(format!("{name}.wav"));
-        let metadata = std::fs::symlink_metadata(&path).map_err(recording_io_error)?;
-        if metadata.file_type().is_symlink() {
-            return Err(StorageError::InvalidName);
-        }
-        if !metadata.is_file() {
-            return Err(StorageError::NotFound);
-        }
-        Ok(path)
-    }
-
     pub fn recording(&self, name: &str) -> Result<rusterisk_api::StoredRecording, StorageError> {
-        self.recording_path(name)?;
+        recording_path(&self.recordings, name)?;
         Ok(rusterisk_api::StoredRecording {
             name: name.to_owned(),
             format: "wav".into(),
@@ -258,7 +290,7 @@ impl Store {
     }
 
     pub fn open_recording(&self, name: &str) -> Result<StoredRecordingReader, StorageError> {
-        StoredRecordingReader::open(&self.recording_path(name)?)
+        StoredRecordingReader::open(&recording_path(&self.recordings, name)?)
     }
 
     pub fn prepare_recording_copy(
@@ -266,15 +298,12 @@ impl Store {
         source: &str,
         destination: &str,
     ) -> Result<RecordingCopy, StorageError> {
-        RecordingCopy::create(&self.recording_path(source)?, &self.recordings, destination)
+        RecordingCopy::create(self, source, destination)
     }
 
     pub fn delete_recording(&mut self, name: &str) -> Result<(), StorageError> {
-        let path = self.recording_path(name)?;
-        std::fs::remove_file(path).map_err(recording_io_error)?;
-        self.connection
-            .execute("DELETE FROM recordings WHERE name=?1", [name])?;
-        Ok(())
+        let id = journal::begin_deletion(&mut self.connection, &self.recordings, name)?;
+        journal::unlink(&mut self.connection, &self.recordings, name, id)
     }
 
     pub fn recordings(&self) -> Result<Vec<rusterisk_api::StoredRecording>, StorageError> {
@@ -303,6 +332,19 @@ impl Store {
         output.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(output)
     }
+}
+
+fn recording_path(directory: &Path, name: &str) -> Result<PathBuf, StorageError> {
+    validate_name(name)?;
+    let path = directory.join(format!("{name}.wav"));
+    let metadata = std::fs::symlink_metadata(&path).map_err(recording_io_error)?;
+    if metadata.file_type().is_symlink() {
+        return Err(StorageError::InvalidName);
+    }
+    if !metadata.is_file() {
+        return Err(StorageError::NotFound);
+    }
+    Ok(path)
 }
 
 fn validate_name(name: &str) -> Result<(), StorageError> {
@@ -363,6 +405,7 @@ fn read_header(file: &mut File) -> Result<(u32, u32), StorageError> {
 }
 
 pub struct Recorder {
+    operation: Option<journal::Operation>,
     file: File,
     path: PathBuf,
     rate: u32,
@@ -469,6 +512,7 @@ impl Recorder {
         file.sync_all()?;
         Ok((
             Self {
+                operation: None,
                 file,
                 path,
                 rate,
@@ -507,6 +551,10 @@ impl Recorder {
         let samples = milliseconds.saturating_mul(u64::from(self.rate)) / 1000;
         let trim = samples.saturating_mul(2).min(u64::from(maximum));
         self.bytes -= trim as u32;
+        if let Some(operation) = &self.operation {
+            self.file.sync_all()?;
+            operation.publishing(Some(self.rate), self.bytes)?;
+        }
         self.file.set_len(u64::from(self.bytes) + 44)?;
         self.file.seek(SeekFrom::Start(0))?;
         self.file.write_all(&header(self.rate, self.bytes))?;
@@ -520,12 +568,25 @@ impl Recorder {
             }
             Publication::Replace => std::fs::rename(&self.path, &destination)?,
         }
+        if let Some(operation) = self.operation {
+            #[cfg(unix)]
+            File::open(destination.parent().ok_or(StorageError::InvalidState)?)?.sync_all()?;
+            operation.completed()?;
+        }
         Ok(destination)
     }
 
     pub fn cancel(self) -> Result<(), StorageError> {
+        if let Some(operation) = &self.operation {
+            operation.cancelling()?;
+        }
         drop(self.file);
-        std::fs::remove_file(self.path)?;
+        std::fs::remove_file(&self.path)?;
+        if let Some(operation) = self.operation {
+            #[cfg(unix)]
+            File::open(self.path.parent().ok_or(StorageError::InvalidState)?)?.sync_all()?;
+            operation.forget()?;
+        }
         Ok(())
     }
 }
@@ -560,29 +621,34 @@ fn recover(path: &Path) -> Result<bool, StorageError> {
     match std::fs::hard_link(path, &destination) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let mut completed = File::open(&destination)?;
-            if completed.metadata()?.len() != file.metadata()?.len() {
-                return Err(StorageError::InvalidState);
-            }
-            file.seek(SeekFrom::Start(0))?;
-            let mut left = [0u8; 8192];
-            let mut right = [0u8; 8192];
-            loop {
-                let size = file.read(&mut left)?;
-                if size == 0 {
-                    break;
-                }
-                completed.read_exact(&mut right[..size])?;
-                if left[..size] != right[..size] {
-                    return Err(StorageError::InvalidState);
-                }
-            }
+            confirm_same_audio(&mut file, &destination)?;
         }
         Err(error) => return Err(error.into()),
     }
     drop(file);
     std::fs::remove_file(path)?;
     Ok(true)
+}
+
+fn confirm_same_audio(file: &mut File, destination: &Path) -> Result<(), StorageError> {
+    let mut completed = File::open(destination)?;
+    if completed.metadata()?.len() != file.metadata()?.len() {
+        return Err(StorageError::InvalidState);
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut left = [0u8; 8192];
+    let mut right = [0u8; 8192];
+    loop {
+        let size = file.read(&mut left)?;
+        if size == 0 {
+            break;
+        }
+        completed.read_exact(&mut right[..size])?;
+        if left[..size] != right[..size] {
+            return Err(StorageError::InvalidState);
+        }
+    }
+    Ok(())
 }
 
 pub struct WaveReader {
@@ -648,4 +714,15 @@ impl WaveReader {
         self.remaining -= size as u32;
         Ok(Some(Frame::new(&samples[..size / 2], self.rate)?))
     }
+}
+
+#[test]
+fn opening_an_empty_store_does_not_allocate_a_temporary_catalog() -> Result<(), StorageError> {
+    let root = tempfile::tempdir()?;
+    let store = Store::open(root.path())?;
+    let pages: i64 = store
+        .connection
+        .query_row("PRAGMA temp.page_count", [], |row| row.get(0))?;
+    assert_eq!(pages, 0);
+    Ok(())
 }

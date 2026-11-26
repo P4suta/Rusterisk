@@ -13,6 +13,57 @@ use std::collections::{BTreeMap, BTreeSet};
 use tower::ServiceExt;
 
 #[tokio::test]
+async fn every_declared_operation_authenticates_and_denies_read_only_writes(
+) -> Result<(), ControlError> {
+    let (controller, runner, _effects) = Controller::new(config()?, 8);
+    let task = tokio::spawn(runner.run());
+    let app = router(controller.clone());
+    let result = async {
+        let ari = rusterisk_api::OPERATIONS.iter().map(|op| ("/ari", op));
+        let management = rusterisk_api::MANAGEMENT_OPERATIONS
+            .iter()
+            .map(|op| ("", op.metadata()));
+        for (prefix, op) in ari.chain(management) {
+            let path = op
+                .path
+                .split('/')
+                .map(|part| if part.starts_with('{') { "probe" } else { part })
+                .collect::<Vec<_>>()
+                .join("/");
+            let path = format!("{prefix}{path}");
+            for (user, status) in [
+                (None, StatusCode::UNAUTHORIZED),
+                (Some("reader"), StatusCode::FORBIDDEN),
+            ] {
+                if user.is_some() && op.method == rusterisk_api::Method::Get {
+                    continue;
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request(op.method.upper(), &path, user)?)
+                    .await
+                    .unwrap_or_else(|error| match error {});
+                assert_eq!(response.status(), status, "{}", op.id);
+                let bytes = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .map_err(|error| ControlError::Adapter(error.to_string()))?
+                    .to_bytes();
+                let error: rusterisk_api::ApiError = serde_json::from_slice(&bytes)?;
+                assert!(!error.message.is_empty(), "{}", op.id);
+            }
+        }
+        Ok(())
+    }
+    .await;
+    controller.shutdown();
+    task.await
+        .map_err(|error| ControlError::Adapter(error.to_string()))??;
+    result
+}
+
+#[tokio::test]
 async fn published_paths_report_methods_and_unavailable_operations_through_http(
 ) -> Result<(), ControlError> {
     let (controller, runner, _effects) = Controller::new(config()?, 4);

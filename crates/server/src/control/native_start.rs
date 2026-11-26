@@ -7,6 +7,7 @@ mod tests;
 
 #[derive(Clone)]
 pub(crate) struct CallSettings {
+    pub(super) routes: rusterisk_config::CompiledDialplan,
     pub(super) native_profiles: Option<NativeProfileCatalog>,
     pub(super) music_catalog: Option<PreparedMusic>,
     pub(super) websocket_profiles: Option<crate::signaling::PreparedWebSocketProfiles>,
@@ -15,6 +16,7 @@ pub(crate) struct CallSettings {
 impl CallSettings {
     pub(super) fn empty() -> Self {
         Self {
+            routes: rusterisk_config::Dialplan { steps: Vec::new() }.compile(),
             native_profiles: None,
             music_catalog: None,
             websocket_profiles: None,
@@ -23,6 +25,7 @@ impl CallSettings {
 
     pub(crate) fn configured(config: &rusterisk_config::Config) -> Self {
         Self {
+            routes: config.dialplan.clone().compile(),
             native_profiles: Some(NativeProfileCatalog::new(config)),
             music_catalog: None,
             websocket_profiles: None,
@@ -30,11 +33,13 @@ impl CallSettings {
     }
 
     pub(crate) fn prepared(
+        routes: rusterisk_config::CompiledDialplan,
         native: NativeProfileCatalog,
         websocket: crate::signaling::PreparedWebSocketProfiles,
         music: PreparedMusic,
     ) -> Self {
         Self {
+            routes,
             native_profiles: Some(native),
             music_catalog: Some(music),
             websocket_profiles: Some(websocket),

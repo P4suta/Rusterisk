@@ -89,23 +89,26 @@ impl ServerCandidate {
         if read(root, "SHA256SUMS", 512)? != sums.as_bytes() {
             return Err(invalid());
         }
-        let binary = match target.format() {
+        let (binary, cli) = match target.format() {
             ArchiveFormat::TarGzip => {
                 let archive_root =
                     ArchiveRoot::new(capture.name().root()).map_err(io::Error::other)?;
                 let archive =
                     read_regular_gzip(Cursor::new(&bytes), &archive_root, ArchiveLimits::SERVER)
                         .map_err(io::Error::other)?;
-                archive
-                    .files()
-                    .iter()
-                    .find(|file| file.path().as_str() == target.binary_path())
-                    .map(|file| file.bytes().to_vec())
-                    .ok_or_else(invalid)?
+                let extract = |path: &str| {
+                    archive
+                        .files()
+                        .iter()
+                        .find(|file| file.path().as_str() == path)
+                        .map(|file| file.bytes().to_vec())
+                        .ok_or_else(invalid)
+                };
+                (extract(target.binary_path())?, extract(target.cli_path())?)
             }
-            ArchiveFormat::Zip => zip_read::binary(capture.name(), &bytes)?,
+            ArchiveFormat::Zip => zip_read::executables(capture.name(), &bytes)?,
         };
-        let payload = ServerPayload::capture(target, binary, |path| {
+        let payload = ServerPayload::capture(target, binary, cli, |path| {
             capture
                 .files()
                 .find(|(file, _)| *file == Path::new(path))

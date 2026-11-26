@@ -1,4 +1,4 @@
-use crate::{Recorder, StorageError, WaveReader};
+use crate::{journal::Operation, Recorder, StorageError, Store, WaveReader};
 use rusterisk_api::RecordingIfExists;
 use rusterisk_media::Frame;
 use std::io::{Read, Write};
@@ -7,6 +7,33 @@ use std::path::{Path, PathBuf};
 pub struct RecordingPreparation {
     recorder: Recorder,
     source: Option<WaveReader>,
+}
+
+impl Store {
+    pub fn prepare_recording(
+        &self,
+        name: &str,
+        rate: u32,
+        policy: RecordingIfExists,
+    ) -> Result<RecordingPreparation, StorageError> {
+        let kind = match policy {
+            RecordingIfExists::Fail => "create",
+            RecordingIfExists::Overwrite => "overwrite",
+            RecordingIfExists::Append => "append",
+        };
+        let root = self.recordings.parent().ok_or(StorageError::InvalidState)?;
+        let operation = Operation::start(self, name, kind, None)?;
+        match RecordingPreparation::create(root, name, rate, policy) {
+            Ok(mut preparation) => {
+                preparation.recorder.operation = Some(operation);
+                Ok(preparation)
+            }
+            Err(error) => {
+                operation.forget()?;
+                Err(error)
+            }
+        }
+    }
 }
 
 impl RecordingPreparation {

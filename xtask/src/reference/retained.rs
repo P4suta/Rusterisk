@@ -42,7 +42,7 @@ pub(super) struct CaseRun {
     pub(super) media_output: u8,
     pub(super) callback_output: u8,
     pub(super) tools: ToolOutputs,
-    pub(super) cases: [u8; 3],
+    pub(super) cases: [u8; ReferenceCase::ALL.len()],
     pub(super) runtime: Option<CaseRuntime>,
 }
 
@@ -153,14 +153,15 @@ impl ReferenceNativeContext {
             cases.address_output,
             cases.media_output,
             cases.callback_output,
-            cases.cases[0],
-            cases.cases[1],
-            cases.cases[2],
+        ]
+        .into_iter()
+        .chain(cases.cases)
+        .chain([
             self.cases.cleanup.inspection,
             self.cases.cleanup.removal,
             self.cases.cleanup.absence,
-        ];
-        if !case_order.windows(2).all(|pair| pair[0] < pair[1]) {
+        ]);
+        if !case_order.is_sorted_by(|previous, next| previous < next) {
             return Err(invalid(
                 "reference native case outputs are repeated or out of order",
             ));

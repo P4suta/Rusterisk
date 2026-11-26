@@ -4,6 +4,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+#[cfg(unix)]
+const PAYLOAD_DIRECTORIES: [&str; 3] = ["bin", "config", "data"];
+
 pub struct ServerOciContext<'a> {
     root: Option<PathBuf>,
     payload: Option<ExtractedServer>,
@@ -85,10 +88,10 @@ impl<'a> ServerOciContext<'a> {
             context.payload = Some(candidate.extract(&root.join("payload"))?);
             std::fs::create_dir(root.join("payload/data"))?;
             #[cfg(unix)]
-            {
+            for directory in PAYLOAD_DIRECTORIES {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(
-                    root.join("payload/data"),
+                    root.join("payload").join(directory),
                     std::fs::Permissions::from_mode(0o755),
                 )?;
             }
@@ -134,7 +137,10 @@ impl<'a> ServerOciContext<'a> {
                 ("LICENSE-APACHE", false),
             ],
         )?;
-        directory(&payload.join("bin"), &[("rusterisk", false)])?;
+        directory(
+            &payload.join("bin"),
+            &[("rusterisk", false), ("rusterisk-cli", false)],
+        )?;
         directory(
             &payload.join("config"),
             &[
@@ -146,17 +152,27 @@ impl<'a> ServerOciContext<'a> {
             ],
         )?;
         directory(&payload.join("data"), &[])?;
+        #[cfg(unix)]
+        for directory in PAYLOAD_DIRECTORIES {
+            use std::os::unix::fs::PermissionsExt;
+            let metadata = std::fs::symlink_metadata(payload.join(directory))?;
+            if metadata.permissions().mode() & 0o7777 != 0o755 {
+                return Err(io::Error::other(
+                    "server image payload directory mode changed",
+                ));
+            }
+        }
         super::extraction::check_file(
             &root.join("Dockerfile"),
             self.profile.dockerfile().as_bytes(),
         )?;
-        for (path, bytes) in self.candidate.files() {
-            let path = payload.join(path);
+        for (relative, bytes) in self.candidate.files() {
+            let path = payload.join(relative);
             super::extraction::check_file(&path, bytes)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let expected = if path == payload.join("bin/rusterisk") {
+                let expected = if self.profile.target().is_executable(relative) {
                     0o755
                 } else {
                     0o644

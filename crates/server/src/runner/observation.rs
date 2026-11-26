@@ -99,7 +99,7 @@ impl Controller {
                 target,
                 reply,
             })
-            .map_err(|_| ControlError::Capacity)?;
+            .map_err(ControlError::queue)?;
         self.receive(response).await
     }
 }

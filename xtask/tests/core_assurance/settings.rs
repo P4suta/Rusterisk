@@ -4,13 +4,14 @@ use xtask::core_assurance::{
     Phase,
 };
 
-const METHODS: [&str; 8] = [
+const METHODS: [&str; 9] = [
     "SettingsLifetimes::slot",
     "SettingsLifetimes::available",
     "SettingsLifetimes::prepare",
     "SettingsLifetimes::cancel",
     "SettingsLifetimes::commit",
     "SettingsLifetimes::retain",
+    "SettingsLifetimes::retain_unpublished",
     "SettingsLifetimes::release",
     "SettingsError::into_reference",
 ];
@@ -40,7 +41,7 @@ fn both_mutation_phases_select_settings_lifetimes_and_reference_recovery(
             .find_map(|pair| (pair[0] == "--re").then_some(pair[1].as_str()))
             .ok_or(AssuranceError::Plan)?;
         assert!(selector
-            .contains("SettingsLifetimes::(slot|available|prepare|cancel|commit|retain|release)"));
+            .contains("SettingsLifetimes::(slot|available|prepare|cancel|commit|retain|retain_unpublished|release)"));
         assert!(selector.contains("SettingsError::into_reference"));
     }
     Ok(())

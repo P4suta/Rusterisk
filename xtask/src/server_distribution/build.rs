@@ -137,23 +137,25 @@ impl ServerBuildPlan {
         self.limits
     }
 
-    pub fn executable(&self) -> PathBuf {
+    fn built_executable(&self, path: &str) -> PathBuf {
         self.state
             .join("target")
             .join(self.target.triple())
             .join("release")
-            .join(match self.target {
-                ServerTarget::WindowsX86_64 => "rusterisk.exe",
-                ServerTarget::LinuxX86_64
-                | ServerTarget::LinuxArm64
-                | ServerTarget::MacOsArm64
-                | ServerTarget::MacOsX86_64 => "rusterisk",
-            })
+            .join(path.trim_start_matches("bin/"))
+    }
+
+    pub fn executable(&self) -> PathBuf {
+        self.built_executable(self.target.binary_path())
+    }
+
+    pub fn cli_executable(&self) -> PathBuf {
+        self.built_executable(self.target.cli_path())
     }
 
     pub fn step(&self, phase: ServerBuildPhase) -> Step {
         let jobs = self.limits.jobs().to_string();
-        let (arguments, seconds) = match phase {
+        let (mut arguments, seconds) = match phase {
             ServerBuildPhase::Fetch => (
                 ["fetch", "--locked", "--target", self.target.triple()]
                     .map(str::to_owned)
@@ -168,8 +170,12 @@ impl ServerBuildPlan {
                     "--release",
                     "--package",
                     "rusterisk-server",
+                    "--package",
+                    "rusterisk-cli",
                     "--bin",
                     "rusterisk",
+                    "--bin",
+                    "rusterisk-cli",
                     "--target",
                     self.target.triple(),
                     "--jobs",
@@ -182,6 +188,19 @@ impl ServerBuildPlan {
                 self.limits.build_timeout().as_secs(),
             ),
         };
+        if phase == ServerBuildPhase::Build
+            && matches!(
+                self.target,
+                ServerTarget::LinuxArm64 | ServerTarget::LinuxX86_64
+            )
+        {
+            arguments.extend([
+                "--config".to_owned(),
+                r#"profile.release.package.libsqlite3-sys.opt-level="s""#.to_owned(),
+                "--config".to_owned(),
+                "profile.release.package.rusterisk-server.codegen-units=1".to_owned(),
+            ]);
+        }
         Step {
             arguments,
             budget: Duration::from_secs(seconds),

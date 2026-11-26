@@ -174,3 +174,18 @@ async fn a_released_slot_admits_the_next_start_before_another_settle() -> Result
     assert_eq!(calls.entries.len(), 64);
     Ok(())
 }
+
+#[tokio::test]
+async fn originating_and_adopting_report_a_closed_session() -> Result<(), Error> {
+    let (requests, calls) = driver()?;
+    drop(calls);
+    assert!(matches!(
+        originate(&requests, Originate::new("PJSIP/phone".into())?).await,
+        Err(Error::Closed)
+    ));
+    assert!(matches!(
+        adopt(&requests, channel("incoming")?.id).await,
+        Err(Error::Closed)
+    ));
+    Ok(())
+}

@@ -19,6 +19,49 @@ fn failure(error: impl std::fmt::Display) -> MediaError {
     MediaError::Transport(error.to_string())
 }
 
+#[test]
+fn active_calls_try_distinct_rtp_pairs_before_probing_occupied_ports() -> std::io::Result<()> {
+    for slot in 0..64 {
+        let mut ports = super::port_choices(10000, 10127, slot)?;
+        assert_eq!(ports.next(), Some(10000 + u16::from(slot) * 2));
+        assert_eq!(ports.count(), 63);
+    }
+    assert_eq!(
+        super::port_choices(10000, 10006, 5)?.collect::<Vec<_>>(),
+        [10004, 10000, 10002]
+    );
+    assert_eq!(
+        super::port_choices(65532, 65535, 1)?.collect::<Vec<_>>(),
+        [65534, 65532]
+    );
+    assert_eq!(super::port_choices(2, u16::MAX, 63)?.count(), 256);
+    assert_eq!(
+        super::port_choices(0, 0, 7)?
+            .filter(|port| *port == 0)
+            .count(),
+        128
+    );
+    assert!(super::port_choices(10001, 10003, 1).is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_slot_reclaims_its_pair_only_after_the_control_port_closes() -> std::io::Result<()> {
+    let ip = Ipv4Addr::LOCALHOST.into();
+    let initial = SocketPair::bind(ip, 0, 0)?;
+    let first = initial.local_addr()?.port();
+    let last = initial.control_addr()?.port();
+    let (data, control) = initial.into_std()?;
+    drop(data);
+    assert!(matches!(SocketPair::bind_for_slot(ip, first, last, 63),
+        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse));
+    drop(control);
+    let reclaimed = SocketPair::bind_for_slot(ip, first, last, 63)?;
+    assert_eq!(reclaimed.local_addr()?.port(), first);
+    assert_eq!(reclaimed.control_addr()?.port(), last);
+    Ok(())
+}
+
 async fn finish(
     mut task: tokio::task::JoinHandle<Result<LinkStats, MediaError>>,
 ) -> Result<LinkStats, MediaError> {

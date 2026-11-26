@@ -14,6 +14,7 @@ fn configuration_reload_has_a_separate_closed_management_contract() {
             ManagementOperation::DiagnoseChannel,
             ManagementOperation::DiagnoseRuntime,
             ManagementOperation::TestCall,
+            ManagementOperation::Capabilities,
         ]
     );
     let operation = ManagementOperation::ReloadConfiguration;
@@ -98,6 +99,21 @@ fn management_openapi_overrides_the_ari_server_at_its_full_path() {
 }
 
 #[test]
+fn capabilities_publish_verified_paths_separately_from_operation_coverage() {
+    let document = openapi();
+    let operation = &document["paths"]["/rusterisk/capabilities"]["get"];
+    assert_eq!(operation["operationId"], "capabilities.get");
+    let schemas = &document["components"]["schemas"];
+    assert_eq!(
+        operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/Capabilities"
+    );
+    let properties = &schemas["Capabilities"]["properties"];
+    assert!(properties["operations"]["items"]["$ref"].is_string());
+    assert!(properties["verified_call_paths"]["items"]["$ref"].is_string());
+}
+
+#[test]
 fn both_swagger_formats_keep_management_outside_ari_discovery(
 ) -> Result<(), rusterisk_api::SwaggerError> {
     let metadata = ManagementOperation::ReloadConfiguration.metadata();
@@ -133,6 +149,16 @@ fn runtime_diagnosis_requires_authentication_and_defines_all_counters() {
     let get = &document["paths"][operation.path]["get"];
     assert!(get["security"][0]["basicAuth"].is_array());
     let schemas = &document["components"]["schemas"];
+    assert_eq!(
+        schemas["RuntimeActivity"]["properties"]["call_slots"]["$ref"],
+        "#/components/schemas/CallSlots"
+    );
+    for counter in ["active", "awaiting_release", "limit", "capacity_refusals"] {
+        assert_eq!(
+            schemas["CallSlots"]["properties"][counter]["type"],
+            "integer"
+        );
+    }
     for name in ["control", "signaling", "media"] {
         assert_eq!(
             schemas["RuntimeActivity"]["properties"][name]["$ref"],

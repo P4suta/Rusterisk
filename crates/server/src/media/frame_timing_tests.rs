@@ -108,8 +108,11 @@ async fn a_port_attached_after_idleness_receives_its_first_frame_one_period_late
     let mut fixture = Fixture::new();
     fixture.sleeps().await?;
     let key = key()?;
-    let (port, mut channels) =
-        Port::new(PeerMediaDirection::SendReceive, DigitSupport::Unsupported);
+    let (port, mut channels) = Port::new(
+        PeerMediaDirection::SendReceive,
+        DigitSupport::Unsupported,
+        fixture.hub.notices.reserve_leg()?,
+    );
     assert_eq!(channels.incoming.max_capacity(), 1);
     assert_eq!(channels.outgoing.max_capacity(), 1);
     fixture

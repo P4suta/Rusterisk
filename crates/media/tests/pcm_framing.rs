@@ -81,6 +81,63 @@ fn continuous_pcm_chunks_form_exact_twenty_millisecond_frames() -> Result<(), Me
 }
 
 #[test]
+fn consecutive_frames_keep_sample_order_across_the_ring_boundary() -> Result<(), MediaError> {
+    let mut framer = PcmFramer::new(8000)?;
+    framer.push(Frame::new(&[0; 57], 8000)?)?;
+    for turn in 0..24 {
+        let packet = std::array::from_fn::<_, 160, _>(|i| 1 + turn * 160 + i as i16);
+        framer.push(Frame::new(&packet, 8000)?)?;
+        let frame = framer.pop().ok_or(MediaError::InvalidFrame)?;
+        for (i, sample) in frame.samples().iter().enumerate() {
+            let position = turn * 160 + i as i16;
+            assert_eq!(*sample, (position - 56).max(0));
+        }
+        assert!(framer.pop().is_none());
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "Measures narrowband PCM frame copies with an optimized build."]
+fn narrowband_frames_stay_within_the_bulk_copy_budget() -> Result<(), MediaError> {
+    use std::{collections::VecDeque, hint::black_box, time::Instant};
+
+    let mut bulk = [std::time::Duration::ZERO; 5];
+    let mut framed = bulk;
+    let input = Frame::new(&std::array::from_fn::<_, 160, _>(|i| i as i16), 8000)?;
+    for round in 0..5 {
+        let mut ring = VecDeque::with_capacity(1759);
+        ring.extend([0_i16; 57]);
+        let start = Instant::now();
+        for _ in 0..100_000 {
+            ring.extend(black_box(input.samples()).iter().copied());
+            let (first, second) = ring.as_slices();
+            let n = first.len().min(160);
+            let mut output = [0; 160];
+            output[..n].copy_from_slice(&first[..n]);
+            output[n..].copy_from_slice(&second[..160 - n]);
+            ring.drain(..160);
+            black_box(Frame::new(&output, 8000)?);
+        }
+        bulk[round] = start.elapsed();
+
+        let mut framer = PcmFramer::new(8000)?;
+        framer.push(Frame::new(&[0; 57], 8000)?)?;
+        let start = Instant::now();
+        for _ in 0..100_000 {
+            framer.push(black_box(input))?;
+            black_box(framer.pop().ok_or(MediaError::InvalidFrame)?);
+        }
+        framed[round] = start.elapsed();
+    }
+    bulk.sort_unstable();
+    framed.sort_unstable();
+    println!("100000 narrowband frames: bulk {bulk:?}, framer {framed:?}");
+    assert!(framed[2] <= bulk[2] * 2);
+    Ok(())
+}
+
+#[test]
 fn pcm_capacity_and_rate_failures_preserve_queued_audio() -> Result<(), MediaError> {
     let mut framer = PcmFramer::new(8000)?;
     for _ in 0..10 {

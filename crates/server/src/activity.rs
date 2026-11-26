@@ -1,4 +1,4 @@
-use rusterisk_api::diagnosis::{LoopActivity, RuntimeActivity};
+use rusterisk_api::diagnosis::{CallSlots, LoopActivity, RuntimeActivity};
 use rusterisk_core::Wake;
 use tokio::sync::watch;
 
@@ -38,8 +38,9 @@ pub(crate) struct Meters {
 }
 
 impl Meters {
-    pub(crate) fn snapshot(&self) -> RuntimeActivity {
+    pub(crate) fn snapshot(&self, call_slots: CallSlots) -> RuntimeActivity {
         RuntimeActivity {
+            call_slots,
             control: *self.control.0.borrow(),
             signaling: *self.signaling.0.borrow(),
             media: *self.media.0.borrow(),

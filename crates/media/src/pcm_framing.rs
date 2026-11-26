@@ -51,9 +51,11 @@ impl PcmFramer {
             return None;
         }
         let mut samples = [0; MAX_SAMPLES];
-        for (slot, sample) in samples.iter_mut().zip(self.samples.drain(..len)) {
-            *slot = sample;
-        }
+        let (front, back) = self.samples.as_slices();
+        let first = len.min(front.len());
+        samples[..first].copy_from_slice(&front[..first]);
+        samples[first..len].copy_from_slice(&back[..len - first]);
+        self.samples.drain(..len);
         Some(Frame {
             samples,
             len,

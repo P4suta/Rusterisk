@@ -1,3 +1,4 @@
+use futures_util::FutureExt;
 use rusterisk_server::ControlError;
 use rusterisk_test_support::Wait;
 use std::{
@@ -12,13 +13,13 @@ pub fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
 }
 
-pub fn combine(
-    primary: Result<(), ControlError>,
+pub fn combine<T>(
+    primary: Result<T, ControlError>,
     cleanup: Result<(), ControlError>,
-) -> Result<(), ControlError> {
+) -> Result<T, ControlError> {
     match (primary, cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
         (Err(primary), Err(cleanup)) => Err(failure(format!(
             "{primary}; process cleanup failed: {cleanup}"
         ))),
@@ -37,11 +38,11 @@ struct Fields {
 }
 
 pub struct ChildServer {
-    child: Child,
+    pub(super) child: Child,
     address: SocketAddr,
 }
 
-async fn terminate(child: &mut Child) -> Result<ExitStatus, ControlError> {
+fn terminate(child: &mut Child) -> Result<ExitStatus, ControlError> {
     if let Some(status) = child.try_wait().map_err(failure)? {
         return Ok(status);
     }
@@ -81,7 +82,44 @@ fn ready_line(path: &Path) -> Result<Option<SocketAddr>, ControlError> {
 }
 
 impl ChildServer {
+    pub async fn supervise<T>(
+        &mut self,
+        scenario: impl std::future::Future<Output = Result<T, ControlError>>,
+    ) -> Result<T, ControlError> {
+        let outcome = Wait::Scenario
+            .bounded(std::panic::AssertUnwindSafe(scenario).catch_unwind())
+            .await
+            .map_err(failure)
+            .and_then(|joined| {
+                joined.map_err(|payload| {
+                    let message = payload
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| payload.downcast_ref::<&str>().copied())
+                        .unwrap_or("unknown panic");
+                    failure(format!("Server scenario panicked: {message}"))
+                })
+            })
+            .and_then(|result| result);
+        combine(outcome, self.terminate().map(|_| ()))
+    }
+
     pub async fn start(settings: &Path, data: &Path, log: PathBuf) -> Result<Self, ControlError> {
+        Self::start_from(
+            Path::new(env!("CARGO_BIN_EXE_rusterisk")),
+            settings,
+            data,
+            log,
+        )
+        .await
+    }
+
+    pub async fn start_from(
+        binary: &Path,
+        settings: &Path,
+        data: &Path,
+        log: PathBuf,
+    ) -> Result<Self, ControlError> {
         let mut last = None;
         for attempt in 0..4 {
             let reservation = std::net::TcpListener::bind("127.0.0.1:0").map_err(failure)?;
@@ -95,7 +133,15 @@ impl ChildServer {
             )
             .map_err(failure)?;
             drop(reservation);
-            match Self::spawn(settings, data, log.with_extension(format!("{attempt}.log"))).await {
+            match Self::spawn(
+                binary,
+                settings,
+                data,
+                address,
+                log.with_extension(format!("{attempt}.log")),
+            )
+            .await
+            {
                 Ok(server) => return Ok(server),
                 Err(primary) => {
                     let occupied = match std::net::TcpListener::bind(address) {
@@ -115,10 +161,17 @@ impl ChildServer {
         Err(last.unwrap_or(ControlError::Capacity))
     }
 
-    async fn spawn(settings: &Path, data: &Path, log: PathBuf) -> Result<Self, ControlError> {
+    async fn spawn(
+        binary: &Path,
+        settings: &Path,
+        data: &Path,
+        address: SocketAddr,
+        log: PathBuf,
+    ) -> Result<Self, ControlError> {
         let output = File::create_new(&log).map_err(failure)?;
         let errors = File::create_new(log.with_extension("stderr")).map_err(failure)?;
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rusterisk"))
+        let mut changes = rusterisk_test_support::DirectoryChanges::new(&log).map_err(failure)?;
+        let child = Command::new(binary)
             .arg("--config-dir")
             .arg(settings)
             .arg("--data-dir")
@@ -128,30 +181,36 @@ impl ChildServer {
             .stderr(Stdio::from(errors))
             .spawn()
             .map_err(failure)?;
-        let mut changes = rusterisk_test_support::DirectoryChanges::new(&log).map_err(failure)?;
+        let mut server = Self { child, address };
+        #[cfg(windows)]
+        let mut recheck = tokio::time::interval(Wait::Quiet.duration());
         let ready = Wait::Ready
             .bounded(async {
                 loop {
-                    if let Some(status) = child.try_wait().map_err(failure)? {
+                    if let Some(status) = server.child.try_wait().map_err(failure)? {
                         return Err(failure(format!("server exited before readiness: {status}")));
                     }
-                    if let Some(address) = ready_line(&log)? {
-                        return Ok(address);
+                    if let Some(reported) = ready_line(&log)? {
+                        if reported != address {
+                            return Err(ControlError::Invalid("Unexpected server listener"));
+                        }
+                        return Ok(());
                     }
+                    #[cfg(windows)]
+                    tokio::select! {
+                        changed = changes.changed() => changed.map_err(failure)?,
+                        _ = recheck.tick() => {}
+                    }
+                    #[cfg(not(windows))]
                     changes.changed().await.map_err(failure)?;
                 }
             })
             .await
-            .map_err(failure)
+            .map_err(|error| failure(format!("server startup log: {error}")))
             .and_then(|result| result);
         match ready {
-            Ok(address) => Ok(Self { child, address }),
-            Err(primary) => match terminate(&mut child).await {
-                Ok(_) => Err(primary),
-                Err(cleanup) => Err(failure(format!(
-                    "{primary}; startup cleanup failed: {cleanup}"
-                ))),
-            },
+            Ok(()) => Ok(server),
+            Err(primary) => combine(Err(primary), server.terminate().map(|_| ())),
         }
     }
 
@@ -159,7 +218,15 @@ impl ChildServer {
         self.address
     }
 
-    pub async fn terminate(&mut self) -> Result<ExitStatus, ControlError> {
-        terminate(&mut self.child).await
+    pub fn terminate(&mut self) -> Result<ExitStatus, ControlError> {
+        terminate(&mut self.child)
+    }
+}
+
+impl Drop for ChildServer {
+    fn drop(&mut self) {
+        if let Err(error) = self.terminate() {
+            eprintln!("Failed to reap the server: {error}");
+        }
     }
 }

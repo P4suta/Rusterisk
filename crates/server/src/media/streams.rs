@@ -1,7 +1,8 @@
+use super::notices::LegNotices;
 use super::stream_frames::{with_stream_port, FramePair, TaskFrames};
 use super::{
-    AudioSocketLink, Connection, DigitSupport, Gate, Io, MediaError, MediaHub, PeerMediaDirection,
-    Port, RtpChannels, TaskIo,
+    AudioSocketLink, DigitSupport, Gate, Io, MediaError, MediaHub, PeerMediaDirection, Port,
+    RtpChannels, TaskIo,
 };
 use crate::media_websocket::{MediaLinkOptions, MediaSocket, WebSocketMediaLink};
 use crate::CallKey;
@@ -23,13 +24,20 @@ impl Port {
     pub(super) fn new(
         initial_direction: PeerMediaDirection,
         digit_support: DigitSupport,
+        notices: LegNotices,
     ) -> (Self, RtpChannels) {
-        Self::with_frames(initial_direction, digit_support, TaskFrames::Hz48000)
+        Self::with_frames(
+            initial_direction,
+            digit_support,
+            notices,
+            TaskFrames::Hz48000,
+        )
     }
 
     fn with_frames<const N: usize>(
         initial_direction: PeerMediaDirection,
         digit_support: DigitSupport,
+        notices: LegNotices,
         pair: fn(FramePair<N>) -> TaskFrames,
     ) -> (Self, RtpChannels<N>) {
         let (incoming, input) = mpsc::channel(1);
@@ -52,7 +60,7 @@ impl Port {
                     stop,
                     direction,
                 }),
-                ..Self::owned(initial_direction, digit_support)
+                ..Self::owned(initial_direction, digit_support, notices)
             },
             RtpChannels {
                 incoming,
@@ -70,6 +78,7 @@ impl Port {
     pub(super) fn owned(
         initial_direction: PeerMediaDirection,
         digit_support: DigitSupport,
+        notices: LegNotices,
     ) -> Self {
         Self {
             connection_lease: None,
@@ -83,7 +92,7 @@ impl Port {
                 PeerMediaDirection::Inactive => Gate::Closed,
             },
             saved_music: None,
-            connection: Connection::Waiting,
+            notices,
         }
     }
 }
@@ -110,14 +119,14 @@ impl MediaHub {
         Ok(())
     }
 
-    pub(super) fn check_link(&self, key: &CallKey) -> Result<(), MediaError> {
+    pub(super) fn reserve_link(&self, key: &CallKey) -> Result<LegNotices, MediaError> {
         if self.ports.len() >= self.capacity || self.workers.len() >= self.capacity {
             return Err(MediaError::Capacity);
         }
         if self.ports.contains_key(key) || self.stream_releases.contains_key(&key.handle()) {
             return Err(MediaError::InvalidRoute);
         }
-        Ok(())
+        self.notices.reserve_leg()
     }
 
     pub(super) fn install_link(
@@ -140,8 +149,8 @@ impl MediaHub {
         socket: tokio::net::TcpStream,
         rate: u32,
     ) -> Result<(), MediaError> {
-        self.check_link(&key)?;
-        with_stream_port!(rate, |port, channels| {
+        let notices = self.reserve_link(&key)?;
+        with_stream_port!(rate, notices, |port, channels| {
             let link = AudioSocketLink::new(socket, channels, rate)?;
             self.install_link(key.clone(), port, Gate::Open, rate)?;
             self.stream_releases
@@ -164,12 +173,12 @@ impl MediaHub {
         {
             return Err(MediaError::UnknownStream);
         }
-        self.check_link(&key)?;
+        let notices = self.reserve_link(&key)?;
         if options.channel_id != key.id {
             return Err(MediaError::InvalidRoute);
         }
         let rate = options.format.rate();
-        with_stream_port!(rate, |port, channels| {
+        with_stream_port!(rate, notices, |port, channels| {
             let mut port = port;
             let (answer, answers) = mpsc::channel(8);
             port.answers = Some(answers);
@@ -237,7 +246,7 @@ impl super::MediaPort {
                 lease,
                 reply,
             })
-            .map_err(|_| MediaError::Capacity)?;
+            .map_err(super::notices::service_queue_error)?;
         tokio::time::timeout(std::time::Duration::from_secs(5), response)
             .await
             .map_err(|error| MediaError::Transport(error.to_string()))?

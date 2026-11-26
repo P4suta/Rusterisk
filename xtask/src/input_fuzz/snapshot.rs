@@ -1,4 +1,4 @@
-use super::{normalize_manifest, validate_locks, FuzzError, FuzzFileScope};
+use super::{manifest::normalize_manifest_for_version, validate_locks, FuzzError, FuzzFileScope};
 use crate::release_check::SourceInputs;
 use std::{
     collections::BTreeMap,
@@ -264,9 +264,14 @@ impl Snapshot {
         }
         let manifest = std::str::from_utf8(&files[0].bytes).map_err(|_| FuzzError::Manifest)?;
         let manifest: toml::Value = toml::from_str(manifest).map_err(FuzzError::Toml)?;
-        let members = manifest
-            .get("workspace")
-            .and_then(|workspace| workspace.get("members"))
+        let workspace = manifest.get("workspace").ok_or(FuzzError::Manifest)?;
+        let version = workspace
+            .get("package")
+            .and_then(|package| package.get("version"))
+            .and_then(toml::Value::as_str)
+            .ok_or(FuzzError::Manifest)?;
+        let members = workspace
+            .get("members")
             .and_then(toml::Value::as_array)
             .ok_or(FuzzError::Manifest)?;
         if members.is_empty() || members.len() > 32 {
@@ -308,7 +313,7 @@ impl Snapshot {
                 .ok_or(FuzzError::Manifest)?;
             std::str::from_utf8(&file.bytes).map_err(|_| FuzzError::Manifest)
         };
-        let normalized = normalize_manifest(text("xtask/fuzz/Cargo.toml")?)?;
+        let normalized = normalize_manifest_for_version(text("xtask/fuzz/Cargo.toml")?, version)?;
         validate_locks(text("Cargo.lock")?, text("xtask/fuzz/Cargo.lock")?)?;
         Ok(Self { files, normalized })
     }

@@ -19,26 +19,35 @@ pub struct SocketPair {
     control: UdpSocket,
 }
 
+fn port_choices(start: u16, end: u16, slot: u8) -> io::Result<impl Iterator<Item = u16>> {
+    let ephemeral = start == 0 && end == 0;
+    if !ephemeral && (start == 0 || !start.is_multiple_of(2) || start >= end) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid media port range",
+        ));
+    }
+    let attempts = if ephemeral {
+        128
+    } else {
+        (end - start).div_ceil(2).min(256)
+    };
+    Ok((0..attempts).map(move |index| {
+        if ephemeral {
+            0
+        } else {
+            start + ((u16::from(slot) + index) % attempts) * 2
+        }
+    }))
+}
+
 impl SocketPair {
     pub fn bind(ip: IpAddr, start: u16, end: u16) -> Result<Self, io::Error> {
-        let ephemeral = start == 0 && end == 0;
-        if !ephemeral && (start == 0 || !start.is_multiple_of(2) || start >= end) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid media port range",
-            ));
-        }
-        let attempts = if ephemeral {
-            128
-        } else {
-            (usize::from(end - start) / 2 + 1).min(256)
-        };
-        for index in 0..attempts {
-            let port = if ephemeral {
-                0
-            } else {
-                start + index as u16 * 2
-            };
+        Self::bind_for_slot(ip, start, end, 0)
+    }
+
+    pub(crate) fn bind_for_slot(ip: IpAddr, start: u16, end: u16, slot: u8) -> io::Result<Self> {
+        for port in port_choices(start, end, slot)? {
             let data = match std::net::UdpSocket::bind(SocketAddr::new(ip, port)) {
                 Ok(socket) => socket,
                 Err(error) if error.kind() == io::ErrorKind::AddrInUse => continue,
@@ -51,9 +60,6 @@ impl SocketPair {
             let Some(control_port) = local.port().checked_add(1) else {
                 continue;
             };
-            if !ephemeral && control_port > end {
-                continue;
-            }
             let control = match std::net::UdpSocket::bind(SocketAddr::new(ip, control_port)) {
                 Ok(socket) => socket,
                 Err(error) if error.kind() == io::ErrorKind::AddrInUse => continue,

@@ -144,3 +144,27 @@ fn another_immutable_start_request_cannot_satisfy_the_selected_reference_image()
     assert!(selected.check_start(&plan.start()).is_err());
     Ok(())
 }
+
+#[test]
+fn the_comparison_runs_each_registered_phone_and_trunk_audio_case() -> io::Result<()> {
+    let names = ReferenceCase::ALL.map(ReferenceCase::name);
+    for name in [
+        "call_paths::reference_registered_extensions",
+        "call_paths::reference_incoming_trunk",
+        "call_paths::reference_outgoing_trunk",
+    ] {
+        let index = names
+            .iter()
+            .position(|entry| *entry == name)
+            .ok_or_else(|| io::Error::other(format!("Missing reference case {name}")))?;
+        let case = ReferenceCase::ALL[index];
+        assert_eq!(
+            &case.cargo_arguments()[3..7],
+            ["rusterisk-server", "--test", "sip_call", name]
+        );
+        case.validate_execution(&passed(name))
+            .map_err(io::Error::other)?;
+        assert!(case.validate_execution(&passed(ARI)).is_err());
+    }
+    Ok(())
+}

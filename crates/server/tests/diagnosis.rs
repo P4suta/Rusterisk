@@ -65,6 +65,45 @@ async fn diagnosis_follows_dialplan_and_live_call_identity_with_read_only_creden
     let task = tokio::spawn(runner.run());
     let result = async {
         let app = router(controller.clone());
+        let capabilities = read(&app, "/rusterisk/capabilities").await?;
+        assert_eq!(capabilities["reference"], rusterisk_api::REFERENCE_VERSION);
+        let verified = capabilities["verified_call_paths"]
+            .as_array()
+            .ok_or(ControlError::Invalid("Missing call paths"))?;
+        let browser = verified
+            .iter()
+            .find(|profile| profile["path"] == "webrtc_application")
+            .ok_or(ControlError::Invalid("Missing verified browser call"))?;
+        assert_eq!(browser["codec"], "PCMU");
+        assert_eq!(browser["media"], "DTLS-SRTP");
+        assert_eq!(browser["signaling"], "SIP over WebSocket");
+        assert!(browser["conditions"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()));
+        for name in [
+            "registered_extensions",
+            "incoming_sip_trunk",
+            "outgoing_sip_trunk",
+        ] {
+            let profile = verified
+                .iter()
+                .find(|profile| profile["path"] == name)
+                .ok_or(ControlError::Invalid("Missing verified SIP call path"))?;
+            assert_eq!(profile["signaling"], "SIP over UDP");
+            assert_eq!(profile["media"], "RTP");
+            assert_eq!(profile["codec"], "PCMU");
+            assert!(profile["conditions"]
+                .as_array()
+                .is_some_and(|conditions| !conditions.is_empty()));
+        }
+        let operations = capabilities["operations"]
+            .as_array()
+            .ok_or(ControlError::Invalid("Missing operation capabilities"))?;
+        assert_eq!(operations.len(), rusterisk_api::OPERATIONS.len());
+        for (published, declared) in operations.iter().zip(rusterisk_api::OPERATIONS) {
+            assert_eq!(published["operation"], declared.id);
+            assert!(published["call_verified"].is_boolean());
+        }
         let path = "/rusterisk/diagnostics/runtime";
         let request = Request::builder()
             .uri(path)
@@ -78,6 +117,10 @@ async fn diagnosis_follows_dialplan_and_live_call_identity_with_read_only_creden
         assert_eq!(denied.status().as_u16(), 401);
         let first = read(&app, path).await?;
         let second = read(&app, path).await?;
+        assert_eq!(
+            second["call_slots"],
+            serde_json::json!({"active":0,"awaiting_release":0,"limit":8,"capacity_refusals":0})
+        );
         assert!(second["control"]["turns"].as_u64() > first["control"]["turns"].as_u64());
         for name in ["control", "signaling", "media"] {
             for counter in ["turns", "late_turns", "drops"] {

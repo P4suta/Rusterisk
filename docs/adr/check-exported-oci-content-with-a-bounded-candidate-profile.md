@@ -18,7 +18,7 @@ Reject embedded data and external blob locations in the local export profile.
 Check architecture variants in both descriptors and image configuration.
 Accept known directory headers and bounded nested indexes.
 Hash opaque base layers and their uncompressed DiffIDs.
-Require the final app layer to match the candidate's nine files, numeric ownership, modes, and empty data directory.
+Require every candidate file, numeric ownership, prescribed modes, and an empty data directory in the final layer.
 Require one gzip member per layer.
 Recognize [BuildKit attestation descriptors](https://docs.docker.com/build/metadata/attestations/attestation-storage/) and their subject references.
 Bound archive bytes, entries, JSON, graph depth, and total decompression.

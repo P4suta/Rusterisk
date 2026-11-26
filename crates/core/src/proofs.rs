@@ -1066,14 +1066,24 @@ struct ProofFailure;
 
 fn reference_lifetime(owner: u128, reverse: bool) -> Result<(), ProofFailure> {
     let mut settings = SettingsLifetimes::new(owner);
-    let initial = settings.current();
-    let slot = settings.slot(initial).map_err(|_| ProofFailure)?;
-    let first = settings.retain(initial).map_err(|_| ProofFailure)?;
+    let current = settings.current();
+    let current_slot = settings.slot(current).map_err(|_| ProofFailure)?;
+    let private: bool = kani::any();
+    let (first, slot) = if private {
+        settings.retain_unpublished().map_err(|_| ProofFailure)?
+    } else {
+        (
+            settings.retain(current).map_err(|_| ProofFailure)?,
+            current_slot,
+        )
+    };
+    assert_eq!(settings.current(), current);
+    let initial = first.generation();
     let second = settings.retain(initial).map_err(|_| ProofFailure)?;
     let candidate = settings.prepare().map_err(|_| ProofFailure)?;
     let publication = settings.commit(candidate).map_err(|_| ProofFailure)?;
     assert_ne!(publication.generation(), initial);
-    assert_eq!(publication.retired_slot(), None);
+    assert_eq!(publication.retired_slot(), private.then_some(current_slot));
     let (first, second) = if reverse {
         (second, first)
     } else {

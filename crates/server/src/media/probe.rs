@@ -126,7 +126,7 @@ impl MediaPort {
         let challenge = Challenge::new(uuid::Uuid::new_v4().as_bytes(), sender);
         self.commands
             .try_send(Command::Probe { key, challenge })
-            .map_err(|_| ControlError::Capacity)?;
+            .map_err(ControlError::queue)?;
         Ok(receiver)
     }
 }

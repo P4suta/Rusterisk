@@ -284,7 +284,7 @@ fn command(
             reply,
         } => {
             if !reply.is_closed() {
-                match recordings.begin(name, rate, policy, input, lifetime) {
+                match recordings.begin(store, name, rate, policy, input, lifetime) {
                     Ok(key) => recordings.admit(key, reply),
                     Err(error) => respond(reply, Err(error)),
                 }
@@ -303,11 +303,11 @@ fn drain_commands(
     for _ in 0..64 {
         match commands.try_recv() {
             Ok(next) => {
-                recordings.pump(store);
+                recordings.pump();
                 playbacks.pump();
                 files.pump();
                 command(store, recordings, playbacks, next);
-                recordings.pump(store);
+                recordings.pump();
                 playbacks.pump();
                 files.pump();
             }
@@ -327,7 +327,7 @@ fn serve(
     mut wakes: mpsc::Receiver<()>,
     stop: watch::Receiver<bool>,
 ) {
-    let mut recordings = RecordingSet::new(root.clone(), messages);
+    let mut recordings = RecordingSet::new(messages);
     let mut playbacks = PlaybackSet::new(root.clone());
     let mut files = FileSet::new();
     loop {
@@ -342,7 +342,7 @@ fn serve(
                 &mut commands,
             );
             while let Ok(next) = stored.try_recv() {
-                recordings.pump(&mut store);
+                recordings.pump();
                 playbacks.pump();
                 files.pump();
                 stored::execute(&mut store, &mut files, &root, next, |_store, _files| {
@@ -352,7 +352,7 @@ fn serve(
                     )))
                 });
             }
-            recordings.pump(&mut store);
+            recordings.pump();
             playbacks.pump();
             files.pump();
             files.close();
@@ -383,7 +383,7 @@ fn serve(
             );
             match stored.try_recv() {
                 Ok(next) => {
-                    recordings.pump(&mut store);
+                    recordings.pump();
                     playbacks.pump();
                     files.pump();
                     stored::execute(&mut store, &mut files, &root, next, |store, files| {
@@ -402,7 +402,7 @@ fn serve(
                         );
                         Ok(())
                     });
-                    recordings.pump(&mut store);
+                    recordings.pump();
                     playbacks.pump();
                     files.pump();
                 }
@@ -411,7 +411,7 @@ fn serve(
                 }
             }
         }
-        recordings.pump(&mut store);
+        recordings.pump();
         playbacks.pump();
         files.pump();
     }

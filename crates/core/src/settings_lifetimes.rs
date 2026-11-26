@@ -263,6 +263,33 @@ impl SettingsLifetimes {
         Ok(candidate)
     }
 
+    pub fn retain_unpublished(
+        &mut self,
+    ) -> Result<(SettingsReference, SettingsSlot), SettingsError> {
+        if self.candidate.is_some() {
+            return Err(SettingsError::Capacity);
+        }
+        let index = self
+            .slots
+            .iter()
+            .position(Option::is_none)
+            .ok_or(SettingsError::Capacity)?;
+        let sequence = self
+            .sequence
+            .checked_add(1)
+            .ok_or(SettingsError::Capacity)?;
+        let generation = SettingsGeneration {
+            owner: self.current.owner,
+            sequence,
+        };
+        self.slots[index] = Some(Generation {
+            key: generation,
+            references: 1,
+        });
+        self.sequence = sequence;
+        Ok((SettingsReference { generation }, SettingsSlot { index }))
+    }
+
     pub fn cancel(&mut self, candidate: SettingsCandidate) -> Result<(), SettingsError> {
         if self.candidate != Some(candidate) {
             return Err(SettingsError::UnknownCandidate);

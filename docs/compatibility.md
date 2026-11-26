@@ -5,6 +5,23 @@ The public Rust models and operation catalog generate the discovery documents an
 Declaring an operation in discovery doesn't certify its call behavior.
 The authenticated `/rusterisk/capabilities` endpoint reports the reference version and each operation's `call_verified` value.
 Every operation reports `false` while complete operation coverage remains pending.
+The `verified_call_paths` array identifies call paths that exchanged audio in both directions and released their channels on both servers.
+Each entry names the signaling transport, media transport, codec, and tested conditions.
+
+## Upgrade clients and stored data
+
+Earlier runtime diagnostics reported only the control, signaling, and media counters.
+The `RuntimeActivity` model now requires `call_slots` in responses and Rust struct literals.
+Use a Rust client and server from the same release for runtime diagnostics and supply the measured counts when constructing the model.
+
+A stopped control service previously returned HTTP 503 with the message `Resource capacity exceeded`.
+The server now returns `Service stopped` for shutdown and `Resource capacity exceeded` for saturation.
+Discovery lists the capacity message for HTTP 503.
+Handle both messages, wait for capacity after saturation, and reconnect after the service restarts.
+
+Opening a schema version 2 database upgrades it to version 3 for the recording journal.
+An older server that supports version 2 rejects the upgraded database with `UnknownSchema`.
+To roll back, restore the configuration and data directories from the backup taken while the older server was stopped.
 
 ## Control interface
 

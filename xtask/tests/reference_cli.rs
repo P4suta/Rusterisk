@@ -39,9 +39,20 @@ fn interop_dry_run_reports_local_ports_deadlines_and_cleanup() -> Result<(), std
         "budget=300s cargo test --locked --package rusterisk-client --test reference resource_queries_and_app_subscriptions_match_the_reference -- --ignored --exact --show-output"
     ));
     assert_eq!(stdout.matches("budget=300s cargo test ").count(), 1);
-    assert!(stdout.contains("budget=180s cargo test --locked --package rusterisk-server --test sip_call blind_transfer::reference_blind_transfer_matches_native_received_audio -- --ignored --exact --show-output"));
-    assert!(stdout.contains("budget=180s cargo test --locked --package rusterisk-server --test sip_call attended_transfer::reference_attended_transfer_matches_native_received_audio -- --ignored --exact --show-output"), "{stdout}");
-    assert_eq!(stdout.matches("budget=180s cargo test ").count(), 2);
+    let calls = [
+        "blind_transfer::reference_blind_transfer_matches_native_received_audio",
+        "attended_transfer::reference_attended_transfer_matches_native_received_audio",
+        "call_paths::reference_registered_extensions",
+        "call_paths::reference_incoming_trunk",
+        "call_paths::reference_outgoing_trunk",
+    ];
+    for case in calls {
+        assert!(stdout.contains(&format!("budget=180s cargo test --locked --package rusterisk-server --test sip_call {case} -- --ignored --exact --show-output")), "{case}");
+    }
+    assert_eq!(
+        stdout.matches("budget=180s cargo test ").count(),
+        calls.len()
+    );
     assert!(stdout.contains("docker rm --force rusterisk-interop-preview"));
     Ok(())
 }

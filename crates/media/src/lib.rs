@@ -23,6 +23,7 @@ const MAX_DECODED_SAMPLES: usize = 5760;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MediaError {
     Capacity,
+    ServiceClosed,
     InvalidFrame,
     InvalidPacket,
     InvalidRoute,
@@ -37,6 +38,7 @@ impl std::fmt::Display for MediaError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Capacity => f.write_str("media capacity exceeded"),
+            Self::ServiceClosed => f.write_str("media service closed"),
             Self::InvalidFrame => f.write_str("invalid audio frame"),
             Self::InvalidPacket => f.write_str("invalid media packet"),
             Self::InvalidRoute => f.write_str("invalid media route"),

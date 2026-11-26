@@ -348,7 +348,7 @@ pub fn using_fixture(test: impl FnOnce(&mut Fixture) -> io::Result<()>) -> io::R
     let operation = (|| {
         write(
             &fixture.root.join("Cargo.toml"),
-            b"[workspace]\nmembers=['xtask']\n",
+            crate::input_fuzz::TEST_WORKSPACE.as_bytes(),
         )?;
         for path in ["Cargo.lock", "xtask/fuzz/Cargo.lock"] {
             write(

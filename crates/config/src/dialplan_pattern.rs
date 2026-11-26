@@ -1,4 +1,5 @@
 use crate::Dialplan;
+use std::collections::BTreeMap;
 use std::{cmp::Ordering, iter::Peekable, str::Bytes};
 
 #[derive(Clone, Copy)]
@@ -103,6 +104,37 @@ fn matches(pattern: &str, extension: &str) -> bool {
 }
 
 impl Dialplan {
+    pub fn compile(self) -> CompiledDialplan {
+        let mut contexts = BTreeMap::<String, BTreeMap<u16, ExtensionRoutes>>::new();
+        for (index, step) in self.steps.iter().enumerate() {
+            let routes = contexts
+                .entry(step.context.clone())
+                .or_default()
+                .entry(step.priority)
+                .or_default();
+            if step.extension.starts_with('_') {
+                routes.patterns.push(index);
+            } else {
+                routes.exact.push(index);
+            }
+        }
+        for priorities in contexts.values_mut() {
+            for routes in priorities.values_mut() {
+                routes.exact.sort_by(|&left, &right| {
+                    digits(&self.steps[left].extension).cmp(digits(&self.steps[right].extension))
+                });
+                routes.patterns.sort_by(|&left, &right| {
+                    ranks(&self.steps[left].extension[1..])
+                        .cmp(ranks(&self.steps[right].extension[1..]))
+                });
+            }
+        }
+        CompiledDialplan {
+            program: self,
+            contexts,
+        }
+    }
+
     pub fn position(&self, context: &str, extension: &str, priority: u16) -> Option<u16> {
         let mut best: Option<(usize, &str)> = None;
         for (index, step) in self
@@ -129,5 +161,48 @@ impl Dialplan {
             }
         }
         best.and_then(|(index, _)| u16::try_from(index).ok())
+    }
+}
+
+fn digits(extension: &str) -> impl Iterator<Item = u8> + '_ {
+    extension.bytes().filter(|byte| *byte != b'-')
+}
+
+#[derive(Clone, Debug, Default)]
+struct ExtensionRoutes {
+    exact: Vec<usize>,
+    patterns: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompiledDialplan {
+    program: Dialplan,
+    contexts: BTreeMap<String, BTreeMap<u16, ExtensionRoutes>>,
+}
+
+impl CompiledDialplan {
+    pub fn program(&self) -> &Dialplan {
+        &self.program
+    }
+
+    pub fn position(&self, context: &str, extension: &str, priority: u16) -> Option<u16> {
+        let routes = self.contexts.get(context)?.get(&priority)?;
+        let steps = &self.program.steps;
+        let first = routes.exact.partition_point(|&index| {
+            digits(&steps[index].extension)
+                .cmp(digits(extension))
+                .is_lt()
+        });
+        let exact = routes
+            .exact
+            .get(first)
+            .filter(|&&index| digits(&steps[index].extension).eq(digits(extension)));
+        let selected = exact.or_else(|| {
+            routes
+                .patterns
+                .iter()
+                .find(|&&index| matches(&steps[index].extension[1..], extension))
+        })?;
+        u16::try_from(*selected).ok()
     }
 }

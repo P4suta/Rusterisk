@@ -114,6 +114,8 @@ impl fmt::Display for CandidateNameError {
 
 impl std::error::Error for CandidateNameError {}
 
+pub(crate) const SERVER_FILE_COUNT: usize = 10;
+
 impl ServerTarget {
     pub const ALL: [Self; 5] = [
         Self::LinuxX86_64,
@@ -158,9 +160,23 @@ impl ServerTarget {
         }
     }
 
-    pub const fn required_files(self) -> [&'static str; 9] {
+    pub const fn cli_path(self) -> &'static str {
+        match self {
+            Self::WindowsX86_64 => "bin/rusterisk-cli.exe",
+            Self::LinuxX86_64 | Self::LinuxArm64 | Self::MacOsArm64 | Self::MacOsX86_64 => {
+                "bin/rusterisk-cli"
+            }
+        }
+    }
+
+    pub fn is_executable(self, path: &str) -> bool {
+        path == self.binary_path() || path == self.cli_path()
+    }
+
+    pub const fn required_files(self) -> [&'static str; SERVER_FILE_COUNT] {
         [
             self.binary_path(),
+            self.cli_path(),
             "README.md",
             "LICENSE-MIT",
             "LICENSE-APACHE",

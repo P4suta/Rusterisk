@@ -469,12 +469,10 @@ impl Control {
         timestamp: &str,
     ) -> Result<(DialBranches, Outcome), ControlError> {
         let destinations = destinations.split('&').collect::<Vec<_>>();
-        if destinations.is_empty()
-            || destinations.len() > 16
-            || self.channels.len() + destinations.len() > self.capacity
-        {
+        if destinations.is_empty() || destinations.len() > 16 {
             return Err(ControlError::Capacity);
         }
+        self.require_call_slots(destinations.len())?;
         for destination in &destinations {
             let endpoint = super::endpoint_resource(destination)?;
             ChannelId::try_from(endpoint.to_owned())?;
@@ -560,12 +558,11 @@ impl Control {
                     deadline: None,
                     variables: BTreeMap::new(),
                     dtmf: None,
-                    dialplan: Some(super::dialplan::DialplanFrame::dormant(
-                        self.dialplan_program.clone(),
-                    )),
+                    dialplan: Some(super::dialplan::DialplanFrame::dormant()),
                     media_tasks: rusterisk_core::MediaTasks::new(generation),
                     music: None,
                     settings,
+                    route_override: None,
                     pending_native: Some(capsule),
                     pending_websocket: None,
                 },

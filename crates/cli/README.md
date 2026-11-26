@@ -69,7 +69,9 @@ Start another watch to get a fresh snapshot.
 
 Use `doctor extension CONTEXT NUMBER` to follow the matched priorities and find destinations, a Stasis app, and active call legs.
 Routes that depend on per-call variables can remain unresolved.
-Use `doctor runtime` to read cumulative processing turns, late turns, and drops for call control, signaling, and media.
+Use the CLI from the same server release for `doctor runtime`.
+The command requires the server to report active call slots, slots awaiting release, the slot limit, and capacity refusals.
+It also reports cumulative processing turns, late turns, and drops for call control, signaling, and media.
 Use `--json` for numeric fields from the authenticated `GET /rusterisk/diagnostics/runtime` endpoint.
 Use `doctor channel ID` to inspect signaling, hold, and the change in received and sent packet counts over a half-second sample.
 The result includes the elapsed interval, the available observations, and a specific next check.

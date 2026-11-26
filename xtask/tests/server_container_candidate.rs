@@ -58,11 +58,12 @@ fn captured_linux_builds_package_the_container_output_and_remove_owned_state(
             assert!(state.join("tmp").is_dir());
             execution = state.parent().map(PathBuf::from);
             if calls == 1 {
-                write(
-                    &state,
+                for path in [
                     "target/aarch64-unknown-linux-gnu/release/rusterisk",
-                    &binary(),
-                )?;
+                    "target/aarch64-unknown-linux-gnu/release/rusterisk-cli",
+                ] {
+                    write(&state, path, &binary())?;
+                }
             }
             calls += 1;
             Ok(())

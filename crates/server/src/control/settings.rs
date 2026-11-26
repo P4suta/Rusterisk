@@ -41,6 +41,15 @@ impl<T> SettingsGenerations<T> {
             .ok_or(ControlError::Conflict("Settings payload is missing"))
     }
 
+    pub(super) fn retain_unpublished(
+        &mut self,
+        value: T,
+    ) -> Result<SettingsReference, ControlError> {
+        let (reference, slot) = self.lifetimes.retain_unpublished().map_err(failed)?;
+        self.values[slot.index()] = Some(value);
+        Ok(reference)
+    }
+
     pub(super) fn retain(
         &mut self,
         generation: SettingsGeneration,

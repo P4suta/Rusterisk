@@ -2,7 +2,7 @@ use super::{
     api, AdoptRequest, CallSnapshot, Calls, Cleanup, Command, Entry, Error, Lifetime, OwnedCall,
     OwnedCallProgress, Probe, Requests, Work,
 };
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{oneshot, watch};
 
 pub(crate) async fn adopt(requests: &Requests, id: api::ChannelId) -> Result<OwnedCall, Error> {
     // An abandoned request drops this notice after its lifetime and progress handles.
@@ -16,18 +16,12 @@ pub(crate) async fn adopt(requests: &Requests, id: api::ChannelId) -> Result<Own
     });
     let (lifetime, dropped) = oneshot::channel();
     let (reply, accepted) = oneshot::channel();
-    requests
-        .commands
-        .try_send(Command::Adopt(AdoptRequest {
-            id: id.clone(),
-            progress,
-            lifetime: dropped,
-            reply,
-        }))
-        .map_err(|error| match error {
-            mpsc::error::TrySendError::Full(_) => Error::Capacity,
-            mpsc::error::TrySendError::Closed(_) => Error::Closed,
-        })?;
+    requests.submit(Command::Adopt(AdoptRequest {
+        id: id.clone(),
+        progress,
+        lifetime: dropped,
+        reply,
+    }))?;
     accepted.await.map_err(|_| Error::Closed)??;
     Ok(OwnedCall {
         id,

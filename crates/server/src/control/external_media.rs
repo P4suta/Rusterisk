@@ -61,9 +61,7 @@ impl Control {
         if self.channels.contains_key(&id) {
             return Err(ControlError::Conflict("Channel already exists"));
         }
-        if self.channels.len() >= self.capacity {
-            return Err(ControlError::Capacity);
-        }
+        self.require_call_slots(1)?;
         ChannelId::try_from(app.clone())?;
         if data.len() > 4096
             || data.split(',').count() > 32
@@ -200,10 +198,11 @@ impl Control {
                 deadline: Some(deadline),
                 variables,
                 dtmf: None,
-                dialplan: Some(super::DialplanFrame::dormant(self.dialplan_program.clone())),
+                dialplan: Some(super::DialplanFrame::dormant()),
                 media_tasks: MediaTasks::new(generation),
                 music: None,
                 settings,
+                route_override: None,
                 pending_native: None,
                 pending_websocket,
             },

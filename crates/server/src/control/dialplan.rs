@@ -1,6 +1,6 @@
 use super::{CallKey, Control, ControlError, Effect, Outcome, PlaybackCompletion, VariableAccess};
 use rusterisk_api::{ChannelId, ChannelState, EventKind};
-use rusterisk_config::{expand_variables, Application, Dialplan, ExpansionError};
+use rusterisk_config::{expand_variables, Application, CompiledDialplan, Dialplan, ExpansionError};
 use rusterisk_core::{
     AnswerProgress, AnswerStatus, CallState, DialFailure, DialForkOutcome, DialplanContinuation,
     DialplanDispatch, DialplanError, DialplanInstruction, DialplanMachine, DialplanState,
@@ -8,7 +8,6 @@ use rusterisk_core::{
 };
 
 pub(super) struct DialplanFrame {
-    program: Dialplan,
     extension: String,
     machine: Option<DialplanMachine>,
     answer: Option<AnswerProgress>,
@@ -53,9 +52,6 @@ enum PlaybackWait {
 }
 
 impl DialplanFrame {
-    pub(super) fn program(&self) -> &Dialplan {
-        &self.program
-    }
     pub(super) fn complete_dial(&mut self, token: DialplanToken) -> Result<(), ControlError> {
         if self
             .machine
@@ -68,9 +64,8 @@ impl DialplanFrame {
         }
     }
 
-    pub(super) fn dormant(program: Dialplan) -> Self {
+    pub(super) fn dormant() -> Self {
         Self {
-            program,
             extension: String::new(),
             machine: None,
             answer: None,
@@ -226,14 +221,15 @@ impl Control {
             .dialplan
             .as_ref()
             .ok_or(ControlError::Conflict("Dialplan is executing"))?;
-        let destination = frame.program.position(context, extension, rank);
+        let program = &self.settings.get(entry.route_generation())?.routes;
+        let destination = program.position(context, extension, rank);
         let extension = extension.to_owned();
         let next_machine = if let Some(mut machine) = frame.machine {
             let DialplanState::Awaiting { position, token } = machine.state() else {
                 return Err(ControlError::Conflict("Dialplan is not waiting in Stasis"));
             };
-            if !frame
-                .program
+            if !program
+                .program()
                 .steps
                 .get(usize::from(position))
                 .is_some_and(|step| matches!(step.application, Application::Stasis { .. }))
@@ -253,7 +249,7 @@ impl Control {
                     DialplanMachine::new(
                         entry.call.generation(),
                         index,
-                        u16::try_from(frame.program.steps.len())
+                        u16::try_from(program.program().steps.len())
                             .map_err(|_| ControlError::Capacity)?,
                     )
                     .map_err(core_error)
@@ -317,6 +313,44 @@ impl Control {
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
         let entry = self.channels.require_key_mut(key)?;
+        let generation = entry.route_generation();
+        if self.settings.get(generation)?.routes.program() == &program {
+            return self.start_bound_dialplan(key, now, timestamp);
+        }
+        let routes = program.compile();
+        let started = Self::starting_frame(entry, &routes)?;
+        let reference = self.settings.retain_unpublished(super::CallSettings {
+            routes,
+            ..super::CallSettings::empty()
+        })?;
+        let previous = entry.route_override.replace(reference);
+        entry.dialplan = Some(started);
+        if let Some(previous) = previous {
+            self.settings.release(previous)?;
+        }
+        self.advance_dialplan(key, now, timestamp)
+    }
+
+    pub(crate) fn published_routes(&self) -> Result<&CompiledDialplan, ControlError> {
+        Ok(&self.settings.get(self.settings.current())?.routes)
+    }
+
+    pub(crate) fn start_bound_dialplan(
+        &mut self,
+        key: &CallKey,
+        now: u64,
+        timestamp: &str,
+    ) -> Result<Outcome, ControlError> {
+        let entry = self.channels.require_key_mut(key)?;
+        let routes = &self.settings.get(entry.route_generation())?.routes;
+        entry.dialplan = Some(Self::starting_frame(entry, routes)?);
+        self.advance_dialplan(key, now, timestamp)
+    }
+
+    fn starting_frame(
+        entry: &super::ChannelEntry,
+        routes: &CompiledDialplan,
+    ) -> Result<DialplanFrame, ControlError> {
         if entry
             .dialplan
             .as_ref()
@@ -325,26 +359,20 @@ impl Control {
             return Err(ControlError::Conflict("Dialplan already started"));
         }
         let location = &entry.snapshot.dialplan;
-        let index = program
-            .position(
-                &location.context,
-                &location.exten,
-                u16::try_from(location.priority)
-                    .map_err(|_| ControlError::Invalid("Invalid dialplan priority"))?,
-            )
+        let priority = u16::try_from(location.priority)
+            .map_err(|_| ControlError::Invalid("Invalid dialplan priority"))?;
+        let index = routes
+            .position(&location.context, &location.exten, priority)
             .ok_or(ControlError::NotFound("Extension not found"))?;
-        let length = u16::try_from(program.steps.len()).map_err(|_| ControlError::Capacity)?;
-        let machine = DialplanMachine::new(key.generation, index, length).map_err(core_error)?;
-        entry.dialplan = Some(DialplanFrame {
-            program,
+        let length =
+            u16::try_from(routes.program().steps.len()).map_err(|_| ControlError::Capacity)?;
+        let machine =
+            DialplanMachine::new(entry.call.generation(), index, length).map_err(core_error)?;
+        Ok(DialplanFrame {
             extension: location.exten.clone(),
             machine: Some(machine),
-            answer: None,
-            dial: None,
-            playback: None,
-            pace: Pace::default(),
-        });
-        self.advance_dialplan(key, now, timestamp)
+            ..DialplanFrame::dormant()
+        })
     }
 
     pub fn dialplan_wake(&self) -> Wake {
@@ -450,6 +478,11 @@ impl Control {
         let Some(machine) = &mut frame.machine else {
             return Ok(());
         };
+        let generation = self
+            .channels
+            .by_key(key)
+            .ok_or(ControlError::NotFound("Channel not found"))?
+            .route_generation();
         loop {
             if let Some(dial) = &mut frame.dial {
                 let decision = dial.fork.tick(now);
@@ -517,8 +550,9 @@ impl Control {
                     return Ok(());
                 }
             };
-            let step = frame
-                .program
+            let program = &self.settings.get(generation)?.routes;
+            let step = program
+                .program()
                 .steps
                 .get(usize::from(index))
                 .ok_or(ControlError::Invalid("Invalid dialplan position"))?
@@ -551,7 +585,7 @@ impl Control {
                     let context = self.expand(key, context.as_deref().unwrap_or(&step.context))?;
                     let extension =
                         self.expand(key, extension.as_deref().unwrap_or(&frame.extension))?;
-                    let next = frame.program.position(&context, &extension, *priority);
+                    let next = program.position(&context, &extension, *priority);
                     jump_extension = Some(extension);
                     next
                 }
@@ -563,9 +597,7 @@ impl Control {
                 | Application::Playback(_)
                 | Application::Wait(_)
                 | Application::Hangup => step.priority.checked_add(1).and_then(|priority| {
-                    frame
-                        .program
-                        .position(&step.context, &frame.extension, priority)
+                    program.position(&step.context, &frame.extension, priority)
                 }),
             };
             let execution = match machine

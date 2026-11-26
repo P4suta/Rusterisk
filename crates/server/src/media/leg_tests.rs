@@ -49,6 +49,110 @@ fn read(hub: &MediaHub, key: &CallKey) -> Result<u64, MediaError> {
         .rxcount)
 }
 
+#[tokio::test]
+async fn g711_playback_and_music_frames_reach_the_phone_without_allocating_after_warmup(
+) -> Result<(), MediaError> {
+    use crate::storage::{PlaybackMedia, StorageWorker};
+    use rusterisk_core::{MediaTaskKind, MediaTasks};
+    let directory = tempfile::tempdir().map_err(failure)?;
+    let root = directory.path();
+    let mut recording =
+        rusterisk_storage::Recorder::create(root, "example", 8000).map_err(failure)?;
+    for _ in 0..40 {
+        recording
+            .write(Frame::new(&[4096; 160], 8000)?)
+            .map_err(failure)?;
+    }
+    let saved = recording.finish().map_err(failure)?;
+    std::fs::create_dir(root.join("music")).map_err(failure)?;
+    std::fs::copy(saved, root.join("music/track.wav")).map_err(failure)?;
+    let settings = rusterisk_config::Config::parse(
+        "[general]\nbindaddr=127.0.0.1\n",
+        "[app]\ntype=user\npassword=local\n",
+        "",
+        "",
+        "",
+    )
+    .and_then(|config| {
+        config.with_music_on_hold_configuration("[default]\nmode=files\ndirectory=music\n")
+    })
+    .map_err(failure)?;
+    let (storage, worker) = StorageWorker::start(root.to_owned())
+        .await
+        .map_err(failure)?;
+    let (handle, mut hub, _notices) = MediaHub::new(1);
+    let phone = key("generated")?;
+    let peer = leg(&mut hub, &phone, None)?;
+    let mut tasks = MediaTasks::new(phone.generation);
+    let result = Wait::Scenario
+        .bounded(async {
+            let catalog = storage
+                .prepare_music(settings.music_on_hold)
+                .await
+                .map_err(failure)?;
+            for music in [false, true] {
+                let token = tasks
+                    .reserve(MediaTaskKind::Playback)
+                    .map_err(|_| MediaError::Capacity)?;
+                tasks.start(token).map_err(|_| MediaError::InvalidRoute)?;
+                let (done, completion) = oneshot::channel();
+                let source = if music {
+                    hub.mixer.gates(&phone, Gate::Closed, Gate::Open)?;
+                    hub.playbacks
+                        .reserve_music(token, phone.clone(), "default".into(), done)?;
+                    storage
+                        .play_music(&catalog, "default", None)
+                        .await
+                        .map_err(failure)?
+                } else {
+                    hub.playbacks.reserve(
+                        token,
+                        AudioTarget::Channel(phone.clone()),
+                        done,
+                        Default::default(),
+                    )?;
+                    storage
+                        .play(PlaybackMedia::Recording(
+                            ChannelId::try_from("example".to_owned()).map_err(failure)?,
+                        ))
+                        .await
+                        .map_err(failure)?
+                };
+                hub.playbacks.attach(token, source)?;
+                let mut delivered = 0;
+                while delivered < 6 {
+                    let mut tick = Ok(());
+                    let measured = allocation_counter::measure(|| tick = hub.tick());
+                    tick?;
+                    let mut bytes = [0_u8; 1501];
+                    let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
+                    let packet = RtpPacket::parse(&bytes[..size])?;
+                    if packet.payload() == [rusterisk_media::mulaw_encode(4096); 160] {
+                        if delivered >= 2 {
+                            assert_eq!(
+                                measured.count_total, 0,
+                                "music={music}, sounding frame {delivered}"
+                            );
+                        }
+                        delivered += 1;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                hub.playbacks.end(token, Ok(()));
+                completion.await.map_err(failure)??;
+                assert!(tasks.finish(token));
+            }
+            Ok::<(), MediaError>(())
+        })
+        .await
+        .map_err(failure)
+        .and_then(|result| result);
+    drop(handle);
+    let closed = hub.close().await;
+    let stopped = worker.close().await.map_err(failure);
+    result.and(closed).and(stopped)
+}
+
 // Signaling bridges two legs, and a peer speaks before the media task reads its commands.
 // The bridge applies before the turn reads that audio, so the other peer hears it.
 #[tokio::test]
@@ -251,10 +355,36 @@ async fn a_leg_reads_at_most_one_window_of_datagrams_in_a_turn() -> Result<(), M
     Ok(())
 }
 
+#[tokio::test]
+async fn a_refused_digit_sequence_delivers_its_reserved_completion() -> Result<(), MediaError> {
+    let (handle, mut hub, mut notices) = MediaHub::new(1);
+    let missing = key("missing")?;
+    let timing = DtmfTiming::new(0, 20, 60, 0).map_err(|_| MediaError::InvalidRoute)?;
+    let command = DtmfOutbox::new(u16::MAX)
+        .and_then(|mut outbox| outbox.admit(&[DtmfDigit::Five], timing))
+        .map_err(|_| MediaError::InvalidRoute)?;
+    handle.send_sequence(missing.clone(), command)?;
+    for _ in 0..hub.notices.ordinary.max_capacity() {
+        hub.notice(MediaNotice::Answer {
+            key: missing.clone(),
+        })?;
+    }
+    hub.tick()?;
+    let mut count = 0;
+    while let Ok(notice) = notices.try_recv() {
+        if matches!(notice, MediaNotice::DtmfFinished { key, token } if key == missing && token == command.token)
+        {
+            count += 1;
+        }
+    }
+    assert_eq!(count, 1);
+    hub.close().await
+}
+
 // Signaling sends a digit sequence to a leg that the media task owns.
 #[tokio::test(start_paused = true)]
 async fn an_owned_leg_sends_digits_and_reports_their_finish() -> Result<(), MediaError> {
-    let (_handle, mut hub, mut notices) = MediaHub::new(4);
+    let (handle, mut hub, mut notices) = MediaHub::new(4);
     let dialing = key("dialing")?;
     let format = TelephoneFormat::new(101, 8000)?;
     let peer = leg(&mut hub, &dialing, Some(format))?;
@@ -263,23 +393,23 @@ async fn an_owned_leg_sends_digits_and_reports_their_finish() -> Result<(), Medi
         .and_then(|mut outbox| outbox.admit(&[DtmfDigit::Five], timing))
         .map_err(|_| MediaError::InvalidRoute)?;
     let token = command.token;
-    let (reply, mut response) = oneshot::channel();
-    hub.command(Command::Digits {
-        key: dialing.clone(),
-        command: RtpDigitCommand::Sequence(command),
-        reply: Some(reply),
-    })?;
-    assert!(matches!(response.try_recv(), Ok(Ok(()))));
-    let mut finished = false;
+    handle.send_sequence(dialing.clone(), command)?;
+    for _ in 0..hub.notices.ordinary.max_capacity() {
+        hub.notice(MediaNotice::Answer {
+            key: dialing.clone(),
+        })?;
+    }
     for _ in 0..50 {
         hub.tick()?;
-        while let Ok(notice) = notices.try_recv() {
-            finished |= matches!(notice, MediaNotice::DtmfFinished { key, token: done } if key == dialing && done == token);
-        }
-        if finished {
-            break;
-        }
         tokio::time::advance(Duration::from_millis(20)).await;
+    }
+    let mut finished = false;
+    while let Ok(notice) = notices.try_recv() {
+        if matches!(notice, MediaNotice::DtmfFinished { key, token: done } if key == dialing && done == token)
+        {
+            assert!(!finished);
+            finished = true;
+        }
     }
     // The leg also sends the mixer's audio, so the peer looks for the first telephone event.
     let mut bytes = [0; 1501];
@@ -299,4 +429,49 @@ async fn an_owned_leg_sends_digits_and_reports_their_finish() -> Result<(), Medi
     assert!(events > 0, "the peer received no telephone event");
     assert_eq!(goodbye.last(), Some(&ControlKind::Goodbye));
     Ok(())
+}
+
+#[tokio::test]
+async fn received_digits_wait_for_notice_capacity_without_stopping_the_phone(
+) -> Result<(), MediaError> {
+    let (_handle, mut hub, mut notices) = MediaHub::new(2);
+    let phone = key("digits")?;
+    let peer = leg(&mut hub, &phone, Some(TelephoneFormat::new(101, 8000)?))?;
+    for _ in 0..hub.notices.ordinary.max_capacity() {
+        hub.notice(MediaNotice::Answer { key: phone.clone() })?;
+    }
+    let expected = [DtmfDigit::Hash, DtmfDigit::Star];
+    for (index, digit) in [0_u16, 1].into_iter().zip(expected) {
+        let leg = hub.legs.get(&phone).ok_or(MediaError::UnknownStream)?;
+        let event = rusterisk_media::TelephoneEvent::new(digit, true, 10, 960)?;
+        let packet = RtpPacket::new(
+            101,
+            index + 1,
+            1000 + u32::from(index) * 1600,
+            7,
+            &event.encode(),
+        )?;
+        peer.data()
+            .send_to(&packet.encode()?, leg.local_addr()?)
+            .await
+            .map_err(failure)?;
+        Wait::Ready
+            .bounded(leg.input_observer()?.peek_from(&mut [0; 1]))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
+        hub.tick()?;
+        assert!(hub.legs.contains_key(&phone));
+    }
+    while let Ok(notice) = notices.try_recv() {
+        assert!(matches!(notice, MediaNotice::Answer { .. }));
+    }
+    hub.tick()?;
+    for digit in expected {
+        assert!(
+            matches!(notices.try_recv(), Ok(MediaNotice::Dtmf {key, tone}) if key == phone && tone.digit == digit)
+        );
+    }
+    assert!(notices.try_recv().is_err());
+    hub.close().await
 }

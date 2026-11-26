@@ -278,12 +278,15 @@ impl CapturedServer {
     }
 
     fn collect(&self, plan: &ServerBuildPlan, destination: &Path) -> io::Result<()> {
-        let executable = plan.executable();
-        let relative = executable
-            .strip_prefix(plan.state())
-            .map_err(io::Error::other)?;
-        let binary = bounded(plan.state(), relative, 256 * 1024 * 1024)?;
-        let payload = ServerPayload::capture(self.name().target(), binary, |path| {
+        let built = |executable: &Path| {
+            let relative = executable
+                .strip_prefix(plan.state())
+                .map_err(io::Error::other)?;
+            bounded(plan.state(), relative, 256 * 1024 * 1024)
+        };
+        let binary = built(&plan.executable())?;
+        let cli = built(&plan.cli_executable())?;
+        let payload = ServerPayload::capture(self.name().target(), binary, cli, |path| {
             self.files()
                 .find(|(file, _)| *file == Path::new(path))
                 .map(|(_, bytes)| bytes.to_vec())

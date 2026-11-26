@@ -1,6 +1,15 @@
 use super::{FuzzError, Target};
 
 pub fn normalize_manifest(source: &str) -> Result<String, FuzzError> {
+    normalize_manifest_for_version(source, env!("CARGO_PKG_VERSION"))
+}
+
+pub(super) fn normalize_manifest_for_version(
+    source: &str,
+    version: &str,
+) -> Result<String, FuzzError> {
+    let version = semver::Version::parse(version).map_err(|_| FuzzError::Manifest)?;
+    let requirement = format!("={version}");
     let mut manifest: toml::Value = toml::from_str(source).map_err(FuzzError::Toml)?;
     let package = manifest
         .get("package")
@@ -79,7 +88,7 @@ pub fn normalize_manifest(source: &str) -> Result<String, FuzzError> {
             .get_mut(name)
             .and_then(toml::Value::as_table_mut)
             .ok_or(FuzzError::Manifest)?;
-        if dependency.get("version").and_then(toml::Value::as_str) != Some("=0.1.0")
+        if dependency.get("version").and_then(toml::Value::as_str) != Some(requirement.as_str())
             || dependency.get("path").and_then(toml::Value::as_str)
                 != Some(format!("../../crates/{directory}").as_str())
         {

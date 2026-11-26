@@ -1,27 +1,18 @@
-use std::{
-    path::Path,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::path::Path;
 use xtask::distribution::SdkCandidateBuildError;
 
 pub fn using_project(
     label: &str,
     test: impl FnOnce(&Path, &Path) -> Result<(), SdkCandidateBuildError>,
 ) -> Result<(), SdkCandidateBuildError> {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(std::io::Error::other)?
-        .as_nanos();
-    let parent = std::env::temp_dir().join(format!(
-        "rusterisk-sdk-candidate-fixture-{}-{stamp}-{label}",
-        std::process::id()
-    ));
-    std::fs::create_dir(&parent)?;
-    let root = parent.join("root");
+    let parent = tempfile::Builder::new()
+        .prefix(&format!("rusterisk-sdk-candidate-{label}-"))
+        .tempdir()?;
+    let root = parent.path().join("root");
     let operation = project(&root)
         .map_err(SdkCandidateBuildError::from)
-        .and_then(|()| test(&root, &parent));
-    let cleanup = std::fs::remove_dir_all(&parent);
+        .and_then(|()| test(&root, parent.path()));
+    let cleanup = parent.close();
     match (operation, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) => Err(error),

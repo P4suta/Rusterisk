@@ -31,7 +31,9 @@ impl Operation {
 }
 
 fn failure(error: WorkerError) -> ControlError {
-    if matches!(&error, WorkerError::Storage(StorageError::NotFound)) {
+    if matches!(&error, WorkerError::Closed | WorkerError::Thread) {
+        ControlError::ServiceClosed
+    } else if matches!(&error, WorkerError::Storage(StorageError::NotFound)) {
         ControlError::NotFound("Recording not found")
     } else if matches!(&error, WorkerError::Storage(StorageError::Exists)) {
         ControlError::Conflict("A recording with the same name already exists on the system")
@@ -101,7 +103,7 @@ impl Controller {
                 operation,
                 reply,
             })
-            .map_err(|_| ControlError::Capacity)?;
+            .map_err(ControlError::queue)?;
         self.receive(response).await
     }
 }
@@ -236,4 +238,10 @@ mod tests {
         ));
         Ok(())
     }
+}
+
+#[test]
+fn a_closed_recording_store_reports_service_closure() {
+    assert_eq!(failure(WorkerError::Closed), ControlError::ServiceClosed);
+    assert_eq!(failure(WorkerError::Capacity), ControlError::Capacity);
 }

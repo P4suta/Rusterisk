@@ -27,10 +27,20 @@ use rusterisk_test_support::Wait;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
+#[path = "sip_call/call_paths.rs"]
+mod call_paths;
 #[path = "sip_call/early_music.rs"]
 mod early_music;
 #[path = "sip_call/late_answer.rs"]
 mod late_answer;
+#[path = "sip_call/loopback_extensions.rs"]
+mod loopback_extensions;
+#[path = "sip_call/normal_logs.rs"]
+mod normal_logs;
+#[path = "process_recovery/process.rs"]
+mod process;
+#[path = "sip_call/registration.rs"]
+mod registration;
 #[path = "sip_call/test_probe.rs"]
 mod test_probe;
 use tokio::net::UdpSocket;
@@ -479,7 +489,8 @@ async fn stable_audio(peer: &SocketPair, expected: i32) -> Result<(), ControlErr
             for _ in 0..100 {
                 let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
                 let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
-                if packet.payload().len() == 160
+                if packet.payload_type() == 0
+                    && packet.payload().len() == 160
                     && packet
                         .payload()
                         .iter()
@@ -499,6 +510,28 @@ async fn stable_audio(peer: &SocketPair, expected: i32) -> Result<(), ControlErr
         })
         .await
         .map_err(failure)?
+}
+
+#[tokio::test]
+async fn pcmu_audio_with_an_unnegotiated_payload_type_cannot_validate_a_call(
+) -> Result<(), ControlError> {
+    let ip = Ipv4Addr::LOCALHOST.into();
+    let peer = SocketPair::bind(ip, 0, 0).map_err(failure)?;
+    let mut sender = RtpSender::new(AudioFormat::Pcmu, 8, [3; 10]).map_err(failure)?;
+    let frame = Frame::new(&[4000; 160], 8000).map_err(failure)?;
+    for _ in 0..100 {
+        let packet = sender
+            .packet(frame)
+            .map_err(failure)?
+            .encode()
+            .map_err(failure)?;
+        peer.data()
+            .send_to(&packet, peer.local_addr().map_err(failure)?)
+            .await
+            .map_err(failure)?;
+    }
+    assert!(stable_audio(&peer, 4000).await.is_err());
+    Ok(())
 }
 
 async fn exchange(
@@ -733,11 +766,18 @@ async fn invite(
 }
 
 async fn final_response(signal: &UdpSocket) -> Result<rsipstack::sip::Response, ControlError> {
+    final_response_matching(signal, |_| Ok(true)).await
+}
+
+async fn final_response_matching(
+    signal: &UdpSocket,
+    matches: impl Fn(&rsipstack::sip::Response) -> Result<bool, ControlError>,
+) -> Result<rsipstack::sip::Response, ControlError> {
     Wait::Ready
         .bounded(async {
             for _ in 0..8 {
                 let response = response(signal).await?;
-                if response.status_code.code() >= 200 {
+                if response.status_code.code() >= 200 && matches(&response)? {
                     return Ok(response);
                 }
             }
@@ -779,6 +819,27 @@ async fn start_invitation(
     local: SocketAddr,
     audio: SocketAddr,
     invitation: Invitation<'_>,
+) -> Result<(), ControlError> {
+    start_invitation_as(
+        signal,
+        target,
+        local,
+        audio,
+        invitation,
+        "phone",
+        "test-password",
+    )
+    .await
+}
+
+async fn start_invitation_as(
+    signal: &UdpSocket,
+    target: SocketAddr,
+    local: SocketAddr,
+    audio: SocketAddr,
+    invitation: Invitation<'_>,
+    username: &str,
+    password: &str,
 ) -> Result<(), ControlError> {
     let Invitation {
         extension,
@@ -829,8 +890,8 @@ async fn start_invitation(
         nc: 1,
     };
     let digest = DigestGenerator {
-        username: "phone",
-        password: "test-password",
+        username,
+        password,
         nonce: &challenge.nonce,
         uri: &uri,
         realm: &challenge.realm,
@@ -839,7 +900,7 @@ async fn start_invitation(
         algorithm: Algorithm::Md5,
     }
     .compute();
-    let authorization = format!("Authorization: Digest username=\"phone\", realm=\"{}\", nonce=\"{}\", uri=\"{uri}\", response=\"{digest}\", algorithm=MD5, qop=auth, cnonce=\"test-client\", nc=00000001\r\n", challenge.realm, challenge.nonce);
+    let authorization = format!("Authorization: Digest username=\"{username}\", realm=\"{}\", nonce=\"{}\", uri=\"{uri}\", response=\"{digest}\", algorithm=MD5, qop=auth, cnonce=\"test-client\", nc=00000001\r\n", challenge.realm, challenge.nonce);
     signal
         .send_to(packet(2, &authorization).as_bytes(), target)
         .await
