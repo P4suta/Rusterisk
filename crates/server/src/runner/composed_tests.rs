@@ -130,59 +130,55 @@ async fn a_control_loop_alone_delivers_waiting_effects_before_the_next_request(
         id: ChannelId::try_from("filler".to_owned())?,
         generation: 1,
     };
-    let mut filled = 0_usize;
-    while runner
-        .effect_sender()?
-        .try_send(Effect::Release {
-            key: filler.clone(),
-        })
-        .is_ok()
-    {
-        filled += 1;
+    for _ in 0..effects.max_capacity() {
+        runner
+            .effect_sender()?
+            .try_send(Effect::Release {
+                key: filler.clone(),
+            })
+            .map_err(failure)?;
     }
+    let waiting = CallKey {
+        id: ChannelId::try_from("waiting".to_owned())?,
+        generation: 2,
+    };
     runner.pending_effects.push_back(Effect::Release {
-        key: filler.clone(),
+        key: waiting.clone(),
     });
-    let running = tokio::spawn(runner.run());
-    let credentials = Credentials::new("app".into(), "test".into())?;
-    let requested = tokio::spawn({
-        let controller = controller.clone();
-        async move {
-            controller
-                .execute(
-                    credentials,
-                    None,
-                    Action::CreateBridge {
-                        id: ChannelId::try_from("held".to_owned())?,
-                        name: "held".into(),
-                    },
-                )
-                .await
-        }
-    });
-    // The request reaches the loop while the effects still wait.
-    for _ in 0..16 {
-        tokio::task::yield_now().await;
+    let requested = controller.execute(
+        Credentials::new("app".into(), "test".into())?,
+        None,
+        Action::CreateBridge {
+            id: ChannelId::try_from("held".to_owned())?,
+            name: "held".into(),
+        },
+    );
+    tokio::pin!(requested);
+    assert!(futures_util::poll!(requested.as_mut()).is_pending());
+    assert_eq!(runner.requests.len(), 1);
+
+    let running = runner.run();
+    tokio::pin!(running);
+    assert!(futures_util::poll!(running.as_mut()).is_pending());
+    assert!(
+        futures_util::poll!(requested.as_mut()).is_pending(),
+        "the request completed while the release was still waiting"
+    );
+    for _ in 0..effects.max_capacity() {
+        let effect = effects.try_recv().map_err(failure)?;
+        assert!(matches!(effect, Effect::Release { key } if key == filler));
     }
-    let mut delivered = 0_usize;
-    while delivered <= filled {
-        match tokio::time::timeout(std::time::Duration::from_secs(2), effects.recv()).await {
-            Ok(Some(Effect::Release { key })) if key == filler => delivered += 1,
-            Ok(other) => return Err(failure(format!("unexpected effect {other:?}"))),
-            Err(elapsed) => return Err(failure(elapsed)),
-        }
-    }
-    let created = tokio::time::timeout(std::time::Duration::from_secs(2), requested)
-        .await
-        .map_err(failure)?
-        .map_err(failure)?;
+    assert!(futures_util::poll!(running.as_mut()).is_pending());
+    let effect = effects.try_recv().map_err(failure)?;
+    assert!(matches!(effect, Effect::Release { key } if key == waiting));
+    let created = futures_util::poll!(requested.as_mut());
+    assert!(
+        matches!(created, std::task::Poll::Ready(Ok(_))),
+        "{created:?}"
+    );
+
     controller.shutdown();
-    let stopped = tokio::time::timeout(std::time::Duration::from_secs(2), running)
-        .await
-        .map_err(failure)?
-        .map_err(failure)?;
-    assert!(created.is_ok(), "{created:?}");
-    stopped
+    running.await
 }
 
 // A caller that keeps the effect receiver without reading it still sees the loop stop.
