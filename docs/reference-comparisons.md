@@ -139,7 +139,9 @@ cargo test --locked -p rusterisk-server --lib sixty_four_active_rtp_disconnects 
 ```
 
 The comparison alternates five fresh processes per build at zero, two, 16, and 64 RTP legs.
-Each pair sends distinct G.711 signals and measures the time from its first channel request until each receiver hears the other signal.
-The test samples process CPU time over one second of steady traffic and reads resident memory before hangup and after the server releases its ports.
+Each phone sends its G.711 signal when the server returns its RTP address and continues while the bridge connects.
+The test measures the time from the first channel request for each pair until each receiver hears the other signal.
+Each receiver must hear at least one second of that signal with no gap longer than 150 ms.
+The test reads the process CPU clock over one second of steady traffic and samples resident memory before hangup and after the server releases its ports.
 The candidate median for each measurement must fit within the largest baseline observation at the same load.
 The Linux ARM64 package also limits median resident memory before and after hangup to 14.5, 15.5, 16, and 18 MiB at the four loads.

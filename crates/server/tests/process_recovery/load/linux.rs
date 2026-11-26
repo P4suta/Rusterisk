@@ -15,6 +15,53 @@ use tokio::{sync::watch, task::JoinSet};
 
 type Metrics = [u64; 5];
 
+#[derive(Default)]
+struct ReceivedAudio {
+    first: Option<Duration>,
+    last: Duration,
+    longest_gap: Duration,
+}
+
+impl ReceivedAudio {
+    fn hear(&mut self, at: Duration) {
+        if self.first.is_some() {
+            self.longest_gap = self.longest_gap.max(at.saturating_sub(self.last));
+        } else {
+            self.first = Some(at);
+        }
+        self.last = at;
+    }
+
+    fn first_if_continuous(&self, end: Duration) -> Option<Duration> {
+        let gap = self.longest_gap.max(end.saturating_sub(self.last));
+        self.first.filter(|first| {
+            self.last.saturating_sub(*first) >= Duration::from_secs(1)
+                && gap <= Wait::Quiet.duration()
+        })
+    }
+}
+
+#[test]
+fn a_burst_or_an_audio_gap_cannot_validate_a_second_of_load() {
+    let mut audio = ReceivedAudio::default();
+    let end = Duration::from_millis(1100);
+    assert_eq!(audio.first_if_continuous(end), None);
+    for n in 1..=5 {
+        audio.hear(Duration::from_millis(n * 20));
+    }
+    assert_eq!(audio.first_if_continuous(end), None);
+    audio.hear(end);
+    assert_eq!(audio.first_if_continuous(end), None);
+    let mut audio = ReceivedAudio::default();
+    for n in 1..=55 {
+        audio.hear(Duration::from_millis(n * 20));
+    }
+    assert_eq!(
+        audio.first_if_continuous(end),
+        Some(Duration::from_millis(20))
+    );
+}
+
 #[test]
 fn the_process_cpu_clock_observes_work_shorter_than_a_scheduler_tick() -> Result<(), ControlError> {
     let pid = std::process::id();
@@ -58,7 +105,6 @@ struct Leg {
     sender: RtpSender,
     next_packet: tokio::time::Instant,
     signal: i16,
-    heard: Option<Duration>,
 }
 
 #[tokio::test]
@@ -118,7 +164,6 @@ impl Leg {
             sender: RtpSender::new(AudioFormat::Pcmu, 0, [n + 1; 10]).map_err(failure)?,
             next_packet: tokio::time::Instant::now() + Duration::from_millis(20),
             signal: if n.is_multiple_of(2) { 4000 } else { -7000 },
-            heard: None,
         };
         leg.transmit().await?;
         Ok(leg)
@@ -144,27 +189,28 @@ impl Leg {
         &mut self,
         start: Instant,
         mut stop: watch::Receiver<bool>,
-    ) -> Result<(), ControlError> {
+    ) -> Result<Duration, ControlError> {
         let expected = if self.signal > 0 { -7000 } else { 4000 };
+        let mut audio = ReceivedAudio::default();
         let mut buffer = [0; 1501];
         let mut clock = tokio::time::interval_at(self.next_packet, Duration::from_millis(20));
         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
-                _ = stop.changed() => return Ok(()),
+                _ = stop.changed() => return audio.first_if_continuous(start.elapsed())
+                    .ok_or(ControlError::Invalid("Peer did not receive continuous audio at load")),
                 _ = clock.tick() => self.transmit().await?,
                 received = self.peer.data().recv_from(&mut buffer) => {
                     let (length, _) = received.map_err(failure)?;
                     let received_at = start.elapsed();
                     let packet = RtpPacket::parse(&buffer[..length]).map_err(failure)?;
-                    if self.heard.is_none()
-                        && packet.payload_type() == 0
+                    if packet.payload_type() == 0
                         && packet.payload().len() == 160
                         && packet.payload().iter().all(|sample| {
                             (i32::from(mulaw_decode(*sample)) - expected).abs() < 300
                         })
                     {
-                        self.heard = Some(received_at);
+                        audio.hear(received_at);
                     }
                 }
             }
@@ -203,8 +249,8 @@ async fn measure(process: &ChildServer, count: u8) -> Result<Metrics, ControlErr
                 let mut leg = Leg::open(&client, addr, n).await?;
                 let lifetime = stop.clone();
                 calls.spawn(async move {
-                    leg.drive(start, lifetime).await?;
-                    Ok::<_, ControlError>((n, leg))
+                    let first = leg.drive(start, lifetime).await?;
+                    Ok::<_, ControlError>((n, leg, first))
                 });
             }
             let bridge = format!("bridges/pair-{pair}");
@@ -235,11 +281,11 @@ async fn measure(process: &ChildServer, count: u8) -> Result<Metrics, ControlErr
         while let Some(call) = calls.join_next().await {
             completed.push(call.map_err(failure)??);
         }
-        completed.sort_unstable_by_key(|(n, _)| *n);
+        completed.sort_unstable_by_key(|(n, _, _)| *n);
         let mut audio_us = [0; 2];
         let mut release = tokio::time::interval(Duration::from_millis(20));
         release.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        for (n, leg) in &completed {
+        for (n, leg, heard) in &completed {
             if n % 2 == 0 {
                 release.tick().await;
                 request(
@@ -251,9 +297,6 @@ async fn measure(process: &ChildServer, count: u8) -> Result<Metrics, ControlErr
                 )
                 .await?;
             }
-            let heard = leg
-                .heard
-                .ok_or(ControlError::Invalid("Missing received audio at load"))?;
             let micros = u64::try_from(heard.as_micros()).map_err(failure)?;
             let direction = usize::from(n % 2);
             audio_us[direction] = audio_us[direction].max(micros);
