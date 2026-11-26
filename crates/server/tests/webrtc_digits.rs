@@ -1,9 +1,16 @@
 use rusterisk_api::{Channel, ChannelId, ChannelState, EventKind};
 use rusterisk_core::{DtmfDigit, DtmfTiming, DtmfTone};
 use rusterisk_media::MediaError;
+#[path = "webrtc_leg/driver.rs"]
+mod webrtc_driver;
+
+use rusterisk_media::MAX_PACKET;
 use rusterisk_server::{
-    media::MediaHub, media_link::DigitCommand, signaling::Signaling, webrtc::WebRtcStats, Action,
-    Controller, Credentials,
+    media::MediaHub,
+    media_link::{Channels, DigitCommand},
+    signaling::Signaling,
+    webrtc::{WebRtcLeg, WebRtcSession, WebRtcStats},
+    Action, Controller, Credentials,
 };
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -120,7 +127,7 @@ async fn exchange(clock: Clock) -> Result<Observed, MediaError> {
             states.push(channel.state);
             let session = peer::answer(peer, clock).await?;
             let (channels, application) = peer::channels();
-            jobs.push(tokio::spawn(session.run(channels)));
+            jobs.push(tokio::spawn(webrtc_driver::run(session, channels)));
             applications.push(application);
             loop {
                 if let EventKind::StasisStart { channel, .. } = events

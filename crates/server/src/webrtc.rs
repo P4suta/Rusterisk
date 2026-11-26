@@ -17,7 +17,7 @@ mod rtp_tests;
 mod source_tests;
 mod telephone;
 mod transmit_sources;
-pub use link::WebRtcStats;
+pub use link::{WebRtcLeg, WebRtcStats};
 
 struct Engine {
     rtc: Rtc,

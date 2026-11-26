@@ -692,6 +692,77 @@ struct Port {
     connection: Connection,
 }
 
+// The parts of the media task that take one owned leg's turn output.
+struct Delivery<'a> {
+    recordings: &'a mut Recordings,
+    mixer: &'a mut Mixer<CallKey>,
+    probes: &'a mut BTreeMap<CallKey, probe::Challenge>,
+    notices: &'a NoticeSender,
+    ports: &'a mut BTreeMap<CallKey, Port>,
+    dropped: &'a mut u64,
+}
+
+impl Delivery<'_> {
+    // Hands a leg's digits, finished commands, and frame onward, or records the leg's failure.
+    fn deliver(
+        &mut self,
+        key: &CallKey,
+        frame: Result<Option<Frame>, MediaError>,
+        tones: &mut Vec<DtmfTone>,
+        finished: &mut Vec<DtmfToken>,
+        failed: &mut Vec<(CallKey, MediaError)>,
+    ) -> Result<(), MediaError> {
+        let frame = match frame {
+            Ok(frame) => frame,
+            Err(error) => {
+                tones.clear();
+                finished.clear();
+                failed.push((key.clone(), error));
+                return Ok(());
+            }
+        };
+        for tone in tones.drain(..) {
+            self.recordings
+                .received_digit(key, self.mixer.bridge_for(key), tone.digit);
+            self.notices
+                .try_send(MediaNotice::Dtmf {
+                    key: key.clone(),
+                    tone,
+                })
+                .map_err(|_| MediaError::Capacity)?;
+        }
+        for token in finished.drain(..) {
+            self.notices
+                .try_send(MediaNotice::DtmfFinished {
+                    key: key.clone(),
+                    token,
+                })
+                .map_err(|_| MediaError::Capacity)?;
+        }
+        let Some(frame) = frame else {
+            return Ok(());
+        };
+        if let Some(challenge) = self.probes.get_mut(key) {
+            challenge.receive(&frame)?;
+        }
+        self.recordings.channel(key, frame);
+        match self.mixer.push(key, frame) {
+            Ok(()) => {
+                if let Some(port) = self.ports.get_mut(key) {
+                    if matches!(port.connection, Connection::Waiting) {
+                        port.connection = Connection::Connected;
+                        self.notices
+                            .try_send(MediaNotice::Connected { key: key.clone() })
+                            .map_err(|_| MediaError::Capacity)?;
+                    }
+                }
+            }
+            Err(_) => *self.dropped += 1,
+        }
+        Ok(())
+    }
+}
+
 const FRAME_PERIOD: Duration = Duration::from_millis(20);
 
 enum Turn {
@@ -733,8 +804,10 @@ pub struct MediaHub {
     notices: NoticeSender,
     mixer: Mixer<CallKey>,
     ports: BTreeMap<CallKey, Port>,
-    // The protocol legs that this task runs, each beside its port.
+    // The protocol and WebRTC legs that this task runs, each beside its port.
     legs: BTreeMap<CallKey, RtpLeg>,
+    webrtc_legs: BTreeMap<CallKey, crate::webrtc::WebRtcLeg>,
+    finished: Vec<DtmfToken>,
     // Room for one datagram, which every leg reads into in turn.
     scratch: [u8; MAX_PACKET + 1],
     tones: Vec<DtmfTone>,
@@ -788,6 +861,8 @@ impl MediaHub {
                 mixer: Mixer::new(capacity),
                 ports: BTreeMap::new(),
                 legs: BTreeMap::new(),
+                webrtc_legs: BTreeMap::new(),
+                finished: Vec::with_capacity(16),
                 scratch: [0; MAX_PACKET + 1],
                 tones: Vec::with_capacity(16),
                 failed: Vec::with_capacity(4),
@@ -819,11 +894,36 @@ impl MediaHub {
                         let stats = leg.finish();
                         tracing::debug!(channel = %key.id, generation = key.generation, ?stats, "media leg released");
                     }
+                    if let Some(leg) = self.webrtc_legs.remove(key) {
+                        let stats = leg.finish();
+                        tracing::debug!(channel = %key.id, generation = key.generation, ?stats, "WebRTC leg released");
+                    }
                 }
             }
             if !self.mixer.remove(key) {
                 return Err(MediaError::InvalidRoute);
             }
+        }
+        Ok(())
+    }
+
+    // Ends each WebRTC leg whose session closed, and tells signaling that its media stopped.
+    fn end_closed_legs(&mut self) -> Result<(), MediaError> {
+        while let Some(key) = self
+            .webrtc_legs
+            .iter()
+            .find_map(|(key, leg)| leg.closed().then(|| key.clone()))
+        {
+            let stats = self
+                .webrtc_legs
+                .remove(&key)
+                .map(crate::webrtc::WebRtcLeg::finish)
+                .unwrap_or_default();
+            self.remove(&key)?;
+            self.notice(MediaNotice::Stopped {
+                key,
+                result: Ok(stats.audio),
+            })?;
         }
         Ok(())
     }
@@ -1081,11 +1181,14 @@ impl MediaHub {
                                     .commands
                                     .try_send(command)
                                     .map_err(|_| MediaError::Capacity),
-                                Io::Owned => self
-                                    .legs
-                                    .get_mut(&key)
-                                    .ok_or(MediaError::UnknownStream)?
-                                    .queue_digits(command),
+                                Io::Owned => {
+                                    match (self.legs.get_mut(&key), self.webrtc_legs.get_mut(&key))
+                                    {
+                                        (Some(leg), _) => leg.queue_digits(command),
+                                        (None, Some(leg)) => leg.queue_digits(command),
+                                        (None, None) => Err(MediaError::UnknownStream),
+                                    }
+                                }
                             }
                         });
                     match (reply, result) {
@@ -1181,6 +1284,11 @@ impl MediaHub {
                                     Io::Owned => {
                                         if let Some(leg) = self.legs.get_mut(&key) {
                                             leg.set_direction(direction);
+                                        }
+                                        if let Some(leg) = self.webrtc_legs.get_mut(&key) {
+                                            if let Err(error) = leg.set_direction(direction) {
+                                                self.failed.push((key.clone(), error));
+                                            }
                                         }
                                     }
                                 }
@@ -1311,56 +1419,39 @@ impl MediaHub {
             }
         }
         // Every owned leg reads what arrived and hands its next frame to the mixer before the mix.
+        let mut delivery = Delivery {
+            recordings: &mut self.recordings,
+            mixer: &mut self.mixer,
+            probes: &mut self.probes,
+            notices: &self.notices,
+            ports: &mut self.ports,
+            dropped: &mut self.dropped,
+        };
         for (key, leg) in &mut self.legs {
-            let advanced = leg
+            let frame = leg
                 .receive(&mut self.scratch, &mut self.tones, |_| Ok(()))
-                .and_then(|()| leg.advance(&mut self.tones));
-            let advanced = match advanced {
-                Ok(advanced) => advanced,
-                Err(error) => {
-                    self.tones.clear();
-                    self.failed.push((key.clone(), error));
-                    continue;
-                }
-            };
-            for tone in self.tones.drain(..) {
-                self.recordings
-                    .received_digit(key, self.mixer.bridge_for(key), tone.digit);
-                self.notices
-                    .try_send(MediaNotice::Dtmf {
-                        key: key.clone(),
-                        tone,
-                    })
-                    .map_err(|_| MediaError::Capacity)?;
-            }
-            if let Some(token) = advanced.completed {
-                self.notices
-                    .try_send(MediaNotice::DtmfFinished {
-                        key: key.clone(),
-                        token,
-                    })
-                    .map_err(|_| MediaError::Capacity)?;
-            }
-            if let Some(frame) = advanced.frame {
-                if let Some(challenge) = self.probes.get_mut(key) {
-                    challenge.receive(&frame)?;
-                }
-                self.recordings.channel(key, frame);
-                match self.mixer.push(key, frame) {
-                    Ok(()) => {
-                        if let Some(port) = self.ports.get_mut(key) {
-                            if matches!(port.connection, Connection::Waiting) {
-                                port.connection = Connection::Connected;
-                                self.notices
-                                    .try_send(MediaNotice::Connected { key: key.clone() })
-                                    .map_err(|_| MediaError::Capacity)?;
-                            }
-                        }
-                    }
-                    Err(_) => self.dropped += 1,
-                }
-            }
+                .and_then(|()| leg.advance(&mut self.tones, &mut self.finished));
+            delivery.deliver(
+                key,
+                frame,
+                &mut self.tones,
+                &mut self.finished,
+                &mut self.failed,
+            )?;
         }
+        for (key, leg) in &mut self.webrtc_legs {
+            let frame = leg
+                .receive(&mut self.scratch)
+                .and_then(|()| leg.advance(&mut self.tones, &mut self.finished));
+            delivery.deliver(
+                key,
+                frame,
+                &mut self.tones,
+                &mut self.finished,
+                &mut self.failed,
+            )?;
+        }
+        self.end_closed_legs()?;
         self.fail_legs()?;
         self.remember_music();
         let frames = self.playbacks.tick()?;
@@ -1394,10 +1485,13 @@ impl MediaHub {
                     }
                 },
                 Io::Owned => {
-                    if let Some(leg) = self.legs.get_mut(key) {
-                        if let Err(error) = leg.send(frame) {
-                            self.failed.push((key.clone(), error));
-                        }
+                    let sent = match (self.legs.get_mut(key), self.webrtc_legs.get_mut(key)) {
+                        (Some(leg), _) => leg.send(frame),
+                        (None, Some(leg)) => leg.send(frame),
+                        (None, None) => Ok(()),
+                    };
+                    if let Err(error) = sent {
+                        self.failed.push((key.clone(), error));
                     }
                 }
             }
@@ -1463,6 +1557,10 @@ impl MediaHub {
         for (key, leg) in std::mem::take(&mut self.legs) {
             let stats = leg.finish();
             tracing::debug!(channel = %key.id, generation = key.generation, ?stats, "media leg closed");
+        }
+        for (key, leg) in std::mem::take(&mut self.webrtc_legs) {
+            let stats = leg.finish();
+            tracing::debug!(channel = %key.id, generation = key.generation, ?stats, "WebRTC leg closed");
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         let mut failure = self.recordings.close().await.err();

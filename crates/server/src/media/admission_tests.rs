@@ -422,17 +422,8 @@ async fn a_replacement_webrtc_answer_survives_release_of_the_expired_attachment(
             admitted.push(serial);
         }
     }
-    let (_stop, mut stopped) = watch::channel(false);
-    let mut frames = FrameClock::new();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while hub.workers.len() > 1 {
-            hub.turn(&mut stopped, &mut frames).await?;
-        }
-        Ok::<_, MediaError>(())
-    })
-    .await
-    .map_err(failure)??;
-    let installed = hub.ports.contains_key(&key);
+    let installed = hub.ports.contains_key(&key) && hub.webrtc_legs.contains_key(&key);
+    assert!(hub.workers.is_empty());
     hub.close().await?;
     assert_eq!(admitted, [1, 2]);
     assert!(installed, "the expired link cannot remove the replacement");

@@ -52,8 +52,8 @@ async fn bridge_reports_connection_only_after_received_audio_and_releases_owned_
     let hub = tokio::spawn(hub.run(stopped));
     let (left_channels, mut left_app) = channels();
     let (right_channels, mut right_app) = channels();
-    let left = tokio::spawn(left_client.run(left_channels));
-    let right = tokio::spawn(right_client.run(right_channels));
+    let left = tokio::spawn(super::webrtc_driver::run(left_client, left_channels));
+    let right = tokio::spawn(super::webrtc_driver::run(right_client, right_channels));
     let result = tokio::time::timeout(Duration::from_secs(5), async {
         media.attach_webrtc(keys[0].clone(), left_server, PeerMediaDirection::SendReceive).await?;
         media.attach_webrtc(keys[1].clone(), right_server, PeerMediaDirection::SendReceive).await?;
