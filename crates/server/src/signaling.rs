@@ -16,7 +16,7 @@ use rusterisk_sip::{
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::net::SocketAddr;
 
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 mod attended;
 mod cleanup;
