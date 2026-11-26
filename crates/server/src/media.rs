@@ -570,25 +570,6 @@ impl MediaPort {
         Ok(release)
     }
 
-    // The media task reports the result of this direction change as a notice with the same number.
-    pub(crate) fn start_peer_direction(
-        &self,
-        key: CallKey,
-        direction: PeerMediaDirection,
-        gate: Gate,
-        generated_audio_gate: Gate,
-        serial: u64,
-    ) -> Result<(), MediaError> {
-        self.commands
-            .try_send(Command::PeerDirection {
-                key,
-                direction,
-                gate,
-                generated_audio_gate,
-                reply: self.completion(serial)?,
-            })
-            .map_err(|_| MediaError::Capacity)
-    }
     pub fn release(&self, key: CallKey) -> Result<(), MediaError> {
         self.send(Order::Release(key))
     }

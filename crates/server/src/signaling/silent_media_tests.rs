@@ -686,7 +686,8 @@ async fn destroyed(subscription: &mut crate::Subscription) -> Result<u16, Contro
 }
 
 #[tokio::test]
-async fn a_direction_change_that_cannot_start_ends_its_call_and_not_the_signaling_task(
+// A direction change behind a full queue waits owed, and its call ends at the wait's deadline.
+async fn a_direction_change_behind_a_full_queue_ends_its_call_at_its_deadline(
 ) -> Result<(), ControlError> {
     silent(async |fixture: &mut Silent| {
         let (key, mut subscription, _answered) = dialed(fixture).await?;
@@ -700,6 +701,9 @@ async fn a_direction_change_that_cannot_start_ends_its_call_and_not_the_signalin
                 generated_audio_gate: AudioGate::Open,
             })
             .await?;
+        assert!(!fixture.signaling.owed.is_empty());
+        let clock = fixture.signaling.controller.clock();
+        fixture.signaling.turn(5000, clock).await?;
         assert_eq!(destroyed(&mut subscription).await?, 21);
         Ok(())
     })
@@ -874,7 +878,7 @@ async fn a_direction_change_leaves_the_turn_free() -> Result<(), ControlError> {
                 generated_audio_gate: AudioGate::Open,
             })
             .await?;
-        assert_eq!(fixture.queued(), Some(Queued::Other));
+        assert_eq!(fixture.queued(), Some(Queued::Direction));
         fixture.registers().await
     })
     .await
@@ -1041,6 +1045,65 @@ async fn a_release_stays_owed_while_the_media_queue_is_full() -> Result<(), Cont
             .iter()
             .all(|queued| *queued == Queued::Release));
         assert_eq!(taken[filled..], [Queued::Release, Queued::Other]);
+        assert!(fixture.queued().is_none());
+        Ok(())
+    })
+    .await
+}
+
+// The media queue frees one place while the task owes a gate, and a direction change for the call follows.
+#[tokio::test]
+async fn a_direction_change_follows_a_gate_that_the_task_owes() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (key, _token) = unattached(fixture)?;
+        let filled = fixture.fill()?;
+        fixture
+            .turn(Effect::Gate {
+                key: key.clone(),
+                gate: AudioGate::Closed,
+                generated_audio_gate: AudioGate::Closed,
+            })
+            .await?;
+        assert_eq!(fixture.queued(), Some(Queued::Release));
+        fixture
+            .turn(Effect::PeerDirection {
+                key,
+                direction: PeerMediaDirection::SendOnly,
+                gate: AudioGate::Open,
+                generated_audio_gate: AudioGate::Open,
+            })
+            .await?;
+        let taken = fixture.drains(filled + 1).await?;
+        assert_eq!(taken[filled - 1..], [Queued::Gate, Queued::Direction]);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_full_owed_queue_uses_the_slot_the_media_task_just_freed() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let filled = fixture.fill()?;
+        assert_eq!(filled, super::OWED_MEDIA);
+        let limit = u64::try_from(super::OWED_MEDIA).map_err(failure)?;
+        for generation in 0..limit {
+            fixture.turn(Effect::ReleaseBridge { generation }).await?;
+        }
+        assert_eq!(fixture.queued(), Some(Queued::Release));
+        fixture
+            .turn(Effect::ReleaseBridge { generation: limit })
+            .await?;
+        let pending = &fixture.signaling.owed;
+        assert_eq!(pending.len(), super::OWED_MEDIA);
+        for (order, generation) in pending.iter().zip(1..=limit) {
+            assert!(
+                matches!(order, crate::media::Order::ReleaseBridge(value) if *value == generation)
+            );
+        }
+        let taken = fixture.drains(filled + super::OWED_MEDIA).await?;
+        assert!(taken[filled - 1..]
+            .iter()
+            .all(|command| *command == Queued::Other));
         assert!(fixture.queued().is_none());
         Ok(())
     })

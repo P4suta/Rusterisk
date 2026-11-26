@@ -1063,17 +1063,18 @@ impl Signaling {
                 generated_audio_gate,
             } => {
                 let serial = self.next_serial();
-                let started = self.media.start_peer_direction(
+                let order = match self.media.direction_order(
                     key.clone(),
                     direction,
                     audio_gate(gate),
                     audio_gate(generated_audio_gate),
                     serial,
-                );
-                match started {
-                    Ok(()) => self.pend(key, serial, Waiting::Direction { direction }, now),
-                    Err(error) => self.direction_applied(key, direction, Err(error)).await?,
-                }
+                ) {
+                    Ok(order) => order,
+                    Err(error) => return self.direction_applied(key, direction, Err(error)).await,
+                };
+                self.order(order)?;
+                self.pend(key, serial, Waiting::Direction { direction }, now);
             }
             Effect::Answer { key } => {
                 if let Err(error) = self.answer(&key, now).await {
@@ -1693,6 +1694,7 @@ impl Signaling {
     // Sends a media order behind the owed ones, and owes it while the media queue is full.
     // The server stops only when the media task stops taking orders.
     fn order(&mut self, order: Order) -> Result<(), ControlError> {
+        self.send_owed()?;
         let order = if self.owed.is_empty() {
             match self.media.offer(order).map_err(failure)? {
                 None => return Ok(()),

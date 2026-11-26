@@ -1,6 +1,6 @@
-use super::{Command, MediaPort, RecordingEnd};
+use super::{Command, Completion, MediaPort, RecordingEnd};
 use crate::CallKey;
-use rusterisk_core::MediaTaskToken;
+use rusterisk_core::{MediaTaskToken, PeerMediaDirection};
 use rusterisk_media::{Gate, MediaError};
 use tokio::sync::mpsc;
 
@@ -21,6 +21,14 @@ pub(crate) enum Order {
     EndRecording {
         token: MediaTaskToken,
         mode: RecordingEnd,
+    },
+    // The media task reports the result as a notice with the same number.
+    PeerDirection {
+        key: CallKey,
+        direction: PeerMediaDirection,
+        gate: Gate,
+        generated_audio_gate: Gate,
+        reply: Completion<bool>,
     },
 }
 
@@ -48,11 +56,41 @@ impl Order {
                 generated_audio_gate,
             },
             Self::EndRecording { token, mode } => Command::EndRecording { token, mode },
+            Self::PeerDirection {
+                key,
+                direction,
+                gate,
+                generated_audio_gate,
+                reply,
+            } => Command::PeerDirection {
+                key,
+                direction,
+                gate,
+                generated_audio_gate,
+                reply,
+            },
         }
     }
 }
 
 impl MediaPort {
+    pub(crate) fn direction_order(
+        &self,
+        key: CallKey,
+        direction: PeerMediaDirection,
+        gate: Gate,
+        generated_audio_gate: Gate,
+        serial: u64,
+    ) -> Result<Order, MediaError> {
+        Ok(Order::PeerDirection {
+            key,
+            direction,
+            gate,
+            generated_audio_gate,
+            reply: self.completion(serial)?,
+        })
+    }
+
     // Sends an order now, or returns it while the media queue is full.
     pub(crate) fn offer(&self, order: Order) -> Result<Option<Order>, MediaError> {
         match self.commands.try_reserve() {
