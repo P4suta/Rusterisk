@@ -1,4 +1,4 @@
-use crate::{validate_name, StorageError, Store, MAX_DIRECTORY_ENTRIES};
+use crate::{validate_name, StorageError, Store};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
@@ -140,23 +140,4 @@ pub(super) fn unlink(
     Ok(())
 }
 
-pub(super) fn replay_deletions(
-    connection: &mut Connection,
-    directory: &Path,
-) -> Result<(), StorageError> {
-    let mut query = connection.prepare("SELECT id,name FROM recording_operations WHERE operation='delete' AND phase='deleting' ORDER BY id")?;
-    let rows = query
-        .query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })?
-        .take(MAX_DIRECTORY_ENTRIES + 1)
-        .collect::<Result<Vec<_>, _>>()?;
-    drop(query);
-    if rows.len() > MAX_DIRECTORY_ENTRIES {
-        return Err(StorageError::Capacity);
-    }
-    for (id, name) in rows {
-        unlink(connection, directory, &name, id)?;
-    }
-    Ok(())
-}
+pub(super) mod replay;

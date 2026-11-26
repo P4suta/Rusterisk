@@ -173,8 +173,11 @@ impl Store {
                 interrupted.push(entry.path());
             }
         }
-        journal::replay_deletions(&mut connection, &recordings)?;
+        journal::replay::pending(&mut connection, &recordings)?;
         for path in interrupted {
+            if !path.try_exists()? {
+                continue;
+            }
             if path.extension().is_some_and(|value| value == "copying") {
                 std::fs::remove_file(path)?;
                 continue;
