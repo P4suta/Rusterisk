@@ -7,9 +7,10 @@ use rusterisk_core::{
 };
 use rusterisk_media::{Frame, MediaError};
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 pub type RecordingPrompt = oneshot::Receiver<Result<(), MediaError>>;
 
@@ -29,6 +30,7 @@ mod tests {
     use rusterisk_storage::WaveReader;
     use std::time::Duration;
     use tokio::sync::oneshot;
+    use tokio::time::Instant;
 
     fn failure(error: impl std::fmt::Display) -> MediaError {
         MediaError::Transport(error.to_string())
@@ -58,7 +60,7 @@ mod tests {
                 .await
                 .map_err(failure)?;
             let (prompt, receiver) = oneshot::channel();
-            let start = std::time::Instant::now();
+            let start = Instant::now();
             let options = rusterisk_api::RecordingOptions {
                 beep: true,
                 max_duration_seconds: rusterisk_api::RecordingSeconds::try_from(1)
@@ -294,7 +296,7 @@ mod tests {
             )
             .await
             .map_err(failure)?;
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         let options = rusterisk_api::RecordingOptions {
             max_duration_seconds: rusterisk_api::RecordingSeconds::try_from(1).map_err(failure)?,
             ..Default::default()
@@ -378,6 +380,26 @@ mod tests {
         }
         assert!(reader.read_frame().map_err(failure)?.is_none());
         worker.close().await.map_err(failure)?;
+        Ok(())
+    }
+
+    // A bridge recording that waits for its file ends after five seconds of runtime time.
+    #[tokio::test(start_paused = true)]
+    async fn a_waiting_recording_ends_after_five_seconds_of_runtime_time() -> Result<(), MediaError>
+    {
+        let mut recordings = Recordings::new();
+        let mut tasks = MediaTasks::new(1);
+        let token = tasks
+            .reserve(MediaTaskKind::Recording)
+            .map_err(|_| MediaError::Capacity)?;
+        let (completed, mut completion) = oneshot::channel();
+        recordings.reserve(token, RecordingTarget::Bridge(1), completed)?;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        recordings.bridges(&[])?;
+        assert!(matches!(
+            completion.try_recv().map_err(failure)?,
+            Err(WorkerError::Timeout)
+        ));
         Ok(())
     }
 

@@ -4,8 +4,9 @@ use rusterisk_core::MediaTaskToken;
 use rusterisk_media::{AudioTarget, Frame, MediaError};
 use std::collections::BTreeMap;
 use std::task::Poll;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 #[cfg(test)]
 mod held_channel_tests;
@@ -370,6 +371,28 @@ mod tests {
         })
         .await
         .map_err(failure)?
+    }
+
+    // A playback that waits for its source ends after five seconds of runtime time.
+    #[tokio::test(start_paused = true)]
+    async fn a_waiting_playback_ends_after_five_seconds_of_runtime_time() -> Result<(), MediaError>
+    {
+        let mut tasks = MediaTasks::new(1);
+        let token = tasks
+            .reserve(MediaTaskKind::Playback)
+            .map_err(|_| MediaError::Capacity)?;
+        let mut playbacks = Playbacks::new();
+        let (completed, mut completion) = oneshot::channel();
+        playbacks.reserve(
+            token,
+            AudioTarget::Bridge(1),
+            completed,
+            PlaybackOptions::default(),
+        )?;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        playbacks.tick()?;
+        assert!(matches!(completion.try_recv(), Ok(Err(_))));
+        Ok(())
     }
 
     #[tokio::test]
