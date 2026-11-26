@@ -2,6 +2,8 @@ pub mod audiosocket;
 mod call_profiles;
 pub mod cli;
 mod clock;
+#[cfg(test)]
+mod combined_turn_tests;
 mod control;
 mod encryption;
 pub mod http;

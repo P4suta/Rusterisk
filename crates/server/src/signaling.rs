@@ -197,7 +197,7 @@ fn key(id: String, generation: u64) -> Result<CallKey, ControlError> {
     })
 }
 
-fn peer_direction(direction: rusterisk_sip::Direction) -> PeerMediaDirection {
+pub(super) fn peer_direction(direction: rusterisk_sip::Direction) -> PeerMediaDirection {
     match direction {
         rusterisk_sip::Direction::SendRecv => PeerMediaDirection::SendReceive,
         rusterisk_sip::Direction::SendOnly => PeerMediaDirection::SendOnly,
