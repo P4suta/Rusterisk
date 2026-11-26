@@ -867,6 +867,7 @@ struct BridgeEntry {
 
 pub struct Control {
     capacity: usize,
+    call_capacity_refusals: u64,
     generation: u64,
     channels: ChannelSlots,
     bridges: BTreeMap<ChannelId, BridgeEntry>,
@@ -910,9 +911,7 @@ impl Control {
                 "Channel with given unique ID already exists",
             ));
         }
-        if self.channels.len() >= self.capacity {
-            return Err(ControlError::Capacity);
-        }
+        self.require_call_slots(1)?;
         let (application, arguments, app_name, app_data) = match incoming.target {
             IncomingTarget::Dialplan => (None, Vec::new(), String::new(), String::new()),
             IncomingTarget::Stasis {
@@ -1054,6 +1053,7 @@ impl Control {
         let info = crate::server_info::ServerInfo::new(capacity);
         Self {
             capacity: capacity.min(64),
+            call_capacity_refusals: 0,
             generation: 0,
             channels: ChannelSlots::default(),
             bridges: BTreeMap::new(),
@@ -1074,10 +1074,25 @@ impl Control {
         }
     }
 
-    fn call_generation(&mut self, reserved: u64) -> Result<u64, ControlError> {
-        if self.channels.occupied() + reserved.count_ones() as usize >= self.capacity {
+    pub(crate) fn call_slots(&self) -> rusterisk_api::diagnosis::CallSlots {
+        rusterisk_api::diagnosis::CallSlots {
+            active: self.channels.len() as u64,
+            awaiting_release: (self.channels.occupied() - self.channels.len()) as u64,
+            limit: self.capacity as u64,
+            capacity_refusals: self.call_capacity_refusals,
+        }
+    }
+
+    fn require_call_slots(&mut self, count: usize) -> Result<(), ControlError> {
+        if self.channels.occupied() + count > self.capacity {
+            self.call_capacity_refusals = self.call_capacity_refusals.saturating_add(1);
             return Err(ControlError::Capacity);
         }
+        Ok(())
+    }
+
+    fn call_generation(&mut self, reserved: u64) -> Result<u64, ControlError> {
+        self.require_call_slots(reserved.count_ones() as usize + 1)?;
         for _ in 0..64 {
             let generation = self.generation()?;
             let handle = CallHandle::new(generation);
@@ -1421,9 +1436,7 @@ impl Control {
                         "Channel with given unique ID already exists",
                     ));
                 }
-                if self.channels.len() >= self.capacity {
-                    return Err(ControlError::Capacity);
-                }
+                self.require_call_slots(1)?;
                 let application = self
                     .applications
                     .get(&app)

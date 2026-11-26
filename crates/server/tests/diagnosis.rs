@@ -78,6 +78,10 @@ async fn diagnosis_follows_dialplan_and_live_call_identity_with_read_only_creden
         assert_eq!(denied.status().as_u16(), 401);
         let first = read(&app, path).await?;
         let second = read(&app, path).await?;
+        assert_eq!(
+            second["call_slots"],
+            serde_json::json!({"active":0,"awaiting_release":0,"limit":8,"capacity_refusals":0})
+        );
         assert!(second["control"]["turns"].as_u64() > first["control"]["turns"].as_u64());
         for name in ["control", "signaling", "media"] {
             for counter in ["turns", "late_turns", "drops"] {

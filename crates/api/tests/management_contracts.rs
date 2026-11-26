@@ -133,6 +133,16 @@ fn runtime_diagnosis_requires_authentication_and_defines_all_counters() {
     let get = &document["paths"][operation.path]["get"];
     assert!(get["security"][0]["basicAuth"].is_array());
     let schemas = &document["components"]["schemas"];
+    assert_eq!(
+        schemas["RuntimeActivity"]["properties"]["call_slots"]["$ref"],
+        "#/components/schemas/CallSlots"
+    );
+    for counter in ["active", "awaiting_release", "limit", "capacity_refusals"] {
+        assert_eq!(
+            schemas["CallSlots"]["properties"][counter]["type"],
+            "integer"
+        );
+    }
     for name in ["control", "signaling", "media"] {
         assert_eq!(
             schemas["RuntimeActivity"]["properties"][name]["$ref"],

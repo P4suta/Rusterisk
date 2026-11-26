@@ -61,9 +61,7 @@ impl Control {
         if self.channels.contains_key(&id) {
             return Err(ControlError::Conflict("Channel already exists"));
         }
-        if self.channels.len() >= self.capacity {
-            return Err(ControlError::Capacity);
-        }
+        self.require_call_slots(1)?;
         ChannelId::try_from(app.clone())?;
         if data.len() > 4096
             || data.split(',').count() > 32

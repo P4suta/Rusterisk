@@ -33,7 +33,7 @@ impl Controller {
 impl Runner {
     pub(super) fn diagnose(&self, target: Target) -> Result<Value, ControlError> {
         Ok(match target {
-            Target::Runtime => to_value(self.activity.snapshot())?,
+            Target::Runtime => to_value(self.activity.snapshot(self.control.call_slots()))?,
             Target::Channel(id) => to_value(self.control.diagnose_channel(&id)?)?,
             Target::Extension { context, extension } => {
                 to_value(self.control.diagnose_extension(context, extension))?

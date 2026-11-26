@@ -94,16 +94,25 @@ fn end(control: &mut Control, key: CallKey) -> Result<Outcome, ControlError> {
 fn a_retiring_call_counts_towards_the_configured_capacity() -> Result<(), ControlError> {
     let mut control = Control::new(1);
     let ended = participant(&mut control, "retiring", 1)?;
+    assert_eq!(control.call_slots().active, 1);
+    assert_eq!(control.call_slots().awaiting_release, 0);
+    assert_eq!(control.call_slots().capacity_refusals, 0);
     end(&mut control, ended.clone())?;
     let mut other = ended.clone();
     other.id = ChannelId::try_from("another-call".to_owned())?;
     assert!(!control.media_released(&other));
+    assert_eq!(control.call_slots().active, 0);
+    assert_eq!(control.call_slots().awaiting_release, 1);
     assert!(matches!(
         participant(&mut control, "replacement", 1),
         Err(ControlError::Capacity)
     ));
+    assert_eq!(control.call_slots().capacity_refusals, 1);
     assert!(control.media_released(&ended));
     participant(&mut control, "replacement", 1)?;
+    assert_eq!(control.call_slots().awaiting_release, 0);
+    assert_eq!(control.call_slots().active, 1);
+    assert_eq!(control.call_slots().capacity_refusals, 1);
     Ok(())
 }
 

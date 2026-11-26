@@ -78,7 +78,16 @@ pub struct LoopActivity {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct RuntimeActivity {
+    pub call_slots: CallSlots,
     pub control: LoopActivity,
     pub signaling: LoopActivity,
     pub media: LoopActivity,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+pub struct CallSlots {
+    pub active: u64,
+    pub awaiting_release: u64,
+    pub limit: u64,
+    pub capacity_refusals: u64,
 }
