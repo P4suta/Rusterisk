@@ -1,5 +1,5 @@
 use crate::clock::Clock;
-use crate::media::{MediaNotice, MediaNotices, MediaPort, Reservation};
+use crate::media::{MediaNotice, MediaNotices, MediaPort, Order, Reservation};
 use crate::rtp::SocketPair;
 use crate::runner::Flow;
 use crate::storage::{PlaybackMedia, StoragePort};
@@ -99,6 +99,9 @@ impl DigitDelivery {
     }
 }
 
+// The media orders that signaling holds while the media queue is full, which is one more queue.
+const OWED_MEDIA: usize = 128;
+
 // Signaling cleanup ends within the runtime shutdown deadline, as the separate signaling task did.
 const SIGNALING_CLEANUP: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -136,6 +139,8 @@ pub struct Signaling {
     // The call decisions that this task applies in the same turn as its signaling.
     control: Runner,
     media: MediaPort,
+    // Media orders that wait, in order, for room in the media queue.
+    owed: VecDeque<Order>,
     notices: MediaNotices,
     listeners: Vec<Listener>,
     network: transport::Network,
@@ -361,6 +366,7 @@ impl Signaling {
             controller,
             control,
             media,
+            owed: VecDeque::new(),
             notices,
             listeners,
             network,
@@ -997,7 +1003,7 @@ impl Signaling {
                 }
             }
             Effect::EndRecording { token, mode, .. } => {
-                self.media.stop_recording(token, mode).map_err(failure)?
+                self.order(Order::EndRecording { token, mode })?
             }
             Effect::Dtmf { key, command } => {
                 if self.external_media.contains(&key)
@@ -1044,13 +1050,11 @@ impl Signaling {
                 gate,
                 generated_audio_gate,
             } => {
-                self.media
-                    .gate_with_generated_audio(
-                        key,
-                        audio_gate(gate),
-                        audio_gate(generated_audio_gate),
-                    )
-                    .map_err(failure)?;
+                self.order(Order::Gate {
+                    key,
+                    gate: audio_gate(gate),
+                    generated_audio_gate: audio_gate(generated_audio_gate),
+                })?;
             }
             Effect::PeerDirection {
                 key,
@@ -1059,17 +1063,18 @@ impl Signaling {
                 generated_audio_gate,
             } => {
                 let serial = self.next_serial();
-                let started = self.media.start_peer_direction(
+                let order = match self.media.direction_order(
                     key.clone(),
                     direction,
                     audio_gate(gate),
                     audio_gate(generated_audio_gate),
                     serial,
-                );
-                match started {
-                    Ok(()) => self.pend(key, serial, Waiting::Direction { direction }, now),
-                    Err(error) => self.direction_applied(key, direction, Err(error)).await?,
-                }
+                ) {
+                    Ok(order) => order,
+                    Err(error) => return self.direction_applied(key, direction, Err(error)).await,
+                };
+                self.order(order)?;
+                self.pend(key, serial, Waiting::Direction { direction }, now);
             }
             Effect::Answer { key } => {
                 if let Err(error) = self.answer(&key, now).await {
@@ -1193,7 +1198,7 @@ impl Signaling {
                     let output = self.terminate(call.listener, &key, now).map_err(failure)?;
                     self.transmit(call.listener, output.datagrams).await?;
                 }
-                self.media.release(key).map_err(failure)?;
+                self.order(Order::Release(key))?;
             }
             Effect::Bridge {
                 id,
@@ -1201,21 +1206,19 @@ impl Signaling {
                 channels,
             } => {
                 tracing::debug!(bridge = %id, generation, "bridge membership changed");
-                self.media.bridge(generation, channels).map_err(failure)?;
+                self.order(Order::bridge(generation, channels).map_err(failure)?)?;
             }
-            Effect::ReleaseBridge { generation } => {
-                self.media.release_bridge(generation).map_err(failure)?
-            }
+            Effect::ReleaseBridge { generation } => self.order(Order::ReleaseBridge(generation))?,
             Effect::DialBridge {
                 parent,
                 generation,
                 peer,
             } => match peer {
-                Some(peer) => self
-                    .media
-                    .bridge(generation, [parent, peer].into_iter().collect())
-                    .map_err(failure)?,
-                None => self.media.release_bridge(generation).map_err(failure)?,
+                Some(peer) => self.order(
+                    Order::bridge(generation, [parent, peer].into_iter().collect())
+                        .map_err(failure)?,
+                )?,
+                None => self.order(Order::ReleaseBridge(generation))?,
             },
         }
         Ok(())
@@ -1647,6 +1650,10 @@ impl Signaling {
                     },
                     None => { if !*stop.borrow() { return Err(ControlError::Adapter("Media task stopped".into())); } break; }
                 },
+                room = self.media.room(), if !self.owed.is_empty() => {
+                    room.map_err(failure)?;
+                    self.send_owed()?;
+                },
                 result = self.playbacks.join_next(), if !self.playbacks.is_empty() => {
                     let completed = result.ok_or(ControlError::Capacity)?.map_err(failure)?;
                     self.playback_completed(completed).await?;
@@ -1684,6 +1691,50 @@ impl Signaling {
         Ok(())
     }
 
+    // Sends a media order behind the owed ones, and owes it while the media queue is full.
+    // The server stops only when the media task stops taking orders.
+    fn order(&mut self, order: Order) -> Result<(), ControlError> {
+        self.send_owed()?;
+        let order = if self.owed.is_empty() {
+            match self.media.offer(order).map_err(failure)? {
+                None => return Ok(()),
+                Some(order) => order,
+            }
+        } else {
+            order
+        };
+        if self.owed.len() >= OWED_MEDIA {
+            return Err(ControlError::Adapter(
+                "Media task stopped taking orders".into(),
+            ));
+        }
+        self.owed.push_back(order);
+        Ok(())
+    }
+
+    // Sends owed media orders in order while the media queue takes them.
+    fn send_owed(&mut self) -> Result<(), ControlError> {
+        while let Some(order) = self.owed.pop_front() {
+            if let Some(order) = self.media.offer(order).map_err(failure)? {
+                self.owed.push_front(order);
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn release_attachment(&mut self, key: &CallKey, release: crate::media::AttachmentRelease) {
+        let order = Order::Release(key.clone());
+        let first = match self.owed.pop_front() {
+            Some(first) => {
+                self.owed.push_back(order);
+                first
+            }
+            None => order,
+        };
+        release.send(first);
+    }
+
     // Applies the effects of the call decisions, including the effects that applying them causes.
     async fn apply_effects(&mut self, now: u64) -> Result<(), ControlError> {
         while let Some(effect) = self.control.take_effect() {
@@ -1716,6 +1767,17 @@ impl Signaling {
 
     async fn finish_signaling(&mut self, clock: Clock) -> Result<(), ControlError> {
         let now = clock.now_ms()?;
+        // The media task stops with the server, so owed orders get one more offer and then end.
+        if let Err(error) = self.send_owed() {
+            tracing::debug!(%error, "media task stopped before the owed orders");
+        }
+        if !self.owed.is_empty() {
+            tracing::debug!(
+                owed = self.owed.len(),
+                "owed media orders end with the media task"
+            );
+            self.owed.clear();
+        }
         let mut cleanup = self.finish_registrations().await;
         cleanup = cleanup::combine(cleanup, self.close_refer_routes(now));
         cleanup = cleanup::combine(cleanup, self.finish_native().await);

@@ -1,7 +1,7 @@
 use super::{failure, Signaling};
 use crate::{
-    encryption::TlsClientContext, media_websocket::MediaLinkOptions, CallKey, ControlError,
-    Milestone, Signal,
+    encryption::TlsClientContext, media::Order, media_websocket::MediaLinkOptions, CallKey,
+    ControlError, Milestone, Signal,
 };
 use base64::Engine;
 use rusterisk_api::{ChannelId, WebSocketMediaOptions};
@@ -210,7 +210,7 @@ impl Signaling {
         completed: Completion,
     ) -> Result<(), ControlError> {
         let Some(pending) = self.websocket_admissions.remove(&completed.key) else {
-            self.media.release(completed.key).map_err(failure)?;
+            self.order(Order::Release(completed.key))?;
             return Ok(());
         };
         let admitted = completed.result.is_ok();

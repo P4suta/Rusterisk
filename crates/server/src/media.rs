@@ -17,6 +17,7 @@ mod measurements;
 mod notices;
 pub use notices::MediaNotices;
 use notices::NoticeSender;
+mod orders;
 mod probe;
 #[cfg(test)]
 mod queued;
@@ -27,6 +28,7 @@ mod playback;
 mod recording;
 mod streams;
 mod webrtc;
+pub(crate) use orders::Order;
 pub use playback::PlaybackControl;
 use playback::Playbacks;
 use recording::Recordings;
@@ -231,8 +233,8 @@ pub(crate) struct AttachmentRelease {
 }
 
 impl AttachmentRelease {
-    pub(crate) fn send(self, key: CallKey) {
-        self.command.send(Command::Release { key });
+    pub(crate) fn send(self, order: Order) {
+        self.command.send(order.command());
     }
 }
 
@@ -475,9 +477,7 @@ impl MediaPort {
         token: MediaTaskToken,
         mode: RecordingEnd,
     ) -> Result<(), MediaError> {
-        self.commands
-            .try_send(Command::EndRecording { token, mode })
-            .map_err(|_| MediaError::Capacity)
+        self.send(Order::EndRecording { token, mode })
     }
 
     pub async fn send_tone(&self, key: CallKey, tone: DtmfTone) -> Result<(), MediaError> {
@@ -570,29 +570,8 @@ impl MediaPort {
         Ok(release)
     }
 
-    // The media task reports the result of this direction change as a notice with the same number.
-    pub(crate) fn start_peer_direction(
-        &self,
-        key: CallKey,
-        direction: PeerMediaDirection,
-        gate: Gate,
-        generated_audio_gate: Gate,
-        serial: u64,
-    ) -> Result<(), MediaError> {
-        self.commands
-            .try_send(Command::PeerDirection {
-                key,
-                direction,
-                gate,
-                generated_audio_gate,
-                reply: self.completion(serial)?,
-            })
-            .map_err(|_| MediaError::Capacity)
-    }
     pub fn release(&self, key: CallKey) -> Result<(), MediaError> {
-        self.commands
-            .try_send(Command::Release { key })
-            .map_err(|_| MediaError::Capacity)
+        self.send(Order::Release(key))
     }
     pub async fn attach_audiosocket(
         &self,
@@ -615,17 +594,10 @@ impl MediaPort {
             .map_err(|error| MediaError::Transport(error.to_string()))?
     }
     pub fn bridge(&self, id: u64, members: Vec<CallKey>) -> Result<(), MediaError> {
-        if members.len() > 64 {
-            return Err(MediaError::Capacity);
-        }
-        self.commands
-            .try_send(Command::Bridge { id, members })
-            .map_err(|_| MediaError::Capacity)
+        self.send(Order::bridge(id, members)?)
     }
     pub fn release_bridge(&self, id: u64) -> Result<(), MediaError> {
-        self.commands
-            .try_send(Command::ReleaseBridge { id })
-            .map_err(|_| MediaError::Capacity)
+        self.send(Order::ReleaseBridge(id))
     }
     pub fn gate(&self, key: CallKey, gate: Gate) -> Result<(), MediaError> {
         self.gate_with_generated_audio(key, gate, gate)
@@ -636,13 +608,11 @@ impl MediaPort {
         gate: Gate,
         generated_audio_gate: Gate,
     ) -> Result<(), MediaError> {
-        self.commands
-            .try_send(Command::Gate {
-                key,
-                gate,
-                generated_audio_gate,
-            })
-            .map_err(|_| MediaError::Capacity)
+        self.send(Order::Gate {
+            key,
+            gate,
+            generated_audio_gate,
+        })
     }
     pub async fn peer_direction(
         &self,

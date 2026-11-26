@@ -5,6 +5,8 @@ pub(crate) enum Queued {
     Reservation,
     Stop,
     Release,
+    Gate,
+    Direction,
     Other,
 }
 
@@ -31,6 +33,10 @@ impl MediaHub {
             Queued::Stop
         } else if matches!(command, Command::Release { .. }) {
             Queued::Release
+        } else if matches!(command, Command::Gate { .. }) {
+            Queued::Gate
+        } else if matches!(command, Command::PeerDirection { .. }) {
+            Queued::Direction
         } else {
             Queued::Other
         })

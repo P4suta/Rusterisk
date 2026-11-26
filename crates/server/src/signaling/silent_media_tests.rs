@@ -586,14 +586,16 @@ async fn an_expired_attachment_releases_through_a_full_command_queue() -> Result
         let (key, _subscription, answered) = dialed(fixture).await?;
         fixture.receive(answered, 0).await?;
         while fixture.signaling.media.bridge(71, Vec::new()).is_ok() {}
+        fixture
+            .signaling
+            .order(crate::media::Order::ReleaseBridge(71))?;
         fixture.signaling.expire_pending(5000).await?;
-        let mut releases = 0;
         while let Some(command) = fixture.queued() {
-            if command == Queued::Release {
-                releases += 1;
-            }
+            assert_eq!(command, Queued::Other);
         }
-        assert_eq!(releases, 1);
+        fixture.signaling.send_owed()?;
+        assert_eq!(fixture.queued(), Some(Queued::Release));
+        assert_eq!(fixture.queued(), None);
         assert_eq!(fixture.signaling.waiting_serial(&key), None);
         Ok(())
     })
@@ -684,7 +686,8 @@ async fn destroyed(subscription: &mut crate::Subscription) -> Result<u16, Contro
 }
 
 #[tokio::test]
-async fn a_direction_change_that_cannot_start_ends_its_call_and_not_the_signaling_task(
+// A direction change behind a full queue waits owed, and its call ends at the wait's deadline.
+async fn a_direction_change_behind_a_full_queue_ends_its_call_at_its_deadline(
 ) -> Result<(), ControlError> {
     silent(async |fixture: &mut Silent| {
         let (key, mut subscription, _answered) = dialed(fixture).await?;
@@ -698,6 +701,9 @@ async fn a_direction_change_that_cannot_start_ends_its_call_and_not_the_signalin
                 generated_audio_gate: AudioGate::Open,
             })
             .await?;
+        assert!(!fixture.signaling.owed.is_empty());
+        let clock = fixture.signaling.controller.clock();
+        fixture.signaling.turn(5000, clock).await?;
         assert_eq!(destroyed(&mut subscription).await?, 21);
         Ok(())
     })
@@ -872,7 +878,7 @@ async fn a_direction_change_leaves_the_turn_free() -> Result<(), ControlError> {
                 generated_audio_gate: AudioGate::Open,
             })
             .await?;
-        assert_eq!(fixture.queued(), Some(Queued::Other));
+        assert_eq!(fixture.queued(), Some(Queued::Direction));
         fixture.registers().await
     })
     .await
@@ -964,6 +970,160 @@ async fn a_control_request_finishes_while_an_attachment_waits_for_a_silent_media
         let created = fixture.answers(bridge()?).await?;
         assert!((200..300).contains(&created.status));
         assert!(fixture.signaling.waits(&key));
+        Ok(())
+    })
+    .await
+}
+
+impl Silent {
+    // Fills the media queue with releases of calls that never existed and returns their count.
+    fn fill(&mut self) -> Result<usize, ControlError> {
+        let mut filled = 0;
+        while self
+            .signaling
+            .media
+            .release(CallKey {
+                id: id(&format!("filler-{filled}"))?,
+                generation: 1,
+            })
+            .is_ok()
+        {
+            filled += 1;
+        }
+        Ok(filled)
+    }
+
+    // Serves signaling while the media queue gives up its commands one at a time.
+    async fn drains(&mut self, count: usize) -> Result<Vec<Queued>, ControlError> {
+        let mut media = self.media.take().ok_or(ControlError::Capacity)?;
+        let (stop, mut stopped) = watch::channel(false);
+        let clock = self.signaling.controller.clock();
+        let mut serving = std::pin::pin!(self.signaling.serve(&mut stopped, clock));
+        let taken = tokio::time::timeout(Duration::from_secs(2), async {
+            let mut taken = Vec::with_capacity(count);
+            while taken.len() < count {
+                match media.take_queued() {
+                    Some(queued) => taken.push(queued),
+                    None => tokio::task::yield_now().await,
+                }
+            }
+            taken
+        });
+        let result = tokio::select! {
+            taken = taken => taken.map_err(|_| ControlError::Invalid("The owed commands stayed owed")),
+            result = &mut serving => {
+                return combine(Err(ControlError::Invalid("Signaling stopped before the queue drained")), result).map(|()| Vec::new());
+            }
+        };
+        stop.send_replace(true);
+        let served = serving.await;
+        self.media = Some(media);
+        match (result, served) {
+            (Ok(taken), Ok(())) => Ok(taken),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+}
+
+// A hangup arrives while the media queue is full.
+// The composed task owes the release, answers signaling meanwhile, and sends it in order.
+#[tokio::test]
+async fn a_release_stays_owed_while_the_media_queue_is_full() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let filled = fixture.fill()?;
+        let owed = CallKey {
+            id: id("owed")?,
+            generation: 1,
+        };
+        fixture.turn(Effect::Release { key: owed }).await?;
+        fixture
+            .turn(Effect::ReleaseBridge { generation: 7 })
+            .await?;
+        fixture.registers().await?;
+        let taken = fixture.drains(filled + 2).await?;
+        assert!(taken[..filled]
+            .iter()
+            .all(|queued| *queued == Queued::Release));
+        assert_eq!(taken[filled..], [Queued::Release, Queued::Other]);
+        assert!(fixture.queued().is_none());
+        Ok(())
+    })
+    .await
+}
+
+// The media queue frees one place while the task owes a gate, and a direction change for the call follows.
+#[tokio::test]
+async fn a_direction_change_follows_a_gate_that_the_task_owes() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (key, _token) = unattached(fixture)?;
+        let filled = fixture.fill()?;
+        fixture
+            .turn(Effect::Gate {
+                key: key.clone(),
+                gate: AudioGate::Closed,
+                generated_audio_gate: AudioGate::Closed,
+            })
+            .await?;
+        assert_eq!(fixture.queued(), Some(Queued::Release));
+        fixture
+            .turn(Effect::PeerDirection {
+                key,
+                direction: PeerMediaDirection::SendOnly,
+                gate: AudioGate::Open,
+                generated_audio_gate: AudioGate::Open,
+            })
+            .await?;
+        let taken = fixture.drains(filled + 1).await?;
+        assert_eq!(taken[filled - 1..], [Queued::Gate, Queued::Direction]);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_full_owed_queue_uses_the_slot_the_media_task_just_freed() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let filled = fixture.fill()?;
+        assert_eq!(filled, super::OWED_MEDIA);
+        let limit = u64::try_from(super::OWED_MEDIA).map_err(failure)?;
+        for generation in 0..limit {
+            fixture.turn(Effect::ReleaseBridge { generation }).await?;
+        }
+        assert_eq!(fixture.queued(), Some(Queued::Release));
+        fixture
+            .turn(Effect::ReleaseBridge { generation: limit })
+            .await?;
+        let pending = &fixture.signaling.owed;
+        assert_eq!(pending.len(), super::OWED_MEDIA);
+        for (order, generation) in pending.iter().zip(1..=limit) {
+            assert!(
+                matches!(order, crate::media::Order::ReleaseBridge(value) if *value == generation)
+            );
+        }
+        let taken = fixture.drains(filled + super::OWED_MEDIA).await?;
+        assert!(taken[filled - 1..]
+            .iter()
+            .all(|command| *command == Queued::Other));
+        assert!(fixture.queued().is_none());
+        Ok(())
+    })
+    .await
+}
+
+// A media task that takes no orders stops signaling once the owed queue holds a second queue.
+#[tokio::test]
+async fn owed_orders_beyond_one_more_queue_stop_signaling() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let filled = fixture.fill()?;
+        for generation in 0..u64::try_from(filled).map_err(failure)? {
+            fixture
+                .signaling
+                .order(crate::media::Order::ReleaseBridge(generation))?;
+        }
+        let refused = fixture
+            .signaling
+            .order(crate::media::Order::ReleaseBridge(u64::MAX));
+        assert!(matches!(refused, Err(ControlError::Adapter(_))));
         Ok(())
     })
     .await

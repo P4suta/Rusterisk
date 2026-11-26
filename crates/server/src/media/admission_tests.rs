@@ -317,13 +317,16 @@ async fn ordinary_notices_keep_their_capacity_while_a_webrtc_attachment_waits(
 async fn accepted_direction_keeps_its_notice_slot_under_load() -> Result<(), MediaError> {
     let (handle, mut hub, mut notices) = MediaHub::new(4);
     let key = key()?;
-    handle.start_peer_direction(
-        key.clone(),
-        PeerMediaDirection::SendOnly,
-        Gate::Open,
-        Gate::Open,
-        1,
-    )?;
+    let direction = |serial| {
+        handle.direction_order(
+            key.clone(),
+            PeerMediaDirection::SendOnly,
+            Gate::Open,
+            Gate::Open,
+            serial,
+        )
+    };
+    handle.send(direction(1)?)?;
     let mut pending = Vec::new();
     while let Ok(slot) = hub.notices.completions.clone().try_reserve_owned() {
         pending.push(slot);
@@ -332,13 +335,7 @@ async fn accepted_direction_keeps_its_notice_slot_under_load() -> Result<(), Med
     for _ in 0..128 {
         hub.notice(MediaNotice::Connected { key: key.clone() })?;
     }
-    let refused = handle.start_peer_direction(
-        key.clone(),
-        PeerMediaDirection::SendOnly,
-        Gate::Open,
-        Gate::Open,
-        2,
-    );
+    let refused = direction(2);
     settle(&mut hub)?;
     let mut completed = Vec::new();
     while let Ok(notice) = notices.try_recv() {
@@ -358,13 +355,14 @@ async fn a_direction_change_without_a_reply_reports_whether_it_applied() -> Resu
     let key = key()?;
     let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
     for (serial, applied) in [(41, false), (42, true)] {
-        handle.start_peer_direction(
+        let order = handle.direction_order(
             key.clone(),
             PeerMediaDirection::SendOnly,
             Gate::OutgoingMuted,
             Gate::OutgoingMuted,
             serial,
         )?;
+        handle.send(order)?;
         settle(&mut hub)?;
         let reported = matches!(
             notices.try_recv(),
@@ -394,7 +392,7 @@ async fn a_replacement_webrtc_answer_survives_release_of_the_expired_attachment(
         AttachmentMode::Early,
         1,
     )?;
-    expired.send(key.clone());
+    expired.send(Order::Release(key.clone()));
     let _replacement = handle.start_webrtc_attachment(
         key.clone(),
         browser()?,
