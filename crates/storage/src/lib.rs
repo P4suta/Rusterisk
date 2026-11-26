@@ -4,6 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 mod history;
+mod journal;
 mod preparation;
 mod recording_copy;
 mod recording_file;
@@ -145,8 +146,11 @@ impl Store {
                 transaction.execute_batch("ALTER TABLE calls ADD COLUMN channel TEXT NOT NULL DEFAULT ''; ALTER TABLE calls ADD COLUMN generation TEXT NOT NULL DEFAULT '0'; UPDATE calls SET channel=id; PRAGMA user_version=2;")?;
                 transaction.commit()?;
             }
-            2 => {}
+            2 | 3 => {}
             _ => return Err(StorageError::UnknownSchema),
+        }
+        if version < 3 {
+            journal::migrate(&mut connection)?;
         }
         connection.execute("UPDATE calls SET outcome='interrupted', ended_at=COALESCE(ended_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE outcome='active'", [])?;
         let mut count = 0usize;
