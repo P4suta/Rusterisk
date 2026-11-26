@@ -9,7 +9,7 @@ use std::{
     fs, io,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{sync::watch, task::JoinSet};
 
@@ -23,17 +23,21 @@ struct ReceivedAudio {
 }
 
 impl ReceivedAudio {
-    fn hear(&mut self, at: Duration) {
+    fn hear(&mut self, at: Duration) -> Result<(), ControlError> {
         if self.first.is_some() {
-            self.longest_gap = self.longest_gap.max(at.saturating_sub(self.last));
+            let gap = at
+                .checked_sub(self.last)
+                .ok_or(ControlError::Invalid("Packet clock moved backward"))?;
+            self.longest_gap = self.longest_gap.max(gap);
         } else {
             self.first = Some(at);
         }
         self.last = at;
+        Ok(())
     }
 
     fn first_if_continuous(&self, end: Duration) -> Option<Duration> {
-        let gap = self.longest_gap.max(end.saturating_sub(self.last));
+        let gap = self.longest_gap.max(end.checked_sub(self.last)?);
         self.first.filter(|first| {
             self.last.saturating_sub(*first) >= Duration::from_secs(1)
                 && gap <= Wait::Quiet.duration()
@@ -42,24 +46,36 @@ impl ReceivedAudio {
 }
 
 #[test]
-fn a_burst_or_an_audio_gap_cannot_validate_a_second_of_load() {
+fn a_burst_or_an_audio_gap_cannot_validate_a_second_of_load() -> Result<(), ControlError> {
     let mut audio = ReceivedAudio::default();
     let end = Duration::from_millis(1100);
     assert_eq!(audio.first_if_continuous(end), None);
     for n in 1..=5 {
-        audio.hear(Duration::from_millis(n * 20));
+        audio.hear(Duration::from_millis(n * 20))?;
     }
     assert_eq!(audio.first_if_continuous(end), None);
-    audio.hear(end);
+    audio.hear(end)?;
     assert_eq!(audio.first_if_continuous(end), None);
     let mut audio = ReceivedAudio::default();
     for n in 1..=55 {
-        audio.hear(Duration::from_millis(n * 20));
+        audio.hear(Duration::from_millis(n * 20))?;
     }
     assert_eq!(
         audio.first_if_continuous(end),
         Some(Duration::from_millis(20))
     );
+    Ok(())
+}
+
+#[test]
+fn backward_packet_or_shutdown_timestamps_reject_the_load_sample() -> Result<(), ControlError> {
+    let mut audio = ReceivedAudio::default();
+    for n in 1..=55 {
+        audio.hear(Duration::from_millis(n * 20))?;
+    }
+    assert_eq!(audio.first_if_continuous(Duration::from_millis(1099)), None);
+    assert!(audio.hear(Duration::from_millis(1050)).is_err());
+    Ok(())
 }
 
 #[test]
@@ -101,6 +117,7 @@ fn resident_kib(pid: u32) -> Result<u64, ControlError> {
 
 struct Leg {
     peer: SocketPair,
+    timestamps: Vec<u8>,
     target: SocketAddr,
     sender: RtpSender,
     next_packet: tokio::time::Instant,
@@ -122,9 +139,70 @@ async fn a_negotiated_phone_sends_audio_before_its_bridge_exists() -> Result<(),
     Ok(())
 }
 
+#[tokio::test]
+async fn first_audio_is_timestamped_before_a_ready_packet_is_read() -> Result<(), ControlError> {
+    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let address = peer.local_addr().map_err(failure)?;
+    let sender = tokio::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .map_err(failure)?;
+    let mut leg = Leg::negotiated(peer, sender.local_addr().map_err(failure)?, 0).await?;
+    sender
+        .send_to(b"received", address)
+        .await
+        .map_err(failure)?;
+    leg.peer.data().readable().await.map_err(failure)?;
+    let ready = SystemTime::now();
+    let mut bytes = [0; 16];
+    let (length, arrival) = leg.receive(&mut bytes).await?;
+    assert_eq!(&bytes[..length], b"received");
+    assert!(
+        arrival <= ready,
+        "the receiver included time spent waiting in its socket"
+    );
+    Ok(())
+}
+
 impl Leg {
-    async fn open(client: &Client, server: SocketAddr, n: u8) -> Result<Self, ControlError> {
-        let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    async fn receive(&mut self, buffer: &mut [u8]) -> Result<(usize, SystemTime), ControlError> {
+        use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
+        use std::{io::IoSliceMut, os::fd::AsRawFd};
+        let socket = self.peer.data();
+        socket
+            .async_io(tokio::io::Interest::READABLE, || {
+                let mut slices = [IoSliceMut::new(buffer)];
+                let packet = recvmsg::<()>(
+                    socket.as_raw_fd(),
+                    &mut slices,
+                    Some(&mut self.timestamps),
+                    MsgFlags::empty(),
+                )?;
+                let arrival = packet
+                    .cmsgs()?
+                    .find_map(|message| match message {
+                        ControlMessageOwned::ScmTimestampns(time) => {
+                            UNIX_EPOCH.checked_add(time.into())
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Missing packet arrival timestamp",
+                        )
+                    })?;
+                Ok((packet.bytes, arrival))
+            })
+            .await
+            .map_err(failure)
+    }
+
+    async fn open(
+        peer: SocketPair,
+        client: &Client,
+        server: SocketAddr,
+        n: u8,
+    ) -> Result<Self, ControlError> {
         let name = format!("load-{n}");
         let remote = peer.local_addr().map_err(failure)?.to_string();
         let channel: Channel = request(
@@ -158,8 +236,15 @@ impl Leg {
     }
 
     async fn negotiated(peer: SocketPair, target: SocketAddr, n: u8) -> Result<Self, ControlError> {
+        nix::sys::socket::setsockopt(
+            peer.data(),
+            nix::sys::socket::sockopt::ReceiveTimestampns,
+            &true,
+        )
+        .map_err(failure)?;
         let mut leg = Self {
             peer,
+            timestamps: nix::cmsg_space!(nix::sys::time::TimeSpec),
             target,
             sender: RtpSender::new(AudioFormat::Pcmu, 0, [n + 1; 10]).map_err(failure)?,
             next_packet: tokio::time::Instant::now() + Duration::from_millis(20),
@@ -187,7 +272,7 @@ impl Leg {
 
     async fn drive(
         &mut self,
-        start: Instant,
+        start: SystemTime,
         mut stop: watch::Receiver<bool>,
     ) -> Result<Duration, ControlError> {
         let expected = if self.signal > 0 { -7000 } else { 4000 };
@@ -197,12 +282,12 @@ impl Leg {
         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
-                _ = stop.changed() => return audio.first_if_continuous(start.elapsed())
+                _ = stop.changed() => return audio.first_if_continuous(start.elapsed().map_err(failure)?)
                     .ok_or(ControlError::Invalid("Peer did not receive continuous audio at load")),
                 _ = clock.tick() => self.transmit().await?,
-                received = self.peer.data().recv_from(&mut buffer) => {
-                    let (length, _) = received.map_err(failure)?;
-                    let received_at = start.elapsed();
+                received = self.receive(&mut buffer) => {
+                    let (length, arrived) = received?;
+                    let received_at = arrived.duration_since(start).map_err(failure)?;
                     let packet = RtpPacket::parse(&buffer[..length]).map_err(failure)?;
                     if packet.payload_type() == 0
                         && packet.payload().len() == 160
@@ -210,7 +295,7 @@ impl Leg {
                             (i32::from(mulaw_decode(*sample)) - expected).abs() < 300
                         })
                     {
-                        audio.hear(received_at);
+                        audio.hear(received_at)?;
                     }
                 }
             }
@@ -244,9 +329,11 @@ async fn measure(process: &ChildServer, count: u8) -> Result<Metrics, ControlErr
         let mut calls = JoinSet::new();
         let (done, stop) = watch::channel(false);
         for pair in 0..count / 2 {
-            let start = Instant::now();
-            for n in [2 * pair, 2 * pair + 1] {
-                let mut leg = Leg::open(&client, addr, n).await?;
+            let bind = || SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure);
+            let phones = [(2 * pair, bind()?), (2 * pair + 1, bind()?)];
+            let start = SystemTime::now();
+            for (n, peer) in phones {
+                let mut leg = Leg::open(peer, &client, addr, n).await?;
                 let lifetime = stop.clone();
                 calls.spawn(async move {
                     let first = leg.drive(start, lifetime).await?;
