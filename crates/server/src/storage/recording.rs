@@ -3,7 +3,6 @@ use rusterisk_api::{ChannelId, RecordingIfExists};
 use rusterisk_media::Frame;
 use rusterisk_storage::{RecordingPreparation, StorageError, Store};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use tokio::sync::{mpsc, oneshot};
 
 const MAX_RECORDINGS: usize = 64;
@@ -264,16 +263,14 @@ struct Entry {
 }
 
 pub(super) struct RecordingSet {
-    root: PathBuf,
     generation: u64,
     entries: BTreeMap<RecordingKey, Entry>,
     messages: mpsc::Receiver<RecordingMessage>,
 }
 
 impl RecordingSet {
-    pub fn new(root: PathBuf, messages: mpsc::Receiver<RecordingMessage>) -> Self {
+    pub fn new(messages: mpsc::Receiver<RecordingMessage>) -> Self {
         Self {
-            root,
             generation: 0,
             entries: BTreeMap::new(),
             messages,
@@ -282,6 +279,7 @@ impl RecordingSet {
 
     pub fn begin(
         &mut self,
+        store: &Store,
         name: ChannelId,
         rate: u32,
         policy: RecordingIfExists,
@@ -298,7 +296,7 @@ impl RecordingSet {
             .generation
             .checked_add(1)
             .ok_or(StorageError::Capacity)?;
-        let recorder = RecordingPreparation::create(&self.root, name.as_str(), rate, policy)?;
+        let recorder = store.prepare_recording(name.as_str(), rate, policy)?;
         self.generation = generation;
         let key = RecordingKey(generation);
         self.entries.insert(
@@ -343,7 +341,7 @@ impl RecordingSet {
             .any(|entry| !entry.recorder.is_ready())
     }
 
-    pub fn pump(&mut self, store: &mut Store) {
+    pub fn pump(&mut self) {
         let mut cancelled = Vec::new();
         for (key, entry) in &mut self.entries {
             if entry
@@ -406,7 +404,7 @@ impl RecordingSet {
                     reply,
                     lifetime,
                 } => {
-                    respond(reply, self.finish(&key, store, trim_milliseconds));
+                    respond(reply, self.finish(&key, trim_milliseconds));
                     drop(lifetime);
                 }
                 RecordingMessage::Cancel {
@@ -429,18 +427,13 @@ impl RecordingSet {
         }
     }
 
-    fn finish(
-        &mut self,
-        key: &RecordingKey,
-        store: &mut Store,
-        trim_milliseconds: u64,
-    ) -> Result<(), StorageError> {
+    fn finish(&mut self, key: &RecordingKey, trim_milliseconds: u64) -> Result<(), StorageError> {
         let entry = self.entries.remove(key).ok_or(StorageError::InvalidState)?;
         if let Some(error) = entry.failure {
             return Err(error);
         }
         entry.recorder.finish_with_tail_trim(trim_milliseconds)?;
-        store.recording_finished(entry.name.as_str())
+        Ok(())
     }
 
     fn cancel(&mut self, key: &RecordingKey) -> Result<(), StorageError> {
@@ -473,7 +466,7 @@ mod tests {
         let root = tempfile::tempdir()?;
         let mut store = Store::open(root.path())?;
         let (recording, inbox) = mpsc::channel(4);
-        let mut recordings = RecordingSet::new(root.path().to_owned(), inbox);
+        let mut recordings = RecordingSet::new(inbox);
         let mut playbacks = crate::storage::PlaybackSet::new(root.path().to_owned());
         let mut files = crate::storage::FileSet::new();
         let (commands, mut receiver) = mpsc::channel(1);
@@ -510,7 +503,7 @@ mod tests {
         assert!(wakes.is_empty());
         let (finished, ()) = tokio::join!(biased; sink.finish(), async {
             crate::storage::drain_commands(&mut store, &mut recordings, &mut playbacks, &mut files, &mut receiver);
-            recordings.pump(&mut store);
+            recordings.pump();
         });
         finished?;
         let mut reader =
@@ -544,17 +537,18 @@ mod tests {
     fn append_copying_yields_between_bounded_steps_and_other_recordings_keep_progressing(
     ) -> Result<(), WorkerError> {
         let directory = tempfile::tempdir()?;
-        let mut store = Store::open(directory.path())?;
+        let store = Store::open(directory.path())?;
         let mut original = rusterisk_storage::Recorder::create(directory.path(), "bounded", 8000)?;
         for _ in 0..100 {
             original.write(Frame::new(&[1234; 160], 8000).map_err(StorageError::from)?)?;
         }
         original.finish()?;
         let (messages, inbox) = mpsc::channel(MESSAGE_CAPACITY);
-        let mut recordings = RecordingSet::new(directory.path().to_owned(), inbox);
+        let mut recordings = RecordingSet::new(inbox);
         let (_frames, input) = mpsc::channel(3);
         let (_lifetime, receiver) = oneshot::channel();
         let append = recordings.begin(
+            &store,
             name()?,
             8000,
             rusterisk_api::RecordingIfExists::Append,
@@ -565,7 +559,7 @@ mod tests {
         assert_eq!(std::fs::metadata(&path)?.len(), 44);
         let (reply, mut response) = oneshot::channel();
         recordings.admit(append, reply);
-        recordings.pump(&mut store);
+        recordings.pump();
         assert_eq!(std::fs::metadata(&path)?.len(), 44 + 8192);
         assert!(matches!(
             response.try_recv(),
@@ -574,6 +568,7 @@ mod tests {
         let (frames, input) = mpsc::channel(3);
         let (_lifetime, receiver) = oneshot::channel();
         let other = recordings.begin(
+            &store,
             ChannelId::try_from("other".to_owned()).map_err(|_| WorkerError::Invalid)?,
             8000,
             rusterisk_api::RecordingIfExists::Fail,
@@ -581,8 +576,8 @@ mod tests {
             receiver,
         )?;
         queue_audio(&messages, frames, other, 5678)?;
-        recordings.pump(&mut store);
-        recordings.finish(&other, &mut store, 0)?;
+        recordings.pump();
+        recordings.finish(&other, 0)?;
         assert_eq!(
             rusterisk_storage::WaveReader::open(&directory.path().join("recordings/other.wav"))?
                 .read_frame()?
@@ -591,10 +586,10 @@ mod tests {
             [5678; 160]
         );
         assert_eq!(std::fs::metadata(&path)?.len(), 44 + 16384);
-        recordings.pump(&mut store);
-        recordings.pump(&mut store);
+        recordings.pump();
+        recordings.pump();
         assert!(response.try_recv().map_err(|_| WorkerError::Invalid)?? == append);
-        recordings.finish(&append, &mut store, 0)?;
+        recordings.finish(&append, 0)?;
         assert_eq!(
             std::fs::metadata(directory.path().join("recordings/bounded.wav"))?.len(),
             32044
@@ -613,11 +608,12 @@ mod tests {
         original.finish()?;
         let previous = std::fs::read(directory.path().join("recordings/bounded.wav"))?;
         let (_messages, inbox) = mpsc::channel(MESSAGE_CAPACITY);
-        let mut store = Store::open(directory.path())?;
-        let mut recordings = RecordingSet::new(directory.path().to_owned(), inbox);
+        let store = Store::open(directory.path())?;
+        let mut recordings = RecordingSet::new(inbox);
         let (_frames, input) = mpsc::channel(3);
         let (_lifetime, receiver) = oneshot::channel();
         let append = recordings.begin(
+            &store,
             name()?,
             8000,
             rusterisk_api::RecordingIfExists::Append,
@@ -627,7 +623,7 @@ mod tests {
         let (reply, response) = oneshot::channel();
         recordings.admit(append, reply);
         drop(response);
-        recordings.pump(&mut store);
+        recordings.pump();
         assert!(!directory.path().join("recordings/bounded.append").exists());
         assert!(!recordings.is_preparing());
         assert_eq!(
@@ -700,12 +696,13 @@ mod tests {
     #[test]
     fn stale_operations_cannot_remove_a_reused_recording_name() -> Result<(), WorkerError> {
         let directory = tempfile::tempdir()?;
-        let mut store = Store::open(directory.path())?;
+        let store = Store::open(directory.path())?;
         let (messages, inbox) = mpsc::channel(MESSAGE_CAPACITY);
-        let mut recordings = RecordingSet::new(directory.path().to_owned(), inbox);
+        let mut recordings = RecordingSet::new(inbox);
         let (_frames, input) = mpsc::channel(3);
         let (lifetime, receiver) = oneshot::channel();
         let stale = recordings.begin(
+            &store,
             name()?,
             8000,
             rusterisk_api::RecordingIfExists::Fail,
@@ -713,11 +710,12 @@ mod tests {
             receiver,
         )?;
         drop(lifetime);
-        recordings.pump(&mut store);
+        recordings.pump();
         assert!(!directory.path().join("recordings/bounded.partial").exists());
         let (frames, input) = mpsc::channel(3);
         let (_lifetime, receiver) = oneshot::channel();
         let fresh = recordings.begin(
+            &store,
             name()?,
             8000,
             rusterisk_api::RecordingIfExists::Fail,
@@ -729,12 +727,12 @@ mod tests {
             Err(StorageError::InvalidState)
         ));
         assert!(matches!(
-            recordings.finish(&stale, &mut store, 0),
+            recordings.finish(&stale, 0),
             Err(StorageError::InvalidState)
         ));
         queue_audio(&messages, frames, fresh, 2)?;
-        recordings.pump(&mut store);
-        recordings.finish(&fresh, &mut store, 0)?;
+        recordings.pump();
+        recordings.finish(&fresh, 0)?;
         assert_eq!(store.recordings()?.len(), 1);
         Ok(())
     }

@@ -292,6 +292,12 @@ async fn forced_process_exit_recovers_audio_and_history_through_the_next_server_
                     "server exited without forced termination".into(),
                 ));
             }
+            let db = rusqlite::Connection::open(data.join("calls.sqlite3")).map_err(failure)?;
+            let writing: u32 = db.query_row(
+                "SELECT count(*) FROM recording_operations WHERE name='interrupted' AND operation='create' AND phase='writing'",
+                [], |row| row.get(0),
+            ).map_err(failure)?;
+            assert_eq!(writing, 1);
             Ok(())
         })
         .await
