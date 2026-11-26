@@ -137,32 +137,12 @@ fn add_runtime(fixtures: &mut [archive_fixture::Fixture; 3]) -> io::Result<()> {
 }
 
 fn inputs(source: &Path) -> io::Result<()> {
-    for path in [
-        "rust-toolchain.toml",
-        "clippy.toml",
-        "deny.toml",
-        "justfile",
-        ".gitignore",
-        "crates/core/proofs/Cargo.lock",
-        "crates/core/assurance/Cargo.lock",
-    ] {
-        captured_fixture::write(source, path, b"release fixture\n")?;
-    }
+    super::source::write_fixture_inputs(source)?;
     captured_fixture::write(
         source,
         "docs/server-distribution.md",
         b"Server fixture startup instructions.\n",
     )?;
-    for directory in [
-        "api",
-        "containers",
-        ".github/workflows",
-        "tests/interop/node-ari-client",
-        "tests/interop/sipp",
-        "docs/adr",
-    ] {
-        fs::create_dir_all(source.join(directory))?;
-    }
     for (path, bytes) in [
         (
             "config/http.conf",
