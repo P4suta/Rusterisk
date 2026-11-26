@@ -202,6 +202,10 @@ impl Store {
 
     fn reconcile_recordings(&mut self) -> Result<(), StorageError> {
         let recordings = self.recordings()?;
+        if recordings.is_empty() {
+            self.connection.execute("DELETE FROM recordings", [])?;
+            return Ok(());
+        }
         let transaction = self.connection.transaction()?;
         transaction.execute_batch(
             "CREATE TEMP TABLE published_recordings (name TEXT PRIMARY KEY NOT NULL)",
@@ -711,4 +715,15 @@ impl WaveReader {
         self.remaining -= size as u32;
         Ok(Some(Frame::new(&samples[..size / 2], self.rate)?))
     }
+}
+
+#[test]
+fn opening_an_empty_store_does_not_allocate_a_temporary_catalog() -> Result<(), StorageError> {
+    let root = tempfile::tempdir()?;
+    let store = Store::open(root.path())?;
+    let pages: i64 = store
+        .connection
+        .query_row("PRAGMA temp.page_count", [], |row| row.get(0))?;
+    assert_eq!(pages, 0);
+    Ok(())
 }
