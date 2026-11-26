@@ -1,6 +1,3 @@
-use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use rusterisk_config::{Config, ConfigError, MusicSort};
 
 const HTTP: &str = "[general]\nbindaddr=127.0.0.1\n";
@@ -355,21 +352,8 @@ fn fixture_error(error: impl std::fmt::Display) -> ConfigError {
     }
 }
 
-fn fixture_directory() -> Result<PathBuf, ConfigError> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(fixture_error)?
-        .as_nanos();
-    let directory = std::env::temp_dir().join(format!(
-        "rusterisk-music-settings-{}-{timestamp}",
-        std::process::id()
-    ));
-    std::fs::create_dir(&directory).map_err(fixture_error)?;
-    Ok(directory)
-}
-
 fn load_from_file(source: Option<&str>) -> Result<Config, ConfigError> {
-    let directory = fixture_directory()?;
+    let directory = tempfile::tempdir().map_err(fixture_error)?;
     let result = (|| {
         for (file, contents) in [
             ("http.conf", HTTP),
@@ -378,14 +362,15 @@ fn load_from_file(source: Option<&str>) -> Result<Config, ConfigError> {
             ("rtp.conf", ""),
             ("extensions.conf", ""),
         ] {
-            std::fs::write(directory.join(file), contents).map_err(fixture_error)?;
+            std::fs::write(directory.path().join(file), contents).map_err(fixture_error)?;
         }
         if let Some(source) = source {
-            std::fs::write(directory.join("musiconhold.conf"), source).map_err(fixture_error)?;
+            std::fs::write(directory.path().join("musiconhold.conf"), source)
+                .map_err(fixture_error)?;
         }
-        Config::load(&directory)
+        Config::load(directory.path())
     })();
-    let cleanup = std::fs::remove_dir_all(&directory).map_err(fixture_error);
+    let cleanup = directory.close().map_err(fixture_error);
     match (result, cleanup) {
         (Ok(config), Ok(())) => Ok(config),
         (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
