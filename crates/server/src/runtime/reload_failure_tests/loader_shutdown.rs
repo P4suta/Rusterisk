@@ -57,10 +57,12 @@ async fn exercise(data: &Path) -> Result<(), ControlError> {
             Ok(replacement)
         },
     );
+    // The loader starts before the server, so that the shutdown cannot cancel it before it runs.
+    let started = bounded(async { observed_start.await.map_err(failure) }).await;
     let task = tokio::spawn(server.run());
     let primary = async {
         addresses.as_ref().map_err(Clone::clone)?;
-        bounded(async { observed_start.await.map_err(failure) }).await?;
+        started?;
         let deadline = bounded(async { observed_deadline.await.map_err(failure) }).await?;
         tokio::time::pause();
         tokio::time::advance(Duration::from_secs(11)).await;
