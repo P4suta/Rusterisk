@@ -27,6 +27,8 @@ use rusterisk_test_support::Wait;
 use std::collections::BTreeSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
+#[path = "sip_call/call_paths.rs"]
+mod call_paths;
 #[path = "sip_call/early_music.rs"]
 mod early_music;
 #[path = "sip_call/late_answer.rs"]

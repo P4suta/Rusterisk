@@ -1,7 +1,8 @@
 use super::{
-    answer_dialog_at, exchange, failure, final_response, finish_bye,
+    answer_dialog_at,
+    call_paths::{CallPath, Phones},
+    exchange, failure, final_response, finish_bye,
     process::{combine, ChildServer},
-    registration::register,
     start_invitation_as,
     transfer_peer::Peer,
     transfer_signals::acknowledge,
@@ -44,12 +45,13 @@ async fn dialog_request(
     Ok(())
 }
 
-async fn call(
+pub(super) async fn call(
     target: SocketAddr,
     caller: &Peer,
     account: &Auth,
     number: &str,
     callee: &Peer,
+    expected_user: &str,
 ) -> Result<(), ControlError> {
     start_invitation_as(
         &caller.signal,
@@ -64,7 +66,8 @@ async fn call(
         &account.username,
         account.password.expose(),
     )
-    .await?;
+    .await
+    .map_err(|error| failure(format!("INVITE {number} authentication: {error}")))?;
     let caller_answer = async {
         let answer = final_response(&caller.signal).await?;
         if answer.status_code.code() != 200 {
@@ -77,12 +80,18 @@ async fn call(
         Ok(answer)
     };
     let callee_answer = async {
-        let (media, _, ack) =
-            answer_dialog_at(&callee.signal, callee.contact()?, callee.media()?, None).await?;
+        let (media, _, ack) = answer_dialog_at(
+            &callee.signal,
+            callee.contact()?,
+            callee.media()?,
+            Some(expected_user),
+        )
+        .await?;
         acknowledge(&callee.signal, &ack).await?;
         Ok(media)
     };
-    let (answer, remote) = tokio::try_join!(caller_answer, callee_answer)?;
+    let (answer, remote) = tokio::try_join!(caller_answer, callee_answer)
+        .map_err(|error| failure(format!("INVITE {number} answer: {error}")))?;
     let session = Session::parse(
         std::str::from_utf8(&answer.body).map_err(failure)?,
         &[rusterisk_config::Codec::Pcmu],
@@ -100,9 +109,12 @@ async fn call(
         sender: RtpSender::new(AudioFormat::Pcmu, 0, [8; 10]).map_err(failure)?,
         sample: -7000,
     };
-    exchange(&mut left, &mut right, (-7000, 4000)).await?;
+    exchange(&mut left, &mut right, (-7000, 4000))
+        .await
+        .map_err(|error| failure(format!("RTP {number}: {error}")))?;
     dialog_request(caller, target, &answer, Method::Bye, 3).await?;
-    let (reply, ()) = tokio::try_join!(final_response(&caller.signal), finish_bye(&callee.signal))?;
+    let (reply, ()) = tokio::try_join!(final_response(&caller.signal), finish_bye(&callee.signal))
+        .map_err(|error| failure(format!("BYE {number}: {error}")))?;
     if reply.status_code.code() != 200 {
         return Err(ControlError::Invalid(
             "Expected the caller's hangup to succeed",
@@ -112,39 +124,13 @@ async fn call(
 }
 
 async fn exercise(
+    phones: Phones,
     config: &Config,
     target: SocketAddr,
     management: SocketAddr,
+    path: CallPath,
 ) -> Result<(), ControlError> {
-    let ip = Ipv4Addr::LOCALHOST.into();
-    let alice = Peer::bind(ip, ip).await?;
-    let bob = Peer::bind(ip, ip).await?;
-    let account = |name| {
-        config
-            .auth
-            .iter()
-            .find(|auth| auth.username == name)
-            .ok_or(ControlError::Invalid("Missing phone account"))
-    };
-    let alice_auth = account("alice")?;
-    let bob_auth = account("bob")?;
-    for (serial, phone, auth) in [(1, &alice, alice_auth), (2, &bob, bob_auth)] {
-        if register(
-            &phone.signal,
-            target,
-            &auth.username,
-            auth.password.expose(),
-            serial,
-            300,
-        )
-        .await?
-            != 1
-        {
-            return Err(ControlError::Invalid(
-                "Expected one registered phone contact",
-            ));
-        }
-    }
+    phones.exercise(config, target, path).await?;
     let user = config
         .users
         .first()
@@ -154,25 +140,19 @@ async fn exercise(
         .timeout(Wait::Io.duration())
         .build()
         .map_err(failure)?;
-    for (caller, auth, extension, callee) in [
-        (&alice, alice_auth, "102", &bob),
-        (&bob, bob_auth, "101", &alice),
-    ] {
-        call(target, caller, auth, extension, callee).await?;
-        let channels: Vec<rusterisk_api::Channel> = client
-            .get(format!("http://{management}/ari/channels"))
-            .basic_auth(&user.name, Some(user.password.expose()))
-            .send()
-            .await
-            .map_err(failure)?
-            .error_for_status()
-            .map_err(failure)?
-            .json()
-            .await
-            .map_err(failure)?;
-        if !channels.is_empty() {
-            return Err(ControlError::Invalid("Call channels survived hangup"));
-        }
+    let channels: Vec<rusterisk_api::Channel> = client
+        .get(format!("http://{management}/ari/channels"))
+        .basic_auth(&user.name, Some(user.password.expose()))
+        .send()
+        .await
+        .map_err(failure)?
+        .error_for_status()
+        .map_err(failure)?
+        .json()
+        .await
+        .map_err(failure)?;
+    if !channels.is_empty() {
+        return Err(ControlError::Invalid("Call channels survived hangup"));
     }
     Ok(())
 }
@@ -180,15 +160,22 @@ async fn exercise(
 #[tokio::test]
 async fn two_registered_phones_exchange_audio_on_the_shipped_extensions() -> Result<(), ControlError>
 {
+    native(CallPath::RegisteredExtensions).await
+}
+
+pub(super) async fn native(path: CallPath) -> Result<(), ControlError> {
+    let ip = Ipv4Addr::LOCALHOST.into();
+    let phones = Phones::bind(ip, ip).await?;
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config");
     let config = Config::load(&source).map_err(failure)?;
     let root = tempfile::tempdir().map_err(failure)?;
     let settings = root.path().join("config");
     fs::create_dir(&settings).map_err(failure)?;
-    for name in ["ari.conf", "rtp.conf", "extensions.conf"] {
+    for name in ["ari.conf", "rtp.conf"] {
         fs::copy(source.join(name), settings.join(name)).map_err(failure)?;
     }
-    let sip = fs::read_to_string(source.join("pjsip.conf")).map_err(failure)?;
+    let (sip, extensions) = phones.settings()?;
+    fs::write(settings.join("extensions.conf"), extensions).map_err(failure)?;
     let address = config
         .transports
         .first()
@@ -217,10 +204,11 @@ async fn two_registered_phones_exchange_audio_on_the_shipped_extensions() -> Res
             }
             Err(error) => return Err(error),
         };
+        let config = Config::load(&settings).map_err(failure)?;
         let management = server.address();
         let scenario = tokio::spawn(async move {
             Wait::Scenario
-                .bounded(exercise(&config, target, management))
+                .bounded(exercise(phones, &config, target, management, path))
                 .await
                 .map_err(failure)?
         });

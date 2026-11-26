@@ -34,7 +34,16 @@ async fn register(
     serial: u32,
     expires: u32,
 ) -> Result<usize, ControlError> {
-    registration::register(socket, target, "phone", "test-password", serial, expires).await
+    registration::register(
+        socket,
+        target,
+        socket.local_addr().map_err(failure)?,
+        "phone",
+        "test-password",
+        serial,
+        expires,
+    )
+    .await
 }
 
 async fn wait_state(controller: &Controller, expected: EndpointState) -> Result<(), ControlError> {
