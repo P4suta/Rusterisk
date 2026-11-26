@@ -257,7 +257,7 @@ impl Signaling {
             tokio::select! {
                 biased;
                 output = &mut future => return Ok(output),
-                input = self.control.next(true) => {
+                input = self.control.next() => {
                     let now = self.controller.clock().now_ms()?;
                     if self.control.handle(input, now)? == Flow::Stop {
                         return Err(ControlError::Adapter("Control stopped".into()));
@@ -275,7 +275,7 @@ impl Signaling {
             if let Some(effect) = self.control.take_effect() {
                 return Ok(effect);
             }
-            let input = self.control.next(true).await;
+            let input = self.control.next().await;
             let now = self.controller.clock().now_ms()?;
             if self.control.handle(input, now)? == Flow::Stop {
                 return Err(ControlError::Adapter("Control stopped".into()));
@@ -298,7 +298,7 @@ impl Signaling {
             tokio::select! {
                 biased;
                 completed = self.native_jobs.join_next() => return Ok(completed),
-                input = self.control.next(true) => {
+                input = self.control.next() => {
                     let now = self.controller.clock().now_ms()?;
                     if self.control.handle(input, now)? == Flow::Stop {
                         return Err(ControlError::Adapter("Control stopped".into()));
@@ -1573,7 +1573,7 @@ impl Signaling {
                     None => break,
                 },
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { break; },
-                input = self.control.next(true) => {
+                input = self.control.next() => {
                     let now = clock.now_ms()?;
                     if self.control.handle(input, now)? == Flow::Stop { break; }
                 },

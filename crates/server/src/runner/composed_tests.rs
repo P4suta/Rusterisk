@@ -1,5 +1,6 @@
 use crate::{
-    CallKey, ControlError, Controller, Effect, IncomingCall, IncomingTarget, Milestone, Signal,
+    Action, CallKey, ControlError, Controller, Credentials, Effect, IncomingCall, IncomingTarget,
+    Milestone, Signal,
 };
 use rusterisk_api::ChannelId;
 use rusterisk_config::Config;
@@ -116,5 +117,101 @@ fn a_dialplan_step_falls_due_while_the_effects_of_its_turn_still_wait() -> Resul
         released |= matches!(effect, Effect::Release { key } if key == waiting);
     }
     assert!(released, "the dialplan step waited for the queued effects");
+    Ok(())
+}
+
+// The control loop that runs alone hands a turn's effects to its channel before the next input.
+// A request behind a full channel waits for room, as it waits for a composed turn to end.
+#[tokio::test]
+async fn a_control_loop_alone_delivers_waiting_effects_before_the_next_request(
+) -> Result<(), ControlError> {
+    let (controller, mut runner, mut effects) = Controller::new(configuration()?, 4);
+    let filler = CallKey {
+        id: ChannelId::try_from("filler".to_owned())?,
+        generation: 1,
+    };
+    for _ in 0..effects.max_capacity() {
+        runner
+            .effect_sender()?
+            .try_send(Effect::Release {
+                key: filler.clone(),
+            })
+            .map_err(failure)?;
+    }
+    let waiting = CallKey {
+        id: ChannelId::try_from("waiting".to_owned())?,
+        generation: 2,
+    };
+    runner.pending_effects.push_back(Effect::Release {
+        key: waiting.clone(),
+    });
+    let requested = controller.execute(
+        Credentials::new("app".into(), "test".into())?,
+        None,
+        Action::CreateBridge {
+            id: ChannelId::try_from("held".to_owned())?,
+            name: "held".into(),
+        },
+    );
+    tokio::pin!(requested);
+    assert!(futures_util::poll!(requested.as_mut()).is_pending());
+    assert_eq!(runner.requests.len(), 1);
+
+    let running = runner.run();
+    tokio::pin!(running);
+    assert!(futures_util::poll!(running.as_mut()).is_pending());
+    assert!(
+        futures_util::poll!(requested.as_mut()).is_pending(),
+        "the request completed while the release was still waiting"
+    );
+    for _ in 0..effects.max_capacity() {
+        let effect = effects.try_recv().map_err(failure)?;
+        assert!(matches!(effect, Effect::Release { key } if key == filler));
+    }
+    assert!(futures_util::poll!(running.as_mut()).is_pending());
+    let effect = effects.try_recv().map_err(failure)?;
+    assert!(matches!(effect, Effect::Release { key } if key == waiting));
+    let created = futures_util::poll!(requested.as_mut());
+    assert!(
+        matches!(created, std::task::Poll::Ready(Ok(_))),
+        "{created:?}"
+    );
+
+    controller.shutdown();
+    running.await
+}
+
+// A caller that keeps the effect receiver without reading it still sees the loop stop.
+#[tokio::test(start_paused = true)]
+async fn a_control_loop_alone_stops_while_its_effects_wait_for_a_reader() -> Result<(), ControlError>
+{
+    let (controller, mut runner, _effects) = Controller::new(configuration()?, 4);
+    let filler = CallKey {
+        id: ChannelId::try_from("filler".to_owned())?,
+        generation: 1,
+    };
+    while runner
+        .effect_sender()?
+        .try_send(Effect::Release {
+            key: filler.clone(),
+        })
+        .is_ok()
+    {}
+    runner
+        .pending_effects
+        .push_back(Effect::Release { key: filler });
+    let running = tokio::spawn(runner.run());
+    for _ in 0..16 {
+        tokio::task::yield_now().await;
+    }
+    controller.shutdown();
+    let stopped = tokio::time::timeout(std::time::Duration::from_secs(10), running)
+        .await
+        .map_err(|_| ControlError::Invalid("The control loop kept waiting for a reader"))?
+        .map_err(failure)?;
+    assert!(
+        matches!(stopped, Err(ControlError::Adapter(_))),
+        "{stopped:?}"
+    );
     Ok(())
 }
