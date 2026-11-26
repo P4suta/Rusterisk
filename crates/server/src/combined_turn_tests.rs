@@ -196,14 +196,62 @@ impl Combined {
                 u16::try_from(40_000 + index * 2).map_err(failure)?,
             ));
             let started = Instant::now();
-            control.apply(Action::Answer(id), STAMP, now)?;
+            let outcome = control.apply(Action::Answer(id), STAMP, now)?;
+            let [Effect::Answer { key: requested }] = outcome.effects.as_slice() else {
+                return Err(ControlError::Invalid("Control did not request an answer"));
+            };
             let answered = engine
-                .answer(key.id.as_str(), key.generation, local, now)
+                .answer(requested.id.as_str(), requested.generation, local, now)
                 .map_err(failure)?;
+            let mut events = answered.events.into_iter();
+            let (
+                Some(SipEvent::Answered {
+                    id,
+                    generation,
+                    session,
+                }),
+                None,
+            ) = (events.next(), events.next())
+            else {
+                return Err(ControlError::Invalid(
+                    "The engine did not confirm the answer",
+                ));
+            };
+            let answered_key = CallKey {
+                id: ChannelId::try_from(id)?,
+                generation,
+            };
+            control.signal(
+                Signal::PeerDirection {
+                    key: answered_key.clone(),
+                    direction: crate::signaling::peer_direction(session.direction),
+                },
+                STAMP,
+            )?;
+            if let Some(format) = session.telephone {
+                control.signal(
+                    Signal::DtmfReady {
+                        key: answered_key.clone(),
+                        events: format.events(),
+                    },
+                    STAMP,
+                )?;
+            }
+            control.signal(
+                Signal::Milestone {
+                    key: answered_key,
+                    milestone: Milestone::Answered,
+                },
+                STAMP,
+            )?;
             turns.push(Turn {
                 input: "answer",
                 elapsed: started.elapsed(),
             });
+            assert_eq!(
+                control.channel(&key.id)?.state,
+                rusterisk_api::ChannelState::Up
+            );
             let answer = answered
                 .datagrams
                 .first()
@@ -212,18 +260,12 @@ impl Combined {
                 .clone();
             let acknowledged = in_dialog(&answer, "ACK", 2, peer)?;
             let started = Instant::now();
-            engine.receive(&acknowledged, peer, now).map_err(failure)?;
-            control.signal(
-                Signal::Milestone {
-                    key: key.clone(),
-                    milestone: Milestone::Answered,
-                },
-                STAMP,
-            )?;
+            let acknowledgment = engine.receive(&acknowledged, peer, now).map_err(failure)?;
             turns.push(Turn {
                 input: "answer acknowledgment",
                 elapsed: started.elapsed(),
             });
+            assert!(acknowledgment.events.is_empty());
             calls.push(Call {
                 peer,
                 bye: in_dialog(&answer, "BYE", 3, peer)?,
@@ -335,43 +377,57 @@ impl Combined {
     }
 
     // The loader task parses and prepares the replacement, and the owner validates and commits it.
-    fn reload(&mut self) -> Result<Turn, ControlError> {
-        let replacement = configuration(2)?;
+    fn reload(
+        &mut self,
+        revision: usize,
+        shutdown: Option<u64>,
+        turns: &mut Vec<Turn>,
+    ) -> Result<(), ControlError> {
+        let replacement = configuration(revision)?;
         let prepared =
             PreparedEngineConfiguration::prepare(replacement.clone()).map_err(failure)?;
         let settings = CallSettings::configured(&replacement);
+        let generation = self.control.configuration_generation();
         let started = Instant::now();
         let candidate = self.control.prepare_configuration(replacement, settings)?;
+        let (input, started) = if let Some(now) = shutdown {
+            turns.push(Turn {
+                input: "stage reload",
+                elapsed: started.elapsed(),
+            });
+            turns.push(self.shutdown(now)?);
+            assert_eq!(self.control.configuration_generation(), generation);
+            ("publish reload", Instant::now())
+        } else {
+            ("reload", started)
+        };
         self.control.commit_configuration(candidate)?;
         self.control.configuration_published(STAMP.into());
         self.engine.publish_configuration(prepared);
-        Ok(Turn {
-            input: "reload",
+        turns.push(Turn {
+            input,
             elapsed: started.elapsed(),
-        })
+        });
+        assert_ne!(self.control.configuration_generation(), generation);
+        Ok(())
     }
 }
 
 // Every channel starts, answers, and joins a bridge.
 // The first group reloads halfway through individual hangups.
-// The second group reloads with all calls active and ends them in one shutdown decision.
+// The second group completes a reload with every call active and shuts down during the next reload.
 fn trial() -> Result<Vec<Turn>, ControlError> {
-    let mut turns = Vec::with_capacity(CHANNELS * 13 + 3);
+    let mut turns = Vec::with_capacity(CHANNELS * 13 + 5);
     let mut combined = Combined::established(&mut turns)?;
     for index in 0..CHANNELS {
         if index == CHANNELS / 2 {
-            turns.push(combined.reload()?);
+            combined.reload(2, None, &mut turns)?;
         }
         turns.push(combined.hangup(index, 1000)?);
     }
     let mut ended = Combined::established(&mut turns)?;
-    let starting_generation = ended.control.configuration_generation();
-    turns.push(ended.reload()?);
-    assert_ne!(
-        ended.control.configuration_generation(),
-        starting_generation
-    );
-    turns.push(ended.shutdown(2000)?);
+    ended.reload(2, None, &mut turns)?;
+    ended.reload(3, Some(2000), &mut turns)?;
     Ok(turns)
 }
 
@@ -392,8 +448,7 @@ fn median(mut values: Vec<Duration>) -> Option<Duration> {
 }
 
 #[test]
-fn a_trial_times_each_input_and_reloads_before_the_simultaneous_shutdown(
-) -> Result<(), ControlError> {
+fn a_trial_times_each_input_and_shuts_down_during_a_staged_reload() -> Result<(), ControlError> {
     let turns = trial()?;
     for (input, count) in [
         ("challenge", CHANNELS * 2),
@@ -405,6 +460,8 @@ fn a_trial_times_each_input_and_reloads_before_the_simultaneous_shutdown(
         ("bridge", CHANNELS),
         ("hangup", CHANNELS),
         ("reload", 2),
+        ("stage reload", 1),
+        ("publish reload", 1),
         ("shutdown", 1),
     ] {
         assert_eq!(
@@ -414,7 +471,7 @@ fn a_trial_times_each_input_and_reloads_before_the_simultaneous_shutdown(
         );
     }
     assert!(
-        matches!(turns.as_slice(), [.., reload, shutdown] if reload.input == "reload" && shutdown.input == "shutdown")
+        matches!(turns.as_slice(), [.., reload, stage, shutdown, publish] if reload.input == "reload" && stage.input == "stage reload" && shutdown.input == "shutdown" && publish.input == "publish reload")
     );
     Ok(())
 }
