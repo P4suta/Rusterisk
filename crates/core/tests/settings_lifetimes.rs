@@ -1,6 +1,32 @@
 use rusterisk_core::{SettingsError, SettingsLifetimes};
 
 #[test]
+fn a_private_route_generation_lives_until_its_last_call_without_changing_publication(
+) -> Result<(), SettingsError> {
+    let mut settings = SettingsLifetimes::new(3);
+    let original = settings.current();
+    let (first, slot) = settings.retain_unpublished()?;
+    let generation = first.generation();
+    assert_ne!(generation, original);
+    assert_eq!(settings.current(), original);
+    assert_eq!(settings.slot(generation)?, slot);
+    let second = settings.retain(generation)?;
+    let publication = settings.prepare()?;
+    assert!(matches!(
+        settings.retain_unpublished(),
+        Err(SettingsError::Capacity)
+    ));
+    settings.commit(publication)?;
+    assert_eq!(settings.release(first)?, None);
+    assert_eq!(settings.release(second)?, Some(slot));
+    assert!(settings.slot(generation).is_err());
+    let (next, reused) = settings.retain_unpublished()?;
+    assert_ne!(next.generation(), generation);
+    assert_eq!(settings.release(next)?, Some(reused));
+    Ok(())
+}
+
+#[test]
 fn cancelled_candidates_cannot_publish_or_cancel_a_later_candidate() -> Result<(), SettingsError> {
     let mut settings = SettingsLifetimes::new(1);
     let initial = settings.current();
