@@ -1388,15 +1388,17 @@ impl MediaHub {
             }
             if let Some(answers) = &mut port.answers {
                 for _ in 0..8 {
-                    match answers.try_recv() {
-                        Ok(()) => self
-                            .notices
-                            .try_send(MediaNotice::Answer { key: key.clone() })?,
-                        Err(
-                            mpsc::error::TryRecvError::Empty
-                            | mpsc::error::TryRecvError::Disconnected,
-                        ) => break,
+                    if answers.is_empty() {
+                        break;
                     }
+                    let Some(slot) = self.notices.ordinary_slot()? else {
+                        break;
+                    };
+                    if answers.try_recv().is_err() {
+                        break;
+                    }
+                    self.notices
+                        .send_reserved(slot, MediaNotice::Answer { key: key.clone() })?;
                 }
             }
             for _ in 0..8 {
@@ -1408,19 +1410,24 @@ impl MediaHub {
                 }
             }
             for _ in 0..16 {
-                match io.digits.try_recv() {
-                    Ok(tone) => {
-                        self.recordings
-                            .received_digit(key, self.mixer.bridge_for(key), tone.digit);
-                        self.notices.try_send(MediaNotice::Dtmf {
-                            key: key.clone(),
-                            tone,
-                        })?;
-                    }
-                    Err(
-                        mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected,
-                    ) => break,
+                if io.digits.is_empty() {
+                    break;
                 }
+                let Some(slot) = self.notices.ordinary_slot()? else {
+                    break;
+                };
+                let Ok(tone) = io.digits.try_recv() else {
+                    break;
+                };
+                self.recordings
+                    .received_digit(key, self.mixer.bridge_for(key), tone.digit);
+                self.notices.send_reserved(
+                    slot,
+                    MediaNotice::Dtmf {
+                        key: key.clone(),
+                        tone,
+                    },
+                )?;
             }
             match io.audio.receive() {
                 Ok(frame) => {

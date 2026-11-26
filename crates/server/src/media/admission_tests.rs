@@ -702,3 +702,42 @@ async fn received(hub: &mut MediaHub, key: &CallKey, count: u64) -> Result<(), M
         "the leg never read the packet".into(),
     ))
 }
+
+#[tokio::test]
+async fn stream_answers_and_digits_remain_available_during_notice_pressure(
+) -> Result<(), MediaError> {
+    let (_handle, mut hub, mut notices) = MediaHub::new(2);
+    let key = key()?;
+    let (mut port, link) = Port::new(
+        PeerMediaDirection::SendReceive,
+        DigitSupport::Unsupported,
+        hub.notices.reserve_leg()?,
+    );
+    let (answer, answers) = mpsc::channel(1);
+    port.answers = Some(answers);
+    hub.install_link(key.clone(), port, Gate::Open, 8000)?;
+    for _ in 0..hub.notices.ordinary.max_capacity() {
+        hub.notice(MediaNotice::Answer {
+            key: named("filler")?,
+        })?;
+    }
+    let tone = DtmfTone {
+        digit: rusterisk_core::DtmfDigit::Hash,
+        duration_ms: 120,
+    };
+    answer.try_send(()).map_err(failure)?;
+    link.digits.try_send(tone).map_err(failure)?;
+    hub.tick()?;
+    while let Ok(notice) = notices.try_recv() {
+        assert!(
+            matches!(notice, MediaNotice::Answer { key: filler } if filler.id.as_str() == "filler")
+        );
+    }
+    hub.tick()?;
+    assert!(matches!(notices.try_recv(), Ok(MediaNotice::Answer { key: source }) if source == key));
+    assert!(
+        matches!(notices.try_recv(), Ok(MediaNotice::Dtmf { key: source, tone: received }) if source == key && received == tone)
+    );
+    assert!(notices.try_recv().is_err());
+    hub.close().await
+}
