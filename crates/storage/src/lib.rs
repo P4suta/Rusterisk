@@ -307,7 +307,7 @@ impl Store {
         source: &str,
         destination: &str,
     ) -> Result<RecordingCopy, StorageError> {
-        RecordingCopy::create(&self.recording_path(source)?, &self.recordings, destination)
+        RecordingCopy::create(self, source, destination)
     }
 
     pub fn delete_recording(&mut self, name: &str) -> Result<(), StorageError> {
@@ -550,7 +550,7 @@ impl Recorder {
         self.bytes -= trim as u32;
         if let Some(operation) = &self.operation {
             self.file.sync_all()?;
-            operation.publishing(self.rate, self.bytes)?;
+            operation.publishing(Some(self.rate), self.bytes)?;
         }
         self.file.set_len(u64::from(self.bytes) + 44)?;
         self.file.seek(SeekFrom::Start(0))?;
@@ -618,29 +618,34 @@ fn recover(path: &Path) -> Result<bool, StorageError> {
     match std::fs::hard_link(path, &destination) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let mut completed = File::open(&destination)?;
-            if completed.metadata()?.len() != file.metadata()?.len() {
-                return Err(StorageError::InvalidState);
-            }
-            file.seek(SeekFrom::Start(0))?;
-            let mut left = [0u8; 8192];
-            let mut right = [0u8; 8192];
-            loop {
-                let size = file.read(&mut left)?;
-                if size == 0 {
-                    break;
-                }
-                completed.read_exact(&mut right[..size])?;
-                if left[..size] != right[..size] {
-                    return Err(StorageError::InvalidState);
-                }
-            }
+            confirm_same_audio(&mut file, &destination)?;
         }
         Err(error) => return Err(error.into()),
     }
     drop(file);
     std::fs::remove_file(path)?;
     Ok(true)
+}
+
+fn confirm_same_audio(file: &mut File, destination: &Path) -> Result<(), StorageError> {
+    let mut completed = File::open(destination)?;
+    if completed.metadata()?.len() != file.metadata()?.len() {
+        return Err(StorageError::InvalidState);
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut left = [0u8; 8192];
+    let mut right = [0u8; 8192];
+    loop {
+        let size = file.read(&mut left)?;
+        if size == 0 {
+            break;
+        }
+        completed.read_exact(&mut right[..size])?;
+        if left[..size] != right[..size] {
+            return Err(StorageError::InvalidState);
+        }
+    }
+    Ok(())
 }
 
 pub struct WaveReader {

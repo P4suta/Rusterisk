@@ -1,6 +1,57 @@
 use rusterisk_storage::{StorageError, Store};
 
 #[test]
+fn restart_finishes_a_synchronized_copy_with_its_source_bytes_and_catalog_row(
+) -> Result<(), StorageError> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    let store = Store::open(root)?;
+    let mut original = rusterisk_storage::Recorder::create(root, "source", 8000)?;
+    original.write(rusterisk_media::Frame::new(&[1616; 160], 8000)?)?;
+    let published = original.finish()?;
+    let db = rusqlite::Connection::open(root.join("calls.sqlite3"))?;
+    let original = std::fs::read(published)?;
+    let stages = root.join("recordings");
+    for name in ["staged", "linked", "published"] {
+        let stage = stages.join(format!("{name}.copying"));
+        let destination = stage.with_extension("wav");
+        std::fs::write(&stage, &original)?;
+        if name != "staged" {
+            std::fs::hard_link(&stage, &destination)?;
+        }
+        if name == "published" {
+            std::fs::remove_file(stage)?;
+        }
+        db.execute("INSERT INTO recording_operations (name,source,operation,phase,final_bytes) VALUES (?1,'source','copy','publishing',?2)", (name, original.len() as i64))?;
+    }
+    drop(store);
+    for _ in 0..2 {
+        let reopened = Store::open(root)?;
+        for name in ["staged", "linked", "published"] {
+            assert_eq!(std::fs::read(stages.join(format!("{name}.wav")))?, original);
+            assert!(!stages.join(format!("{name}.copying")).exists());
+            assert_eq!(
+                db.query_row(
+                    "SELECT outcome FROM recordings WHERE name=?1",
+                    [name],
+                    |row| row.get::<_, String>(0)
+                )?,
+                "completed"
+            );
+        }
+        assert_eq!(reopened.recordings()?.len(), 4);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM recording_operations", [], |row| row
+                .get::<_, u32>(
+                0
+            ))?,
+            0
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn interrupted_append_publication_preserves_the_trimmed_audio_and_never_repeats_the_prefix(
 ) -> Result<(), StorageError> {
     use rusterisk_api::RecordingIfExists::{Append, Fail};

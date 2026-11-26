@@ -14,6 +14,8 @@ fn recording_copies_publish_exact_complete_bytes_and_reserve_their_destination(
     source.finish()?;
     let expected = std::fs::read(directory.path().join("recordings/source.wav"))?;
     let mut copy = store.prepare_recording_copy("source", "copy")?;
+    let db = rusqlite::Connection::open(directory.path().join("calls.sqlite3"))?;
+    assert_eq!(db.query_row("SELECT count(*) FROM recording_operations WHERE name='copy' AND source='source' AND operation='copy' AND phase='writing'", [], |row| row.get::<_,u32>(0))?, 1);
     assert!(!copy.is_ready());
     assert!(matches!(
         store.recording("copy"),
@@ -41,6 +43,21 @@ fn recording_copies_publish_exact_complete_bytes_and_reserve_their_destination(
     assert_eq!(steps, 5);
     assert_eq!(copy.finish()?.name, "copy");
     assert_eq!(
+        db.query_row(
+            "SELECT outcome FROM recordings WHERE name='copy'",
+            [],
+            |row| row.get::<_, String>(0)
+        )?,
+        "completed"
+    );
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM recording_operations", [], |row| row
+            .get::<_, u32>(
+            0
+        ))?,
+        0
+    );
+    assert_eq!(
         std::fs::read(directory.path().join("recordings/copy.wav"))?,
         expected
     );
@@ -66,6 +83,13 @@ fn recording_copies_publish_exact_complete_bytes_and_reserve_their_destination(
     drop(interrupted);
     drop(store);
     let reopened = Store::open(directory.path())?;
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM recording_operations", [], |row| row
+            .get::<_, u32>(
+            0
+        ))?,
+        0
+    );
     assert!(!directory
         .path()
         .join("recordings/interrupted.copying")

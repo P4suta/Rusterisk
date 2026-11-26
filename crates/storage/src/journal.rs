@@ -29,7 +29,7 @@ impl Operation {
         Ok(connection)
     }
 
-    pub(super) fn publishing(&self, rate: u32, bytes: u32) -> Result<(), StorageError> {
+    pub(super) fn publishing(&self, rate: Option<u32>, bytes: u32) -> Result<(), StorageError> {
         let changed = self.connect()?.execute(
             "UPDATE recording_operations SET phase='publishing',sample_rate=?2,final_bytes=?3 WHERE id=?1 AND phase='writing'",
             (self.id, rate, bytes)

@@ -49,6 +49,18 @@ pub(crate) fn pending(connection: &mut Connection, directory: &Path) -> Result<(
             "create" => "partial",
             "overwrite" => "replacement",
             "append" => "append",
+            "copy" => {
+                let stage = directory.join(format!("{}.copying", entry.name));
+                match entry.phase.as_str() {
+                    "writing" | "cancelling" => discard(connection, entry.id, &stage)?,
+                    "publishing" => {
+                        publish_copy(&stage, entry.bytes.ok_or(StorageError::InvalidState)?)?;
+                        publish_catalog(connection, entry.id, "completed")?;
+                    }
+                    _ => return Err(StorageError::InvalidState),
+                }
+                continue;
+            }
             _ => return Err(StorageError::InvalidState),
         };
         let stage = directory.join(format!("{}.{extension}", entry.name));
@@ -91,6 +103,32 @@ fn discard(connection: &Connection, id: i64, stage: &Path) -> Result<(), Storage
     sync_parent(stage)?;
     connection.execute("DELETE FROM recording_operations WHERE id=?1", [id])?;
     Ok(())
+}
+
+fn publish_copy(stage: &Path, expected: u32) -> Result<(), StorageError> {
+    let destination = stage.with_extension("wav");
+    if u64::from(expected) > MAX_RECORDING + 44 {
+        return Err(StorageError::Capacity);
+    }
+    if stage.try_exists()? {
+        let mut file = File::open(stage)?;
+        if file.metadata()?.len() != u64::from(expected) {
+            return Err(StorageError::InvalidState);
+        }
+        match std::fs::hard_link(stage, &destination) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                crate::confirm_same_audio(&mut file, &destination)?
+            }
+            Err(error) => return Err(error.into()),
+        }
+        drop(file);
+        std::fs::remove_file(stage)?;
+    }
+    if std::fs::metadata(destination)?.len() != u64::from(expected) {
+        return Err(StorageError::InvalidState);
+    }
+    sync_parent(stage)
 }
 
 fn captured(stage: &Path, append: bool) -> Result<Option<(u32, u32)>, StorageError> {

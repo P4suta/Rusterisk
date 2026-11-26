@@ -1,10 +1,14 @@
-use crate::{reserve_directory_entries, validate_name, StorageError, StoredRecordingReader};
+use crate::{
+    journal::Operation, reserve_directory_entries, validate_name, StorageError, Store,
+    StoredRecordingReader,
+};
 use rusterisk_api::StoredRecording;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct RecordingCopy {
+    operation: Operation,
     source: Option<StoredRecordingReader>,
     file: File,
     path: PathBuf,
@@ -13,11 +17,12 @@ pub struct RecordingCopy {
 
 impl RecordingCopy {
     pub(crate) fn create(
-        source: &Path,
-        directory: &Path,
+        store: &Store,
+        source_name: &str,
         name: &str,
     ) -> Result<Self, StorageError> {
-        let source = StoredRecordingReader::open(source)?;
+        let source = store.open_recording(source_name)?;
+        let directory = &store.recordings;
         validate_name(name)?;
         for extension in ["wav", "partial", "replacement", "append", "copying"] {
             match std::fs::symlink_metadata(directory.join(format!("{name}.{extension}"))) {
@@ -34,7 +39,8 @@ impl RecordingCopy {
         }
         reserve_directory_entries(directory, 2)?;
         let path = directory.join(format!("{name}.copying"));
-        let file = OpenOptions::new()
+        let operation = Operation::start(store, name, "copy", Some(source_name))?;
+        let opened = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
@@ -44,8 +50,16 @@ impl RecordingCopy {
                 } else {
                     StorageError::Io(error)
                 }
-            })?;
+            });
+        let file = match opened {
+            Ok(file) => file,
+            Err(error) => {
+                operation.forget()?;
+                return Err(error);
+            }
+        };
         Ok(Self {
+            operation,
             source: Some(source),
             file,
             path,
@@ -72,18 +86,27 @@ impl RecordingCopy {
             self.cancel()?;
             return Err(StorageError::InvalidState);
         }
-        let synchronized = self.file.sync_all();
+        self.file.sync_all()?;
+        let bytes =
+            u32::try_from(self.file.metadata()?.len()).map_err(|_| StorageError::Capacity)?;
+        self.operation.publishing(None, bytes)?;
         drop(self.file);
-        let publication = synchronized
-            .and_then(|()| std::fs::hard_link(&self.path, self.path.with_extension("wav")));
-        let cleanup = std::fs::remove_file(self.path);
+        let publication = std::fs::hard_link(&self.path, self.path.with_extension("wav"));
+        let cleanup = std::fs::remove_file(&self.path);
         match (publication, cleanup) {
             (Ok(()), Ok(())) => {}
             (Err(operation), Err(cleanup)) => {
                 return Err(StorageError::PublicationCleanup { operation, cleanup });
             }
-            (Err(error), Ok(())) | (Ok(()), Err(error)) => return Err(StorageError::Io(error)),
+            (Err(error), Ok(())) => {
+                self.operation.forget()?;
+                return Err(StorageError::Io(error));
+            }
+            (Ok(()), Err(error)) => return Err(StorageError::Io(error)),
         }
+        #[cfg(unix)]
+        File::open(self.path.parent().ok_or(StorageError::InvalidState)?)?.sync_all()?;
+        self.operation.completed()?;
         Ok(StoredRecording {
             name: self.name,
             format: "wav".into(),
@@ -91,9 +114,12 @@ impl RecordingCopy {
     }
 
     pub fn cancel(self) -> Result<(), StorageError> {
+        self.operation.cancelling()?;
         drop(self.source);
         drop(self.file);
-        std::fs::remove_file(self.path)?;
-        Ok(())
+        std::fs::remove_file(&self.path)?;
+        #[cfg(unix)]
+        File::open(self.path.parent().ok_or(StorageError::InvalidState)?)?.sync_all()?;
+        self.operation.forget()
     }
 }
