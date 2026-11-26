@@ -14,6 +14,7 @@ fn configuration_reload_has_a_separate_closed_management_contract() {
             ManagementOperation::DiagnoseChannel,
             ManagementOperation::DiagnoseRuntime,
             ManagementOperation::TestCall,
+            ManagementOperation::Capabilities,
         ]
     );
     let operation = ManagementOperation::ReloadConfiguration;
@@ -95,6 +96,21 @@ fn management_openapi_overrides_the_ari_server_at_its_full_path() {
             operation.id
         );
     }
+}
+
+#[test]
+fn capabilities_publish_verified_paths_separately_from_operation_coverage() {
+    let document = openapi();
+    let operation = &document["paths"]["/rusterisk/capabilities"]["get"];
+    assert_eq!(operation["operationId"], "capabilities.get");
+    let schemas = &document["components"]["schemas"];
+    assert_eq!(
+        operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        "#/components/schemas/Capabilities"
+    );
+    let properties = &schemas["Capabilities"]["properties"];
+    assert!(properties["operations"]["items"]["$ref"].is_string());
+    assert!(properties["verified_call_paths"]["items"]["$ref"].is_string());
 }
 
 #[test]

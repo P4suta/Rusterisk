@@ -11,7 +11,7 @@ use axum::{
 use base64::Engine;
 use rusterisk_api::{ChannelId, InvalidMediaUri, MediaUri};
 use rusterisk_core::{DtmfTiming, MuteDirection, RecordingControl};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::BTreeMap;
 mod configuration;
 mod diagnosis;
@@ -489,13 +489,19 @@ async fn dispatch(
         .into_response());
     }
     if method == Method::GET && segments == ["rusterisk", "capabilities"] {
-        let operations: Vec<Value> = rusterisk_api::OPERATIONS
+        use rusterisk_api::capabilities::{Capabilities, OperationCapability};
+        let operations = rusterisk_api::OPERATIONS
             .iter()
-            .map(|operation| json!({"operation": operation.id, "call_verified": false}))
+            .map(|operation| OperationCapability {
+                operation: operation.id.into(),
+                call_verified: false,
+            })
             .collect();
-        return Ok(Json(
-            json!({"reference": rusterisk_api::REFERENCE_VERSION, "operations": operations}),
-        )
+        return Ok(Json(Capabilities {
+            reference: rusterisk_api::REFERENCE_VERSION.into(),
+            operations,
+            verified_call_paths: Vec::new(),
+        })
         .into_response());
     }
     if method == Method::GET {

@@ -1,6 +1,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+pub mod capabilities;
 pub mod diagnosis;
 mod event_filter;
 mod event_source;
@@ -497,6 +498,7 @@ pub struct Operation {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ManagementOperation {
+    Capabilities,
     ReloadConfiguration,
     ChannelRtpObservation,
     DiagnoseExtension,
@@ -508,6 +510,15 @@ pub enum ManagementOperation {
 impl ManagementOperation {
     pub const fn metadata(self) -> &'static Operation {
         match self {
+            Self::Capabilities => &Operation {
+                id: "capabilities.get",
+                nickname: "getCapabilities",
+                method: Method::Get,
+                path: "/rusterisk/capabilities",
+                response: "Capabilities",
+                success_status: 200,
+                parameters: &[],
+            },
             Self::ReloadConfiguration => &Operation {
                 id: "configuration.reload",
                 nickname: "reloadConfiguration",
@@ -573,6 +584,7 @@ pub const MANAGEMENT_OPERATIONS: &[ManagementOperation] = &[
     ManagementOperation::DiagnoseChannel,
     ManagementOperation::DiagnoseRuntime,
     ManagementOperation::TestCall,
+    ManagementOperation::Capabilities,
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1318,6 +1330,7 @@ pub fn schemas() -> Value {
     let _channel_diagnosis = generator.subschema_for::<diagnosis::ChannelDiagnosis>();
     let _rtp = generator.subschema_for::<RtpObservation>();
     let _test_call = generator.subschema_for::<test_call::TestCallResult>();
+    let _capabilities = generator.subschema_for::<capabilities::Capabilities>();
     let _bridge = generator.subschema_for::<Bridge>();
     let _application = generator.subschema_for::<Application>();
     let _filter = generator.subschema_for::<EventFilterRequest>();

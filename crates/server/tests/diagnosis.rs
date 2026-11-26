@@ -65,6 +65,17 @@ async fn diagnosis_follows_dialplan_and_live_call_identity_with_read_only_creden
     let task = tokio::spawn(runner.run());
     let result = async {
         let app = router(controller.clone());
+        let capabilities = read(&app, "/rusterisk/capabilities").await?;
+        assert_eq!(capabilities["reference"], rusterisk_api::REFERENCE_VERSION);
+        assert!(capabilities["verified_call_paths"].is_array());
+        let operations = capabilities["operations"]
+            .as_array()
+            .ok_or(ControlError::Invalid("Missing operation capabilities"))?;
+        assert_eq!(operations.len(), rusterisk_api::OPERATIONS.len());
+        for (published, declared) in operations.iter().zip(rusterisk_api::OPERATIONS) {
+            assert_eq!(published["operation"], declared.id);
+            assert!(published["call_verified"].is_boolean());
+        }
         let path = "/rusterisk/diagnostics/runtime";
         let request = Request::builder()
             .uri(path)
