@@ -7,7 +7,7 @@ use crate::{
 };
 use rusterisk_api::{AudioSocketTarget, ExternalRtpTarget, StaticRtpCodec};
 use rusterisk_core::PeerMediaDirection;
-use rusterisk_media::{AudioFormat, MediaError};
+use rusterisk_media::AudioFormat;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 use tokio::{io::AsyncWriteExt, sync::watch};
@@ -186,18 +186,20 @@ impl Signaling {
                 AttachmentMode::Answered,
                 serial,
             )
-            .map_err(|error| match error {
-                MediaError::Capacity => ControlError::Capacity,
-                error @ (MediaError::InvalidFrame
-                | MediaError::InvalidPacket
-                | MediaError::InvalidRoute
-                | MediaError::UnknownStream
-                | MediaError::ServiceClosed
-                | MediaError::Unsupported
-                | MediaError::Codec(_)
-                | MediaError::Transport(_)
-                | MediaError::Control(_)) => failure(error),
-            })?;
+            .map_err(ControlError::from)?;
         Ok((local, release))
     }
+}
+
+#[test]
+fn a_closed_media_service_has_a_distinct_admission_error() {
+    use rusterisk_media::MediaError;
+    assert_eq!(
+        ControlError::from(MediaError::ServiceClosed),
+        ControlError::ServiceClosed
+    );
+    assert_eq!(
+        ControlError::from(MediaError::Capacity),
+        ControlError::Capacity
+    );
 }

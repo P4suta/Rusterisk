@@ -138,6 +138,24 @@ impl From<DtmfError> for ControlError {
         }
     }
 }
+impl From<rusterisk_media::MediaError> for ControlError {
+    fn from(error: rusterisk_media::MediaError) -> Self {
+        use rusterisk_media::MediaError;
+        match error {
+            MediaError::Capacity => Self::Capacity,
+            MediaError::ServiceClosed => Self::ServiceClosed,
+            error @ (MediaError::InvalidFrame
+            | MediaError::InvalidPacket
+            | MediaError::InvalidRoute
+            | MediaError::UnknownStream
+            | MediaError::Unsupported
+            | MediaError::Codec(_)
+            | MediaError::Transport(_)
+            | MediaError::Control(_)) => Self::Adapter(error.to_string()),
+        }
+    }
+}
+
 impl From<MediaTaskError> for ControlError {
     fn from(error: MediaTaskError) -> Self {
         match error {
