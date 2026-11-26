@@ -12,6 +12,8 @@ use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, Message},
     MaybeTlsStream, WebSocketStream,
 };
+#[path = "process_recovery/load.rs"]
+mod load;
 #[path = "process_recovery/process.rs"]
 mod process;
 use process::{combine, failure, ChildServer};
@@ -31,14 +33,25 @@ async fn request(
     } else {
         format!("http://{address}/ari/{path}?{encoded}")
     };
-    client
+    let response = client
         .request(method, url)
         .basic_auth("app", Some("test-password"))
         .send()
         .await
-        .map_err(failure)?
-        .error_for_status()
-        .map_err(failure)
+        .map_err(failure)?;
+    if let Err(status) = response.error_for_status_ref() {
+        let error = response
+            .json::<rusterisk_api::ApiError>()
+            .await
+            .map_err(failure)?;
+        if status.status() == Some(reqwest::StatusCode::SERVICE_UNAVAILABLE)
+            && error.message == ControlError::Capacity.to_string()
+        {
+            return Err(ControlError::Capacity);
+        }
+        return Err(failure(format!("{status}: {}", error.message)));
+    }
+    Ok(response)
 }
 
 async fn events(address: SocketAddr) -> Result<Events, ControlError> {

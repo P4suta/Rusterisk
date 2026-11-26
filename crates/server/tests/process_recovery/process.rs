@@ -12,13 +12,13 @@ pub fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
 }
 
-pub fn combine(
-    primary: Result<(), ControlError>,
+pub fn combine<T>(
+    primary: Result<T, ControlError>,
     cleanup: Result<(), ControlError>,
-) -> Result<(), ControlError> {
+) -> Result<T, ControlError> {
     match (primary, cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
         (Err(primary), Err(cleanup)) => Err(failure(format!(
             "{primary}; process cleanup failed: {cleanup}"
         ))),
@@ -37,7 +37,7 @@ struct Fields {
 }
 
 pub struct ChildServer {
-    child: Child,
+    pub(super) child: Child,
     address: SocketAddr,
 }
 
