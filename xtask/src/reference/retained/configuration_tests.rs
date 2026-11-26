@@ -51,7 +51,7 @@ fn context(configuration: PathBuf, directory: PathBuf) -> ReferenceNativeContext
                 media_output: 4,
                 callback_output: 5,
                 tools: tools(),
-                cases: [6, 7, 8],
+                cases: [6, 7, 8, 12, 13, 14],
                 runtime: None,
             },
             cleanup: cleanup(),

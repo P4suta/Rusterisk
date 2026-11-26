@@ -7,26 +7,38 @@ const IMAGE: &str = "rusterisk-asterisk-reference:22.9.0";
 pub enum ReferenceCase {
     Ari,
     Transfer(SipTransferCase),
+    RegisteredExtensions,
+    IncomingTrunk,
+    OutgoingTrunk,
 }
 
 impl ReferenceCase {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 6] = [
         Self::Ari,
         Self::Transfer(SipTransferCase::Blind),
         Self::Transfer(SipTransferCase::Attended),
+        Self::RegisteredExtensions,
+        Self::IncomingTrunk,
+        Self::OutgoingTrunk,
     ];
 
     pub const fn name(self) -> &'static str {
         match self {
             Self::Ari => "resource_queries_and_app_subscriptions_match_the_reference",
             Self::Transfer(case) => case.name(),
+            Self::RegisteredExtensions => "call_paths::reference_registered_extensions",
+            Self::IncomingTrunk => "call_paths::reference_incoming_trunk",
+            Self::OutgoingTrunk => "call_paths::reference_outgoing_trunk",
         }
     }
 
     pub const fn cargo_arguments(self) -> [&'static str; 11] {
         let (package, target) = match self {
             Self::Ari => ("rusterisk-client", "reference"),
-            Self::Transfer(_) => ("rusterisk-server", "sip_call"),
+            Self::Transfer(_)
+            | Self::RegisteredExtensions
+            | Self::IncomingTrunk
+            | Self::OutgoingTrunk => ("rusterisk-server", "sip_call"),
         };
         [
             "test",
@@ -46,13 +58,18 @@ impl ReferenceCase {
     pub const fn budget(self) -> Duration {
         Duration::from_secs(match self {
             Self::Ari => 300,
-            Self::Transfer(_) => 180,
+            Self::Transfer(_)
+            | Self::RegisteredExtensions
+            | Self::IncomingTrunk
+            | Self::OutgoingTrunk => 180,
         })
     }
 
     pub fn validate_execution(self, output: &str) -> Result<(), ReferenceError> {
         match self {
-            Self::Ari => validate_case(self.name(), output),
+            Self::Ari | Self::RegisteredExtensions | Self::IncomingTrunk | Self::OutgoingTrunk => {
+                validate_case(self.name(), output)
+            }
             Self::Transfer(case) => case.validate_execution(output),
         }
     }

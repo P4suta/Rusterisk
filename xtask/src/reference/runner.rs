@@ -271,7 +271,7 @@ impl ReferenceRunner {
             let media = media_address(&text).map_err(io::Error::other)?;
             let (text, callback_output) = inspect(plan.callback_address())?;
             let callback = callback_address(&text).map_err(io::Error::other)?;
-            let mut cases = [0; 3];
+            let mut cases = [0; ReferenceCase::ALL.len()];
             for (case, index) in ReferenceCase::ALL.into_iter().zip(&mut cases) {
                 println!("reference case: {}", case.name());
                 let mut arguments = Vec::with_capacity(12);

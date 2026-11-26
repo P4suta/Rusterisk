@@ -42,7 +42,7 @@ pub(super) struct CaseRun {
     pub(super) media_output: u8,
     pub(super) callback_output: u8,
     pub(super) tools: ToolOutputs,
-    pub(super) cases: [u8; 3],
+    pub(super) cases: [u8; ReferenceCase::ALL.len()],
     pub(super) runtime: Option<CaseRuntime>,
 }
 
