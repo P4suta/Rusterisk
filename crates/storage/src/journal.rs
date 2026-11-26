@@ -1,5 +1,5 @@
 use crate::{validate_name, StorageError, Store};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use std::path::{Path, PathBuf};
 
 pub(super) struct Operation {
@@ -124,6 +124,28 @@ pub(super) fn begin(
     Ok(connection.last_insert_rowid())
 }
 
+pub(super) fn begin_deletion(
+    connection: &mut Connection,
+    directory: &Path,
+    name: &str,
+) -> Result<i64, StorageError> {
+    validate_name(name)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let existing = transaction.query_row(
+        "SELECT id FROM recording_operations WHERE name=?1 AND operation='delete' AND phase='deleting'",
+        [name], |row| row.get(0),
+    ).optional()?;
+    let id = match existing {
+        Some(id) => id,
+        None => {
+            super::recording_path(directory, name)?;
+            begin(&transaction, name, "delete", "deleting", None)?
+        }
+    };
+    transaction.commit()?;
+    Ok(id)
+}
+
 pub(super) fn unlink(
     connection: &mut Connection,
     directory: &Path,
@@ -131,6 +153,14 @@ pub(super) fn unlink(
     id: i64,
 ) -> Result<(), StorageError> {
     validate_name(name)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let pending: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM recording_operations WHERE id=?1 AND name=?2 AND operation='delete' AND phase='deleting')",
+        (id, name), |row| row.get(0),
+    )?;
+    if !pending {
+        return Ok(());
+    }
     match std::fs::remove_file(directory.join(format!("{name}.wav"))) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -138,7 +168,6 @@ pub(super) fn unlink(
     }
     #[cfg(unix)]
     std::fs::File::open(directory)?.sync_all()?;
-    let transaction = connection.transaction()?;
     transaction.execute("DELETE FROM recordings WHERE name=?1", [name])?;
     transaction.execute("DELETE FROM recording_operations WHERE id=?1", [id])?;
     transaction.commit()?;

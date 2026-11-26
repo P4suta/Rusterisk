@@ -281,21 +281,8 @@ impl Store {
         Ok(())
     }
 
-    fn recording_path(&self, name: &str) -> Result<PathBuf, StorageError> {
-        validate_name(name)?;
-        let path = self.recordings.join(format!("{name}.wav"));
-        let metadata = std::fs::symlink_metadata(&path).map_err(recording_io_error)?;
-        if metadata.file_type().is_symlink() {
-            return Err(StorageError::InvalidName);
-        }
-        if !metadata.is_file() {
-            return Err(StorageError::NotFound);
-        }
-        Ok(path)
-    }
-
     pub fn recording(&self, name: &str) -> Result<rusterisk_api::StoredRecording, StorageError> {
-        self.recording_path(name)?;
+        recording_path(&self.recordings, name)?;
         Ok(rusterisk_api::StoredRecording {
             name: name.to_owned(),
             format: "wav".into(),
@@ -303,7 +290,7 @@ impl Store {
     }
 
     pub fn open_recording(&self, name: &str) -> Result<StoredRecordingReader, StorageError> {
-        StoredRecordingReader::open(&self.recording_path(name)?)
+        StoredRecordingReader::open(&recording_path(&self.recordings, name)?)
     }
 
     pub fn prepare_recording_copy(
@@ -315,8 +302,7 @@ impl Store {
     }
 
     pub fn delete_recording(&mut self, name: &str) -> Result<(), StorageError> {
-        self.recording_path(name)?;
-        let id = journal::begin(&self.connection, name, "delete", "deleting", None)?;
+        let id = journal::begin_deletion(&mut self.connection, &self.recordings, name)?;
         journal::unlink(&mut self.connection, &self.recordings, name, id)
     }
 
@@ -346,6 +332,19 @@ impl Store {
         output.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(output)
     }
+}
+
+fn recording_path(directory: &Path, name: &str) -> Result<PathBuf, StorageError> {
+    validate_name(name)?;
+    let path = directory.join(format!("{name}.wav"));
+    let metadata = std::fs::symlink_metadata(&path).map_err(recording_io_error)?;
+    if metadata.file_type().is_symlink() {
+        return Err(StorageError::InvalidName);
+    }
+    if !metadata.is_file() {
+        return Err(StorageError::NotFound);
+    }
+    Ok(path)
 }
 
 fn validate_name(name: &str) -> Result<(), StorageError> {

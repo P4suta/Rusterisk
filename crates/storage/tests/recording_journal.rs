@@ -110,6 +110,49 @@ fn deletion_replays_before_and_after_unlink_and_keeps_its_intent_until_catalog_c
 }
 
 #[test]
+fn a_delete_retries_on_the_live_store_before_or_after_unlink() -> Result<(), StorageError> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    let mut store = Store::open(root)?;
+    let db = rusqlite::Connection::open(root.join("calls.sqlite3"))?;
+    for name in ["before", "after", "conflict"] {
+        rusterisk_storage::Recorder::create(root, name, 8000)?.finish()?;
+        store.recording_finished(name)?;
+    }
+    db.execute_batch(
+        "INSERT INTO recording_operations(name,operation,phase) VALUES
+        ('before','delete','deleting'),('conflict','overwrite','writing');
+        CREATE TRIGGER reject_delete BEFORE DELETE ON recordings
+        WHEN OLD.name='after' BEGIN SELECT RAISE(ABORT,'catalog unavailable'); END;",
+    )?;
+    assert!(matches!(
+        store.delete_recording("conflict"),
+        Err(StorageError::Exists)
+    ));
+    assert!(store.delete_recording("after").is_err());
+    assert!(!root.join("recordings/after.wav").exists());
+    db.execute_batch("DROP TRIGGER reject_delete")?;
+    for name in ["before", "after"] {
+        store.delete_recording(name)?;
+        assert!(matches!(
+            store.delete_recording(name),
+            Err(StorageError::NotFound)
+        ));
+        assert_eq!(
+            db.query_row(
+                "SELECT (SELECT count(*) FROM recordings WHERE name=?1) +
+             (SELECT count(*) FROM recording_operations WHERE name=?1)",
+                [name],
+                |row| row.get::<_, u32>(0),
+            )?,
+            0
+        );
+    }
+    assert!(store.recording("conflict").is_ok());
+    Ok(())
+}
+
+#[test]
 fn upgrading_a_stopped_store_preserves_history_and_installs_the_recording_journal(
 ) -> Result<(), StorageError> {
     let directory = tempfile::tempdir()?;
