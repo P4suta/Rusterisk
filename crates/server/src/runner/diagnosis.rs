@@ -36,7 +36,7 @@ impl Runner {
             Target::Runtime => to_value(self.activity.snapshot(self.control.call_slots()))?,
             Target::Channel(id) => to_value(self.control.diagnose_channel(&id)?)?,
             Target::Extension { context, extension } => {
-                to_value(self.control.diagnose_extension(context, extension))?
+                to_value(self.control.diagnose_extension(context, extension)?)?
             }
         })
     }

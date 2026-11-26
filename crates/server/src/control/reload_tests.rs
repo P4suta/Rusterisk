@@ -1,4 +1,4 @@
-use super::super::{dialplan::DialplanFrame, CallSettings, Control, ControlError};
+use super::super::{CallSettings, Control, ControlError};
 use crate::call_profiles::{BoundNativeProfiles, NativeTransportBinding};
 use crate::storage::{PreparedMusic, StorageWorker};
 use crate::{Action, CallKey, Effect, MediaOwner, Milestone, Outcome, Signal};
@@ -159,7 +159,7 @@ fn state(control: &mut Control) -> Result<ControlState, ControlError> {
         bridges: body(control, Action::ListBridges)?,
         endpoints: body(control, Action::ListEndpoints { technology: None })?,
         applications: body(control, Action::ListApplications)?,
-        dialplan: control.dialplan_program.clone(),
+        dialplan: control.published_routes()?.program().clone(),
         websocket: control.websocket.clone(),
     })
 }
@@ -192,14 +192,12 @@ fn native_profile(
 }
 
 fn program<'a>(control: &'a Control, key: &CallKey) -> Result<&'a Dialplan, ControlError> {
-    control
-        .channels
-        .get(&key.id)
-        .ok_or(ControlError::Capacity)?
-        .dialplan
-        .as_ref()
-        .map(DialplanFrame::program)
-        .ok_or(ControlError::Capacity)
+    let entry = control.channels.by_key(key).ok_or(ControlError::Capacity)?;
+    Ok(control
+        .settings
+        .get(entry.route_generation())?
+        .routes
+        .program())
 }
 
 fn shared_observation(
@@ -306,7 +304,7 @@ fn control_commit_moves_new_defaults_without_recreating_live_observations(
     shared_observation(&mut control, observation)?;
     assert!(control.endpoint_key("phone").is_err());
     assert!(control.endpoint_key("replacement").is_ok());
-    assert_eq!(control.dialplan_program, replacement.dialplan);
+    assert_eq!(control.published_routes()?.program(), &replacement.dialplan);
     assert_eq!(password(&replacement)?, "replacement");
     assert_eq!(replacement.origins, ["https://replacement.example"]);
     let (new, current) = originate(&mut control, "new", Profile::Replacement)?;

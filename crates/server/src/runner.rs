@@ -953,8 +953,8 @@ impl Runner {
         let dialplan = matches!(&call.target, crate::IncomingTarget::Dialplan);
         if dialplan
             && self
-                .config
-                .dialplan
+                .control
+                .published_routes()?
                 .position(&call.context, &call.extension, 1)
                 .is_none()
         {
@@ -965,12 +965,7 @@ impl Runner {
         let mut outcome = self.control.incoming(call, &timestamp)?;
         let key = self.control.key(&id)?;
         if dialplan {
-            match self.control.start_dialplan(
-                &key,
-                self.config.dialplan.clone(),
-                now_ms,
-                &timestamp,
-            ) {
+            match self.control.start_bound_dialplan(&key, now_ms, &timestamp) {
                 Ok(executed) => outcome.append(executed),
                 Err(error) => {
                     outcome.append(self.control.apply(Action::Hangup(id), &timestamp, now_ms)?);

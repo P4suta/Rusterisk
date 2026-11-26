@@ -214,6 +214,7 @@ async fn prepare(
         .await
         .map_err(failure)?;
     let settings = CallSettings::prepared(
+        config.dialplan.clone().compile(),
         signaling.call_catalog(),
         signaling.websocket_catalog(),
         music,

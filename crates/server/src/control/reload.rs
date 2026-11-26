@@ -1,12 +1,11 @@
 use super::{CallSettings, Control, ControlError, Endpoints};
-use rusterisk_config::{Config, Dialplan, WebSocketConfig};
+use rusterisk_config::{Config, WebSocketConfig};
 use rusterisk_core::SettingsCandidate;
 
 pub(super) struct PreparedConfiguration {
     key: SettingsCandidate,
     config: Config,
     endpoints: Endpoints,
-    dialplan: Dialplan,
     websocket: WebSocketConfig,
 }
 
@@ -23,14 +22,12 @@ impl Control {
             .validate_runtime()
             .map_err(|error| ControlError::Adapter(error.to_string()))?;
         let endpoints = self.endpoints.prepare_configuration(&replacement)?;
-        let dialplan = replacement.dialplan.clone();
         let websocket = replacement.websocket.clone();
         let key = self.settings.prepare(settings)?;
         self.pending_configuration = Some(PreparedConfiguration {
             key,
             config: replacement,
             endpoints,
-            dialplan,
             websocket,
         });
         Ok(key)
@@ -71,13 +68,11 @@ impl Control {
         let PreparedConfiguration {
             config,
             mut endpoints,
-            dialplan,
             websocket,
             key: _,
         } = prepared;
         endpoints.preserve_contacts(&self.endpoints);
         self.endpoints = endpoints;
-        self.dialplan_program = dialplan;
         self.websocket = websocket;
         Ok(config)
     }

@@ -91,6 +91,34 @@ fn end(control: &mut Control, key: CallKey) -> Result<Outcome, ControlError> {
 }
 
 #[test]
+fn admitting_a_phone_uses_the_same_memory_with_one_or_4096_dialplan_steps(
+) -> Result<(), ControlError> {
+    let measured = |count| -> Result<_, ControlError> {
+        let program = rusterisk_config::Dialplan {
+            steps: (0..count)
+                .map(|number| rusterisk_config::Step {
+                    context: "internal".into(),
+                    extension: format!("{number:04}"),
+                    priority: 1,
+                    application: rusterisk_config::Application::Hangup,
+                })
+                .collect(),
+        };
+        let mut control = Control::with_dialplan(2, program);
+        let mut result = Ok(());
+        let allocation = allocation_counter::measure(|| {
+            result = participant(&mut control, "phone", 1).map(|_| ());
+        });
+        result?;
+        Ok((allocation.count_total, allocation.bytes_total))
+    };
+    let small = measured(1)?;
+    let large = measured(4096)?;
+    assert_eq!(large, small);
+    Ok(())
+}
+
+#[test]
 fn a_retiring_call_counts_towards_the_configured_capacity() -> Result<(), ControlError> {
     let mut control = Control::new(1);
     let ended = participant(&mut control, "retiring", 1)?;

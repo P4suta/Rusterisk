@@ -82,23 +82,20 @@ impl Control {
             .map(String::as_str)
             .unwrap_or_else(|| refer.authority().context());
         let extension = refer.target().extension();
-        let frame = entry
-            .dialplan
-            .as_ref()
-            .ok_or(ControlError::Conflict("Transfer settings unavailable"))?;
+        if entry.dialplan.is_none() {
+            return Err(ControlError::Conflict("Transfer settings unavailable"));
+        }
+        let generation = entry.route_generation();
+        let routes = &self.settings.get(generation)?.routes;
         let found = context.len() <= 128
             && extension.len() <= 128
             && !context
                 .chars()
                 .chain(extension.chars())
                 .any(char::is_control)
-            && frame.program().position(context, extension, 1).is_some();
-        let (program, context, extension, source_call) = (
-            frame.program().clone(),
-            context.to_owned(),
-            extension.to_owned(),
-            entry.call,
-        );
+            && routes.position(context, extension, 1).is_some();
+        let (context, extension, source_call) =
+            (context.to_owned(), extension.to_owned(), entry.call);
         let token = match self.generation() {
             Ok(generation) => TransferToken::new(generation),
             Err(ControlError::Capacity) => {
@@ -126,10 +123,19 @@ impl Control {
             .by_handle_mut(source.handle())
             .ok_or(ControlError::NotFound("Transfer source disappeared"))?
             .call = decision.transferor;
-        self.channels
-            .by_handle_mut(survivor.handle())
-            .ok_or(ControlError::NotFound("Transfer survivor disappeared"))?
-            .call = decision.transferee;
+        let surviving = self.channels.require_key_mut(&survivor)?;
+        if surviving.route_generation() != generation {
+            let retained = if surviving.settings.generation() == generation {
+                None
+            } else {
+                Some(self.settings.retain(generation)?)
+            };
+            let previous = std::mem::replace(&mut surviving.route_override, retained);
+            if let Some(previous) = previous {
+                self.settings.release(previous)?;
+            }
+        }
+        surviving.call = decision.transferee;
         self.transfers.insert(
             token,
             ActiveTransfer {
@@ -162,8 +168,8 @@ impl Control {
         entry.snapshot.dialplan.priority = 1;
         entry.snapshot.dialplan.app_name.clear();
         entry.snapshot.dialplan.app_data.clear();
-        entry.dialplan = Some(super::DialplanFrame::dormant(program.clone()));
-        match self.start_dialplan(&survivor, program, now, timestamp) {
+        entry.dialplan = Some(super::DialplanFrame::dormant());
+        match self.start_bound_dialplan(&survivor, now, timestamp) {
             Ok(started) => {
                 outcome.effects.push(Effect::ReferProgress {
                     source,

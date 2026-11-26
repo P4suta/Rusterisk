@@ -754,11 +754,19 @@ struct ChannelEntry {
     media_tasks: MediaTasks,
     music: Option<music::MusicTask>,
     settings: rusterisk_core::SettingsReference,
+    route_override: Option<rusterisk_core::SettingsReference>,
     pending_native: Option<NativeStartCapsule>,
     pending_websocket: Option<WebSocketStartCapsule>,
 }
 
 impl ChannelEntry {
+    fn route_generation(&self) -> rusterisk_core::SettingsGeneration {
+        self.route_override
+            .as_ref()
+            .unwrap_or(&self.settings)
+            .generation()
+    }
+
     fn variable(&self, name: &str) -> Result<String, ControlError> {
         let value = match name {
             "EXTEN" => self.snapshot.dialplan.exten.clone(),
@@ -879,7 +887,6 @@ pub struct Control {
     pending_configuration: Option<reload::PreparedConfiguration>,
     info: crate::server_info::ServerInfo,
     recordings: BTreeMap<ChannelId, recording::RecordingEntry>,
-    dialplan_program: rusterisk_config::Dialplan,
     endpoints: Endpoints,
     media_connections: BTreeMap<ChannelId, (CallKey, crate::media_websocket::MediaLinkOptions)>,
     websocket: rusterisk_config::WebSocketConfig,
@@ -1005,10 +1012,11 @@ impl Control {
                 deadline: None,
                 variables: BTreeMap::new(),
                 dtmf: None,
-                dialplan: Some(DialplanFrame::dormant(self.dialplan_program.clone())),
+                dialplan: Some(DialplanFrame::dormant()),
                 media_tasks: MediaTasks::new(call.generation()),
                 music: None,
                 settings,
+                route_override: None,
                 pending_native: None,
                 pending_websocket: None,
             },
@@ -1031,25 +1039,23 @@ impl Control {
     }
 
     pub fn with_configuration(capacity: usize, config: &rusterisk_config::Config) -> Self {
-        let mut control = Self::with_initial_settings(
-            capacity,
-            config.dialplan.clone(),
-            CallSettings::configured(config),
-        );
+        let mut control = Self::with_initial_settings(capacity, CallSettings::configured(config));
         control.endpoints = Endpoints::configured(config);
         control.websocket = config.websocket.clone();
         control
     }
 
     pub fn with_dialplan(capacity: usize, program: rusterisk_config::Dialplan) -> Self {
-        Self::with_initial_settings(capacity, program, CallSettings::empty())
+        Self::with_initial_settings(
+            capacity,
+            CallSettings {
+                routes: program.compile(),
+                ..CallSettings::empty()
+            },
+        )
     }
 
-    fn with_initial_settings(
-        capacity: usize,
-        program: rusterisk_config::Dialplan,
-        settings: CallSettings,
-    ) -> Self {
+    fn with_initial_settings(capacity: usize, settings: CallSettings) -> Self {
         let info = crate::server_info::ServerInfo::new(capacity);
         Self {
             capacity: capacity.min(64),
@@ -1065,7 +1071,6 @@ impl Control {
             pending_configuration: None,
             info,
             recordings: BTreeMap::new(),
-            dialplan_program: program,
             endpoints: Endpoints::default(),
             media_connections: BTreeMap::new(),
             websocket: rusterisk_config::WebSocketConfig::default(),
@@ -1523,10 +1528,11 @@ impl Control {
                         deadline: Some(deadline),
                         variables: initial.values,
                         dtmf: None,
-                        dialplan: Some(DialplanFrame::dormant(self.dialplan_program.clone())),
+                        dialplan: Some(DialplanFrame::dormant()),
                         media_tasks: MediaTasks::new(generation),
                         music: None,
                         settings,
+                        route_override: None,
                         pending_native: Some(capsule),
                         pending_websocket: None,
                     },
@@ -1882,6 +1888,9 @@ impl Control {
         for step in teardown.by_ref() {
             match step {
                 TeardownStep::Admissions => {
+                    if let Some(reference) = entry.route_override.take() {
+                        self.settings.release(reference)?;
+                    }
                     drop(entry.pending_native.take());
                     drop(entry.pending_websocket.take());
                     self.settings.release(
