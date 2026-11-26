@@ -51,10 +51,14 @@ fn context(configuration: PathBuf, directory: PathBuf) -> ReferenceNativeContext
                 media_output: 4,
                 callback_output: 5,
                 tools: tools(),
-                cases: [6, 7, 8, 12, 13, 14],
+                cases: [6, 7, 8, 9, 10, 11],
                 runtime: None,
             },
-            cleanup: cleanup(),
+            cleanup: CleanupOutputs {
+                inspection: 12,
+                removal: 13,
+                absence: 14,
+            },
         },
         sipp: SippContext {
             run: SippRun {
@@ -397,6 +401,27 @@ fn retained_case_configuration_keeps_runtime_websocket_settings_and_excludes_gen
         );
         reject_changes(fixture)
     })
+}
+
+#[test]
+fn retained_audio_cases_must_finish_before_reference_cleanup() -> io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut fixture = prepare(&fs::canonicalize(root.path())?)?;
+    fixture.validate()?;
+    let cases = &mut fixture.context.cases.run.cases;
+    let last = cases
+        .last_mut()
+        .ok_or_else(|| io::Error::other("missing final case"))?;
+    let reports = fixture.retained.join("reference-comparisons");
+    for extension in ["stdout", "stderr"] {
+        fs::rename(
+            reports.join(format!("{last:03}.{extension}")),
+            reports.join(format!("015.{extension}")),
+        )?;
+    }
+    *last = 15;
+    assert!(fixture.validate().is_err());
+    Ok(())
 }
 
 #[test]
