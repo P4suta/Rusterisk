@@ -894,9 +894,11 @@ impl MediaHub {
     }
 
     fn release_notice(&mut self, key: CallKey) -> Result<(), MediaError> {
-        match self.notices.try_reserve() {
-            Ok(permit) => permit.send(MediaNotice::Released { key }),
-            Err(mpsc::error::TrySendError::Full(())) => {
+        match self.notices.ordinary.clone().try_reserve_owned() {
+            Ok(slot) => self
+                .notices
+                .send_reserved(slot, MediaNotice::Released { key })?,
+            Err(mpsc::error::TrySendError::Full(_)) => {
                 let slot = key.handle().slot();
                 if self
                     .release_notices
@@ -906,7 +908,7 @@ impl MediaHub {
                     self.release_notices.insert(slot, key);
                 }
             }
-            Err(mpsc::error::TrySendError::Closed(())) => return Err(MediaError::UnknownStream),
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(MediaError::UnknownStream),
         }
         Ok(())
     }
@@ -1563,10 +1565,10 @@ impl MediaHub {
                 Some(attachment) => self.websocket_attachment(attachment)?,
                 None => return Ok(Turn::Stop),
             },
-            permit = self.notices.clone().reserve_owned(), if !self.release_notices.is_empty() => {
-                let permit = permit.map_err(|_| MediaError::UnknownStream)?;
+            slot = self.notices.ordinary.clone().reserve_owned(), if !self.release_notices.is_empty() => {
+                let slot = slot.map_err(|_| MediaError::UnknownStream)?;
                 if let Some((_, key)) = self.release_notices.pop_first() {
-                    permit.send(MediaNotice::Released { key });
+                    self.notices.send_reserved(slot, MediaNotice::Released { key })?;
                 }
             }
             result = self.workers.join_next(), if !self.workers.is_empty() => {

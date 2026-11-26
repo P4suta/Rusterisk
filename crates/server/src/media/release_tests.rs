@@ -21,8 +21,8 @@ fn key(generation: u64) -> Result<CallKey, MediaError> {
 async fn all_release_notices_survive_a_full_notice_channel() -> Result<(), MediaError> {
     let (_port, mut hub, mut notices) = MediaHub::new(64);
     let first = key(1)?;
-    while let Ok(permit) = hub.notices.try_reserve() {
-        permit.send(MediaNotice::Answer { key: first.clone() });
+    for _ in 0..128 {
+        hub.notice(MediaNotice::Answer { key: first.clone() })?;
     }
     for generation in 1..=64 {
         hub.release_call(key(generation)?)?;
