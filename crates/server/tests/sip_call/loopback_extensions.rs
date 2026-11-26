@@ -278,20 +278,19 @@ async fn run(
         };
         let config = Config::load(&settings).map_err(failure)?;
         let management = server.address();
-        let scenario = tokio::spawn(async move {
-            Wait::Scenario
-                .bounded(async {
-                    exercise(phones, &config, target, management, path).await?;
-                    if let Some(cli) = cli {
-                        check_cli(&cli, &config, management).await?;
-                    }
-                    Ok(())
-                })
-                .await
-                .map_err(failure)?
-        });
-        let observed = scenario.await.map_err(failure).and_then(|result| result);
+        let observed = Wait::Scenario
+            .bounded(async {
+                exercise(phones, &config, target, management, path).await?;
+                if let Some(cli) = cli.as_deref() {
+                    check_cli(cli, &config, management).await?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(failure)
+            .and_then(|result| result);
         result = combine(observed, server.terminate().await.map(|_| ()));
+        result = combine(result, super::normal_logs::files(root.path(), &config));
         break;
     }
     combine(result, root.close().map_err(failure))

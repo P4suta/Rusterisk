@@ -35,6 +35,8 @@ mod early_music;
 mod late_answer;
 #[path = "sip_call/loopback_extensions.rs"]
 mod loopback_extensions;
+#[path = "sip_call/normal_logs.rs"]
+mod normal_logs;
 #[path = "process_recovery/process.rs"]
 mod process;
 #[path = "sip_call/registration.rs"]
