@@ -48,6 +48,14 @@ impl Client {
         Ok(self.http.request(method, url).timeout(timeout))
     }
 
+    pub async fn capabilities(&self) -> Result<api::capabilities::Capabilities, Error> {
+        let response = self
+            .prepare_management_request(api::ManagementOperation::Capabilities, &[])?
+            .send()
+            .await?;
+        Self::decode_response(response).await
+    }
+
     pub async fn reload_configuration(&self) -> Result<(), Error> {
         let operation = api::ManagementOperation::ReloadConfiguration;
         let response = self
@@ -144,6 +152,33 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn capabilities_use_the_authenticated_management_route() -> Result<(), Error> {
+        use axum::{routing::get, Json, Router};
+        use std::future::IntoFuture;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let route = api::ManagementOperation::Capabilities.metadata().path;
+        let app = Router::new().route(route, get(|headers: axum::http::HeaderMap| async move {
+            assert!(headers.contains_key(axum::http::header::AUTHORIZATION));
+            Json(serde_json::json!({"reference": api::REFERENCE_VERSION, "operations": [], "verified_call_paths": [{"path":"registered_extensions","signaling":"SIP over UDP","media":"RTP","codec":"PCMU","conditions":["Two registered phones"]}]}))
+        }));
+        let task = tokio::spawn(axum::serve(listener, app).into_future());
+        let result = Client::new(&format!("http://{address}"), "reader", "password")?
+            .capabilities()
+            .await;
+        task.abort();
+        match task.await {
+            Err(error) if error.is_cancelled() => {}
+            Ok(result) => result?,
+            Err(_) => return Err(Error::Closed),
+        }
+        let result = result?;
+        assert_eq!(result.reference, api::REFERENCE_VERSION);
+        assert_eq!(result.verified_call_paths[0].path, "registered_extensions");
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_call_posts_to_the_nominated_endpoint_with_its_deadline() -> Result<(), Error> {
