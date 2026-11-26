@@ -10,7 +10,8 @@ use rusterisk_media::AudioSocket;
 use rusterisk_server::{
     http::router, media::MediaHub, signaling::Signaling, ControlError, Controller, Credentials,
 };
-use std::{fmt::Display, time::Duration};
+use rusterisk_test_support::Wait;
+use std::fmt::Display;
 use tokio::{io::AsyncReadExt, net::TcpStream, task::JoinHandle};
 use tower::ServiceExt;
 
@@ -47,7 +48,7 @@ async fn finish<E: Display>(
     role: &str,
     mut task: JoinHandle<Result<(), E>>,
 ) -> Result<(), ControlError> {
-    match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+    match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result
             .map_err(|error| failure(format!("{role} join: {error}")))?
             .map_err(|error| failure(format!("{role}: {error}"))),
@@ -68,38 +69,39 @@ async fn termination(peer: Option<&mut TcpStream>) -> Result<(), ControlError> {
     let Some(peer) = peer else {
         return Ok(());
     };
-    tokio::time::timeout(Duration::from_secs(1), async {
-        let mut bytes = [0; 1923];
-        for _ in 0..16 {
-            peer.read_exact(&mut bytes[..3]).await.map_err(failure)?;
-            let length = usize::from(u16::from_be_bytes([bytes[1], bytes[2]]));
-            if length > 1920 {
-                return Err(ControlError::Capacity);
-            }
-            peer.read_exact(&mut bytes[3..length + 3])
-                .await
-                .map_err(failure)?;
-            match AudioSocket::parse(&bytes[..length + 3]).map_err(failure)? {
-                AudioSocket::Terminate => {
-                    if peer.read(&mut bytes[..1]).await.map_err(failure)? != 0 {
-                        return Err(ControlError::Invalid(
-                            "AudioSocket sent bytes after termination",
-                        ));
+    Wait::Ready
+        .bounded(async {
+            let mut bytes = [0; 1923];
+            for _ in 0..16 {
+                peer.read_exact(&mut bytes[..3]).await.map_err(failure)?;
+                let length = usize::from(u16::from_be_bytes([bytes[1], bytes[2]]));
+                if length > 1920 {
+                    return Err(ControlError::Capacity);
+                }
+                peer.read_exact(&mut bytes[3..length + 3])
+                    .await
+                    .map_err(failure)?;
+                match AudioSocket::parse(&bytes[..length + 3]).map_err(failure)? {
+                    AudioSocket::Terminate => {
+                        if peer.read(&mut bytes[..1]).await.map_err(failure)? != 0 {
+                            return Err(ControlError::Invalid(
+                                "AudioSocket sent bytes after termination",
+                            ));
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
-                }
-                AudioSocket::Audio(_) | AudioSocket::Dtmf(_) => {}
-                AudioSocket::Uuid(_) => {
-                    return Err(ControlError::Invalid(
-                        "AudioSocket repeated its identity during shutdown",
-                    ))
+                    AudioSocket::Audio(_) | AudioSocket::Dtmf(_) => {}
+                    AudioSocket::Uuid(_) => {
+                        return Err(ControlError::Invalid(
+                            "AudioSocket repeated its identity during shutdown",
+                        ))
+                    }
                 }
             }
-        }
-        Err(ControlError::Capacity)
-    })
-    .await
-    .map_err(|error| failure(format!("AudioSocket termination: {error}")))?
+            Err(ControlError::Capacity)
+        })
+        .await
+        .map_err(|error| failure(format!("AudioSocket termination: {error}")))?
 }
 
 struct Observations {
@@ -142,11 +144,11 @@ async fn stream_http_requests_admit_the_transport_and_keep_reference_validation_
             return Err(failure(format!("AudioSocket admission returned {admitted}")));
         }
         let channel: Channel = serde_json::from_slice(&response.into_body().collect().await.map_err(failure)?.to_bytes())?;
-        let (accepted, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await.map_err(failure)?.map_err(failure)?;
+        let (accepted, _) = Wait::Ready.bounded(listener.accept()).await.map_err(failure)?.map_err(failure)?;
         peer = Some(accepted);
         let current = peer.as_mut().ok_or(ControlError::Capacity)?;
         let mut identity = [0; 19];
-        tokio::time::timeout(Duration::from_secs(1), current.read_exact(&mut identity)).await.map_err(failure)?.map_err(failure)?;
+        Wait::Ready.bounded(current.read_exact(&mut identity)).await.map_err(failure)?.map_err(failure)?;
         let response = app.oneshot(request("app=calls&external_host=127.0.0.1:12000&format=slin&transport=tcp&encapsulation=audiosocket")?).await.map_err(failure)?;
         let rejected = response.status();
         if rejected != StatusCode::BAD_REQUEST {

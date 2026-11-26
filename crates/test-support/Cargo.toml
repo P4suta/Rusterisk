@@ -1,0 +1,29 @@
+[package]
+name = "rusterisk-test-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+notify = { version = "=8.2.2", default-features = false, features = [
+  "macos_kqueue",
+] }
+tokio = { version = "1.50.0", default-features = false, features = [
+  "rt",
+  "net",
+  "sync",
+  "time",
+  "test-util",
+] }
+wait-timeout = "=0.2.1"
+
+[target.'cfg(unix)'.dependencies]
+signal-hook = { version = "=0.4.6", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+win-custody = "=0.1.6"
+
+[lints]
+workspace = true

@@ -1,5 +1,6 @@
 use super::*;
 use axum::{extract::State, response::IntoResponse};
+use rusterisk_server::test_time::Wait;
 use std::future::IntoFuture;
 
 async fn delayed(
@@ -45,11 +46,11 @@ async fn media_notifications_and_stasis_exit_cancel_owned_state_requests_before_
             let (_lifetime, lifetime) = oneshot::channel();
             calls.entries.insert(channel.id.clone(), Entry { progress, lifetime, work: Work::Idle, probe: Probe::Waiting });
             calls.settle();
-            let release = tokio::time::timeout(Duration::from_secs(1), requests.recv()).await.map_err(|_| Error::Timeout)?.ok_or(Error::Closed)?;
+            let release = Wait::Ready.bounded(requests.recv()).await.map_err(|_| Error::Timeout)?.ok_or(Error::Closed)?;
             let kind = if exiting { api::EventKind::StasisEnd { channel: channel.clone() } }
                 else { api::EventKind::ChannelVarset { channel: channel.clone(), variable: "RUSTERISK_MEDIA_CONNECTED".into(), value: "1".into() } };
             calls.event(&api::Event { application: "app".into(), timestamp: "now".into(), kind })?;
-            let (id, result) = tokio::time::timeout(Duration::from_secs(1), calls.probes.join_next()).await.map_err(|_| Error::Timeout)?.ok_or(Error::Closed)?.map_err(|_| Error::Closed)?;
+            let (id, result) = Wait::Ready.bounded(calls.probes.join_next()).await.map_err(|_| Error::Timeout)?.ok_or(Error::Closed)?.map_err(|_| Error::Closed)?;
             assert!(matches!(result, Err(Error::Closed)));
             calls.probed(id, result);
             assert!(received.borrow().media_probe_failure.is_none());
@@ -62,7 +63,8 @@ async fn media_notifications_and_stasis_exit_cancel_owned_state_requests_before_
         if stop.send(()).is_err() {
             return Err(Error::Closed);
         }
-        tokio::time::timeout(Duration::from_secs(1), server)
+        Wait::Ready
+            .bounded(server)
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|_| Error::Closed)??;

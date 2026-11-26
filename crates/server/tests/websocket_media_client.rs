@@ -6,7 +6,8 @@ use rusterisk_server::{
     media_websocket::{MediaLinkOptions, MediaSocket, SocketMessage},
     CallKey,
 };
-use std::{future::IntoFuture, time::Duration};
+use rusterisk_test_support::Wait;
+use std::future::IntoFuture;
 use tokio::sync::{mpsc, watch};
 
 fn failure(error: impl std::fmt::Display) -> MediaError {
@@ -83,56 +84,58 @@ async fn client_and_server_media_connections_exchange_audio_through_one_bridge(
     let (media, hub, _notices) = MediaHub::new(4);
     let (stop, stopped) = watch::channel(false);
     let hub = tokio::spawn(hub.run(stopped));
-    let result = tokio::time::timeout(Duration::from_secs(3), async {
-        let (left_socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/media"))
-            .await
-            .map_err(failure)?;
-        let mut left = sockets.recv().await.ok_or(MediaError::UnknownStream)?;
-        let left_key = key("left", 1)?;
-        media
-            .attach_client_websocket(left_key.clone(), left_socket, options(&left_key))
-            .await?;
-        let (mut right, _) = tokio_tungstenite::connect_async(format!("ws://{address}/media"))
-            .await
-            .map_err(failure)?;
-        let right_key = key("right", 2)?;
-        media
-            .attach_websocket(
-                right_key.clone(),
-                sockets.recv().await.ok_or(MediaError::UnknownStream)?,
-                options(&right_key),
+    let result = Wait::Ready
+        .bounded(async {
+            let (left_socket, _) =
+                tokio_tungstenite::connect_async(format!("ws://{address}/media"))
+                    .await
+                    .map_err(failure)?;
+            let mut left = sockets.recv().await.ok_or(MediaError::UnknownStream)?;
+            let left_key = key("left", 1)?;
+            media
+                .attach_client_websocket(left_key.clone(), left_socket, options(&left_key))
+                .await?;
+            let (mut right, _) = tokio_tungstenite::connect_async(format!("ws://{address}/media"))
+                .await
+                .map_err(failure)?;
+            let right_key = key("right", 2)?;
+            media
+                .attach_websocket(
+                    right_key.clone(),
+                    sockets.recv().await.ok_or(MediaError::UnknownStream)?,
+                    options(&right_key),
+                )
+                .await?;
+            assert!(matches!(
+                left.receive().await?,
+                Some(SocketMessage::Text(_))
+            ));
+            assert!(matches!(
+                right.receive().await?,
+                Some(SocketMessage::Text(_))
+            ));
+            media.bridge(
+                1,
+                [left_key.clone(), right_key.clone()].into_iter().collect(),
+            )?;
+            MediaSocket::send(
+                &mut left,
+                SocketMessage::Binary(vec![mulaw_encode(4000); 160].into()),
             )
             .await?;
-        assert!(matches!(
-            left.receive().await?,
-            Some(SocketMessage::Text(_))
-        ));
-        assert!(matches!(
-            right.receive().await?,
-            Some(SocketMessage::Text(_))
-        ));
-        media.bridge(
-            1,
-            [left_key.clone(), right_key.clone()].into_iter().collect(),
-        )?;
-        MediaSocket::send(
-            &mut left,
-            SocketMessage::Binary(vec![mulaw_encode(4000); 160].into()),
-        )
-        .await?;
-        MediaSocket::send(
-            &mut right,
-            SocketMessage::Binary(vec![mulaw_encode(-7000); 160].into()),
-        )
-        .await?;
-        tokio::try_join!(received(&mut left, -7000), received(&mut right, 4000))?;
-        media.release(left_key)?;
-        media.release(right_key)?;
-        tokio::try_join!(received_close(&mut left), received_close(&mut right))?;
-        Ok::<(), MediaError>(())
-    })
-    .await
-    .map_err(failure);
+            MediaSocket::send(
+                &mut right,
+                SocketMessage::Binary(vec![mulaw_encode(-7000); 160].into()),
+            )
+            .await?;
+            tokio::try_join!(received(&mut left, -7000), received(&mut right, 4000))?;
+            media.release(left_key)?;
+            media.release(right_key)?;
+            tokio::try_join!(received_close(&mut left), received_close(&mut right))?;
+            Ok::<(), MediaError>(())
+        })
+        .await
+        .map_err(failure);
     stop.send_replace(true);
     hub.await.map_err(failure)??;
     http.abort();

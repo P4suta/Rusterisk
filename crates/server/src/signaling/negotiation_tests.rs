@@ -1,14 +1,15 @@
 use super::{Active, DigitDelivery, Signaling};
 use crate::media::MediaHub;
 use crate::rtp::{RtpSession, SocketPair};
+use crate::signaling::calls;
 use crate::{CallKey, ControlError, Controller, Effect};
 use rusterisk_api::ChannelId;
 use rusterisk_config::Config;
 use rusterisk_core::{AudioGate, PeerMediaDirection};
 use rusterisk_media::AudioFormat;
 use rusterisk_sip::{Datagram, Direction, Output, SipEvent};
+use rusterisk_test_support::Wait;
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
 use tokio::net::UdpSocket;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -39,7 +40,8 @@ async fn direction_answers_wait_for_the_current_transport_and_ignore_cached_retr
         id: ChannelId::try_from("call".to_owned())?,
         generation: 1,
     };
-    signaling.calls.insert(
+    signaling.records.insert(
+        calls::ACTIVE,
         key.clone(),
         Active {
             listener: 0,
@@ -47,7 +49,7 @@ async fn direction_answers_wait_for_the_current_transport_and_ignore_cached_retr
             digits: DigitDelivery::Media,
             direction_reply: None,
         },
-    );
+    )?;
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let result = async {
         media
@@ -96,11 +98,10 @@ async fn direction_answers_wait_for_the_current_transport_and_ignore_cached_retr
             )
             .await?;
         let mut received = [0; 128];
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), peer.recv_from(&mut received))
-                .await
-                .is_err()
-        );
+        assert!(Wait::Quiet
+            .bounded(peer.recv_from(&mut received))
+            .await
+            .is_err());
         signaling
             .effect(
                 Effect::PeerDirection {
@@ -129,7 +130,8 @@ async fn direction_answers_wait_for_the_current_transport_and_ignore_cached_retr
             )
             .await?;
         signaling.media_answers_for_test(3).await?;
-        let (size, _) = tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut received))
+        let (size, _) = Wait::Ready
+            .bounded(peer.recv_from(&mut received))
             .await
             .map_err(failure)?
             .map_err(failure)?;

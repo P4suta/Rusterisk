@@ -25,7 +25,7 @@ mod recording_options;
 mod recording_policy;
 mod swagger;
 pub use event_filter::EventFilterRequest;
-pub use event_source::{EventSource, InvalidEventSource};
+pub use event_source::{EventSource, InvalidEventSource, ResourceEventSource};
 pub use external_rtp::{ExternalRtpTarget, InvalidExternalRtpTarget, StaticRtpCodec};
 pub use media_uri::{InvalidMediaUri, MediaUri};
 pub use playback_options::{InvalidPlaybackOption, PlaybackMilliseconds, PlaybackOptions};
@@ -149,8 +149,9 @@ pub struct Channel {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Bridge {
-    pub id: ChannelId,
+#[schemars(rename = "Bridge")]
+pub struct Bridge<Id = ChannelId> {
+    pub id: Id,
     pub technology: String,
     pub bridge_type: String,
     pub bridge_class: String,
@@ -174,10 +175,11 @@ pub enum BridgeVideoMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Application {
+#[schemars(rename = "Application")]
+pub struct Application<Bridge = ChannelId> {
     pub name: String,
     pub channel_ids: Vec<ChannelId>,
-    pub bridge_ids: Vec<ChannelId>,
+    pub bridge_ids: Vec<Bridge>,
     pub endpoint_ids: Vec<String>,
     pub device_names: Vec<String>,
     pub events_allowed: Vec<EventFilter>,
@@ -208,8 +210,9 @@ pub enum EndpointState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Playback {
-    pub id: ChannelId,
+#[schemars(rename = "Playback")]
+pub struct Playback<Id = ChannelId> {
+    pub id: Id,
     pub media_uri: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_media_uri: Option<String>,
@@ -231,8 +234,9 @@ pub enum PlaybackState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct LiveRecording {
-    pub name: String,
+#[schemars(rename = "LiveRecording")]
+pub struct LiveRecording<Id = String> {
+    pub name: Id,
     pub format: String,
     pub state: RecordingState,
     pub target_uri: String,
@@ -258,8 +262,9 @@ pub enum RecordingState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct StoredRecording {
-    pub name: String,
+#[schemars(rename = "StoredRecording")]
+pub struct StoredRecording<Id = String> {
+    pub name: Id,
     pub format: String,
 }
 
@@ -283,11 +288,12 @@ pub struct ApiError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct Event {
+#[schemars(rename = "Event")]
+pub struct Event<B = ChannelId, P = ChannelId, R = String> {
     pub timestamp: String,
     pub application: String,
     #[serde(flatten)]
-    pub kind: EventKind,
+    pub kind: EventKind<B, P, R>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -296,7 +302,8 @@ pub struct Event {
     clippy::large_enum_variant,
     reason = "docs/adr/keep-related-channel-snapshots-in-owned-events.md: Keep related channel snapshots inline."
 )]
-pub enum EventKind {
+#[schemars(rename = "EventKind")]
+pub enum EventKind<B = ChannelId, P = ChannelId, R = String> {
     EndpointStateChange {
         endpoint: Endpoint,
     },
@@ -338,18 +345,18 @@ pub enum EventKind {
         channel: Channel,
     },
     ChannelEnteredBridge {
-        bridge: Bridge,
+        bridge: Bridge<B>,
         channel: Channel,
     },
     ChannelLeftBridge {
-        bridge: Bridge,
+        bridge: Bridge<B>,
         channel: Channel,
     },
     BridgeCreated {
-        bridge: Bridge,
+        bridge: Bridge<B>,
     },
     BridgeDestroyed {
-        bridge: Bridge,
+        bridge: Bridge<B>,
     },
     ChannelDtmfReceived {
         digit: String,
@@ -370,22 +377,22 @@ pub enum EventKind {
         channel: Channel,
     },
     PlaybackStarted {
-        playback: Playback,
+        playback: Playback<P>,
     },
     PlaybackContinuing {
-        playback: Playback,
+        playback: Playback<P>,
     },
     PlaybackFinished {
-        playback: Playback,
+        playback: Playback<P>,
     },
     RecordingStarted {
-        recording: LiveRecording,
+        recording: LiveRecording<R>,
     },
     RecordingFinished {
-        recording: LiveRecording,
+        recording: LiveRecording<R>,
     },
     RecordingFailed {
-        recording: LiveRecording,
+        recording: LiveRecording<R>,
     },
     ApplicationReplaced {},
     ApplicationMoveFailed {
@@ -415,7 +422,7 @@ pub enum EventKind {
     Published(PublishedEvent),
 }
 
-impl EventKind {
+impl<B, P, R> EventKind<B, P, R> {
     pub const fn event_type(&self) -> &'static str {
         match self {
             Self::EndpointStateChange { .. } => "EndpointStateChange",
@@ -494,6 +501,7 @@ pub enum ManagementOperation {
     ChannelRtpObservation,
     DiagnoseExtension,
     DiagnoseChannel,
+    DiagnoseRuntime,
     TestCall,
 }
 
@@ -536,6 +544,15 @@ impl ManagementOperation {
                 success_status: 200,
                 parameters: &[],
             },
+            Self::DiagnoseRuntime => &Operation {
+                id: "diagnostics.runtime",
+                nickname: "diagnoseRuntime",
+                method: Method::Get,
+                path: "/rusterisk/diagnostics/runtime",
+                response: "RuntimeActivity",
+                success_status: 200,
+                parameters: &[],
+            },
             Self::TestCall => &Operation {
                 id: "testCalls.probe",
                 nickname: "testCall",
@@ -554,6 +571,7 @@ pub const MANAGEMENT_OPERATIONS: &[ManagementOperation] = &[
     ManagementOperation::ChannelRtpObservation,
     ManagementOperation::DiagnoseExtension,
     ManagementOperation::DiagnoseChannel,
+    ManagementOperation::DiagnoseRuntime,
     ManagementOperation::TestCall,
 ];
 
@@ -1296,6 +1314,7 @@ pub fn schemas() -> Value {
     let _channel = generator.subschema_for::<Channel>();
     let _observation = generator.subschema_for::<observation::WatchRecord>();
     let _route_diagnosis = generator.subschema_for::<diagnosis::RouteDiagnosis>();
+    let _runtime_activity = generator.subschema_for::<diagnosis::RuntimeActivity>();
     let _channel_diagnosis = generator.subschema_for::<diagnosis::ChannelDiagnosis>();
     let _rtp = generator.subschema_for::<RtpObservation>();
     let _test_call = generator.subschema_for::<test_call::TestCallResult>();

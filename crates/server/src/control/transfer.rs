@@ -52,11 +52,7 @@ impl Control {
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
         let reference = refer.key();
-        let Some(entry) = self
-            .channels
-            .get(&source.id)
-            .filter(|entry| entry.call.generation() == source.generation)
-        else {
+        let Some(entry) = self.channels.by_key(&source) else {
             return Ok(rejected(source, reference, ReferFailure::NotFound));
         };
         if !matches!(entry.kind, super::ChannelKind::Sip)
@@ -115,8 +111,7 @@ impl Control {
         }
         let survivor_call = self
             .channels
-            .get(&survivor.id)
-            .filter(|entry| entry.call.generation() == survivor.generation)
+            .by_handle(survivor.handle())
             .ok_or(ControlError::Conflict("Transfer survivor changed"))?
             .call;
         let decision = match Transfer::begin(token, source_call, survivor_call) {
@@ -128,11 +123,11 @@ impl Control {
         }
         self.detach_transfer_dial(&pair)?;
         self.channels
-            .get_mut(&source.id)
+            .by_handle_mut(source.handle())
             .ok_or(ControlError::NotFound("Transfer source disappeared"))?
             .call = decision.transferor;
         self.channels
-            .get_mut(&survivor.id)
+            .by_handle_mut(survivor.handle())
             .ok_or(ControlError::NotFound("Transfer survivor disappeared"))?
             .call = decision.transferee;
         self.transfers.insert(
@@ -160,8 +155,7 @@ impl Control {
         outcome.append(self.end_at(&source.id, timestamp, 16, now)?);
         let entry = self
             .channels
-            .get_mut(&survivor.id)
-            .filter(|entry| entry.call.generation() == survivor.generation)
+            .by_handle_mut(survivor.handle())
             .ok_or(ControlError::Conflict("Transfer survivor changed"))?;
         entry.snapshot.dialplan.context = context;
         entry.snapshot.dialplan.exten = extension;
@@ -187,7 +181,7 @@ impl Control {
                 ));
                 if self
                     .channels
-                    .get(&survivor.id)
+                    .by_handle(survivor.handle())
                     .is_some_and(|entry| entry.call.generation() == survivor.generation)
                 {
                     outcome.append(self.end_at(&survivor.id, timestamp, 21, now)?);

@@ -9,7 +9,7 @@ use rusterisk_core::DtmfDigit;
 use rusterisk_server::{
     http::router, ControlError, Controller, Credentials, Effect, IncomingCall, Milestone, Signal,
 };
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tower::ServiceExt;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -61,7 +61,7 @@ async fn http_digits_validate_state_timing_and_capacity_before_accepting_a_comma
         assert_eq!(app.clone().oneshot(request("/ari/channels/call/dtmf?dtmf=12")?).await.map_err(failure)?.status(), StatusCode::PRECONDITION_FAILED);
         controller.signal(Signal::DtmfReady { key: key.clone(), events: u16::MAX }).await?;
         controller.signal(Signal::Milestone { key, milestone: Milestone::Answered }).await?;
-        tokio::time::timeout(Duration::from_secs(1), async {
+        Wait::Ready.bounded(async {
             while let Some(event) = subscription.events.recv().await {
                 if matches!(event.kind, EventKind::ChannelStateChange { channel } if channel.state == ChannelState::Up) { return Ok(()); }
             }

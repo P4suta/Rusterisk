@@ -10,6 +10,7 @@ use rusterisk_config::{Codec, Config};
 use rusterisk_media::{AudioFormat, RtpSender};
 use rusterisk_server::{media::MediaHub, signaling::Signaling, ControlError, Controller};
 use rusterisk_sip::Session;
+use rusterisk_test_support::Wait;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
@@ -400,31 +401,31 @@ async fn native_on(operation: Exercise, layout: CallListeners) -> Result<(), Con
             RequestRoute::Direct(consultation),
         ],
     ));
-    let mut result = finish(worker, Duration::from_secs(8)).await;
+    let mut result = finish(worker).await;
     if result.is_ok() && matches!(operation, Exercise::RetireSource | Exercise::PeerEnded(_)) {
-        let idle = tokio::time::timeout(Duration::from_secs(2), async {
-            let mut tick = tokio::time::interval(Duration::from_millis(20));
-            loop {
-                tick.tick().await;
-                let channels = controller
-                    .execute(
-                        super::credentials()?,
-                        None,
-                        rusterisk_server::Action::ListChannels,
-                    )
-                    .await?;
-                if channels.body == Some(serde_json::json!([])) {
-                    return Ok(());
+        let idle = Wait::Ready
+            .bounded(async {
+                let mut tick = tokio::time::interval(Duration::from_millis(20));
+                loop {
+                    tick.tick().await;
+                    let channels = controller
+                        .execute(
+                            super::credentials()?,
+                            None,
+                            rusterisk_server::Action::ListChannels,
+                        )
+                        .await?;
+                    if channels.body == Some(serde_json::json!([])) {
+                        return Ok(());
+                    }
                 }
-            }
-        })
-        .await
-        .map_err(|_| ControlError::Invalid("Attended transfer left a live channel"));
+            })
+            .await
+            .map_err(|_| ControlError::Invalid("Attended transfer left a live channel"));
         result = idle.and_then(|observation| observation);
     }
     controller.shutdown();
-    let limit = Duration::from_secs(2);
-    let (signaling, hub) = tokio::join!(finish(signaling, limit), finish(hub, limit),);
+    let (signaling, hub) = tokio::join!(finish(signaling), finish(hub),);
     for cleanup in [signaling, hub] {
         result = combine(result, cleanup);
     }

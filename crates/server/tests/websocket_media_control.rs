@@ -3,7 +3,7 @@ use rusterisk_api::{
 };
 use rusterisk_server::{Action, Control, ControlError, Milestone, Signal};
 use rusterisk_server::{Controller, Credentials};
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 
 fn id(value: &str) -> Result<ChannelId, ControlError> {
     Ok(ChannelId::try_from(value.to_owned())?)
@@ -200,7 +200,7 @@ async fn dropped_connection_leases_release_only_their_channel_generation(
             .await?;
         assert_ne!(original.key, replacement.key);
         drop(original);
-        tokio::time::sleep(Duration::from_millis(150)).await;
+
         assert_eq!(
             controller
                 .execute(
@@ -213,24 +213,25 @@ async fn dropped_connection_leases_release_only_their_channel_generation(
             200
         );
         drop(replacement);
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                match controller
-                    .execute(
-                        credentials.clone(),
-                        None,
-                        Action::GetChannel(id("external")?),
-                    )
-                    .await
-                {
-                    Err(ControlError::NotFound(_)) => return Ok::<(), ControlError>(()),
-                    Ok(_) => tokio::time::sleep(Duration::from_millis(10)).await,
-                    Err(error) => return Err(error),
+        Wait::Ready
+            .bounded(async {
+                loop {
+                    match controller
+                        .execute(
+                            credentials.clone(),
+                            None,
+                            Action::GetChannel(id("external")?),
+                        )
+                        .await
+                    {
+                        Err(ControlError::NotFound(_)) => return Ok::<(), ControlError>(()),
+                        Ok(_) => {}
+                        Err(error) => return Err(error),
+                    }
                 }
-            }
-        })
-        .await
-        .map_err(|error| ControlError::Adapter(error.to_string()))??;
+            })
+            .await
+            .map_err(|error| ControlError::Adapter(error.to_string()))??;
         Ok(())
     }
     .await;

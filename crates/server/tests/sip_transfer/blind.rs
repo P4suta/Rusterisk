@@ -6,10 +6,7 @@ use super::{
 };
 use rusterisk_config::Config;
 use rusterisk_server::{media::MediaHub, signaling::Signaling, ControlError, Controller};
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    time::Duration,
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::{net::UdpSocket, sync::mpsc};
 #[path = "exercise.rs"]
 mod exercise;
@@ -73,10 +70,9 @@ async fn native_transfer(departure: Departure) -> Result<ObservedTransfer, Contr
         departure,
         RequestRoute::Direct(target),
     ));
-    let mut result = finish(exchange, Duration::from_secs(8)).await;
+    let mut result = finish(exchange).await;
     controller.shutdown();
-    let limit = Duration::from_secs(2);
-    let (signaling, hub) = tokio::join!(finish(signaling, limit), finish(hub, limit));
+    let (signaling, hub) = tokio::join!(finish(signaling), finish(hub));
     result = combine(
         result,
         signaling.map_err(|error| failure(format!("signaling shutdown: {error}"))),

@@ -1,6 +1,7 @@
 use super::*;
 use rusterisk_api::ChannelId;
 use rusterisk_media::AudioFormat;
+use rusterisk_test_support::Wait;
 use std::net::Ipv4Addr;
 use tokio::net::{TcpListener, TcpStream};
 
@@ -33,7 +34,7 @@ async fn measurement_reply_preserves_the_capture_time_and_counts() -> Result<(),
     )?;
     leg.measurements_mut().local.rxcount = 7;
     let port = Port::owned(PeerMediaDirection::SendReceive, DigitSupport::Unsupported);
-    hub.install_link(key.clone(), port, Gate::Open)?;
+    hub.install_link(key.clone(), port, Gate::Open, 8000)?;
     hub.legs.insert(key.clone(), leg);
     let (reply, response) = oneshot::channel();
     let before = crate::utc_timestamps::now_millis();
@@ -416,16 +417,28 @@ async fn a_replacement_webrtc_answer_survives_release_of_the_expired_attachment(
         2,
     )?;
     settle(&mut hub)?;
-    let mut admitted = Vec::new();
-    while let Ok(MediaNotice::Attached { serial, result, .. }) = notices.try_recv() {
-        if result.is_ok() {
-            admitted.push(serial);
-        }
-    }
+    assert!(matches!(
+        notices.try_recv(),
+        Ok(MediaNotice::Attached {
+            serial: 1,
+            result: Ok(()),
+            ..
+        })
+    ));
+    assert!(
+        matches!(notices.try_recv(), Ok(MediaNotice::Released { key: released }) if released == key)
+    );
+    assert!(matches!(
+        notices.try_recv(),
+        Ok(MediaNotice::Attached {
+            serial: 2,
+            result: Ok(()),
+            ..
+        })
+    ));
     let installed = hub.ports.contains_key(&key) && hub.webrtc_legs.contains_key(&key);
     assert!(hub.workers.is_empty());
     hub.close().await?;
-    assert_eq!(admitted, [1, 2]);
     assert!(installed, "the expired link cannot remove the replacement");
     Ok(())
 }
@@ -549,6 +562,11 @@ async fn one_failing_leg_ends_while_another_keeps_its_audio() -> Result<(), Medi
 // Runs media turns until the leg has read the given number of packets.
 // A loopback datagram can reach its socket after the sender returns, so one turn may come too early.
 async fn received(hub: &mut MediaHub, key: &CallKey, count: u64) -> Result<(), MediaError> {
+    let socket = hub
+        .legs
+        .get(key)
+        .ok_or(MediaError::UnknownStream)?
+        .input_observer()?;
     for _ in 0..100 {
         hub.tick()?;
         let read = hub
@@ -561,7 +579,11 @@ async fn received(hub: &mut MediaHub, key: &CallKey, count: u64) -> Result<(), M
         if read >= count {
             return Ok(());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        Wait::Ready
+            .bounded(socket.peek_from(&mut [0; 1]))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
     }
     Err(MediaError::Transport(
         "the leg never read the packet".into(),

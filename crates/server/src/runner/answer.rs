@@ -1,4 +1,5 @@
 use super::{timestamp, Controller, Credentials, Request, Runner};
+use crate::runner::calls;
 use crate::{Action, CallKey, Control, ControlError, Outcome};
 use rusterisk_api::{ChannelId, ChannelState};
 use rusterisk_core::Wake;
@@ -96,16 +97,17 @@ impl Runner {
         }
         let deadline = now.checked_add(5000).ok_or(ControlError::Capacity)?;
         if self
-            .answers
-            .values()
+            .records
+            .iter(calls::ANSWER)
+            .map(|(_, value)| value)
             .map(|pending| pending.replies.len())
             .sum::<usize>()
             >= 64
         {
             return Err(ControlError::Capacity);
         }
-        if !self.answers.contains_key(&key) {
-            if self.answers.len() >= 64
+        if !self.records.get(calls::ANSWER, &key).is_some() {
+            if self.records.iter(calls::ANSWER).count() >= 64
                 || !self.effects_flowing()
                 || self.effect_room() < outcome.effects.len()
             {
@@ -113,10 +115,10 @@ impl Runner {
             }
             self.publish(&mut outcome)?;
         }
-        let pending = self.answers.entry(key).or_insert_with(|| Pending {
+        let pending = self.records.get_or_insert(calls::ANSWER, key, || Pending {
             deadline,
             replies: VecDeque::new(),
-        });
+        })?;
         pending.deadline = deadline;
         Ok(Some(pending))
     }
@@ -126,7 +128,7 @@ impl Runner {
     }
 
     pub(super) fn finish_answers(&mut self, now: u64) {
-        self.answers.retain(|key, pending| {
+        self.records.retain(calls::ANSWER, |key, pending| {
             let state = answered(&self.control, key);
             for _ in 0..pending.replies.len() {
                 let Some((deadline, reply)) = pending.replies.pop_front() else {

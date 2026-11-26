@@ -4,11 +4,9 @@ use rusterisk_api::{ChannelState, EventKind};
 use rusterisk_config::{Codec, Config};
 use rusterisk_server::{runtime::Server, Action, ControlError};
 use rusterisk_sip::Session;
+use rusterisk_test_support::Wait;
 use serde_json::Value;
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    time::Duration,
-};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Scenario {
@@ -152,7 +150,7 @@ async fn probe(scenario: Scenario) -> Result<(), ControlError> {
         controller.execute(credentials()?,None,Action::Originate{id:keep_id.clone(),endpoint:"PJSIP/keep".into(),app:"keep-app".into(),args:Vec::new(),caller:String::new(),timeout:20}).await?;
         let _remote=answer(&keep.signal,&keep.audio).await?;
         matching_event(&mut app.events,|e|matches!(e,EventKind::StasisStart{channel,..} if channel.id==keep_id && channel.state==ChannelState::Up)).await?;
-        let client=reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(8)).build().map_err(failure)?;
+        let client=reqwest::Client::builder().no_proxy().timeout(Wait::Scenario.duration()).build().map_err(failure)?;
         let limit=if scenario==Scenario::Interrupt{6}else{2};
         let url=format!("http://{address}/rusterisk/test-calls/PJSIP/echo?deadline_seconds={limit}");
         assert_eq!(client.post(&url).basic_auth("reader",Some("read")).send().await.map_err(failure)?.status(),403);
@@ -172,11 +170,11 @@ async fn probe(scenario: Scenario) -> Result<(), ControlError> {
             assert_eq!(result["answered"],answered);
             assert_eq!(result["signal_verified"],scenario==Scenario::Echo);
         }
-        tokio::time::timeout(Duration::from_secs(2),async {
+        Wait::Ready.bounded(async {
             loop {
                 let calls=controller.execute(credentials()?,None,Action::ListChannels).await?.body.ok_or(ControlError::Capacity)?;
                 if let Some([one])=calls.as_array().map(Vec::as_slice){assert_eq!(one["id"],"keep-leg");assert_eq!(one["state"],"Up");break;}
-                tokio::time::sleep(Duration::from_millis(10)).await;
+
             }
             let bridges=controller.execute(credentials()?,None,Action::ListBridges).await?.body.ok_or(ControlError::Capacity)?;
             assert_eq!(bridges.as_array().map(Vec::len),Some(0));

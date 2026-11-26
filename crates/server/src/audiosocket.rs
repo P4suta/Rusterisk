@@ -1,6 +1,7 @@
-use crate::media_link::{Channels, DigitCommand, LinkStats};
+use crate::clock::Clock;
+use crate::media_link::{Channels, DigitSchedule, DigitStep, LinkStats};
 use rusterisk_core::{DtmfDigit, DtmfTone};
-use rusterisk_media::{AudioSocket, AudioSocketDecoder, MediaError, PcmFramer};
+use rusterisk_media::{AudioSocket, AudioSocketDecoder, MediaError, PcmFramer, MAX_SAMPLES};
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -16,9 +17,9 @@ enum LinkTermination {
     Peer(LinkStats),
 }
 
-pub struct AudioSocketLink {
+pub struct AudioSocketLink<const N: usize = MAX_SAMPLES> {
     socket: TcpStream,
-    channels: Channels,
+    channels: Channels<N>,
     decoder: AudioSocketDecoder,
     audio: PcmFramer,
     rate: u32,
@@ -36,8 +37,8 @@ async fn send(socket: &mut TcpStream, message: AudioSocket) -> Result<(), MediaE
         .map_err(failure)
 }
 
-impl AudioSocketLink {
-    pub fn new(socket: TcpStream, channels: Channels, rate: u32) -> Result<Self, MediaError> {
+impl<const N: usize> AudioSocketLink<N> {
+    pub fn new(socket: TcpStream, channels: Channels<N>, rate: u32) -> Result<Self, MediaError> {
         Ok(Self {
             socket,
             channels,
@@ -50,16 +51,14 @@ impl AudioSocketLink {
     async fn serve(&mut self) -> Result<LinkTermination, MediaError> {
         let mut stats = LinkStats::default();
         let mut input = [0; 1923];
-        let period = Duration::from_millis(20);
-        let started = tokio::time::Instant::now();
-        let mut tick = tokio::time::interval_at(started + period, period);
-        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut active: Option<DigitCommand> = None;
+        let clock = Clock::start();
+        let mut digits = DigitSchedule::default();
         loop {
             if *self.channels.stop.borrow() || self.channels.incoming.is_closed() {
                 break;
             }
             tokio::select! {
+                () = self.channels.incoming.closed() => break,
                 changed = self.channels.stop.changed() => if changed.is_err() || *self.channels.stop.borrow() { break; },
                 changed = self.channels.direction.changed() => {
                     if changed.is_err() { break; }
@@ -96,37 +95,25 @@ impl AudioSocketLink {
                 }
                 frame = self.channels.outgoing.recv() => {
                     let Some(frame) = frame else { break; };
+                    match self.channels.incoming.try_reserve() {
+                        Ok(permit) => if let Some(received) = self.audio.pop() { permit.send(received.fit()?); },
+                        Err(mpsc::error::TrySendError::Full(())) => {}
+                        Err(mpsc::error::TrySendError::Closed(())) => break,
+                    }
                     if self.channels.direction.borrow().can_receive() {
-                        send(&mut self.socket, AudioSocket::Audio(frame.resample(self.rate)?)).await?;
+                        send(&mut self.socket, AudioSocket::Audio(frame.expanded().resample(self.rate)?)).await?;
                         stats.packets_sent += 1;
                     }
                 }
-                command = self.channels.commands.recv(), if active.is_none() && (!self.channels.commands.is_closed() || !self.channels.commands.is_empty()) => active = command,
-                _instant = tick.tick() => {
-                    if let Some(frame) = self.audio.pop() {
-                        match self.channels.incoming.try_send(frame) {
-                            Ok(()) => {},
-                            Err(mpsc::error::TrySendError::Full(_)) => stats.dropped += 1,
-                            Err(mpsc::error::TrySendError::Closed(_)) => break,
+                Some(command) = self.channels.commands.recv(), if digits.idle() => digits.admit(command)?,
+                () = clock.reached(digits.wake()) => {
+                    match digits.advance(clock.now_ms().map_err(failure)?, true)? {
+                        DigitStep::Send(tone) if self.channels.direction.borrow().can_receive() => {
+                            send(&mut self.socket, AudioSocket::Dtmf(tone.digit.symbol() as u8)).await?;
+                            stats.packets_sent += 1;
                         }
-                    }
-                    if let Some(command) = &mut active {
-                        let (tone, finished, completion) = match command {
-                            DigitCommand::Tone(tone) => (Some(*tone), true, None),
-                            DigitCommand::Sequence(command) => {
-                                let tone = command.sequence.advance(started.elapsed().as_millis() as u64).map_err(|error| failure(format!("digit schedule: {error:?}")))?;
-                                let finished = command.sequence.finished();
-                                (tone, finished, finished.then_some(command.token))
-                            }
-                        };
-                        if let Some(tone) = tone {
-                            if self.channels.direction.borrow().can_receive() {
-                                send(&mut self.socket, AudioSocket::Dtmf(tone.digit.symbol() as u8)).await?;
-                                stats.packets_sent += 1;
-                            }
-                        }
-                        if let Some(token) = completion { self.channels.completed.try_send(token).map_err(|_| MediaError::Capacity)?; }
-                        if finished { active = None; }
+                        DigitStep::Finished(token) => self.channels.completed.try_send(token).map_err(|_| MediaError::Capacity)?,
+                        DigitStep::Waiting | DigitStep::Send(_) => {}
                     }
                 }
             }

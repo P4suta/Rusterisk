@@ -1,5 +1,6 @@
 use rusterisk_core::{DtmfDigit, DtmfTone, PeerMediaDirection};
 use rusterisk_media::{AudioFormat, MediaError, RtpPacket, TelephoneEvent, TelephoneFormat};
+use rusterisk_test_support::Wait;
 #[path = "rtp_leg/driver.rs"]
 mod driver;
 
@@ -8,10 +9,7 @@ use rusterisk_media::MAX_PACKET;
 use rusterisk_server::rtp::{
     ControlReception, LinkStats, Measurements, RtpChannels, RtpLeg, RtpSession, SocketPair,
 };
-use std::{
-    net::{IpAddr, Ipv4Addr},
-    time::Duration,
-};
+use std::net::{IpAddr, Ipv4Addr};
 use tokio::sync::{mpsc, watch};
 
 fn failure(error: impl std::fmt::Display) -> MediaError {
@@ -66,60 +64,55 @@ async fn held_events_do_not_complete_after_rtp_reception_resumes() -> Result<(),
         },
     )?;
     let mut task = tokio::spawn(link.run());
-    let result = tokio::time::timeout(Duration::from_secs(2), async {
-        peer.data()
-            .send_to(
-                &packet(DtmfDigit::Hash, 1000, 160, false, 1)?.encode()?,
-                local,
-            )
-            .await
-            .map_err(failure)?;
-        if tokio::time::timeout(Duration::from_millis(150), received.recv())
-            .await
-            .is_ok()
-        {
-            return Err(failure("A held event was delivered"));
-        }
-        direction.send_replace(PeerMediaDirection::SendReceive);
-        peer.data()
-            .send_to(
-                &packet(DtmfDigit::Hash, 1000, 800, true, 2)?.encode()?,
-                local,
-            )
-            .await
-            .map_err(failure)?;
-        if tokio::time::timeout(Duration::from_millis(150), received.recv())
-            .await
-            .is_ok()
-        {
-            return Err(failure(
-                "A held event completed after RTP reception resumed",
-            ));
-        }
-        peer.data()
-            .send_to(
-                &packet(DtmfDigit::Two, 1800, 320, true, 3)?.encode()?,
-                local,
-            )
-            .await
-            .map_err(failure)?;
-        let tone = received.recv().await.ok_or(MediaError::UnknownStream)?;
-        if tone
-            != (DtmfTone {
-                digit: DtmfDigit::Two,
-                duration_ms: 40,
-            })
-        {
-            return Err(failure(
-                "A distinct event was not received after RTP reception resumed",
-            ));
-        }
-        Ok::<(), MediaError>(())
-    })
-    .await
-    .map_err(failure);
+    let result = Wait::Ready
+        .bounded(async {
+            peer.data()
+                .send_to(
+                    &packet(DtmfDigit::Hash, 1000, 160, false, 1)?.encode()?,
+                    local,
+                )
+                .await
+                .map_err(failure)?;
+            if Wait::Quiet.bounded(received.recv()).await.is_ok() {
+                return Err(failure("A held event was delivered"));
+            }
+            direction.send_replace(PeerMediaDirection::SendReceive);
+            peer.data()
+                .send_to(
+                    &packet(DtmfDigit::Hash, 1000, 800, true, 2)?.encode()?,
+                    local,
+                )
+                .await
+                .map_err(failure)?;
+            if Wait::Quiet.bounded(received.recv()).await.is_ok() {
+                return Err(failure(
+                    "A held event completed after RTP reception resumed",
+                ));
+            }
+            peer.data()
+                .send_to(
+                    &packet(DtmfDigit::Two, 1800, 320, true, 3)?.encode()?,
+                    local,
+                )
+                .await
+                .map_err(failure)?;
+            let tone = received.recv().await.ok_or(MediaError::UnknownStream)?;
+            if tone
+                != (DtmfTone {
+                    digit: DtmfDigit::Two,
+                    duration_ms: 40,
+                })
+            {
+                return Err(failure(
+                    "A distinct event was not received after RTP reception resumed",
+                ));
+            }
+            Ok::<(), MediaError>(())
+        })
+        .await
+        .map_err(failure);
     stop.send_replace(true);
-    let cleanup = match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+    let cleanup = match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?.map(|_| ()),
         Err(primary) => {
             task.abort();

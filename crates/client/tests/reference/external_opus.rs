@@ -5,6 +5,7 @@ use rusterisk_client::{
     Client, Error, Session,
 };
 use rusterisk_media::{Frame, OpusCodec};
+use rusterisk_server::test_time::Wait;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -114,12 +115,12 @@ pub async fn compare(
         )
         .await?;
     }
-    let bridge = ChannelId::try_from("opus-bridge".to_owned())?;
+    let bridge = rusterisk_client::BridgeId::try_from("opus-bridge".to_owned())?;
     client.create_bridge(&bridge, "Opus comparison").await?;
     client.add_channels(&bridge, &ids).await?;
     let mut left_audio = OpusCodec::new().map_err(invalid)?;
     let mut right_audio = OpusCodec::new().map_err(invalid)?;
-    tokio::time::timeout(Duration::from_secs(3), async {
+    Wait::Ready.bounded(async {
         let mut clock = tokio::time::interval(Duration::from_millis(20));
         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut sent = 0;

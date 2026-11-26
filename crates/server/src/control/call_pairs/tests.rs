@@ -63,6 +63,21 @@ fn pair(control: &mut Control, bridge: u64) -> Result<[CallKey; 2], ControlError
     Ok(members)
 }
 
+#[test]
+fn unrelated_generation_changes_cannot_assign_two_live_calls_the_same_slot(
+) -> Result<(), ControlError> {
+    let mut control = Control::new(64);
+    let first = participant(&mut control, "first-slot", 1)?;
+    for _ in 0..63 {
+        control.generation()?;
+    }
+    let second = participant(&mut control, "second-slot", 2)?;
+    assert_ne!(first.handle().slot(), second.handle().slot());
+    assert!(control.has_channel(&first));
+    assert!(control.has_channel(&second));
+    Ok(())
+}
+
 fn releases(outcome: &Outcome, key: &CallKey) -> usize {
     outcome
         .effects
@@ -73,6 +88,44 @@ fn releases(outcome: &Outcome, key: &CallKey) -> usize {
 
 fn end(control: &mut Control, key: CallKey) -> Result<Outcome, ControlError> {
     control.signal_at(Signal::Terminated { key, cause: 16 }, "peer end", 1)
+}
+
+#[test]
+fn a_retiring_call_counts_towards_the_configured_capacity() -> Result<(), ControlError> {
+    let mut control = Control::new(1);
+    let ended = participant(&mut control, "retiring", 1)?;
+    end(&mut control, ended.clone())?;
+    let mut other = ended.clone();
+    other.id = ChannelId::try_from("another-call".to_owned())?;
+    assert!(!control.media_released(&other));
+    assert!(matches!(
+        participant(&mut control, "replacement", 1),
+        Err(ControlError::Capacity)
+    ));
+    assert!(control.media_released(&ended));
+    participant(&mut control, "replacement", 1)?;
+    Ok(())
+}
+
+#[test]
+fn a_full_table_waits_for_media_to_release_the_ended_call() -> Result<(), ControlError> {
+    let mut control = Control::new(64);
+    let ended = participant(&mut control, "retiring", 1)?;
+    for number in 1..64 {
+        participant(&mut control, &format!("other-{number}"), 1)?;
+    }
+    end(&mut control, ended.clone())?;
+    assert!(matches!(
+        participant(&mut control, "replacement", 1),
+        Err(ControlError::Capacity)
+    ));
+    assert!(control.media_released(&ended));
+    let replacement = participant(&mut control, "replacement", 1)?;
+    assert_eq!(replacement.handle().slot(), ended.handle().slot());
+    assert_ne!(replacement.generation, ended.generation);
+    assert!(!control.media_released(&ended));
+    assert!(control.has_channel(&replacement));
+    Ok(())
 }
 
 #[test]
@@ -116,16 +169,20 @@ fn moving_a_pair_member_preserves_the_other_current_call_and_bridge() -> Result<
 fn a_reused_peer_identifier_cannot_end_the_replacement_generation() -> Result<(), ControlError> {
     let mut control = Control::new(4);
     let members = pair(&mut control, 100)?;
-    let replacement = control.generation()?;
-    let entry = control
+    let (mut entry, mut cleanup) = control
         .channels
-        .get_mut(&members[1].id)
+        .end(&members[1].id)
         .ok_or(ControlError::NotFound("Missing reused channel"))?;
+    for _step in cleanup.by_ref() {}
+    assert!(control.channels.await_media(cleanup));
+    assert!(control.media_released(&members[1]));
+    let replacement = control.call_generation(0)?;
     entry.call = Call::incoming(replacement)
         .apply(CallEvent::Answer)
         .call()
         .join(200)?;
     let current = entry.call;
+    control.channels.insert(members[1].id.clone(), entry)?;
     let outcome = end(&mut control, members[0].clone())?;
     assert_eq!(releases(&outcome, &members[0]), 1);
     assert_eq!(releases(&outcome, &members[1]), 0);

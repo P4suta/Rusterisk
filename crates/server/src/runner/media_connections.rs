@@ -1,4 +1,5 @@
 use super::{timestamp, ClosureNotice, Controller, Request, Runner, MAX_PENDING_EFFECTS};
+use crate::runner::calls;
 use crate::{media_websocket::MediaLinkOptions, CallKey, ControlError, Signal};
 use rusterisk_api::ChannelId;
 use tokio::sync::{mpsc, oneshot};
@@ -65,14 +66,15 @@ impl Runner {
             .is_some_and(|origin| !self.config.origins.contains(origin))
         {
             Err(ControlError::Forbidden)
-        } else if self.media_leases.len() >= 64 || !self.effects_flowing() {
+        } else if self.records.iter(calls::CONNECTION).count() >= 64 || !self.effects_flowing() {
             Err(ControlError::Capacity)
         } else {
             self.control
                 .claim_media_connection(&connection_id)
-                .map(|(key, options)| {
-                    self.media_leases.insert(key.clone(), lifetime);
-                    (key, options)
+                .and_then(|(key, options)| {
+                    self.records
+                        .insert(calls::CONNECTION, key.clone(), lifetime)?;
+                    Ok((key, options))
                 })
         };
         if reply.send(result).is_err() {
@@ -81,11 +83,11 @@ impl Runner {
     }
 
     pub(super) fn expire_media_connections(&mut self, now: u64) -> Result<(), ControlError> {
-        self.media_leases
-            .retain(|key, _| self.control.has_channel(key));
+        self.records
+            .retain(calls::CONNECTION, |key, _| self.control.has_channel(key));
         let released: Vec<CallKey> = self
-            .media_leases
-            .iter()
+            .records
+            .iter(calls::CONNECTION)
             .filter_map(|(key, lifetime)| lifetime.is_closed().then_some(key.clone()))
             .collect();
         for key in released {
@@ -95,7 +97,7 @@ impl Runner {
             if !direct && self.pending_effects.len() >= pending_budget {
                 break;
             }
-            self.media_leases.remove(&key);
+            self.records.remove(calls::CONNECTION, &key);
             let mut outcome =
                 self.control
                     .signal_at(Signal::Terminated { key, cause: 16 }, &timestamp(), now)?;

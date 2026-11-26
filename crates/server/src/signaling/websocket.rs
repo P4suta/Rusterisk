@@ -1,4 +1,5 @@
 use super::{failure, Signaling};
+use crate::signaling::calls;
 use crate::{
     encryption::TlsClientContext, media::Order, media_websocket::MediaLinkOptions, CallKey,
     ControlError, Milestone, Signal,
@@ -155,10 +156,10 @@ impl Signaling {
         options: WebSocketMediaOptions,
         channel_variables: BTreeMap<String, String>,
     ) -> Result<(), ControlError> {
-        if self.calls.len()
-            + self.external_media.len()
-            + self.stream_admissions.len()
-            + self.websocket_admissions.len()
+        if self.records.iter(calls::ACTIVE).count()
+            + self.records.iter(calls::EXTERNAL).count()
+            + self.records.iter(calls::STREAM).count()
+            + self.records.iter(calls::WEBSOCKET).count()
             >= 64
             || self.websocket_jobs.len() >= 64
         {
@@ -179,14 +180,15 @@ impl Signaling {
             channel_variables,
         };
         let (cancel, mut stopped) = watch::channel(false);
-        self.websocket_admissions.insert(
+        self.records.insert(
+            calls::WEBSOCKET,
             key.clone(),
             PendingWebSocket {
                 cancel,
                 received: false,
                 answered: false,
             },
-        );
+        )?;
         let media = self.media.clone();
         self.websocket_jobs.spawn(async move {
             let connection = async {
@@ -209,13 +211,14 @@ impl Signaling {
         &mut self,
         completed: Completion,
     ) -> Result<(), ControlError> {
-        let Some(pending) = self.websocket_admissions.remove(&completed.key) else {
+        let Some(pending) = self.records.remove(calls::WEBSOCKET, &completed.key) else {
             self.order(Order::Release(completed.key))?;
             return Ok(());
         };
         let admitted = completed.result.is_ok();
         if admitted {
-            self.external_media.insert(completed.key.clone());
+            self.records
+                .insert(calls::EXTERNAL, completed.key.clone(), ())?;
         }
         self.notify(Signal::WebSocketAdmitted {
             key: completed.key.clone(),
@@ -247,7 +250,7 @@ impl Signaling {
     }
 
     pub(super) async fn finish_websockets(&mut self) -> Result<(), ControlError> {
-        for (_, pending) in std::mem::take(&mut self.websocket_admissions) {
+        for (_, pending) in self.records.drain(calls::WEBSOCKET) {
             pending.cancel.send_replace(true);
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);

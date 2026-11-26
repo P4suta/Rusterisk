@@ -20,7 +20,15 @@ pub(super) fn router(controller: Controller) -> Router {
             ManagementOperation::DiagnoseChannel.metadata().path,
             get(channel),
         )
+        .route(
+            ManagementOperation::DiagnoseRuntime.metadata().path,
+            get(runtime),
+        )
         .with_state(controller)
+}
+
+async fn runtime(State(controller): State<Controller>, headers: HeaderMap) -> Response {
+    read(controller, &headers, Ok(DiagnosisTarget::Runtime)).await
 }
 
 async fn extension(

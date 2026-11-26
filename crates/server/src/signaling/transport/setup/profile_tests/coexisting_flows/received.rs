@@ -4,26 +4,27 @@ use tokio::io::AsyncWriteExt;
 
 impl Fixture {
     async fn packet(&mut self) -> Result<Received, ControlError> {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            for _ in 0..16 {
-                match self.transport.network.next().await? {
-                    Input::Packet(packet) => return Ok(packet),
-                    Input::Closed { result, .. } => {
-                        result?;
-                        return Err(ControlError::Invalid(
-                            "Verified flow closed before delivering its SIP packet",
-                        ));
-                    }
-                    Input::SetupFinished { result, .. } => result?,
-                    Input::Prepared(_) | Input::Upgrade(_) => {
-                        return Err(ControlError::Invalid("Unexpected extra TLS preparation"))
+        rusterisk_test_support::Wait::Ready
+            .bounded(async {
+                for _ in 0..16 {
+                    match self.transport.network.next().await? {
+                        Input::Packet(packet) => return Ok(packet),
+                        Input::Closed { result, .. } => {
+                            result?;
+                            return Err(ControlError::Invalid(
+                                "Verified flow closed before delivering its SIP packet",
+                            ));
+                        }
+                        Input::SetupFinished { result, .. } => result?,
+                        Input::Prepared(_) | Input::Upgrade(_) => {
+                            return Err(ControlError::Invalid("Unexpected extra TLS preparation"))
+                        }
                     }
                 }
-            }
-            Err(ControlError::Capacity)
-        })
-        .await
-        .map_err(failure)?
+                Err(ControlError::Capacity)
+            })
+            .await
+            .map_err(failure)?
     }
 }
 

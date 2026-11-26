@@ -2,8 +2,9 @@ use super::{failure, finish, outcome, settings};
 use rsipstack::sip::{HeadersExt, Method, Request, SipMessage};
 use rusterisk_config::RegistrationAddress;
 use rusterisk_server::{media::MediaHub, signaling::Signaling, ControlError, Controller};
+use rusterisk_test_support::Wait;
 use sha2::{Digest, Sha256};
-use std::{net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 
 struct RegistrationPacket {
@@ -51,7 +52,8 @@ fn require(valid: bool, reason: &'static str) -> Result<(), ControlError> {
 
 async fn receive(peer: &UdpSocket) -> Result<RegistrationPacket, ControlError> {
     let mut bytes = [0; 16385];
-    let (size, address) = tokio::time::timeout(Duration::from_secs(3), peer.recv_from(&mut bytes))
+    let (size, address) = Wait::Ready
+        .bounded(peer.recv_from(&mut bytes))
         .await
         .map_err(failure)?
         .map_err(failure)?;

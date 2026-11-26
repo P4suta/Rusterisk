@@ -65,7 +65,7 @@ impl Control {
     ) -> Result<&mut ChannelEntry, ControlError> {
         self.settings.get(generation)?;
         self.channels
-            .get_mut(&key.id)
+            .by_handle_mut(key.handle())
             .filter(|entry| {
                 entry.call.generation() == key.generation
                     && entry.settings.generation() == generation

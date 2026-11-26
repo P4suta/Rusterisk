@@ -1,6 +1,7 @@
 use super::{combine, configuration, failure, joined, Server};
 use crate::{reload::PublicationPort, ControlError};
 use rusterisk_config::ConfigError;
+use rusterisk_test_support::Wait;
 use std::{path::Path, sync::mpsc, time::Duration};
 use tokio::{sync::oneshot, time::Instant};
 
@@ -23,9 +24,7 @@ fn checkpoint_failure(error: impl std::fmt::Display) -> ConfigError {
 async fn bounded<T>(
     future: impl std::future::Future<Output = Result<T, ControlError>>,
 ) -> Result<T, ControlError> {
-    tokio::time::timeout(Duration::from_secs(3), future)
-        .await
-        .map_err(failure)?
+    Wait::Ready.bounded(future).await.map_err(failure)?
 }
 
 async fn exercise(data: &Path) -> Result<(), ControlError> {
@@ -55,7 +54,7 @@ async fn exercise(data: &Path) -> Result<(), ControlError> {
                     checkpoint_failure("fixture stopped before observing the started loader")
                 })?;
                 waiting
-                    .recv_timeout(Duration::from_secs(5))
+                    .recv_timeout(Wait::Ready.duration())
                     .map_err(checkpoint_failure)?;
                 Ok(replacement)
             },
@@ -75,11 +74,9 @@ async fn exercise(data: &Path) -> Result<(), ControlError> {
             expired,
             "Shutdown deadline was not crossed by the fixture clock",
         )?;
-        let observed = tokio::time::timeout(
-            Duration::from_millis(100),
-            caller.as_mut().ok_or(ControlError::Capacity)?,
-        )
-        .await;
+        let observed = Wait::Quiet
+            .bounded(caller.as_mut().ok_or(ControlError::Capacity)?)
+            .await;
         if let Ok(result) = observed {
             drop(caller.take());
             return Err(failure(format!(

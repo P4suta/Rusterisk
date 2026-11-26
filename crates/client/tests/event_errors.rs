@@ -1,6 +1,7 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use rusterisk_client::{api::ChannelId, Client, Error};
-use std::{future::IntoFuture, time::Duration};
+use rusterisk_server::test_time::Wait;
+use std::future::IntoFuture;
 
 async fn malformed_event(mut socket: WebSocket) {
     for text in [
@@ -38,16 +39,19 @@ async fn event_consumers_receive_the_driver_error_when_decoding_stops_the_sessio
         let mut session = client
             .subscribe(&ChannelId::try_from("calls".to_owned())?)
             .await?;
-        let published = tokio::time::timeout(Duration::from_secs(2), session.next_event())
+        let published = Wait::Ready
+            .bounded(session.next_event())
             .await
             .map_err(|_| Error::Timeout)??;
         assert_eq!(published.kind.event_type(), "ApplicationRegistered");
         assert_eq!(serde_json::to_value(published)?["asterisk_id"], "pbx");
-        let modeled = tokio::time::timeout(Duration::from_secs(2), session.next_event())
+        let modeled = Wait::Ready
+            .bounded(session.next_event())
             .await
             .map_err(|_| Error::Timeout)??;
         assert_eq!(modeled.kind.event_type(), "ApplicationReplaced");
-        let error = tokio::time::timeout(Duration::from_secs(2), session.next_event())
+        let error = Wait::Ready
+            .bounded(session.next_event())
             .await
             .map_err(|_| Error::Timeout)?;
         assert!(matches!(error, Err(Error::Json(_))));

@@ -1,9 +1,10 @@
+use rusterisk_test_support::Wait;
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const MAX_OUTPUT: usize = 16_384;
@@ -84,27 +85,13 @@ pub(super) fn using<T>(operation: impl FnOnce(&Fixture) -> io::Result<T>) -> io:
     combine(primary, fixture.close())
 }
 
-fn wait(child: &mut Child, budget: Duration) -> io::Result<ExitStatus> {
-    let deadline = Instant::now()
-        .checked_add(budget)
-        .ok_or_else(|| io::Error::other("Release CLI child deadline overflowed"))?;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Release CLI child deadline elapsed",
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
+fn wait(child: &mut Child, wait: Wait) -> io::Result<ExitStatus> {
+    rusterisk_test_support::child_exit(child, wait)
 }
 
 fn stop(child: &mut Child) -> io::Result<()> {
     let killed = child.kill();
-    let reaped = wait(child, Duration::from_secs(2)).map(|_| ());
+    let reaped = wait(child, Wait::Ready).map(|_| ());
     combine(killed, reaped)
 }
 
@@ -161,7 +148,7 @@ fn run(fixture: &Fixture, arguments: &[&str], directory: &Path) -> io::Result<Ou
     let child = command.spawn();
     drop(command);
     let mut child = child?;
-    let status = match wait(&mut child, Duration::from_secs(5)) {
+    let status = match wait(&mut child, Wait::Shutdown) {
         Ok(status) => Ok(status),
         Err(primary) => combine(Err(primary), stop(&mut child)),
     };

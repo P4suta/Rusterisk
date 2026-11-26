@@ -1,9 +1,10 @@
 use super::Server;
-use crate::reload::{PublicationPhase, PublicationPort, PublicationReceiver, PUBLICATION_BUDGET};
+use crate::reload::{PublicationPhase, PublicationPort, PublicationReceiver};
 use crate::signaling::NativePreparedSignaling;
 use crate::{ControlError, Controller};
 use rusterisk_config::Config;
-use std::{path::Path, time::Duration};
+use rusterisk_test_support::Wait;
+use std::path::Path;
 use tokio::task::JoinHandle;
 
 const PRIMARY: &str = "Native publication acknowledgement failed after the first swap";
@@ -44,7 +45,8 @@ fn configuration(password: &str) -> Result<Config, ControlError> {
 async fn acknowledged(
     result: Result<crate::reload::Acknowledgement, ControlError>,
 ) -> Result<(), ControlError> {
-    tokio::time::timeout(PUBLICATION_BUDGET, result?.receive())
+    Wait::Shutdown
+        .bounded(result?.receive())
         .await
         .map_err(failure)?
 }
@@ -89,7 +91,7 @@ async fn participant(
 async fn joined(
     mut task: JoinHandle<Result<(), ControlError>>,
 ) -> Result<Result<(), ControlError>, ControlError> {
-    match tokio::time::timeout(Duration::from_secs(10), &mut task).await {
+    match Wait::Shutdown.bounded(&mut task).await {
         Ok(result) => result.map_err(failure),
         Err(primary) => {
             task.abort();

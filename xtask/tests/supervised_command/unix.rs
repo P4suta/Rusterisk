@@ -167,7 +167,7 @@ fn the_unix_adapter_preserves_non_unicode_native_values() -> Result<(), String> 
 
 fn output_pair() -> Result<(UnixStream, CommandStream), String> {
     let (reader, writer) = checked(UnixStream::pair())?;
-    checked(reader.set_read_timeout(Some(Duration::from_millis(250))))?;
+    checked(reader.set_read_timeout(Some(rusterisk_test_support::Wait::Observation.duration())))?;
     Ok((
         reader,
         CommandStream::File(File::from(OwnedFd::from(writer))),

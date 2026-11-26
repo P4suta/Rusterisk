@@ -10,6 +10,7 @@ use rusterisk_server::{
     http::router, Action, ControlError, Controller, Credentials, IncomingCall, IncomingTarget,
     Milestone, Signal,
 };
+use rusterisk_test_support::Wait;
 use tower::ServiceExt;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -75,20 +76,21 @@ async fn dialplan_observers_receive_the_executed_applications_and_expanded_argum
             ("Goto", "destination,100,2", "internal", 1),
             ("Stasis", "observer,100", "destination", 2),
         ] {
-            let value = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                loop {
-                    let event = observer.events.recv().await.ok_or(ControlError::Capacity)?;
-                    assert!(
-                        !matches!(event.kind, EventKind::StasisStart { .. }),
-                        "StasisStart preceded the subscribed ChannelDialplan"
-                    );
-                    if event.kind.event_type() == "ChannelDialplan" {
-                        return serde_json::to_value(event).map_err(ControlError::from);
+            let value = Wait::Ready
+                .bounded(async {
+                    loop {
+                        let event = observer.events.recv().await.ok_or(ControlError::Capacity)?;
+                        assert!(
+                            !matches!(event.kind, EventKind::StasisStart { .. }),
+                            "StasisStart preceded the subscribed ChannelDialplan"
+                        );
+                        if event.kind.event_type() == "ChannelDialplan" {
+                            return serde_json::to_value(event).map_err(ControlError::from);
+                        }
                     }
-                }
-            })
-            .await
-            .map_err(failure)??;
+                })
+                .await
+                .map_err(failure)??;
             assert_eq!(value["dialplan_app"], name);
             assert_eq!(value["dialplan_app_data"], arguments);
             assert_eq!(value["channel"]["dialplan"]["context"], context);
@@ -120,7 +122,7 @@ async fn endpoint_observers_receive_availability_and_specific_endpoint_channels(
         assert_eq!(snapshot.endpoint_ids, ["PJSIP/phone"]);
         controller.signal(Signal::EndpointContact { key: rusterisk_server::EndpointKey { resource: "phone".into(), generation: 1 }, presence: rusterisk_core::ContactPresence::Present }).await?;
         for subscription in [&mut observer, &mut all] {
-            let event = tokio::time::timeout(std::time::Duration::from_secs(1), subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
+            let event = Wait::Ready.bounded(subscription.events.recv()).await.map_err(failure)?.ok_or(ControlError::Capacity)?;
             assert!(matches!(event.kind, EventKind::EndpointStateChange { endpoint } if endpoint.state == Some(rusterisk_api::EndpointState::Online)));
         }
         let id = ChannelId::try_from("endpoint-call".to_owned())?;
@@ -191,11 +193,11 @@ async fn channel_observers_count_interests_and_end_before_identifier_reuse(
                 milestone: Milestone::Answered,
             })
             .await?;
-        let answered =
-            tokio::time::timeout(std::time::Duration::from_secs(1), observer.events.recv())
-                .await
-                .map_err(failure)?
-                .ok_or(ControlError::Capacity)?;
+        let answered = Wait::Ready
+            .bounded(observer.events.recv())
+            .await
+            .map_err(failure)?
+            .ok_or(ControlError::Capacity)?;
         assert!(matches!(
             answered.kind,
             EventKind::ChannelStateChange { .. }
@@ -214,17 +216,18 @@ async fn channel_observers_count_interests_and_end_before_identifier_reuse(
                 milestone: Milestone::Answered,
             })
             .await?;
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            for _ in 0..8 {
-                let event = calls.events.recv().await.ok_or(ControlError::Capacity)?;
-                if matches!(event.kind, EventKind::ChannelStateChange { .. }) {
-                    return Ok(());
+        Wait::Ready
+            .bounded(async {
+                for _ in 0..8 {
+                    let event = calls.events.recv().await.ok_or(ControlError::Capacity)?;
+                    if matches!(event.kind, EventKind::ChannelStateChange { .. }) {
+                        return Ok(());
+                    }
                 }
-            }
-            Err(ControlError::Capacity)
-        })
-        .await
-        .map_err(failure)??;
+                Err(ControlError::Capacity)
+            })
+            .await
+            .map_err(failure)??;
         assert!(observer.events.try_recv().is_err());
         let response = app
             .clone()

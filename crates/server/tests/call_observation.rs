@@ -10,8 +10,8 @@ use rusterisk_server::{
     http::router, Action, ControlError, Controller, Credentials, IncomingCall, IncomingTarget,
     Milestone, Signal,
 };
+use rusterisk_test_support::Wait;
 use serde_json::Value;
-use std::time::Duration;
 use tower::ServiceExt;
 
 fn fail(error: impl std::fmt::Display) -> ControlError {
@@ -30,7 +30,8 @@ async fn open(app: &Router, path: &str) -> Result<axum::response::Response, Cont
         .unwrap_or_else(|never| match never {}))
 }
 async fn record(stream: &mut axum::body::BodyDataStream) -> Result<Value, ControlError> {
-    let bytes = tokio::time::timeout(Duration::from_secs(2), stream.next())
+    let bytes = Wait::Ready
+        .bounded(stream.next())
         .await
         .map_err(fail)?
         .ok_or(ControlError::Capacity)?

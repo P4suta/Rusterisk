@@ -1,4 +1,5 @@
 use super::{failure, Config, ControlError, Controller, MediaHub, Signaling};
+use crate::signaling::calls;
 use crate::CallKey;
 use rsipstack::sip::{
     headers::{
@@ -60,7 +61,13 @@ async fn native_shutdown_drains_every_failed_job_and_recovers_known_setup_slots(
         if fixture.signaling.finish_native().await.is_ok() {
             return Err(ControlError::Invalid("Native shutdown lost task failures"));
         }
-        if !fixture.signaling.native_jobs.is_empty() || !fixture.signaling.native_pending.is_empty()
+        if !fixture.signaling.native_jobs.is_empty()
+            || !fixture
+                .signaling
+                .records
+                .iter(calls::NATIVE)
+                .next()
+                .is_none()
         {
             return Err(ControlError::Invalid(
                 "Native shutdown left failed jobs unjoined",
@@ -167,7 +174,12 @@ async fn cancelled_registered_calls_keep_the_shared_setup_slots_until_their_jobs
                 .signaling
                 .cancel_native(&key(&format!("registered-{generation}"), generation)?);
         }
-        if !fixture.signaling.native_pending.is_empty()
+        if !fixture
+            .signaling
+            .records
+            .iter(calls::NATIVE)
+            .next()
+            .is_none()
             || !matches!(
                 fixture.signaling.network.reserve_setup(0, NonZeroU64::MIN),
                 Err(ControlError::Capacity)
@@ -212,7 +224,12 @@ async fn cancelling_jobs_keep_admission_capacity_until_their_completion_is_joine
             .signaling
             .cancel_native(&key(&format!("pending-{generation}"), generation)?);
     }
-    assert!(fixture.signaling.native_pending.is_empty());
+    assert!(fixture
+        .signaling
+        .records
+        .iter(calls::NATIVE)
+        .next()
+        .is_none());
     assert!(matches!(
         fixture.signaling.queue_native(
             key("replacement", 17)?,
@@ -234,7 +251,7 @@ async fn cancelling_jobs_keep_admission_capacity_until_their_completion_is_joine
         "100".into(),
         1,
     )?;
-    assert_eq!(fixture.signaling.native_pending.len(), 1);
+    assert_eq!(fixture.signaling.records.iter(calls::NATIVE).count(), 1);
     fixture.finish().await
 }
 
@@ -259,8 +276,21 @@ async fn delayed_resolution_completions_cannot_touch_a_reused_call_identifier(
         .signaling
         .queue_native(current.clone(), "PJSIP/phone".into(), "100".into(), 1)?;
     fixture.signaling.native_completed(completed, 1).await?;
-    assert!(!fixture.signaling.native_pending.contains_key(&previous));
-    assert!(fixture.signaling.native_pending.contains_key(&current));
-    assert!(fixture.signaling.calls.is_empty());
+    assert!(!fixture
+        .signaling
+        .records
+        .get(calls::NATIVE, &previous)
+        .is_some());
+    assert!(fixture
+        .signaling
+        .records
+        .get(calls::NATIVE, &current)
+        .is_some());
+    assert!(fixture
+        .signaling
+        .records
+        .iter(calls::ACTIVE)
+        .next()
+        .is_none());
     fixture.finish().await
 }

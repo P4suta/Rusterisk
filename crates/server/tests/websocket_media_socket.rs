@@ -1,7 +1,8 @@
 use axum::extract::ws::WebSocketUpgrade;
 use rusterisk_media::MediaError;
 use rusterisk_server::media_websocket::{MediaSocket, SocketMessage};
-use std::{future::IntoFuture, time::Duration};
+use rusterisk_test_support::Wait;
+use std::future::IntoFuture;
 
 fn failure(error: impl std::fmt::Display) -> MediaError {
     MediaError::Transport(error.to_string())
@@ -31,7 +32,8 @@ async fn concrete_client_and_server_sockets_preserve_media_message_types() -> Re
         let (mut client, _) = tokio_tungstenite::connect_async(format!("ws://{address}/media"))
             .await
             .map_err(failure)?;
-        let mut accepted = tokio::time::timeout(Duration::from_secs(1), sockets.recv())
+        let mut accepted = Wait::Ready
+            .bounded(sockets.recv())
             .await
             .map_err(failure)?
             .ok_or(MediaError::Capacity)?;
@@ -58,7 +60,8 @@ async fn concrete_client_and_server_sockets_preserve_media_message_types() -> Re
         );
         MediaSocket::flush(&mut accepted).await?;
         assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), MediaSocket::receive(&mut client))
+            Wait::Ready
+                .bounded(MediaSocket::receive(&mut client))
                 .await
                 .map_err(failure)??,
             Some(SocketMessage::Close)

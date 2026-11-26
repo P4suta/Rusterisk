@@ -1,3 +1,4 @@
+use crate::signaling::calls;
 use crate::{
     media::{AttachmentMode, AttachmentRelease, MediaPort},
     rtp::{RtpSession, SocketPair},
@@ -101,7 +102,7 @@ impl super::Signaling {
             return Err(MediaError::Capacity);
         }
         let serial = self.next_serial();
-        let Some(call) = self.calls.get_mut(key) else {
+        let Some(call) = self.records.get_mut(calls::ACTIVE, key) else {
             return Ok(AnsweredAttachment::Missing);
         };
         match std::mem::replace(&mut call.media, MediaAdmission::Attached) {

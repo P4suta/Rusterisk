@@ -9,7 +9,7 @@ use rusterisk_core::{
 };
 use rusterisk_media::{AudioTarget, Frame, Gate};
 use rusterisk_storage::Recorder;
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tokio::sync::oneshot;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -96,96 +96,97 @@ async fn exercise(storage: StoragePort, muted: bool) -> Result<(), ControlError>
     let token = tasks.reserve(MediaTaskKind::Playback)?;
     tasks.start(token)?;
     let (completed, mut completion) = oneshot::channel();
-    let result = tokio::time::timeout(Duration::from_secs(2), async {
-        let held = Call::incoming(channel.generation)
-            .apply(CallEvent::Answer)
-            .call()
-            .hold()?;
-        let held = if muted {
-            held.mute(MuteDirection::Outgoing)?
-        } else {
-            held
-        };
-        if held.audio_gate() != AudioGate::Closed {
-            return Err(ControlError::Invalid("HOLD left conversation audio open"));
-        }
-        let (generated_audio_gate, expected) = if muted {
-            if held.generated_audio_gate() != AudioGate::OutgoingMuted {
-                return Err(ControlError::Invalid("HOLD lost outgoing muting"));
+    let result = Wait::Ready
+        .bounded(async {
+            let held = Call::incoming(channel.generation)
+                .apply(CallEvent::Answer)
+                .call()
+                .hold()?;
+            let held = if muted {
+                held.mute(MuteDirection::Outgoing)?
+            } else {
+                held
+            };
+            if held.audio_gate() != AudioGate::Closed {
+                return Err(ControlError::Invalid("HOLD left conversation audio open"));
             }
-            (Gate::OutgoingMuted, 0)
-        } else {
-            if held.generated_audio_gate() != AudioGate::Open {
-                return Err(ControlError::Invalid(
-                    "HOLD closed generated audio permission",
-                ));
+            let (generated_audio_gate, expected) = if muted {
+                if held.generated_audio_gate() != AudioGate::OutgoingMuted {
+                    return Err(ControlError::Invalid("HOLD lost outgoing muting"));
+                }
+                (Gate::OutgoingMuted, 0)
+            } else {
+                if held.generated_audio_gate() != AudioGate::Open {
+                    return Err(ControlError::Invalid(
+                        "HOLD closed generated audio permission",
+                    ));
+                }
+                (Gate::Open, 3600)
+            };
+            let (port, mut channels) =
+                Port::new(PeerMediaDirection::SendReceive, DigitSupport::Unsupported);
+            hub.install_link(channel.clone(), port, Gate::Open, 48000)
+                .map_err(failure)?;
+            let (port, mut peers) =
+                Port::new(PeerMediaDirection::SendReceive, DigitSupport::Unsupported);
+            hub.install_link(peer.clone(), port, Gate::Open, 48000)
+                .map_err(failure)?;
+            hub.mixer
+                .bridge(10, &[channel.clone(), peer])
+                .map_err(failure)?;
+            hub.command(Command::Gate {
+                key: channel.clone(),
+                gate: Gate::Closed,
+                generated_audio_gate,
+            })
+            .map_err(failure)?;
+            hub.playbacks
+                .reserve(
+                    token,
+                    AudioTarget::Channel(channel.clone()),
+                    completed,
+                    Default::default(),
+                )
+                .map_err(failure)?;
+            let source = storage
+                .play(PlaybackMedia::Recording(ChannelId::try_from(
+                    "held-announcement".to_owned(),
+                )?))
+                .await
+                .map_err(failure)?;
+            hub.playbacks.attach(token, source).map_err(failure)?;
+            loop {
+                let before = consumed(&hub, token)?;
+                channels.incoming.try_send(frame(4000)?).map_err(failure)?;
+                peers.incoming.try_send(frame(-7000)?).map_err(failure)?;
+                hub.tick().map_err(failure)?;
+                let output = channels.outgoing.try_recv().map_err(failure)?;
+                let peer_output = peers.outgoing.try_recv().map_err(failure)?;
+                if consumed(&hub, token)? > before {
+                    if output.samples() != [expected; 960] {
+                        return Err(ControlError::Invalid(
+                            "Consumed channel playback ignored its generated audio permission",
+                        ));
+                    }
+                    if peer_output.samples() != [0; 960] {
+                        return Err(ControlError::Invalid(
+                            "Held conversation or channel playback reached the bridge peer",
+                        ));
+                    }
+                    if hub
+                        .playbacks
+                        .is_music(&AudioTarget::Channel(channel.clone()))
+                    {
+                        return Err(ControlError::Invalid("Ordinary playback became Music"));
+                    }
+                    return Ok(());
+                }
+                tokio::task::yield_now().await;
             }
-            (Gate::Open, 3600)
-        };
-        let (port, mut channels) =
-            Port::new(PeerMediaDirection::SendReceive, DigitSupport::Unsupported);
-        hub.install_link(channel.clone(), port, Gate::Open)
-            .map_err(failure)?;
-        let (port, mut peers) =
-            Port::new(PeerMediaDirection::SendReceive, DigitSupport::Unsupported);
-        hub.install_link(peer.clone(), port, Gate::Open)
-            .map_err(failure)?;
-        hub.mixer
-            .bridge(10, &[channel.clone(), peer])
-            .map_err(failure)?;
-        hub.command(Command::Gate {
-            key: channel.clone(),
-            gate: Gate::Closed,
-            generated_audio_gate,
         })
-        .map_err(failure)?;
-        hub.playbacks
-            .reserve(
-                token,
-                AudioTarget::Channel(channel.clone()),
-                completed,
-                Default::default(),
-            )
-            .map_err(failure)?;
-        let source = storage
-            .play(PlaybackMedia::Recording(ChannelId::try_from(
-                "held-announcement".to_owned(),
-            )?))
-            .await
-            .map_err(failure)?;
-        hub.playbacks.attach(token, source).map_err(failure)?;
-        loop {
-            let before = consumed(&hub, token)?;
-            channels.incoming.try_send(frame(4000)?).map_err(failure)?;
-            peers.incoming.try_send(frame(-7000)?).map_err(failure)?;
-            hub.tick().map_err(failure)?;
-            let output = channels.outgoing.try_recv().map_err(failure)?;
-            let peer_output = peers.outgoing.try_recv().map_err(failure)?;
-            if consumed(&hub, token)? > before {
-                if output.samples() != [expected; 960] {
-                    return Err(ControlError::Invalid(
-                        "Consumed channel playback ignored its generated audio permission",
-                    ));
-                }
-                if peer_output.samples() != [0; 960] {
-                    return Err(ControlError::Invalid(
-                        "Held conversation or channel playback reached the bridge peer",
-                    ));
-                }
-                if hub
-                    .playbacks
-                    .is_music(&AudioTarget::Channel(channel.clone()))
-                {
-                    return Err(ControlError::Invalid("Ordinary playback became Music"));
-                }
-                return Ok(());
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(failure)
-    .and_then(|result| result);
+        .await
+        .map_err(failure)
+        .and_then(|result| result);
     hub.playbacks.control(token, PlaybackControl::Stop);
     let stopped = completion
         .try_recv()

@@ -35,7 +35,7 @@ async fn stored_recording_methods_use_the_public_contract_and_typed_models() -> 
                         Some("copied")
                     );
                     assert_eq!(parameters.len(), 1);
-                    axum::Json(api::StoredRecording {
+                    axum::Json(api::StoredRecording::<String> {
                         name: "copied".into(),
                         format: "wav".into(),
                     })
@@ -45,14 +45,21 @@ async fn stored_recording_methods_use_the_public_contract_and_typed_models() -> 
     let server = tokio::spawn(axum::serve(listener, app).into_future());
     let result = async {
         let client = Client::new(&format!("http://{address}"), "app", "password")?;
-        let name = api::ChannelId::try_from("saved".to_owned())?;
-        assert_eq!(client.stored_recordings().await?, [saved()]);
-        assert_eq!(client.stored_recording(&name).await?, saved());
-        let destination = api::ChannelId::try_from("copied".to_owned())?;
+        let name = rusterisk_client::RecordingName::try_from("saved".to_owned())?;
+        let expected = rusterisk_client::StoredRecording {
+            name: name.clone(),
+            format: "wav".into(),
+        };
+        assert_eq!(
+            client.stored_recordings().await?,
+            std::slice::from_ref(&expected)
+        );
+        assert_eq!(client.stored_recording(&name).await?, expected);
+        let destination = rusterisk_client::RecordingName::try_from("copied".to_owned())?;
         assert_eq!(
             client.copy_stored_recording(&name, &destination).await?,
-            api::StoredRecording {
-                name: "copied".into(),
+            rusterisk_client::StoredRecording {
+                name: destination,
                 format: "wav".into()
             }
         );
@@ -105,21 +112,21 @@ async fn recording_download_streams_past_json_limits_and_preserves_error_respons
     let result = async {
         let client = Client::new(&format!("http://{address}"), "app", "password")?;
         let mut bytes = Vec::new();
-        assert_eq!(client.download_stored_recording(&api::ChannelId::try_from("saved".to_owned())?, &mut bytes).await?, 256 * 8192);
+        assert_eq!(client.download_stored_recording(&rusterisk_client::RecordingName::try_from("saved".to_owned())?, &mut bytes).await?, 256 * 8192);
         assert_eq!(bytes.len(), 256 * 8192);
         for (index, chunk) in bytes.as_chunks::<8192>().0.iter().enumerate() {
             assert!(chunk.iter().all(|byte| *byte == index as u8));
         }
         let mut output = Vec::new();
-        assert!(matches!(client.download_stored_recording(&api::ChannelId::try_from("missing".to_owned())?, &mut output).await,
+        assert!(matches!(client.download_stored_recording(&rusterisk_client::RecordingName::try_from("missing".to_owned())?, &mut output).await,
             Err(Error::Api { status: 404, message }) if message.message == "Recording not found"));
         assert!(output.is_empty());
-        assert!(matches!(client.download_stored_recording(&api::ChannelId::try_from("huge".to_owned())?, &mut output).await, Err(Error::Capacity)));
+        assert!(matches!(client.download_stored_recording(&rusterisk_client::RecordingName::try_from("huge".to_owned())?, &mut output).await, Err(Error::Capacity)));
         assert!(output.is_empty());
         let (mut broken, peer) = tokio::io::duplex(1);
         drop(peer);
         assert!(matches!(
-            client.download_stored_recording(&api::ChannelId::try_from("saved".to_owned())?, &mut broken).await,
+            client.download_stored_recording(&rusterisk_client::RecordingName::try_from("saved".to_owned())?, &mut broken).await,
             Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::BrokenPipe
         ));
         Ok(())

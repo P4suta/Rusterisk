@@ -2,6 +2,7 @@ use rusterisk_client::{
     api::{ChannelId, ChannelState, EventKind},
     CallCompletion, CallMilestone, Cleanup, Client, Error,
 };
+use rusterisk_server::test_time::Wait;
 use rusterisk_server::{Controller, IncomingCall, IncomingTarget, Milestone, Signal};
 use std::{future::IntoFuture, time::Duration};
 
@@ -47,7 +48,7 @@ async fn incoming(end: End) -> Result<(), Error> {
     let server = tokio::spawn(
         axum::serve(listener, rusterisk_server::http::router(controller.clone())).into_future(),
     );
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
+    let result = Wait::Ready.bounded(async {
         let client = Client::new(&format!("http://{address}"),"api","password")?;
         let mut session = client.subscribe(&ChannelId::try_from("calls".to_owned())?).await?;
         let mut destination = client.subscribe(&ChannelId::try_from("destination".to_owned())?).await?;

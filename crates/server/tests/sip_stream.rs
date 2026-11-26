@@ -12,7 +12,8 @@ use rusterisk_server::{
     media::MediaHub, signaling::Signaling, Action, ControlError, Controller, Credentials,
 };
 use rusterisk_sip::{SipStreamDecoder, StreamItem};
-use std::{net::SocketAddr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::SocketAddr;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -30,23 +31,24 @@ async fn receive(
     peer: &mut TcpStream,
     decoder: &mut SipStreamDecoder,
 ) -> Result<SipMessage, ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        let mut byte = [0; 1];
-        loop {
-            if peer.read(&mut byte).await.map_err(failure)? == 0 {
-                return Err(ControlError::Adapter("Signaling peer closed".into()));
-            }
-            let (_, item) = decoder.push(&byte).map_err(failure)?;
-            match item {
-                Some(StreamItem::Message(bytes)) => {
-                    return SipMessage::try_from(bytes.as_slice()).map_err(failure)
+    Wait::Ready
+        .bounded(async {
+            let mut byte = [0; 1];
+            loop {
+                if peer.read(&mut byte).await.map_err(failure)? == 0 {
+                    return Err(ControlError::Adapter("Signaling peer closed".into()));
                 }
-                Some(StreamItem::Crlf) | None => {}
+                let (_, item) = decoder.push(&byte).map_err(failure)?;
+                match item {
+                    Some(StreamItem::Message(bytes)) => {
+                        return SipMessage::try_from(bytes.as_slice()).map_err(failure)
+                    }
+                    Some(StreamItem::Crlf) | None => {}
+                }
             }
-        }
-    })
-    .await
-    .map_err(failure)?
+        })
+        .await
+        .map_err(failure)?
 }
 
 fn register(local: SocketAddr, target: SocketAddr, serial: u32, authorization: &str) -> String {
@@ -64,11 +66,7 @@ async fn registered(
         .await
         .map_err(failure)?;
     let mut byte = [0; 1];
-    assert!(
-        tokio::time::timeout(Duration::from_millis(30), peer.read(&mut byte))
-            .await
-            .is_err()
-    );
+    assert!(Wait::Quiet.bounded(peer.read(&mut byte)).await.is_err());
     peer.write_all(&initial.as_bytes()[17..])
         .await
         .map_err(failure)?;
@@ -111,28 +109,28 @@ async fn registered(
 }
 
 async fn state(controller: &Controller, expected: EndpointState) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let response = controller
-                .execute(
-                    Credentials::new("app".into(), "test-password".into())?,
-                    None,
-                    Action::GetEndpoint {
-                        technology: "PJSIP".into(),
-                        resource: "phone".into(),
-                    },
-                )
-                .await?;
-            let endpoint: Endpoint =
-                serde_json::from_value(response.body.ok_or(ControlError::Capacity)?)?;
-            if endpoint.state == Some(expected) {
-                return Ok::<(), ControlError>(());
+    Wait::Ready
+        .bounded(async {
+            loop {
+                let response = controller
+                    .execute(
+                        Credentials::new("app".into(), "test-password".into())?,
+                        None,
+                        Action::GetEndpoint {
+                            technology: "PJSIP".into(),
+                            resource: "phone".into(),
+                        },
+                    )
+                    .await?;
+                let endpoint: Endpoint =
+                    serde_json::from_value(response.body.ok_or(ControlError::Capacity)?)?;
+                if endpoint.state == Some(expected) {
+                    return Ok::<(), ControlError>(());
+                }
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .map_err(failure)?
+        })
+        .await
+        .map_err(failure)?
 }
 
 #[tokio::test]
@@ -152,7 +150,8 @@ async fn tcp_registration_uses_fragmented_messages_and_disconnect_releases_prese
         state(&controller, EndpointState::Online).await?;
         peer.write_all(b"\r\n\r\n").await.map_err(failure)?;
         let mut pong = [0; 2];
-        tokio::time::timeout(Duration::from_secs(1), peer.read_exact(&mut pong))
+        Wait::Ready
+            .bounded(peer.read_exact(&mut pong))
             .await
             .map_err(failure)?
             .map_err(failure)?;

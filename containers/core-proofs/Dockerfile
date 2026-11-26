@@ -1,4 +1,4 @@
-FROM rust:1.100.0-trixie@sha256:223cc32ddca8f3ee90c436dbc94b6b5f052ea7f9653c5201e9612f08ad7d21b8
+FROM rust:1.100.0-trixie@sha256:223cc32ddca8f3ee90c436dbc94b6b5f052ea7f9653c5201e9612f08ad7d21b8 AS bundle
 
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
@@ -21,4 +21,23 @@ RUN case "$TARGETARCH" in \
     esac \
     && rm /tmp/kani.tar.gz
 
+FROM bundle AS compiler
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+WORKDIR /build/kani
+ENV KANI_RELEASE=0d2328a93f0e0ff66132d6bfa1a7d884877cf862 \
+    KANI_BACKPORT=1bf25ce33c06031755053811eabc7298ef5d5c0e
+RUN git init \
+    && git remote add origin https://github.com/model-checking/kani.git \
+    && git fetch --depth=1 origin "$KANI_RELEASE" \
+    && git checkout --detach "$KANI_RELEASE" \
+    && git fetch --depth=2 origin "$KANI_BACKPORT" \
+    && git diff "${KANI_BACKPORT}^" "$KANI_BACKPORT" | git apply - \
+    && git submodule update --init --depth=1 charon \
+    && rustup component add --toolchain nightly-2026-08-21 rustc-dev rust-src \
+    && sysroot="$(rustc +nightly-2026-08-21 --print sysroot)" \
+    && LIBRARY_PATH="$sysroot/lib" cargo +nightly-2026-08-21 build --locked --release --jobs=1 --package kani-compiler
+
+FROM bundle
+COPY --from=compiler /build/kani/target/release/kani-compiler /root/.kani/kani-0.68.0/bin/kani-compiler
+LABEL org.rusterisk.verification.kani-backport="1bf25ce33c06031755053811eabc7298ef5d5c0e"
 WORKDIR /tmp

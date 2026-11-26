@@ -10,7 +10,6 @@ use std::{
     path::{Path, PathBuf},
     pin::Pin,
     task::{Context, Poll},
-    time::Duration,
 };
 use tokio::io::AsyncWrite;
 
@@ -105,14 +104,13 @@ pub(super) async fn download_recording(
     destination: &Path,
 ) -> Result<(), ControlError> {
     let mut audio = AudioBuffer(Vec::new());
-    let name = ChannelId::try_from(RECORDING_NAME.to_owned()).map_err(failure)?;
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        client.download_stored_recording(&name, &mut audio),
-    )
-    .await
-    .map_err(failure)?
-    .map_err(failure)?;
+    let name =
+        rusterisk_client::RecordingName::try_from(RECORDING_NAME.to_owned()).map_err(failure)?;
+    rusterisk_test_support::Wait::Scenario
+        .bounded(client.download_stored_recording(&name, &mut audio))
+        .await
+        .map_err(failure)?
+        .map_err(failure)?;
     let mut file = std::fs::File::create_new(destination).map_err(failure)?;
     let written = file.write_all(&audio.0).and_then(|()| file.flush());
     drop(file);
@@ -130,7 +128,7 @@ pub(super) async fn download_recording(
 
 pub(super) fn recording_complete(event: &EventKind) -> Result<bool, ControlError> {
     if let EventKind::RecordingFinished { recording } = event {
-        return if recording.name != RECORDING_NAME {
+        return if recording.name.as_str() != RECORDING_NAME {
             Ok(false)
         } else if recording.state == RecordingState::Done && recording.format == "wav" {
             Ok(true)
@@ -140,7 +138,7 @@ pub(super) fn recording_complete(event: &EventKind) -> Result<bool, ControlError
             ))
         };
     }
-    if matches!(event, EventKind::RecordingFailed { recording } if recording.name == RECORDING_NAME)
+    if matches!(event, EventKind::RecordingFailed { recording } if recording.name.as_str() == RECORDING_NAME)
     {
         return Err(failure("browser recording failed before download"));
     }
@@ -213,33 +211,34 @@ impl BrowserRun<'_> {
             .kill_on_drop(true)
             .spawn()
             .map_err(failure)?;
-        let operation = tokio::time::timeout(Duration::from_secs(150), async {
-            let mut events = 0;
-            let mut browser_done = false;
-            let mut recording_done = false;
-            while !(browser_done && recording_done) {
-                tokio::select! {
-                    status = child.wait(), if !browser_done => {
-                        let status = status.map_err(failure)?;
-                        if !status.success() {
-                            return Err(failure(format!("browser fixture failed: {status}")));
+        let operation = rusterisk_test_support::Wait::Browser
+            .bounded(async {
+                let mut events = 0;
+                let mut browser_done = false;
+                let mut recording_done = false;
+                while !(browser_done && recording_done) {
+                    tokio::select! {
+                        status = child.wait(), if !browser_done => {
+                            let status = status.map_err(failure)?;
+                            if !status.success() {
+                                return Err(failure(format!("browser fixture failed: {status}")));
+                            }
+                            browser_done = true;
                         }
-                        browser_done = true;
-                    }
-                    event = subscription.next_event() => {
-                        recording_done |= recording_complete(&event.map_err(failure)?.kind)?;
-                        events += 1;
-                        if events > 512 {
-                            return Err(ControlError::Capacity);
+                        event = subscription.next_event() => {
+                            recording_done |= recording_complete(&event.map_err(failure)?.kind)?;
+                            events += 1;
+                            if events > 512 {
+                                return Err(ControlError::Capacity);
+                            }
                         }
                     }
                 }
-            }
-            Ok(())
-        })
-        .await
-        .map_err(failure)
-        .and_then(|result| result);
+                Ok(())
+            })
+            .await
+            .map_err(failure)
+            .and_then(|result| result);
         if let Err(primary) = operation {
             eprintln!(
                 "browser resource counters: {}",

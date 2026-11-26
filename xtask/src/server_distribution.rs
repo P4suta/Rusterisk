@@ -1,5 +1,6 @@
 use std::fmt;
 mod binary_target;
+pub mod footprint;
 pub use binary_target::{check_binary_target_header, BinaryTargetError};
 mod execution_host;
 pub use execution_host::ServerExecutionMode;

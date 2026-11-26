@@ -1,12 +1,13 @@
 use rusterisk_client::{
     api::{
-        Channel, ChannelId, EventKind, ExternalRtpTarget, MediaUri, PlaybackMilliseconds,
-        PlaybackOptions, PlaybackState, SoundId, StaticRtpCodec,
+        Channel, ChannelId, EventKind, EventSource, ExternalRtpTarget, MediaUri,
+        PlaybackMilliseconds, PlaybackOptions, PlaybackState, SoundId, StaticRtpCodec,
     },
     Client, Error, MuteDirection, Session,
 };
 use rusterisk_media::{mulaw_decode, AudioFormat, Frame, RtpPacket, RtpSender};
 use rusterisk_server::rtp::SocketPair;
+use rusterisk_server::test_time::Wait;
 use std::{
     future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -33,7 +34,8 @@ fn combine(primary: Result<(), Error>, cleanup: Result<(), Error>) -> Result<(),
 }
 
 async fn bounded<T>(future: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
-    tokio::time::timeout(Duration::from_secs(3), future)
+    Wait::Ready
+        .bounded(future)
         .await
         .map_err(|_| Error::Timeout)?
 }
@@ -153,7 +155,7 @@ impl Peer {
 #[derive(Clone, Copy)]
 enum Wanted<'a> {
     Ended(&'a ChannelId),
-    Finished(&'a ChannelId),
+    Finished(&'a rusterisk_client::PlaybackId),
 }
 
 async fn observed(session: &mut Session, wanted: Wanted<'_>) -> Result<(), Error> {
@@ -187,9 +189,10 @@ async fn observed(session: &mut Session, wanted: Wanted<'_>) -> Result<(), Error
 
 struct Resources {
     peers: [Peer; 2],
-    bridge: ChannelId,
+    bridge: rusterisk_client::BridgeId,
     bridge_lifetime: Lifetime,
-    playback: ChannelId,
+    subscribed_to_bridge: bool,
+    playback: rusterisk_client::PlaybackId,
     playback_lifetime: Lifetime,
 }
 
@@ -200,9 +203,10 @@ impl Resources {
                 Peer::new("music-output", local_ip)?,
                 Peer::new("music-clock", local_ip)?,
             ],
-            bridge: ChannelId::try_from("music-bridge".to_owned())?,
+            bridge: rusterisk_client::BridgeId::try_from("music-bridge".to_owned())?,
             bridge_lifetime: Lifetime::Unused,
-            playback: ChannelId::try_from("music-interruption".to_owned())?,
+            subscribed_to_bridge: false,
+            playback: rusterisk_client::PlaybackId::try_from("music-interruption".to_owned())?,
             playback_lifetime: Lifetime::Unused,
         })
     }
@@ -212,6 +216,7 @@ impl Resources {
         client: &Client,
         session: &mut Session,
         app: &str,
+        server: ComparisonServer,
     ) -> Result<(), Error> {
         missing(bounded(client.bridge(&self.bridge)).await)?;
         missing(bounded(client.playback(&self.playback)).await)?;
@@ -222,6 +227,11 @@ impl Resources {
         let bridge = bounded(client.create_bridge(&self.bridge, "Music comparison")).await?;
         self.bridge_lifetime = Lifetime::Admitted;
         require(bridge.id == self.bridge, "MOH bridge identity changed")?;
+        if matches!(server, ComparisonServer::Asterisk) {
+            bounded(client.subscribe_resources(app, &[EventSource::from(self.bridge.clone())]))
+                .await?;
+            self.subscribed_to_bridge = true;
+        }
         bounded(client.add_channels(
             &self.bridge,
             &[self.peers[0].id.clone(), self.peers[1].id.clone()],
@@ -271,13 +281,14 @@ impl Resources {
             self.bridge_lifetime,
             Lifetime::Requested | Lifetime::Admitted
         ) {
-            cleanup = combine(
-                cleanup,
-                deleted(
-                    bounded(client.destroy_bridge(&self.bridge)).await,
-                    self.bridge_lifetime,
-                ),
-            );
+            let removal = bounded(client.destroy_bridge(&self.bridge)).await;
+            if self.subscribed_to_bridge && removal.is_ok() {
+                cleanup = combine(
+                    cleanup,
+                    super::bridge_destroyed(session, &self.bridge).await,
+                );
+            }
+            cleanup = combine(cleanup, deleted(removal, self.bridge_lifetime));
             cleanup = combine(cleanup, missing(bounded(client.bridge(&self.bridge)).await));
             self.bridge_lifetime = Lifetime::Released;
         }
@@ -303,7 +314,7 @@ async fn pump(peers: &[Peer; 2], mut stopped: watch::Receiver<bool>) -> Result<(
                 for (peer, sender) in peers.iter().zip(&mut senders) {
                     let bytes = sender.packet(Frame::new(&[0; 160], 8000).map_err(invalid)?)
                         .map_err(invalid)?.encode().map_err(invalid)?;
-                    let sent = tokio::time::timeout(Duration::from_secs(1), peer.socket.data().send_to(&bytes, peer.destination()?))
+                    let sent = Wait::Ready.bounded(peer.socket.data().send_to(&bytes, peer.destination()?))
                         .await.map_err(|_| Error::Timeout)??;
                     require(sent == bytes.len(), "MOH clock sent a partial RTP datagram")?;
                 }
@@ -469,13 +480,10 @@ async fn audio(
     let mut second = [0; 2049];
     let onset = Instant::now() + Duration::from_secs(3);
     let measurement = Duration::from_millis(u64::from(frames) * 20);
-    let result = tokio::time::timeout_at(onset + measurement, async {
-        let start_timeout = tokio::time::sleep_until(onset);
-        tokio::pin!(start_timeout);
+    let result = Wait::Shutdown.bounded(async {
         let mut measured_packets = 0;
         while measured_packets < 256 {
             tokio::select! {
-                _ = &mut start_timeout, if window.first.is_none() => return Err(Error::Timeout),
                 result = &mut request, if !repeated && window.total_samples >= 20 * 160 => {
                     result?;
                     repeated = true;
@@ -485,7 +493,9 @@ async fn audio(
                     let (size, source) = result?;
                     left.check_source(source)?;
                     let packet = RtpPacket::parse(&first[..size]).map_err(invalid)?;
-                    window.observe(&packet, Instant::now())?;
+                    let arrived = Instant::now();
+                    if arrived > onset + measurement || window.first.is_none() && arrived > onset { return Err(Error::Timeout); }
+                    window.observe(&packet, arrived)?;
                     measured_packets += 1;
                 }
                 result = right.socket.data().recv_from(&mut second) => {
@@ -561,7 +571,7 @@ async fn exercise(
     session: &mut Session,
     peers: &[Peer; 2],
     server: ComparisonServer,
-    playback_id: &ChannelId,
+    playback_id: &rusterisk_client::PlaybackId,
     playback_lifetime: &mut Lifetime,
 ) -> Result<(), Error> {
     let id = peers[0].id.clone();
@@ -644,13 +654,11 @@ pub async fn compare(
         resources.peers[1].socket.local_addr()?,
         resources.peers[1].socket.control_addr()?,
     ];
-    let operation = tokio::time::timeout(
-        Duration::from_secs(10),
-        resources.prepare(client, session, application),
-    )
-    .await
-    .map_err(|_| Error::Timeout)
-    .and_then(|result| result);
+    let operation = Wait::Scenario
+        .bounded(resources.prepare(client, session, application, server))
+        .await
+        .map_err(|_| Error::Timeout)
+        .and_then(|result| result);
     let operation = match operation {
         Ok(()) => {
             let (stop, stopped) = watch::channel(false);
@@ -658,13 +666,18 @@ pub async fn compare(
             let playback = &resources.playback;
             let playback_lifetime = &mut resources.playback_lifetime;
             let sequence = async {
-                let result = tokio::time::timeout(
-                    Duration::from_secs(45),
-                    exercise(client, session, peers, server, playback, playback_lifetime),
-                )
-                .await
-                .map_err(|_| Error::Timeout)
-                .and_then(|result| result);
+                let result = Wait::Shutdown
+                    .bounded(exercise(
+                        client,
+                        session,
+                        peers,
+                        server,
+                        playback,
+                        playback_lifetime,
+                    ))
+                    .await
+                    .map_err(|_| Error::Timeout)
+                    .and_then(|result| result);
                 stop.send_replace(true);
                 result
             };

@@ -1,3 +1,5 @@
+#[path = "support/time.rs"]
+pub mod test_time;
 use axum::{
     http::{HeaderMap, StatusCode},
     routing::{on, MethodFilter},
@@ -6,7 +8,6 @@ use axum::{
 use std::{
     io,
     process::{Output, Stdio},
-    time::Duration,
 };
 use tokio::{net::TcpListener, process::Command};
 
@@ -23,7 +24,9 @@ async fn invoke(arguments: &[&str], password: &[u8]) -> io::Result<Output> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    tokio::time::timeout(Duration::from_secs(5), child.wait_with_output()).await?
+    crate::test_time::Wait::Ready
+        .bounded(child.wait_with_output())
+        .await?
 }
 
 async fn exchange(

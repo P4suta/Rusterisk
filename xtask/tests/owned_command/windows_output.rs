@@ -3,12 +3,11 @@ use std::{
     io::{self, Read},
     os::windows::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use xtask::process::{CommandStream, SupervisedCommand};
 
 const MAX_OUTPUT: usize = 16_384;
-const SHARING_VIOLATION: i32 = 32;
 
 fn verify(valid: bool, message: &'static str) -> io::Result<()> {
     if valid {
@@ -19,17 +18,7 @@ fn verify(valid: bool, message: &'static str) -> io::Result<()> {
 }
 
 fn open_exclusive(path: &Path) -> io::Result<fs::File> {
-    let deadline = Instant::now() + Duration::from_secs(1);
-    loop {
-        match OpenOptions::new().read(true).share_mode(0).open(path) {
-            Err(error)
-                if error.raw_os_error() == Some(SHARING_VIOLATION) && Instant::now() < deadline =>
-            {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            result => return result,
-        }
-    }
+    OpenOptions::new().read(true).share_mode(0).open(path)
 }
 
 struct TempDir {

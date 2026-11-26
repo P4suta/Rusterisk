@@ -13,8 +13,10 @@ use std::path::{Path, PathBuf};
 
 #[test]
 fn only_the_named_finished_recording_allows_the_download() -> Result<(), ControlError> {
-    let recording = |name: &str, state| LiveRecording {
-        name: name.into(),
+    let known = rusterisk_client::RecordingName::try_from("browser-known".to_owned())?;
+    let other = rusterisk_client::RecordingName::try_from("another-recording".to_owned())?;
+    let recording = |name: &rusterisk_client::RecordingName, state| LiveRecording {
+        name: name.clone(),
         format: "wav".into(),
         state,
         target_uri: "bridge:browser-mix".into(),
@@ -27,21 +29,19 @@ fn only_the_named_finished_recording_allows_the_download() -> Result<(), Control
         recording: recording(name, state),
     };
     assert!(super::driver::recording_complete(&finished(
-        "browser-known",
+        &known,
         RecordingState::Done
     ))?);
     assert!(!super::driver::recording_complete(&finished(
-        "another-recording",
+        &other,
         RecordingState::Done
     ))?);
-    assert!(super::driver::recording_complete(&finished(
-        "browser-known",
-        RecordingState::Canceled
-    ))
-    .is_err());
+    assert!(
+        super::driver::recording_complete(&finished(&known, RecordingState::Canceled)).is_err()
+    );
     assert!(
         super::driver::recording_complete(&EventKind::RecordingFailed {
-            recording: recording("browser-known", RecordingState::Failed),
+            recording: recording(&known, RecordingState::Failed),
         })
         .is_err()
     );

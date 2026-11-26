@@ -2,6 +2,7 @@ use super::{cleanup::combine, failure, Active, DigitDelivery, MediaAdmission, Si
 use super::{Outcome, Waiting};
 use crate::media::{MediaHub, MediaNotice, PlaybackControl, Queued};
 use crate::rtp::SocketPair;
+use crate::signaling::calls;
 use crate::storage::{MusicSelection, StorageWorker};
 use crate::{
     Action, CallKey, ControlError, Controller, Credentials, Effect, IncomingCall, IncomingTarget,
@@ -22,13 +23,12 @@ use rusterisk_core::{
 use rusterisk_media::{Frame, MediaError};
 use rusterisk_sip::{Direction, Output, Session, SessionSecurity, SipEvent};
 use rusterisk_storage::Recorder;
+use rusterisk_test_support::Wait;
 use std::net::Ipv4Addr;
-use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
 
 // A turn that waits for the media task holds an unrelated response for five seconds.
-const UNRELATED: Duration = Duration::from_secs(1);
 
 fn id(name: &str) -> Result<ChannelId, ControlError> {
     Ok(ChannelId::try_from(name.to_owned())?)
@@ -104,7 +104,8 @@ impl Silent {
     }
 
     async fn turn(&mut self, effect: Effect) -> Result<(), ControlError> {
-        tokio::time::timeout(UNRELATED, self.signaling.effect(effect, 0))
+        Wait::Responsive
+            .bounded(self.signaling.effect(effect, 0))
             .await
             .map_err(|_| ControlError::Invalid("The turn waited for the media task"))?
     }
@@ -128,7 +129,8 @@ impl Silent {
                 .await
                 .map_err(failure)?;
             let mut bytes = [0; 2048];
-            let (size, _) = tokio::time::timeout(UNRELATED, peer.recv_from(&mut bytes))
+            let (size, _) = Wait::Responsive
+                .bounded(peer.recv_from(&mut bytes))
                 .await
                 .map_err(|_| ControlError::Invalid("The REGISTER waited for the media task"))?
                 .map_err(failure)?;
@@ -190,7 +192,8 @@ async fn silent(
                         match fixture.answering.take() {
                             Some(answering) => combine(
                                 result,
-                                tokio::time::timeout(Duration::from_secs(3), answering)
+                                Wait::Ready
+                                    .bounded(answering)
                                     .await
                                     .map_err(failure)
                                     .and_then(|joined| joined.map_err(failure))
@@ -286,7 +289,8 @@ fn unattached(fixture: &mut Silent) -> Result<(CallKey, MediaTaskToken), Control
         id: id("unattached")?,
         generation: 7,
     };
-    fixture.signaling.calls.insert(
+    fixture.signaling.records.insert(
+        calls::ACTIVE,
         key.clone(),
         Active {
             listener: 0,
@@ -294,7 +298,7 @@ fn unattached(fixture: &mut Silent) -> Result<(CallKey, MediaTaskToken), Control
             digits: DigitDelivery::Media,
             direction_reply: None,
         },
-    );
+    )?;
     let mut tasks = MediaTasks::new(key.generation);
     let token = tasks.reserve(MediaTaskKind::Playback)?;
     tasks.start(token)?;
@@ -332,12 +336,12 @@ async fn a_refused_reservation_fails_its_job_with_the_reason_of_the_media_task(
             })
             .await?;
         fixture.answer()?;
-        let (owner, failed, result) =
-            tokio::time::timeout(UNRELATED, fixture.signaling.playbacks.join_next())
-                .await
-                .map_err(failure)?
-                .ok_or(ControlError::Capacity)?
-                .map_err(failure)?;
+        let (owner, failed, result) = Wait::Responsive
+            .bounded(fixture.signaling.playbacks.join_next())
+            .await
+            .map_err(failure)?
+            .ok_or(ControlError::Capacity)?
+            .map_err(failure)?;
         assert!(matches!(owner, MediaOwner::Channel(owned) if owned == key));
         assert_eq!(failed, token);
         assert!(matches!(
@@ -400,7 +404,8 @@ async fn a_refused_digit_command_reports_its_finish() -> Result<(), ControlError
             })
             .await?;
         fixture.answer()?;
-        let notice = tokio::time::timeout(UNRELATED, fixture.signaling.notices.recv())
+        let notice = Wait::Responsive
+            .bounded(fixture.signaling.notices.recv())
             .await
             .map_err(failure)?
             .ok_or(ControlError::Capacity)?;
@@ -441,7 +446,8 @@ async fn a_full_command_queue_fails_one_digit_delivery_and_keeps_signaling_runni
                 },
             }))
             .await??;
-        fixture.signaling.calls.insert(
+        fixture.signaling.records.insert(
+            calls::ACTIVE,
             key.clone(),
             Active {
                 listener: 0,
@@ -449,7 +455,7 @@ async fn a_full_command_queue_fails_one_digit_delivery_and_keeps_signaling_runni
                 digits: DigitDelivery::Media,
                 direction_reply: None,
             },
-        );
+        )?;
         let (_unattached, token) = unattached(fixture)?;
         while fixture.signaling.media.stop_playback(token).is_ok() {}
         let received = SipEvent::DtmfReceived {
@@ -458,19 +464,17 @@ async fn a_full_command_queue_fails_one_digit_delivery_and_keeps_signaling_runni
             digit: DtmfDigit::Five,
             duration_ms: 40,
         };
-        tokio::time::timeout(
-            UNRELATED,
-            fixture.signaling.output_for_test(
+        Wait::Responsive
+            .bounded(fixture.signaling.output_for_test(
                 0,
                 Output {
                     datagrams: Vec::new(),
                     events: Vec::from([received]),
                 },
                 0,
-            ),
-        )
-        .await
-        .map_err(|_| ControlError::Invalid("The turn waited for queue space"))??;
+            ))
+            .await
+            .map_err(|_| ControlError::Invalid("The turn waited for queue space"))??;
         fixture.registers().await
     })
     .await
@@ -506,7 +510,8 @@ async fn dialed(
     };
     let sockets = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
     let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
-    fixture.signaling.calls.insert(
+    fixture.signaling.records.insert(
+        calls::ACTIVE,
         key.clone(),
         Active {
             listener: 0,
@@ -514,7 +519,7 @@ async fn dialed(
             digits: DigitDelivery::Media,
             direction_reply: None,
         },
-    );
+    )?;
     let answered = SipEvent::Answered {
         id: key.id.as_str().into(),
         generation: key.generation,
@@ -532,19 +537,17 @@ async fn dialed(
 
 impl Silent {
     async fn receive(&mut self, event: SipEvent, now: u64) -> Result<(), ControlError> {
-        tokio::time::timeout(
-            UNRELATED,
-            self.signaling.output_for_test(
+        Wait::Responsive
+            .bounded(self.signaling.output_for_test(
                 0,
                 Output {
                     datagrams: Vec::new(),
                     events: Vec::from([event]),
                 },
                 now,
-            ),
-        )
-        .await
-        .map_err(|_| ControlError::Invalid("The turn waited for the media task"))?
+            ))
+            .await
+            .map_err(|_| ControlError::Invalid("The turn waited for the media task"))?
     }
 }
 
@@ -631,19 +634,20 @@ async fn published(
     subscription: &mut crate::Subscription,
 ) -> Result<Vec<&'static str>, ControlError> {
     let mut labels = Vec::new();
-    tokio::time::timeout(UNRELATED, async {
-        while labels.last() != Some(&"destroyed") {
-            let event = subscription
-                .events
-                .recv()
-                .await
-                .ok_or(ControlError::Capacity)?;
-            labels.extend(label(&event.kind));
-        }
-        Ok::<(), ControlError>(())
-    })
-    .await
-    .map_err(failure)??;
+    Wait::Responsive
+        .bounded(async {
+            while labels.last() != Some(&"destroyed") {
+                let event = subscription
+                    .events
+                    .recv()
+                    .await
+                    .ok_or(ControlError::Capacity)?;
+                labels.extend(label(&event.kind));
+            }
+            Ok::<(), ControlError>(())
+        })
+        .await
+        .map_err(failure)??;
     Ok(labels)
 }
 
@@ -669,20 +673,21 @@ async fn an_unanswered_attachment_ends_its_call_with_cause_21_at_its_deadline(
 
 // The cause with which control ended the call.
 async fn destroyed(subscription: &mut crate::Subscription) -> Result<u16, ControlError> {
-    tokio::time::timeout(UNRELATED, async {
-        loop {
-            let event = subscription
-                .events
-                .recv()
-                .await
-                .ok_or(ControlError::Capacity)?;
-            if let EventKind::ChannelDestroyed { cause, .. } = event.kind {
-                return Ok::<u16, ControlError>(cause);
+    Wait::Responsive
+        .bounded(async {
+            loop {
+                let event = subscription
+                    .events
+                    .recv()
+                    .await
+                    .ok_or(ControlError::Capacity)?;
+                if let EventKind::ChannelDestroyed { cause, .. } = event.kind {
+                    return Ok::<u16, ControlError>(cause);
+                }
             }
-        }
-    })
-    .await
-    .map_err(failure)?
+        })
+        .await
+        .map_err(failure)?
 }
 
 #[tokio::test]
@@ -738,7 +743,7 @@ async fn an_answer_to_an_expired_wait_completes_no_later_wait() -> Result<(), Co
             .map_err(failure)?;
         fixture
             .signaling
-            .pend(key.clone(), 1, Waiting::External { local, release }, 0);
+            .pend(key.clone(), 1, Waiting::External { local, release }, 0)?;
         fixture.signaling.expire_pending(5000).await?;
         assert_eq!(fixture.queued(), Some(Queued::Release));
         let release = fixture
@@ -748,19 +753,27 @@ async fn an_answer_to_an_expired_wait_completes_no_later_wait() -> Result<(), Co
             .map_err(failure)?;
         fixture
             .signaling
-            .pend(key.clone(), 2, Waiting::External { local, release }, 5001);
+            .pend(key.clone(), 2, Waiting::External { local, release }, 5001)?;
         fixture
             .signaling
             .completed(key.clone(), Outcome::Attached(1, Ok(())), 5002)
             .await?;
         assert_eq!(fixture.signaling.waiting_serial(&key), Some(2));
-        assert!(!fixture.signaling.external_media.contains(&key));
+        assert!(!fixture
+            .signaling
+            .records
+            .get(calls::EXTERNAL, &key)
+            .is_some());
         fixture
             .signaling
             .completed(key.clone(), Outcome::Attached(2, Ok(())), 5003)
             .await?;
         assert_eq!(fixture.signaling.waiting_serial(&key), None);
-        assert!(fixture.signaling.external_media.contains(&key));
+        assert!(fixture
+            .signaling
+            .records
+            .get(calls::EXTERNAL, &key)
+            .is_some());
         assert_eq!(fixture.queued(), None);
         Ok(())
     })
@@ -789,12 +802,12 @@ async fn a_held_direction_change_keeps_the_release_behind_its_own_wait() -> Resu
             .waiting_serial(&key)
             .ok_or(ControlError::Invalid("The direction change did not wait"))?;
         assert_ne!(Some(direction), attachment);
-        assert!(fixture.signaling.calls.contains_key(&key));
+        assert!(fixture.signaling.records.get(calls::ACTIVE, &key).is_some());
         fixture
             .signaling
             .completed(key.clone(), Outcome::Direction(direction, Ok(true)), 2)
             .await?;
-        assert!(!fixture.signaling.calls.contains_key(&key));
+        assert!(!fixture.signaling.records.get(calls::ACTIVE, &key).is_some());
         assert_eq!(fixture.signaling.pending_wake(), Wake::Idle);
         Ok(())
     })
@@ -821,9 +834,9 @@ async fn a_call_that_holds_too_much_ends_once_and_is_released_after_its_wait(
                 .await?;
         }
         assert_eq!(destroyed(&mut subscription).await?, 42);
-        assert!(fixture.signaling.calls.contains_key(&key));
+        assert!(fixture.signaling.records.get(calls::ACTIVE, &key).is_some());
         fixture.attached(&key, 19).await?;
-        assert!(!fixture.signaling.calls.contains_key(&key));
+        assert!(!fixture.signaling.records.get(calls::ACTIVE, &key).is_some());
         Ok(())
     })
     .await
@@ -912,24 +925,25 @@ async fn a_release_for_a_waiting_call_follows_its_answer() -> Result<(), Control
         let (key, mut subscription, answered) = dialed(fixture).await?;
         fixture.receive(answered, 0).await?;
         fixture.turn(Effect::Release { key: key.clone() }).await?;
-        assert!(fixture.signaling.calls.contains_key(&key));
+        assert!(fixture.signaling.records.get(calls::ACTIVE, &key).is_some());
         fixture.attached(&key, 1).await?;
-        assert!(!fixture.signaling.calls.contains_key(&key));
+        assert!(!fixture.signaling.records.get(calls::ACTIVE, &key).is_some());
         assert_eq!(fixture.signaling.pending_wake(), Wake::Idle);
-        let answered = tokio::time::timeout(UNRELATED, async {
-            loop {
-                let event = subscription
-                    .events
-                    .recv()
-                    .await
-                    .ok_or(ControlError::Capacity)?;
-                if label(&event.kind) == Some("answered") {
-                    return Ok::<(), ControlError>(());
+        let answered = Wait::Responsive
+            .bounded(async {
+                loop {
+                    let event = subscription
+                        .events
+                        .recv()
+                        .await
+                        .ok_or(ControlError::Capacity)?;
+                    if label(&event.kind) == Some("answered") {
+                        return Ok::<(), ControlError>(());
+                    }
                 }
-            }
-        })
-        .await
-        .map_err(failure)?;
+            })
+            .await
+            .map_err(failure)?;
         answered
     })
     .await
@@ -943,8 +957,7 @@ impl Silent {
         let (stop, mut stopped) = watch::channel(false);
         let clock = self.signaling.controller.clock();
         let mut serving = std::pin::pin!(self.signaling.serve(&mut stopped, clock));
-        let answered =
-            tokio::time::timeout(UNRELATED, controller.execute(credentials, None, action));
+        let answered = Wait::Responsive.bounded(controller.execute(credentials, None, action));
         let result = tokio::select! {
             result = answered => result.map_err(|_| ControlError::Invalid("The request waited for the media task"))?,
             result = &mut serving => {
@@ -999,7 +1012,7 @@ impl Silent {
         let (stop, mut stopped) = watch::channel(false);
         let clock = self.signaling.controller.clock();
         let mut serving = std::pin::pin!(self.signaling.serve(&mut stopped, clock));
-        let taken = tokio::time::timeout(Duration::from_secs(2), async {
+        let taken = Wait::Ready.bounded(async {
             let mut taken = Vec::with_capacity(count);
             while taken.len() < count {
                 match media.take_queued() {

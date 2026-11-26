@@ -4,7 +4,7 @@ use super::{
     RegistrarUri, Signaling, StaticTarget,
 };
 use crate::signaling::registrations::State;
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tokio::net::UdpSocket;
 use tokio::time::Instant;
 
@@ -62,13 +62,13 @@ async fn run(scenario: Scenario) -> Result<(), ControlError> {
         .1;
     let result = async {
         signaling.registration_tick(1000).await?;
-        let completed =
-            tokio::time::timeout(Duration::from_secs(1), signaling.registrations.completed())
-                .await
-                .map_err(failure)??
-                .ok_or(ControlError::Invalid(
-                    "Exhausted candidate resolution disappeared",
-                ))?;
+        let completed = Wait::Ready
+            .bounded(signaling.registrations.completed())
+            .await
+            .map_err(failure)??
+            .ok_or(ControlError::Invalid(
+                "Exhausted candidate resolution disappeared",
+            ))?;
         signaling.registration_completed(completed, 1000)?;
         signaling.registration_tick(1000).await?;
         let initial = receive(&primary, "Initial REGISTER for candidate exhaustion").await?;

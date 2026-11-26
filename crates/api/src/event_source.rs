@@ -1,11 +1,11 @@
 use crate::ChannelId;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum EventSource {
+pub enum ResourceEventSource<B> {
     AllChannels,
     Channel(ChannelId),
     AllBridges,
-    Bridge(ChannelId),
+    Bridge(B),
     AllEndpoints,
     EndpointTechnology(ChannelId),
     Endpoint {
@@ -13,6 +13,8 @@ pub enum EventSource {
         resource: ChannelId,
     },
 }
+
+pub type EventSource = ResourceEventSource<ChannelId>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InvalidEventSource {
@@ -30,14 +32,14 @@ impl std::fmt::Display for InvalidEventSource {
 }
 impl std::error::Error for InvalidEventSource {}
 
-fn identifier(value: &str) -> Result<ChannelId, InvalidEventSource> {
+fn identifier<T: TryFrom<String>>(value: &str) -> Result<T, InvalidEventSource> {
     if value.len() > 128 {
         return Err(InvalidEventSource::Resource);
     }
-    ChannelId::try_from(value.to_owned()).map_err(|_| InvalidEventSource::Resource)
+    T::try_from(value.to_owned()).map_err(|_| InvalidEventSource::Resource)
 }
 
-impl TryFrom<&str> for EventSource {
+impl<B: TryFrom<String>> TryFrom<&str> for ResourceEventSource<B> {
     type Error = InvalidEventSource;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
@@ -60,7 +62,7 @@ impl TryFrom<&str> for EventSource {
     }
 }
 
-impl std::fmt::Display for EventSource {
+impl<B: std::fmt::Display> std::fmt::Display for ResourceEventSource<B> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AllChannels => formatter.write_str("channel:"),

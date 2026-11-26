@@ -1,18 +1,18 @@
-use crate::{api, Client, Error};
+use crate::{Client, Error};
 use std::time::Duration;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 const MAX_RECORDING_BYTES: u64 = 1024 * 1024 * 1024 + 44;
 
 impl Client {
-    pub async fn stored_recordings(&self) -> Result<Vec<api::StoredRecording>, Error> {
+    pub async fn stored_recordings(&self) -> Result<Vec<crate::StoredRecording>, Error> {
         self.request("recordings.listStored", &[], &[]).await
     }
 
     pub async fn stored_recording(
         &self,
-        name: &api::ChannelId,
-    ) -> Result<api::StoredRecording, Error> {
+        name: &crate::RecordingName,
+    ) -> Result<crate::StoredRecording, Error> {
         self.request(
             "recordings.getStored",
             &[("recordingName", name.as_str())],
@@ -21,7 +21,7 @@ impl Client {
         .await
     }
 
-    pub async fn delete_stored_recording(&self, name: &api::ChannelId) -> Result<(), Error> {
+    pub async fn delete_stored_recording(&self, name: &crate::RecordingName) -> Result<(), Error> {
         self.request(
             "recordings.deleteStored",
             &[("recordingName", name.as_str())],
@@ -32,9 +32,9 @@ impl Client {
 
     pub async fn copy_stored_recording(
         &self,
-        source: &api::ChannelId,
-        destination: &api::ChannelId,
-    ) -> Result<api::StoredRecording, Error> {
+        source: &crate::RecordingName,
+        destination: &crate::RecordingName,
+    ) -> Result<crate::StoredRecording, Error> {
         self.request(
             "recordings.copyStored",
             &[("recordingName", source.as_str())],
@@ -45,7 +45,7 @@ impl Client {
 
     pub async fn download_stored_recording<W: AsyncWrite + Unpin>(
         &self,
-        name: &api::ChannelId,
+        name: &crate::RecordingName,
         output: &mut W,
     ) -> Result<u64, Error> {
         let request = self

@@ -1,5 +1,7 @@
+mod activity;
 pub mod audiosocket;
 mod call_profiles;
+mod call_records;
 pub mod cli;
 mod clock;
 #[cfg(test)]
@@ -19,6 +21,9 @@ pub mod runtime;
 mod server_info;
 pub mod signaling;
 pub mod storage;
+#[doc(hidden)]
+#[path = "../../cli/tests/support/time.rs"]
+pub mod test_time;
 mod utc_timestamps;
 pub mod webrtc;
 mod websocket;

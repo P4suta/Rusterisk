@@ -2,8 +2,8 @@ use axum::{body::Body, http::Request, Router};
 use http_body_util::BodyExt;
 use rusterisk_config::Config;
 use rusterisk_server::{http::router, ControlError, Controller, Credentials, Effect};
+use rusterisk_test_support::Wait;
 use serde_json::Value;
-use std::time::Duration;
 use tower::ServiceExt;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -47,7 +47,7 @@ async fn originate_with_id_preserves_the_path_and_validated_body_fields() -> Res
     .map_err(failure)?;
     let (controller, runner, mut effects) = Controller::new(config, 4);
     let task = tokio::spawn(runner.run());
-    let operation = tokio::time::timeout(Duration::from_secs(3), async {
+    let operation = Wait::Ready.bounded(async {
         let _subscription = controller.subscribe(
             Credentials::new("app".into(), "test-password".into())?,
             None,

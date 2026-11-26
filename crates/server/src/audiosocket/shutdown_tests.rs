@@ -1,7 +1,9 @@
-use super::{failure, AudioSocketLink, Channels, DigitCommand, LinkStats};
+use super::{failure, AudioSocketLink, Channels, LinkStats};
+use crate::media_link::DigitCommand;
 use rusterisk_core::{DtmfToken, DtmfTone, PeerMediaDirection};
 use rusterisk_media::{AudioSocket, Frame, MediaError};
-use std::{future::Future, time::Duration};
+use rusterisk_test_support::Wait;
+use std::future::Future;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -25,9 +27,7 @@ struct Pair {
 }
 
 async fn bounded<T>(future: impl Future<Output = Result<T, MediaError>>) -> Result<T, MediaError> {
-    tokio::time::timeout(Duration::from_secs(1), future)
-        .await
-        .map_err(failure)?
+    Wait::Ready.bounded(future).await.map_err(failure)?
 }
 
 async fn pair() -> Result<Pair, MediaError> {

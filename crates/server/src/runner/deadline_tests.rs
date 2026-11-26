@@ -87,7 +87,9 @@ async fn an_originate_timeout_fires_at_its_instant() -> Result<(), ControlError>
     let Some(Effect::Start { key, .. }) = effects.recv().await else {
         return Err(ControlError::Invalid("Expected the call to start"));
     };
-    let released = tokio::time::timeout(Duration::from_secs(5), effects.recv()).await;
+    let released = rusterisk_test_support::Wait::Ready
+        .bounded(effects.recv())
+        .await;
     let waited = begun.elapsed();
     controller.shutdown();
     task.await.map_err(failure)??;
@@ -112,7 +114,9 @@ async fn a_dialplan_wait_ends_at_its_instant() -> Result<(), ControlError> {
             target: IncomingTarget::Dialplan,
         })
         .await?;
-    let released = tokio::time::timeout(Duration::from_secs(5), effects.recv()).await;
+    let released = rusterisk_test_support::Wait::Ready
+        .bounded(effects.recv())
+        .await;
     let waited = begun.elapsed();
     controller.shutdown();
     task.await.map_err(failure)??;
@@ -213,7 +217,8 @@ async fn a_subscription_keeps_the_runner_serving_after_its_controller_leaves(
     drop(controller);
     progress(&mut serving).await?;
     drop(subscription);
-    tokio::time::timeout(Duration::from_secs(1), serving)
+    rusterisk_test_support::Wait::Ready
+        .bounded(serving)
         .await
         .map_err(failure)?
 }
@@ -312,7 +317,7 @@ async fn work_that_a_full_turn_defers_retries_at_the_bounded_interval() -> Resul
     }
     let started = tokio::time::Instant::now();
     let mut serving = std::pin::pin!(runner.serve());
-    let answered = tokio::time::timeout(Duration::from_secs(1), async {
+    let answered = rusterisk_test_support::Wait::Ready.bounded(async {
         loop {
             tokio::select! {
                 served = &mut serving => return Err(failure(format!("the runner stopped: {served:?}"))),

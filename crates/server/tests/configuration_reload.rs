@@ -6,7 +6,8 @@ use hyper_util::rt::TokioIo;
 use rusterisk_api::{Channel, Event, EventKind};
 use rusterisk_config::Config;
 use rusterisk_server::{runtime::Server, ControlError, Controller};
-use std::{io, net::SocketAddr, path::Path, time::Duration};
+use rusterisk_test_support::Wait;
+use std::{io, net::SocketAddr, path::Path};
 use tokio::{net::TcpStream, task::JoinHandle};
 use tokio_tungstenite::{
     tungstenite::{client::IntoClientRequest, http::HeaderValue, Message},
@@ -15,7 +16,6 @@ use tokio_tungstenite::{
 
 const RELOAD: &str = "/rusterisk/configuration/reload";
 const PING: &str = "/ari/asterisk/ping";
-const REQUEST_BUDGET: Duration = Duration::from_secs(35);
 const OLD: Access = Access {
     user: "writer",
     password: "running-password",
@@ -75,7 +75,7 @@ fn combine<T>(
 }
 
 async fn joined(mut task: JoinHandle<Result<(), ControlError>>) -> Result<(), ControlError> {
-    match tokio::time::timeout(Duration::from_secs(20), &mut task).await {
+    match Wait::Shutdown.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?,
         Err(primary) => {
             task.abort();
@@ -180,14 +180,15 @@ struct HttpConnection {
 
 impl HttpConnection {
     async fn connect(address: SocketAddr) -> Result<Self, ControlError> {
-        let (sender, connection) = tokio::time::timeout(Duration::from_secs(2), async {
-            let stream = TcpStream::connect(address).await.map_err(failure)?;
-            hyper::client::conn::http1::handshake(TokioIo::new(stream))
-                .await
-                .map_err(failure)
-        })
-        .await
-        .map_err(failure)??;
+        let (sender, connection) = Wait::Ready
+            .bounded(async {
+                let stream = TcpStream::connect(address).await.map_err(failure)?;
+                hyper::client::conn::http1::handshake(TokioIo::new(stream))
+                    .await
+                    .map_err(failure)
+            })
+            .await
+            .map_err(failure)??;
         Ok(Self {
             address,
             sender,
@@ -202,39 +203,40 @@ impl HttpConnection {
         access: Option<Access>,
         body: &str,
     ) -> Result<Reply, ControlError> {
-        tokio::time::timeout(REQUEST_BUDGET, async {
-            let mut request = Request::builder()
-                .method(method)
-                .uri(path)
-                .header("Host", self.address.to_string());
-            if let Some(access) = access {
-                request = request
-                    .header("Authorization", authorization(access)?)
-                    .header("Origin", access.origin);
-            }
-            let request = request
-                .body(Full::new(Bytes::copy_from_slice(body.as_bytes())))
-                .map_err(failure)?;
-            let response = self.sender.send_request(request).await.map_err(failure)?;
-            let status = response.status();
-            let mut body = response.into_body();
-            let mut bytes = Vec::new();
-            while let Some(frame) = body.frame().await {
-                if let Some(data) = frame.map_err(failure)?.data_ref() {
-                    let length = bytes
-                        .len()
-                        .checked_add(data.len())
-                        .ok_or(ControlError::Capacity)?;
-                    if length > 16_384 {
-                        return Err(ControlError::Capacity);
-                    }
-                    bytes.extend_from_slice(data);
+        Wait::Shutdown
+            .bounded(async {
+                let mut request = Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("Host", self.address.to_string());
+                if let Some(access) = access {
+                    request = request
+                        .header("Authorization", authorization(access)?)
+                        .header("Origin", access.origin);
                 }
-            }
-            Ok(Reply { status, bytes })
-        })
-        .await
-        .map_err(failure)?
+                let request = request
+                    .body(Full::new(Bytes::copy_from_slice(body.as_bytes())))
+                    .map_err(failure)?;
+                let response = self.sender.send_request(request).await.map_err(failure)?;
+                let status = response.status();
+                let mut body = response.into_body();
+                let mut bytes = Vec::new();
+                while let Some(frame) = body.frame().await {
+                    if let Some(data) = frame.map_err(failure)?.data_ref() {
+                        let length = bytes
+                            .len()
+                            .checked_add(data.len())
+                            .ok_or(ControlError::Capacity)?;
+                        if length > 16_384 {
+                            return Err(ControlError::Capacity);
+                        }
+                        bytes.extend_from_slice(data);
+                    }
+                }
+                Ok(Reply { status, bytes })
+            })
+            .await
+            .map_err(failure)?
     }
 
     async fn close(self) -> Result<(), ControlError> {
@@ -247,26 +249,27 @@ impl HttpConnection {
 }
 
 async fn close_events(socket: &mut Events) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        socket.close(None).await.map_err(failure)?;
-        for _ in 0..64 {
-            match socket.next().await.transpose().map_err(failure)? {
-                Some(Message::Close(_)) => {
-                    return verify(
-                        socket.next().await.transpose().map_err(failure)?.is_none(),
-                        "Event connection remained open after Close",
-                    );
-                }
-                Some(Message::Text(_) | Message::Ping(_) | Message::Pong(_)) => {}
-                Some(Message::Binary(_) | Message::Frame(_)) | None => {
-                    return Err(ControlError::Invalid("Event Close response missing"));
+    Wait::Ready
+        .bounded(async {
+            socket.close(None).await.map_err(failure)?;
+            for _ in 0..64 {
+                match socket.next().await.transpose().map_err(failure)? {
+                    Some(Message::Close(_)) => {
+                        return verify(
+                            socket.next().await.transpose().map_err(failure)?.is_none(),
+                            "Event connection remained open after Close",
+                        );
+                    }
+                    Some(Message::Text(_) | Message::Ping(_) | Message::Pong(_)) => {}
+                    Some(Message::Binary(_) | Message::Frame(_)) | None => {
+                        return Err(ControlError::Invalid("Event Close response missing"));
+                    }
                 }
             }
-        }
-        Err(ControlError::Capacity)
-    })
-    .await
-    .map_err(failure)?
+            Err(ControlError::Capacity)
+        })
+        .await
+        .map_err(failure)?
 }
 
 struct Fixture {
@@ -414,13 +417,11 @@ impl Fixture {
         request
             .headers_mut()
             .insert("Sec-WebSocket-Protocol", HeaderValue::from_static("ari"));
-        let (socket, response) = tokio::time::timeout(
-            Duration::from_secs(2),
-            tokio_tungstenite::connect_async(request),
-        )
-        .await
-        .map_err(failure)?
-        .map_err(failure)?;
+        let (socket, response) = Wait::Ready
+            .bounded(tokio_tungstenite::connect_async(request))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
         self.events = Some(socket);
         verify(
             response.status() == StatusCode::SWITCHING_PROTOCOLS
@@ -432,7 +433,7 @@ impl Fixture {
 
     async fn observed(&mut self, id: &str, observation: Observation) -> Result<(), ControlError> {
         let events = self.events.as_mut().ok_or(ControlError::Capacity)?;
-        tokio::time::timeout(Duration::from_secs(2), async {
+        Wait::Ready.bounded(async {
             for _ in 0..64 {
                 match events.next().await.transpose().map_err(failure)? {
                     Some(Message::Text(text)) => {

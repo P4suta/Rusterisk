@@ -11,10 +11,8 @@ use rusterisk_server::{
     http::router, media::MediaHub, rtp::SocketPair, signaling::Signaling, ControlError, Controller,
     Credentials,
 };
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    time::Duration,
-};
+use rusterisk_test_support::Wait;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tower::ServiceExt;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -60,7 +58,7 @@ async fn external_http_creation_returns_the_bound_transport_and_receives_audio(
         let address = variables.get("UNICASTRTP_LOCAL_ADDRESS").ok_or(ControlError::Capacity)?.parse::<IpAddr>().map_err(failure)?;
         let port = variables.get("UNICASTRTP_LOCAL_PORT").ok_or(ControlError::Capacity)?.parse::<u16>().map_err(failure)?;
         let local = SocketAddr::new(address, port);
-        tokio::time::timeout(Duration::from_secs(2), async {
+        Wait::Ready.bounded(async {
             for _ in 0..16 {
                 let event = subscription.events.recv().await.ok_or(ControlError::Capacity)?;
                 if matches!(event.kind, EventKind::StasisStart { channel, args } if channel.id.as_str() == "external" && args == ["media"]) { return Ok(()); }
@@ -70,7 +68,7 @@ async fn external_http_creation_returns_the_bound_transport_and_receives_audio(
         let mut sender = RtpSender::new(AudioFormat::Pcma, 8, [21; 10]).map_err(failure)?;
         let packet = sender.packet(Frame::new(&[4000; 160], 8000).map_err(failure)?).map_err(failure)?.encode().map_err(failure)?;
         peer.data().send_to(&packet, local).await.map_err(failure)?;
-        tokio::time::timeout(Duration::from_secs(2), async {
+        Wait::Ready.bounded(async {
             for _ in 0..16 {
                 let event = subscription.events.recv().await.ok_or(ControlError::Capacity)?;
                 if matches!(event.kind, EventKind::ChannelVarset { variable, value, .. } if variable == "RUSTERISK_MEDIA_CONNECTED" && value == "1") { return Ok(()); }

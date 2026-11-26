@@ -7,14 +7,7 @@ use std::{
 };
 
 fn exited(pid: Pid) -> Result<(), ProcessError> {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !peek(pid)? {
-        if Instant::now() >= deadline {
-            return Err(ProcessError::Timeout);
-        }
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    Ok(())
+    rusterisk_test_support::child_state(|| Ok(peek(pid)?.then_some(())))
 }
 
 fn reaped(pid: Pid) {

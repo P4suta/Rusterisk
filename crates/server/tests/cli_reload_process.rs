@@ -1,12 +1,12 @@
 use axum::{http::StatusCode, response::IntoResponse};
 use base64::Engine;
+use rusterisk_test_support::Wait;
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read},
     net::{SocketAddr, TcpListener},
     path::Path,
     process::{ExitStatus, Output, Stdio},
-    time::Duration,
 };
 use tokio::{
     process::{Child, Command},
@@ -76,7 +76,8 @@ async fn stop(child: &mut Child) -> io::Result<()> {
         Ok(None) => child.start_kill(),
         Err(primary) => combine(Err(primary), child.start_kill()),
     };
-    let reaped = tokio::time::timeout(Duration::from_secs(2), child.wait())
+    let reaped = Wait::Ready
+        .bounded(child.wait())
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "Reload child was not reaped"))
         .and_then(|result| result)
@@ -85,7 +86,8 @@ async fn stop(child: &mut Child) -> io::Result<()> {
 }
 
 async fn wait(child: &mut Child) -> io::Result<ExitStatus> {
-    let result = tokio::time::timeout(Duration::from_secs(5), child.wait())
+    let result = Wait::Ready
+        .bounded(child.wait())
         .await
         .map_err(|_| {
             io::Error::new(
@@ -230,7 +232,7 @@ impl HttpFixture {
             ..
         } = self;
         drop(lifetime);
-        let joined = match tokio::time::timeout(Duration::from_secs(2), &mut server).await {
+        let joined = match Wait::Ready.bounded(&mut server).await {
             Ok(result) => result.map_err(io::Error::other).and_then(|result| result),
             Err(_) => {
                 server.abort();

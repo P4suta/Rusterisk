@@ -1,3 +1,4 @@
+use super::stream_frames::{with_stream_port, FramePair, TaskFrames};
 use super::{
     AudioSocketLink, Connection, DigitSupport, Gate, Io, MediaError, MediaHub, PeerMediaDirection,
     Port, RtpChannels, TaskIo,
@@ -18,13 +19,22 @@ pub(super) struct WebSocketAttachment<S> {
 }
 
 impl Port {
+    #[cfg(test)]
     pub(super) fn new(
         initial_direction: PeerMediaDirection,
         digit_support: DigitSupport,
     ) -> (Self, RtpChannels) {
-        let (incoming, input) = mpsc::channel(3);
+        Self::with_frames(initial_direction, digit_support, TaskFrames::Hz48000)
+    }
+
+    fn with_frames<const N: usize>(
+        initial_direction: PeerMediaDirection,
+        digit_support: DigitSupport,
+        pair: fn(FramePair<N>) -> TaskFrames,
+    ) -> (Self, RtpChannels<N>) {
+        let (incoming, input) = mpsc::channel(1);
         let (digits, digit_input) = mpsc::channel(16);
-        let (outgoing, output) = mpsc::channel(3);
+        let (outgoing, output) = mpsc::channel(1);
         let (commands, command_input) = mpsc::channel(8);
         let (completed, completions) = mpsc::channel(8);
         let (stop, stopped) = watch::channel(false);
@@ -32,9 +42,11 @@ impl Port {
         (
             Self {
                 io: Io::Task(TaskIo {
-                    incoming: input,
+                    audio: pair(FramePair {
+                        incoming: input,
+                        outgoing,
+                    }),
                     digits: digit_input,
-                    outgoing,
                     commands,
                     completed: completions,
                     stop,
@@ -60,7 +72,6 @@ impl Port {
         digit_support: DigitSupport,
     ) -> Self {
         Self {
-            worker: None,
             connection_lease: None,
             answers: None,
             io: Io::Owned,
@@ -103,7 +114,7 @@ impl MediaHub {
         if self.ports.len() >= self.capacity || self.workers.len() >= self.capacity {
             return Err(MediaError::Capacity);
         }
-        if self.ports.contains_key(key) {
+        if self.ports.contains_key(key) || self.stream_releases.contains_key(&key.handle()) {
             return Err(MediaError::InvalidRoute);
         }
         Ok(())
@@ -114,8 +125,9 @@ impl MediaHub {
         key: CallKey,
         mut port: Port,
         initial_gate: Gate,
+        rate: u32,
     ) -> Result<(), MediaError> {
-        self.mixer.insert(key.clone())?;
+        self.mixer.insert_at_rate(key.clone(), rate)?;
         self.mixer.gates(&key, initial_gate, initial_gate)?;
         port.generated_audio_gate = initial_gate;
         self.ports.insert(key, port);
@@ -129,10 +141,14 @@ impl MediaHub {
         rate: u32,
     ) -> Result<(), MediaError> {
         self.check_link(&key)?;
-        let (port, channels) = Port::new(PeerMediaDirection::SendReceive, DigitSupport::Stream);
-        let link = AudioSocketLink::new(socket, channels, rate)?;
-        self.install_link(key.clone(), port, Gate::Open)?;
-        self.spawn_link(key, link.run())
+        with_stream_port!(rate, |port, channels| {
+            let link = AudioSocketLink::new(socket, channels, rate)?;
+            self.install_link(key.clone(), port, Gate::Open, rate)?;
+            self.stream_releases
+                .insert(key.handle(), super::StreamRelease::Running);
+            self.workers.spawn(async move { (key, link.run().await) });
+            Ok(())
+        })
     }
 
     pub(super) fn attach_websocket<S: MediaSocket + 'static>(
@@ -152,13 +168,19 @@ impl MediaHub {
         if options.channel_id != key.id {
             return Err(MediaError::InvalidRoute);
         }
-        let (mut port, channels) = Port::new(PeerMediaDirection::SendReceive, DigitSupport::Stream);
-        let (answer, answers) = mpsc::channel(8);
-        port.answers = Some(answers);
-        port.connection_lease = lease;
-        let link = WebSocketMediaLink::new(socket, channels, options, answer)?;
-        self.install_link(key.clone(), port, Gate::Open)?;
-        self.spawn_link(key, link.run())
+        let rate = options.format.rate();
+        with_stream_port!(rate, |port, channels| {
+            let mut port = port;
+            let (answer, answers) = mpsc::channel(8);
+            port.answers = Some(answers);
+            port.connection_lease = lease;
+            let link = WebSocketMediaLink::new(socket, channels, options, answer)?;
+            self.install_link(key.clone(), port, Gate::Open, rate)?;
+            self.stream_releases
+                .insert(key.handle(), super::StreamRelease::Running);
+            self.workers.spawn(async move { (key, link.run().await) });
+            Ok(())
+        })
     }
 }
 

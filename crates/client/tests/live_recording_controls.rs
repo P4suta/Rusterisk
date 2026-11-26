@@ -28,7 +28,7 @@ async fn live_recording_queries_and_controls_preserve_methods_states_and_errors(
     let serving = tokio::spawn(axum::serve(listener, app).into_future());
     let result = async {
         let client = Client::new(&format!("http://{address}"), "app", "password")?;
-        let name = api::ChannelId::try_from("known".to_owned())?;
+        let name = rusterisk_client::RecordingName::try_from("known".to_owned())?;
         let recording = client.live_recording(&name).await?;
         assert_eq!(recording.state, api::RecordingState::Recording);
         assert_eq!(recording.target_uri, "bridge:mix");
@@ -42,7 +42,7 @@ async fn live_recording_queries_and_controls_preserve_methods_states_and_errors(
         for (method,path) in [("POST","/ari/recordings/live/known/pause"),("DELETE","/ari/recordings/live/known/pause"),("POST","/ari/recordings/live/known/mute"),("DELETE","/ari/recordings/live/known/mute"),("POST","/ari/recordings/live/known/stop"),("DELETE","/ari/recordings/live/known")] {
             assert_eq!(operations.recv().await.ok_or(Error::Closed)?, (method.to_owned(),path.to_owned()));
         }
-        let missing = api::ChannelId::try_from("missing".to_owned())?;
+        let missing = rusterisk_client::RecordingName::try_from("missing".to_owned())?;
         assert!(matches!(client.live_recording(&missing).await, Err(Error::Api {status:404,message}) if message.message == "Recording not found"));
         assert!(matches!(client.cancel_recording(&missing).await, Err(Error::Api {status:404,message}) if message.message == "Recording not found"));
         Ok::<(),Error>(())

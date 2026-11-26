@@ -63,7 +63,7 @@ async fn run_call(
 #[cfg(test)]
 mod tests {
     use rusterisk_client::{Client, Error, Originate};
-    use std::{future::IntoFuture, time::Duration};
+    use std::future::IntoFuture;
 
     #[tokio::test]
     async fn stopping_the_example_during_call_setup_releases_the_remote_channel(
@@ -92,7 +92,8 @@ mod tests {
                 Originate::new("PJSIP/phone".into())?,
                 async { stopped.await.map_err(|_| Error::Closed) },
             ));
-            let effect = tokio::time::timeout(Duration::from_secs(2), effects.recv())
+            let effect = rusterisk_server::test_time::Wait::Ready
+                .bounded(effects.recv())
                 .await
                 .map_err(|_| Error::Timeout)?
                 .ok_or(Error::Closed)?;
@@ -100,7 +101,8 @@ mod tests {
                 return Err(Error::Invalid("expected start effect"));
             };
             stop.send(()).map_err(|_| Error::Closed)?;
-            tokio::time::timeout(Duration::from_secs(2), demo)
+            rusterisk_server::test_time::Wait::Ready
+                .bounded(demo)
                 .await
                 .map_err(|_| Error::Timeout)?
                 .map_err(|_| Error::Closed)??;

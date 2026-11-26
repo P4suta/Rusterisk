@@ -14,11 +14,9 @@ use hickory_resolver::proto::{
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, Request, SipMessage};
 use rusterisk_config::{Protocol, RegistrarUri};
 use rusterisk_sip::StaticTarget;
+use rusterisk_test_support::Wait;
 use sha2::{Digest, Sha256};
-use std::{
-    net::{Ipv4Addr, SocketAddr},
-    time::Duration,
-};
+use std::net::{Ipv4Addr, SocketAddr};
 use tokio::net::UdpSocket;
 use tokio::time::Instant;
 #[path = "service_unavailable/exhaustion.rs"]
@@ -45,7 +43,8 @@ async fn answer(
     records: Vec<Record>,
 ) -> Result<(), ControlError> {
     let mut bytes = [0; 1233];
-    let (size, peer) = tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut bytes))
+    let (size, peer) = Wait::Ready
+        .bounded(socket.recv_from(&mut bytes))
         .await
         .map_err(failure)?
         .map_err(failure)?;
@@ -128,11 +127,11 @@ fn header<'a>(packet: &'a Packet, name: &str) -> Result<&'a str, ControlError> {
 
 async fn receive(socket: &UdpSocket, phase: &'static str) -> Result<Packet, ControlError> {
     let mut bytes = [0; 16_385];
-    let (size, peer) =
-        tokio::time::timeout(Duration::from_millis(250), socket.recv_from(&mut bytes))
-            .await
-            .map_err(|error| failure(format!("{phase}: {error}")))?
-            .map_err(failure)?;
+    let (size, peer) = Wait::Ready
+        .bounded(socket.recv_from(&mut bytes))
+        .await
+        .map_err(|error| failure(format!("{phase}: {error}")))?
+        .map_err(failure)?;
     require(size <= 16_384, "Oversized candidate REGISTER request")?;
     let source = std::str::from_utf8(&bytes[..size]).map_err(failure)?;
     let uri = source
@@ -258,10 +257,10 @@ async fn respond(
         packet.peer,
     )
     .await?;
-    let Input::Packet(received) =
-        tokio::time::timeout(Duration::from_millis(250), signaling.network.next())
-            .await
-            .map_err(failure)??
+    let Input::Packet(received) = Wait::Ready
+        .bounded(signaling.network.next())
+        .await
+        .map_err(failure)??
     else {
         return Err(ControlError::Invalid(
             "Expected candidate registration response",
@@ -275,11 +274,9 @@ async fn respond(
 }
 
 async fn silent(socket: &UdpSocket) -> Result<(), ControlError> {
-    match tokio::time::timeout(
-        Duration::from_millis(30),
-        socket.recv_from(&mut [0; 16_385]),
-    )
-    .await
+    match Wait::Quiet
+        .bounded(socket.recv_from(&mut [0; 16_385]))
+        .await
     {
         Err(_) => Ok(()),
         Ok(Err(error)) => Err(failure(error)),
@@ -360,7 +357,7 @@ async fn a_service_unavailable_response_advances_to_the_next_resolved_registrar(
         .1;
     let result = async {
         signaling.registration_tick(1000).await?;
-        let completion = tokio::time::timeout(Duration::from_secs(1), signaling.registrations.completed())
+        let completion = Wait::Ready.bounded(signaling.registrations.completed())
             .await.map_err(failure)??.ok_or(ControlError::Invalid("Candidate resolution job disappeared"))?;
         signaling.registration_completed(completion, 1000)?;
         signaling.registration_tick(1000).await?;

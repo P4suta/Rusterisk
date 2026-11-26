@@ -24,7 +24,7 @@ fn proof_dry_runs_require_an_immutable_image_and_never_contact_the_daemon(
         "--cpus=2",
         "--memory=2g",
         "--network=none",
-        "22 harnesses",
+        "25 harnesses",
         image,
         "docker rm --force",
     ] {

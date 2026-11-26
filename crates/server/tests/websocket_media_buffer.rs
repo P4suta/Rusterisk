@@ -202,3 +202,31 @@ fn paused_flush_defers_xon_and_drained_notifications_until_playout_resumes(
     assert_eq!(buffer.pop().flow, None);
     Ok(())
 }
+
+#[test]
+fn websocket_playout_reserves_queue_slots_at_the_negotiated_rate() -> Result<(), MediaError> {
+    for format in [
+        MediaFormat::Pcm8,
+        MediaFormat::Pcm12,
+        MediaFormat::Pcm16,
+        MediaFormat::Pcm24,
+        MediaFormat::Pcm32,
+        MediaFormat::Pcm44,
+        MediaFormat::Pcm48,
+    ] {
+        let mut buffer = None;
+        let allocated = allocation_counter::measure(|| {
+            buffer = Some(MediaBuffer::new(format));
+        });
+        let queue = buffer.ok_or(MediaError::InvalidFrame)??;
+        assert!(queue.is_empty());
+        let samples = u64::from(format.rate() / 50);
+        let capacity = 16 * (2 * samples + 32);
+        assert!(
+            allocated.bytes_total <= capacity,
+            "{format:?}: {} bytes exceed {capacity}",
+            allocated.bytes_total
+        );
+    }
+    Ok(())
+}

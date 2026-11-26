@@ -2,7 +2,7 @@ use super::{cleanup::combine, failure, Signaling};
 use crate::media::MediaHub;
 use crate::{ControlError, Controller, Credentials};
 use rusterisk_config::Config;
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 
 fn configuration() -> Result<Config, ControlError> {
     Config::parse(
@@ -37,33 +37,26 @@ async fn shutdown_ends_signaling_and_refuses_requests_while_a_settings_loader_ru
             ControlError::Adapter("settings loader fixture".into()),
             move |_directory| {
                 let _observed = started.send(());
-                let _released = waiting.recv_timeout(Duration::from_secs(5));
+                let _released = waiting.recv_timeout(Wait::Ready.duration());
                 Ok(config)
             },
         );
-    tokio::time::timeout(Duration::from_secs(2), observed)
+    Wait::Ready
+        .bounded(observed)
         .await
         .map_err(failure)?
         .map_err(failure)?;
     controller.shutdown();
     let running = tokio::spawn(signaling.run(controller.shutdown_signal()));
-    let closed = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            if upgrades.is_closed() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .map_err(|_| ControlError::Invalid("Signaling waited for the settings loader"));
+    let closed = Wait::Ready
+        .bounded(upgrades.closed())
+        .await
+        .map_err(|_| ControlError::Invalid("Signaling waited for the settings loader"));
     // A request that arrives while the call decisions wait for the loader fails at once.
     let credentials = Credentials::new("app".into(), "test".into())?;
-    let refused = match tokio::time::timeout(
-        Duration::from_secs(1),
-        controller.subscribe(credentials, None, "app".into()),
-    )
-    .await
+    let refused = match Wait::Ready
+        .bounded(controller.subscribe(credentials, None, "app".into()))
+        .await
     {
         Ok(Err(_)) => Ok(()),
         Ok(Ok(_)) => Err(ControlError::Invalid("Stopping control accepted a request")),
@@ -73,7 +66,8 @@ async fn shutdown_ends_signaling_and_refuses_requests_while_a_settings_loader_ru
     };
     let waited = !running.is_finished();
     let result = combine(combine(closed, refused), release.send(()).map_err(failure));
-    let ran = tokio::time::timeout(Duration::from_secs(5), running)
+    let ran = Wait::Ready
+        .bounded(running)
         .await
         .map_err(failure)
         .and_then(|joined| joined.map_err(failure))

@@ -5,6 +5,7 @@ use rusterisk_server::{
     media::MediaHub, rtp::SocketPair, signaling::Signaling, Action, ControlError, Controller,
     Credentials, Subscription,
 };
+use rusterisk_test_support::Wait;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
@@ -24,54 +25,59 @@ async fn started(
     subscription: &mut Subscription,
     expected: &ChannelId,
 ) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        for _ in 0..16 {
-            let event = subscription
-                .events
-                .recv()
-                .await
-                .ok_or(ControlError::Capacity)?;
-            match event.kind {
-                EventKind::StasisStart { channel, .. } if channel.id == *expected => return Ok(()),
-                EventKind::ChannelDestroyed { channel, .. } if channel.id == *expected => {
-                    return Err(ControlError::Adapter(
-                        "External media ended before Stasis".into(),
-                    ))
+    Wait::Ready
+        .bounded(async {
+            for _ in 0..16 {
+                let event = subscription
+                    .events
+                    .recv()
+                    .await
+                    .ok_or(ControlError::Capacity)?;
+                match event.kind {
+                    EventKind::StasisStart { channel, .. } if channel.id == *expected => {
+                        return Ok(())
+                    }
+                    EventKind::ChannelDestroyed { channel, .. } if channel.id == *expected => {
+                        return Err(ControlError::Adapter(
+                            "External media ended before Stasis".into(),
+                        ))
+                    }
+                    EventKind::StasisStart { .. }
+                    | EventKind::StasisEnd { .. }
+                    | EventKind::ChannelCreated { .. }
+                    | EventKind::ChannelStateChange { .. }
+                    | EventKind::ChannelDialplan { .. }
+                    | EventKind::ChannelDestroyed { .. }
+                    | EventKind::ChannelVarset { .. } => {}
+                    EventKind::ChannelCallerId { .. }
+                    | EventKind::Published(_)
+                    | EventKind::ChannelHangupRequest { .. }
+                    | EventKind::ChannelEnteredBridge { .. }
+                    | EventKind::ChannelLeftBridge { .. }
+                    | EventKind::BridgeCreated { .. }
+                    | EventKind::BridgeDestroyed { .. }
+                    | EventKind::ChannelDtmfReceived { .. }
+                    | EventKind::ChannelHold { .. }
+                    | EventKind::ChannelUnhold { .. }
+                    | EventKind::PlaybackStarted { .. }
+                    | EventKind::PlaybackContinuing { .. }
+                    | EventKind::PlaybackFinished { .. }
+                    | EventKind::RecordingStarted { .. }
+                    | EventKind::RecordingFinished { .. }
+                    | EventKind::RecordingFailed { .. }
+                    | EventKind::ApplicationReplaced { .. }
+                    | EventKind::ApplicationMoveFailed { .. }
+                    | EventKind::Dial { .. }
+                    | EventKind::ChannelUserevent { .. }
+                    | EventKind::EndpointStateChange { .. } => {
+                        return Err(ControlError::Unsupported)
+                    }
                 }
-                EventKind::StasisStart { .. }
-                | EventKind::StasisEnd { .. }
-                | EventKind::ChannelCreated { .. }
-                | EventKind::ChannelStateChange { .. }
-                | EventKind::ChannelDialplan { .. }
-                | EventKind::ChannelDestroyed { .. }
-                | EventKind::ChannelVarset { .. } => {}
-                EventKind::ChannelCallerId { .. }
-                | EventKind::Published(_)
-                | EventKind::ChannelHangupRequest { .. }
-                | EventKind::ChannelEnteredBridge { .. }
-                | EventKind::ChannelLeftBridge { .. }
-                | EventKind::BridgeCreated { .. }
-                | EventKind::BridgeDestroyed { .. }
-                | EventKind::ChannelDtmfReceived { .. }
-                | EventKind::ChannelHold { .. }
-                | EventKind::ChannelUnhold { .. }
-                | EventKind::PlaybackStarted { .. }
-                | EventKind::PlaybackContinuing { .. }
-                | EventKind::PlaybackFinished { .. }
-                | EventKind::RecordingStarted { .. }
-                | EventKind::RecordingFinished { .. }
-                | EventKind::RecordingFailed { .. }
-                | EventKind::ApplicationReplaced { .. }
-                | EventKind::ApplicationMoveFailed { .. }
-                | EventKind::Dial { .. }
-                | EventKind::ChannelUserevent { .. }
-                | EventKind::EndpointStateChange { .. } => return Err(ControlError::Unsupported),
             }
-        }
-        Err(ControlError::Capacity)
-    })
-    .await
-    .map_err(|error| failure(format!("External Stasis deadline: {error}")))?
+            Err(ControlError::Capacity)
+        })
+        .await
+        .map_err(|error| failure(format!("External Stasis deadline: {error}")))?
 }
 
 async fn local(controller: &Controller, channel: &ChannelId) -> Result<SocketAddr, ControlError> {
@@ -96,24 +102,25 @@ async fn local(controller: &Controller, channel: &ChannelId) -> Result<SocketAdd
 }
 
 async fn receives(peer: &SocketPair, expected: i32) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        let mut bytes = [0; 2049];
-        for _ in 0..100 {
-            let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
-            let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
-            if packet.payload().len() == 160
-                && packet
-                    .payload()
-                    .iter()
-                    .all(|byte| (i32::from(mulaw_decode(*byte)) - expected).abs() < 300)
-            {
-                return Ok(());
+    Wait::Ready
+        .bounded(async {
+            let mut bytes = [0; 2049];
+            for _ in 0..100 {
+                let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
+                let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
+                if packet.payload().len() == 160
+                    && packet
+                        .payload()
+                        .iter()
+                        .all(|byte| (i32::from(mulaw_decode(*byte)) - expected).abs() < 300)
+                {
+                    return Ok(());
+                }
             }
-        }
-        Err(ControlError::Invalid("Expected external audio"))
-    })
-    .await
-    .map_err(|error| failure(format!("External audio deadline for {expected}: {error}")))?
+            Err(ControlError::Invalid("Expected external audio"))
+        })
+        .await
+        .map_err(|error| failure(format!("External audio deadline for {expected}: {error}")))?
 }
 
 #[tokio::test]

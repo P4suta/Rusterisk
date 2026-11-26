@@ -1,3 +1,4 @@
+mod calls;
 use crate::clock::Clock;
 use crate::storage::{StoragePort, WorkerError};
 use crate::{Action, CallKey, Control, ControlError, Effect, IncomingCall, Outcome, Signal};
@@ -193,6 +194,7 @@ struct Session {
 
 #[derive(Clone)]
 pub struct Controller {
+    pub(crate) activity: crate::activity::Meters,
     clock: Clock,
     closures: ClosureLatch,
     requests: mpsc::Sender<Request>,
@@ -203,6 +205,8 @@ pub struct Controller {
 }
 
 pub struct Runner {
+    pub(crate) activity: crate::activity::Meters,
+    records: crate::call_records::CallRecords<calls::Resources>,
     clock: Clock,
     closed: mpsc::Receiver<()>,
     closures_open: bool,
@@ -223,10 +227,6 @@ pub struct Runner {
     history_jobs: JoinSet<Result<(), WorkerError>>,
     stored_jobs: JoinSet<()>,
     recording_admissions: BTreeMap<rusterisk_core::MediaTaskToken, recording_admission::Pending>,
-    external_admissions: BTreeMap<CallKey, external_admission::Pending>,
-    answers: BTreeMap<CallKey, answer::Pending>,
-    media_leases: BTreeMap<CallKey, mpsc::Receiver<()>>,
-    call_lifetimes: BTreeMap<CallKey, mpsc::Receiver<()>>,
 }
 
 pub struct Subscription {
@@ -268,8 +268,10 @@ impl Controller {
         let control = Control::with_configuration(capacity, &config);
         let clock = Clock::start();
         let (closures, closed) = closure::latch();
+        let activity = crate::activity::Meters::default();
         (
             Self {
+                activity: activity.clone(),
                 clock,
                 closures,
                 requests,
@@ -279,6 +281,7 @@ impl Controller {
                 directory_reload_requests,
             },
             Runner {
+                activity,
                 clock,
                 closed,
                 closures_open: true,
@@ -299,10 +302,7 @@ impl Controller {
                 history_jobs: JoinSet::new(),
                 stored_jobs: JoinSet::new(),
                 recording_admissions: BTreeMap::new(),
-                external_admissions: BTreeMap::new(),
-                answers: BTreeMap::new(),
-                media_leases: BTreeMap::new(),
-                call_lifetimes: BTreeMap::new(),
+                records: crate::call_records::CallRecords::new(),
             },
             effect_receiver,
         )
@@ -569,7 +569,7 @@ impl Runner {
 
     fn emit_effect(&mut self, effect: Effect) -> Result<(), ControlError> {
         if let Effect::Release { key } = &effect {
-            self.call_lifetimes.remove(key);
+            self.records.remove(calls::LIFETIME, key);
         }
         let effect = match &self.effects {
             Outlet::Channel(sender) if self.pending_effects.is_empty() => {
@@ -609,10 +609,11 @@ impl Runner {
             }
             if let Some(subscriber) = self.subscribers.get(&event.application) {
                 let application = event.application.clone();
-                if subscriber.events.try_send(event).is_err()
-                    && !disconnected.contains(&application)
-                {
-                    disconnected.push(application);
+                if subscriber.events.try_send(event).is_err() {
+                    self.activity.control.dropped();
+                    if !disconnected.contains(&application) {
+                        disconnected.push(application);
+                    }
                 }
             }
         }
@@ -805,7 +806,7 @@ impl Runner {
                                 && (self.recording_admissions.len() >= 64
                                     || now_ms.checked_add(5000).is_none()))
                             || (external
-                                && (self.external_admissions.len() >= 64
+                                && (self.records.iter(calls::ADMISSION).count() >= 64
                                     || now_ms.checked_add(5000).is_none()))
                         {
                             return Err(ControlError::Capacity);
@@ -868,10 +869,11 @@ impl Runner {
                                     );
                                 }
                                 Admission::ExternalMedia(key) => {
-                                    self.external_admissions.insert(
+                                    self.records.insert(
+                                        calls::ADMISSION,
                                         key,
                                         external_admission::Pending::new(reply, deadline),
-                                    );
+                                    )?;
                                 }
                             }
                             return Ok(());
@@ -989,14 +991,14 @@ impl Runner {
         for pending in self.recording_admissions.values() {
             wake = wake.earliest(Wake::At(pending.deadline()));
         }
-        for (key, pending) in &self.external_admissions {
+        for (key, pending) in self.records.iter(calls::ADMISSION) {
             wake = wake.earliest(if self.control.has_channel(key) {
                 Wake::At(pending.deadline())
             } else {
                 crate::overdue::DUE
             });
         }
-        for (key, pending) in &self.answers {
+        for (key, pending) in self.records.iter(calls::ANSWER) {
             wake = wake.earliest(if self.answer_waits(key) {
                 pending.wake()
             } else {
@@ -1081,7 +1083,7 @@ impl Runner {
                 input = self.next() => {
                     if self.handle(input, clock.now_ms()?)? == Flow::Stop { break; }
                 }
-                () = clock.reached(timer) => {}
+                () = clock.reached(timer) => self.activity.control.deadline(timer, clock.now_ms()?),
             }
         }
         Ok(())
@@ -1122,11 +1124,11 @@ impl Runner {
     }
 
     pub(crate) async fn close(&mut self) -> Result<(), ControlError> {
-        self.media_leases.clear();
-        self.call_lifetimes.clear();
+        self.records.retain(calls::CONNECTION, |_, _| false);
+        self.records.retain(calls::LIFETIME, |_, _| false);
         self.close_recording_admissions();
         self.close_external_admissions();
-        self.answers.clear();
+        self.records.retain(calls::ANSWER, |_, _| false);
         let result = self
             .control
             .shutdown(&timestamp())

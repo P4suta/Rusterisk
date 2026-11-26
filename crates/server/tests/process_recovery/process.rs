@@ -1,11 +1,11 @@
 use rusterisk_server::ControlError;
+use rusterisk_test_support::Wait;
 use std::{
     fs::File,
     io::Read,
     net::SocketAddr,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
-    time::Duration,
 };
 
 pub fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -51,16 +51,7 @@ async fn terminate(child: &mut Child) -> Result<ExitStatus, ControlError> {
             None => Err(failure(primary)),
         };
     }
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(status) = child.try_wait().map_err(failure)? {
-                return Ok(status);
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .map_err(failure)?
+    rusterisk_test_support::child_exit(child, Wait::Ready).map_err(failure)
 }
 
 fn ready_line(path: &Path) -> Result<Option<SocketAddr>, ControlError> {
@@ -137,20 +128,22 @@ impl ChildServer {
             .stderr(Stdio::from(errors))
             .spawn()
             .map_err(failure)?;
-        let ready = tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Some(status) = child.try_wait().map_err(failure)? {
-                    return Err(failure(format!("server exited before readiness: {status}")));
+        let mut changes = rusterisk_test_support::DirectoryChanges::new(&log).map_err(failure)?;
+        let ready = Wait::Ready
+            .bounded(async {
+                loop {
+                    if let Some(status) = child.try_wait().map_err(failure)? {
+                        return Err(failure(format!("server exited before readiness: {status}")));
+                    }
+                    if let Some(address) = ready_line(&log)? {
+                        return Ok(address);
+                    }
+                    changes.changed().await.map_err(failure)?;
                 }
-                if let Some(address) = ready_line(&log)? {
-                    return Ok(address);
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .map_err(failure)
-        .and_then(|result| result);
+            })
+            .await
+            .map_err(failure)
+            .and_then(|result| result);
         match ready {
             Ok(address) => Ok(Self { child, address }),
             Err(primary) => match terminate(&mut child).await {

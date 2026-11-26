@@ -1,4 +1,5 @@
 use super::{Controller, Credentials, Runner};
+use crate::runner::calls;
 use crate::{
     CallKey, ControlError, Effect, IncomingCall, IncomingTarget, Milestone, Outcome, Signal,
 };
@@ -138,7 +139,7 @@ fn disconnecting_the_last_waiter_keeps_one_signaling_command_until_its_deadline(
     )?;
     fixture.runner.finish_answers(5004);
     assert!(matches!(last.try_recv(), Ok(Ok(_))));
-    assert!(fixture.runner.answers.is_empty());
+    assert!(fixture.runner.records.iter(calls::ANSWER).next().is_none());
     Ok(())
 }
 
@@ -163,7 +164,7 @@ fn each_waiter_owns_its_timeout_and_disconnected_waiters_release_capacity(
     ));
     fixture.runner.finish_answers(5004);
     assert!(matches!(last.try_recv(), Ok(Err(ControlError::Capacity))));
-    assert!(fixture.runner.answers.is_empty());
+    assert!(fixture.runner.records.iter(calls::ANSWER).next().is_none());
     assert!(matches!(
         fixture.effects.try_recv(),
         Ok(Effect::Answer { .. })

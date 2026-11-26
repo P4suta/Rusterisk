@@ -4,7 +4,7 @@ use crate::{
     ControlError,
 };
 use rusterisk_core::SettingsLifetimes;
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tokio::sync::watch;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -36,9 +36,7 @@ async fn coordinator_close_reads_the_current_stop_value_after_waiting() -> Resul
     assert!(futures_util::poll!(received.as_mut()).is_pending());
     stop.send_replace(true);
     drop(port);
-    let received: Option<_> = tokio::time::timeout(Duration::from_secs(1), received)
-        .await
-        .map_err(failure)??;
+    let received: Option<_> = Wait::Ready.bounded(received).await.map_err(failure)??;
     assert!(received.is_none());
     Ok(())
 }
@@ -51,9 +49,7 @@ async fn coordinator_close_while_running_remains_an_error() -> Result<(), Contro
     tokio::pin!(received);
     assert!(futures_util::poll!(received.as_mut()).is_pending());
     drop(port);
-    let received = tokio::time::timeout(Duration::from_secs(1), received)
-        .await
-        .map_err(failure)?;
+    let received = Wait::Ready.bounded(received).await.map_err(failure)?;
     assert!(
         matches!(received, Err(ControlError::Adapter(message)) if message == "HTTP settings coordinator stopped")
     );

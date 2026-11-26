@@ -3,6 +3,7 @@ use rusterisk_client::{
     Client, Error, Session,
 };
 use rusterisk_media::{AudioSocket, Frame};
+use rusterisk_server::test_time::Wait;
 use std::{net::Ipv4Addr, time::Duration};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
@@ -12,7 +13,7 @@ fn invalid(error: impl std::fmt::Display) -> Error {
 }
 
 async fn received(peer: &mut (impl AsyncRead + Unpin), expected: i16) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    Wait::Ready.bounded(async {
         let mut bytes = [0; 1923];
         for _ in 0..150 {
             peer.read_exact(&mut bytes[..3]).await?;
@@ -46,11 +47,13 @@ pub async fn compare(
         let channel = client.external_audio_socket(id, app, target).await?;
         assert_eq!(channel.id, *id);
         assert!(channel.name.starts_with("AudioSocket/"));
-        let (mut peer, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        let (mut peer, _) = Wait::Ready
+            .bounded(listener.accept())
             .await
             .map_err(invalid)??;
         let mut header = [0; 19];
-        tokio::time::timeout(Duration::from_secs(2), peer.read_exact(&mut header))
+        Wait::Ready
+            .bounded(peer.read_exact(&mut header))
             .await
             .map_err(invalid)??;
         assert_eq!(
@@ -60,7 +63,7 @@ pub async fn compare(
         super::external_audio::started(session, id).await?;
         peers.push(peer);
     }
-    let bridge = ChannelId::try_from("stream-bridge".to_owned())?;
+    let bridge = rusterisk_client::BridgeId::try_from("stream-bridge".to_owned())?;
     client.create_bridge(&bridge, "Stream comparison").await?;
     client.add_channels(&bridge, &ids).await?;
     let mut left = peers.remove(0);

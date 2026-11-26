@@ -19,7 +19,8 @@ use crate::{
 use rsipstack::sip::HeadersExt;
 use rusterisk_config::Protocol;
 use rusterisk_sip::{SipStreamDecoder, StaticTarget};
-use std::{num::NonZeroU64, time::Duration};
+use rusterisk_test_support::Wait;
+use std::num::NonZeroU64;
 use tokio::{
     io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
@@ -114,22 +115,19 @@ impl Fixture {
                 )),
             }
         };
-        tokio::time::timeout(Duration::from_secs(3), async {
-            tokio::try_join!(accepted, prepared)
-        })
-        .await
-        .map_err(failure)?
+        Wait::Ready
+            .bounded(async { tokio::try_join!(accepted, prepared) })
+            .await
+            .map_err(failure)?
     }
 
     async fn registration(&mut self) -> Result<(Flow, Packet), ControlError> {
         self.signaling.registration_tick(1000).await?;
-        let completed = tokio::time::timeout(
-            Duration::from_secs(3),
-            self.signaling.registrations.completed(),
-        )
-        .await
-        .map_err(failure)??
-        .ok_or(ControlError::Capacity)?;
+        let completed = Wait::Ready
+            .bounded(self.signaling.registrations.completed())
+            .await
+            .map_err(failure)??
+            .ok_or(ControlError::Capacity)?;
         self.signaling.registration_completed(completed, 1000)?;
         let (mut socket, prepared) = self.accept_prepared().await?;
         self.signaling.registration_prepared(prepared, 1000)?;
@@ -178,27 +176,30 @@ impl Fixture {
     }
 
     async fn packet(&mut self, flow: &mut Flow, bytes: &[u8]) -> Result<Received, ControlError> {
-        tokio::time::timeout(Duration::from_secs(3), async {
-            flow.socket.write_all(bytes).await.map_err(failure)?;
-            for _ in 0..16 {
-                match self.signaling.network.next().await? {
-                    Input::Packet(packet) => return Ok(packet),
-                    Input::Closed { result, .. } => {
-                        result?;
-                        return Err(ControlError::Invalid("TLS flow closed before its response"));
-                    }
-                    Input::SetupFinished { result, .. } => result?,
-                    Input::Prepared(_) | Input::Upgrade(_) => {
-                        return Err(ControlError::Invalid(
-                            "Unexpected additional TLS preparation",
-                        ));
+        Wait::Ready
+            .bounded(async {
+                flow.socket.write_all(bytes).await.map_err(failure)?;
+                for _ in 0..16 {
+                    match self.signaling.network.next().await? {
+                        Input::Packet(packet) => return Ok(packet),
+                        Input::Closed { result, .. } => {
+                            result?;
+                            return Err(ControlError::Invalid(
+                                "TLS flow closed before its response",
+                            ));
+                        }
+                        Input::SetupFinished { result, .. } => result?,
+                        Input::Prepared(_) | Input::Upgrade(_) => {
+                            return Err(ControlError::Invalid(
+                                "Unexpected additional TLS preparation",
+                            ));
+                        }
                     }
                 }
-            }
-            Err(ControlError::Capacity)
-        })
-        .await
-        .map_err(failure)?
+                Err(ControlError::Capacity)
+            })
+            .await
+            .map_err(failure)?
     }
 
     async fn finish(self, primary: Result<(), ControlError>) -> Result<(), ControlError> {

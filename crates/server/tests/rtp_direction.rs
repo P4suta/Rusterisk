@@ -1,5 +1,6 @@
 use rusterisk_core::PeerMediaDirection;
 use rusterisk_media::{AudioFormat, ControlKind, Frame, MediaError, RtpPacket, RtpSender};
+use rusterisk_test_support::Wait;
 #[path = "rtp_leg/driver.rs"]
 mod driver;
 
@@ -9,7 +10,6 @@ use rusterisk_server::rtp::{
     ControlReception, LinkStats, Measurements, RtpChannels, RtpLeg, RtpSession, SocketPair,
 };
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 
 fn failure(error: impl std::fmt::Display) -> MediaError {
@@ -62,7 +62,7 @@ async fn negotiated_direction_controls_received_and_sent_audio() -> Result<(), M
                 .send(Frame::new(&[-7000; 160], 8000)?)
                 .await
                 .map_err(failure)?;
-            let audio = tokio::time::timeout(Duration::from_millis(150), received.recv()).await;
+            let audio = Wait::Quiet.bounded(received.recv()).await;
             assert_eq!(audio.is_ok(), direction.can_send(), "{direction:?}");
             if let Ok(audio) = audio {
                 let audio = audio.ok_or(MediaError::InvalidFrame)?;
@@ -72,11 +72,7 @@ async fn negotiated_direction_controls_received_and_sent_audio() -> Result<(), M
                     .all(|sample| (i32::from(*sample) - 4000).abs() < 150));
             }
             let mut bytes = [0; 1501];
-            let packet = tokio::time::timeout(
-                Duration::from_millis(150),
-                peer.data().recv_from(&mut bytes),
-            )
-            .await;
+            let packet = Wait::Quiet.bounded(peer.data().recv_from(&mut bytes)).await;
             assert_eq!(packet.is_ok(), direction.can_receive(), "{direction:?}");
             if let Ok(packet) = packet {
                 let (size, _) = packet.map_err(failure)?;
@@ -131,7 +127,8 @@ async fn inactive_update_still_sends_control_goodbye() -> Result<(), MediaError>
             .await
             .map_err(failure)?;
         let mut bytes = [0; 1501];
-        tokio::time::timeout(Duration::from_secs(2), peer.data().recv_from(&mut bytes))
+        Wait::Ready
+            .bounded(peer.data().recv_from(&mut bytes))
             .await
             .map_err(failure)?
             .map_err(failure)?;
@@ -140,12 +137,10 @@ async fn inactive_update_still_sends_control_goodbye() -> Result<(), MediaError>
             .send(Frame::new(&[-7000; 160], 8000)?)
             .await
             .map_err(failure)?;
-        assert!(tokio::time::timeout(
-            Duration::from_millis(150),
-            peer.data().recv_from(&mut bytes)
-        )
-        .await
-        .is_err());
+        assert!(Wait::Quiet
+            .bounded(peer.data().recv_from(&mut bytes))
+            .await
+            .is_err());
         Ok(())
     }
     .await;
@@ -154,11 +149,11 @@ async fn inactive_update_still_sends_control_goodbye() -> Result<(), MediaError>
     result?;
     assert_eq!(stats.packets_sent, 1);
     let mut bytes = [0; 1501];
-    let (size, _) =
-        tokio::time::timeout(Duration::from_secs(2), peer.control().recv_from(&mut bytes))
-            .await
-            .map_err(failure)?
-            .map_err(failure)?;
+    let (size, _) = Wait::Ready
+        .bounded(peer.control().recv_from(&mut bytes))
+        .await
+        .map_err(failure)?
+        .map_err(failure)?;
     assert_eq!(
         rusterisk_media::inspect_rtcp(&bytes[..size])?.last(),
         Some(&ControlKind::Goodbye)

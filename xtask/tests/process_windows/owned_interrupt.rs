@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+use rusterisk_test_support::Wait;
 use rusterisk_windows_job_accounting::active_processes;
 use std::{
     fs::{self, OpenOptions},
@@ -7,8 +8,7 @@ use std::{
     os::windows::io::AsHandle,
     path::{Path, PathBuf},
     process::ExitStatus,
-    task::{Context, Poll, Waker},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::signal::windows::{ctrl_c, CtrlC};
 use windows_spawn::{Child, Command, CreationFlags, DropPolicy, Job, SpawnOptions, Stdio};
@@ -18,8 +18,6 @@ const MODE: &str = "RUSTERISK_OWNED_INTERRUPT_MODE";
 const ROOT: &str = "RUSTERISK_OWNED_INTERRUPT_ROOT";
 const WORKER: &str = "owned_interrupt::interrupt_worker";
 const HELPER: &str = env!("CARGO_BIN_EXE_xtask");
-const POLL_INTERVAL: Duration = Duration::from_millis(5);
-const WAIT_BUDGET: Duration = Duration::from_secs(5);
 const COMMAND_BUDGET: Duration = Duration::from_secs(3);
 
 fn checked<T>(result: Result<T, impl std::fmt::Display>) -> io::Result<T> {
@@ -42,12 +40,6 @@ fn combine<T>(operation: io::Result<T>, cleanup: io::Result<()>) -> io::Result<T
             "{operation}; owned interruption cleanup failed: {cleanup}"
         ))),
     }
-}
-
-fn deadline(budget: Duration) -> io::Result<Instant> {
-    Instant::now()
-        .checked_add(budget)
-        .ok_or_else(|| io::Error::other("Owned interruption fixture deadline overflow"))
 }
 
 fn reserve_directory() -> io::Result<PathBuf> {
@@ -100,55 +92,32 @@ fn marked(root: &Path, name: &str) -> io::Result<bool> {
 }
 
 fn wait_marker(root: &Path, name: &str, child: &mut Child) -> io::Result<()> {
-    let deadline = deadline(WAIT_BUDGET)?;
-    loop {
+    rusterisk_test_support::file_ready(root, || {
         if marked(root, name)? {
-            return Ok(());
+            return Ok(Some(()));
         }
         if let Some(status) = child.try_wait()? {
             return Err(io::Error::other(format!(
                 "Owned interruption worker exited before {name}: {status}"
             )));
         }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("Owned interruption marker deadline exceeded: {name}"),
-            ));
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
+        Ok(None)
+    })
 }
 
-fn wait_child(child: &mut Child, budget: Duration) -> io::Result<ExitStatus> {
-    let deadline = deadline(budget)?;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Owned interruption child deadline exceeded",
-            ));
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
+fn wait_child(child: &mut Child, wait: Wait) -> io::Result<ExitStatus> {
+    rusterisk_test_support::signaled(child, wait)?;
+    child.wait()
 }
 
 fn empty(job: &Job) -> io::Result<()> {
-    let deadline = deadline(WAIT_BUDGET)?;
-    loop {
-        if active_processes(job.as_handle())? == 0 {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Owned interruption Job did not become empty",
-            ));
-        }
-        std::thread::sleep(POLL_INTERVAL);
+    let count = active_processes(job.as_handle())?;
+    if count == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "Job still contains {count} processes after teardown"
+        )))
     }
 }
 
@@ -172,7 +141,7 @@ fn owned_child(
     let termination = job.terminate(74);
     let reaped = match child {
         Some(mut child) => {
-            let result = wait_child(&mut child, WAIT_BUDGET).map(|_| ());
+            let result = wait_child(&mut child, Wait::Ready).map(|_| ());
             drop(child);
             result
         }
@@ -199,7 +168,7 @@ fn signal_worker(worker: &Child) -> io::Result<()> {
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     owned_child(&mut command, CreationFlags::DETACHED_PROCESS, |helper| {
-        let status = wait_child(helper, WAIT_BUDGET)?;
+        let status = wait_child(helper, Wait::Ready)?;
         verify(status.success(), "Owned console signal helper failed")
     })
 }
@@ -238,24 +207,13 @@ fn reject_commands(supervisor: &mut CommandSupervisor, root: &Path) -> io::Resul
 }
 
 fn wait_signal(observer: &mut CtrlC) -> io::Result<()> {
-    let deadline = deadline(WAIT_BUDGET)?;
-    let mut context = Context::from_waker(Waker::noop());
-    loop {
-        match observer.poll_recv(&mut context) {
-            Poll::Ready(Some(())) => return Ok(()),
-            Poll::Pending => {}
-            Poll::Ready(None) => {
-                return Err(io::Error::other("Owned interruption observer closed"))
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Owned interruption signal delivery deadline exceeded",
-            ));
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
+    rusterisk_test_support::block_on(async {
+        Wait::Ready
+            .bounded(observer.recv())
+            .await
+            .map_err(io::Error::other)?
+            .ok_or_else(|| io::Error::other("Owned interruption observer closed"))
+    })
 }
 
 fn fresh_scope(root: &Path) -> io::Result<()> {
@@ -332,7 +290,7 @@ fn concurrent_interruption_scopes_latch_allow_cleanup_and_leave_fresh_scopes_qui
             wait_marker(&root, "ready", worker)?;
             signal_worker(worker)?;
             wait_marker(&root, "acknowledged", worker)?;
-            let status = wait_child(worker, Duration::from_secs(15))?;
+            let status = wait_child(worker, Wait::Shutdown)?;
             verify(status.success(), "Owned interruption scope worker failed")
         })
     })();

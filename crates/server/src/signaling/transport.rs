@@ -173,7 +173,15 @@ pub(super) enum Input {
     },
 }
 
+#[cfg(test)]
+struct CapturedDatagrams {
+    addresses: Vec<SocketAddr>,
+    sent: mpsc::Sender<(tokio::time::Instant, Datagram)>,
+}
+
 pub(super) struct Network {
+    #[cfg(test)]
+    captured: Option<CapturedDatagrams>,
     listeners: Vec<ListenerSocket>,
     ports: BTreeMap<ConnectionKey, Port>,
     jobs: JoinSet<Result<(), ControlError>>,
@@ -484,6 +492,8 @@ impl Network {
         let (upgrade_requests, upgrades) = mpsc::channel(64);
         let (preparation_sender, prepared) = mpsc::channel(64);
         Ok(Self {
+            #[cfg(test)]
+            captured: None,
             listeners,
             ports: BTreeMap::new(),
             jobs: JoinSet::new(),
@@ -504,6 +514,14 @@ impl Network {
     }
 
     pub(super) fn local_addr(&self, listener: usize) -> Result<SocketAddr, ControlError> {
+        #[cfg(test)]
+        if let Some(capture) = &self.captured {
+            return capture
+                .addresses
+                .get(listener)
+                .copied()
+                .ok_or(ControlError::Invalid("Unknown listener"));
+        }
         match self
             .listeners
             .get(listener)
@@ -625,6 +643,18 @@ impl Network {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(super) fn capture_datagrams(
+        &mut self,
+    ) -> Result<mpsc::Receiver<(tokio::time::Instant, Datagram)>, ControlError> {
+        let addresses = (0..self.listeners.len())
+            .map(|listener| self.local_addr(listener))
+            .collect::<Result<Vec<_>, _>>()?;
+        let (sent, received) = mpsc::channel(16);
+        self.captured = Some(CapturedDatagrams { addresses, sent });
+        Ok(received)
+    }
+
     pub(super) async fn send(
         &mut self,
         listener: usize,
@@ -634,6 +664,13 @@ impl Network {
             return Err(ControlError::Capacity);
         }
         if let ListenerSocket::Datagram(socket) = &self.listeners[listener] {
+            #[cfg(test)]
+            if let Some(capture) = &self.captured {
+                return capture
+                    .sent
+                    .try_send((tokio::time::Instant::now(), packet))
+                    .map_err(failure);
+            }
             let size = tokio::time::timeout(
                 Duration::from_millis(100),
                 socket.send_to(&packet.bytes, packet.peer),
@@ -674,6 +711,13 @@ impl Network {
 
     pub(super) async fn next(&mut self) -> Result<Input, ControlError> {
         loop {
+            let listeners = self.listeners.as_slice();
+            #[cfg(test)]
+            let listeners = if self.captured.is_some() {
+                &[]
+            } else {
+                listeners
+            };
             tokio::select! {
                 event = self.prepared.recv() => {
                     if let Some(input) = self.prepared_event(event.ok_or(ControlError::Capacity)?) { return Ok(input); }
@@ -682,7 +726,7 @@ impl Network {
                     let request = upgrade.ok_or(ControlError::Capacity)?;
                     return Ok(Input::Upgrade(request));
                 },
-                received = listen(&self.listeners) => match received? {
+                received = listen(listeners) => match received? {
                     ListenerInput::Datagram(packet) => return Ok(Input::Packet(packet)),
                     ListenerInput::Accepted { listener, peer, stream } => {
                         if let Err(error) = self.accepted(listener, peer, stream) { tracing::debug!(%error, "signaling connection refused"); }

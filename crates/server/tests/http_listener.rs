@@ -1,7 +1,7 @@
 use rusterisk_config::{Config, TlsFiles};
 use rusterisk_server::listener::HttpServer;
 use rusterisk_server::{ControlError, Controller};
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
@@ -34,9 +34,9 @@ async fn connection_admission_resumes_when_an_existing_socket_is_released(
         let mut waiting = tokio::net::TcpStream::connect(address).await.map_err(failure)?;
         waiting.write_all(b"GET /ari/asterisk/ping HTTP/1.1\r\nHost: localhost\r\nAuthorization: Basic YXBwOnRlc3QtcGFzc3dvcmQ=\r\nConnection: close\r\n\r\n").await.map_err(failure)?;
         let mut status = [0; 12];
-        assert!(tokio::time::timeout(Duration::from_millis(150), waiting.read_exact(&mut status)).await.is_err());
+        assert!(Wait::Quiet.bounded(waiting.read_exact(&mut status)).await.is_err());
         drop(occupied.pop());
-        tokio::time::timeout(Duration::from_secs(2), waiting.read_exact(&mut status)).await.map_err(failure)?.map_err(failure)?;
+        Wait::Ready.bounded(waiting.read_exact(&mut status)).await.map_err(failure)?.map_err(failure)?;
         assert_eq!(&status, b"HTTP/1.1 200");
         Ok(())
     }.await;
@@ -61,8 +61,20 @@ async fn silent_connections_expire_before_protocol_detection_can_hold_a_slot_for
         let mut socket = tokio::net::TcpStream::connect(address)
             .await
             .map_err(failure)?;
+        let client = reqwest::Client::builder().no_proxy().build().map_err(failure)?;
+        let response = Wait::Ready
+            .bounded(client.get(format!("http://{address}/ari/asterisk/ping")).send())
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
         let mut byte = [0; 1];
-        let read = tokio::time::timeout(Duration::from_millis(5500), socket.read(&mut byte))
+        assert!(matches!(socket.try_read(&mut byte), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock));
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        tokio::time::resume();
+        let read = Wait::Responsive
+            .bounded(socket.read(&mut byte))
             .await
             .map_err(failure)?
             .map_err(failure)?;
@@ -100,7 +112,7 @@ async fn encrypted_requests_use_a_trusted_certificate_and_shutdown_releases_the_
     let result: Result<(), ControlError> = async {
         let client = reqwest::Client::builder()
             .no_proxy()
-            .timeout(Duration::from_secs(2))
+            .timeout(Wait::Io.duration())
             .tls_certs_only([
                 reqwest::Certificate::from_pem(certificate.as_bytes()).map_err(failure)?
             ])
@@ -109,7 +121,7 @@ async fn encrypted_requests_use_a_trusted_certificate_and_shutdown_releases_the_
         let url = format!("https://localhost:{}/ari/asterisk/ping", address.port());
         assert!(reqwest::Client::builder()
             .no_proxy()
-            .timeout(Duration::from_secs(2))
+            .timeout(Wait::Io.duration())
             .build()
             .map_err(failure)?
             .get(&url)

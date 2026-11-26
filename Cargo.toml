@@ -8,6 +8,7 @@ members = [
   "crates/media",
   "crates/storage",
   "crates/server",
+  "crates/test-support",
   "crates/sip",
   "crates/windows-job-accounting",
   "xtask",

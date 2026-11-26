@@ -12,6 +12,7 @@ fn configuration_reload_has_a_separate_closed_management_contract() {
             ManagementOperation::ChannelRtpObservation,
             ManagementOperation::DiagnoseExtension,
             ManagementOperation::DiagnoseChannel,
+            ManagementOperation::DiagnoseRuntime,
             ManagementOperation::TestCall,
         ]
     );
@@ -123,4 +124,25 @@ fn both_swagger_formats_keep_management_outside_ari_discovery(
         }
     }
     Ok(())
+}
+
+#[test]
+fn runtime_diagnosis_requires_authentication_and_defines_all_counters() {
+    let document = openapi();
+    let operation = ManagementOperation::DiagnoseRuntime.metadata();
+    let get = &document["paths"][operation.path]["get"];
+    assert!(get["security"][0]["basicAuth"].is_array());
+    let schemas = &document["components"]["schemas"];
+    for name in ["control", "signaling", "media"] {
+        assert_eq!(
+            schemas["RuntimeActivity"]["properties"][name]["$ref"],
+            "#/components/schemas/LoopActivity"
+        );
+    }
+    for name in ["turns", "late_turns", "drops"] {
+        assert_eq!(
+            schemas["LoopActivity"]["properties"][name]["type"],
+            "integer"
+        );
+    }
 }

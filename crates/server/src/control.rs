@@ -13,6 +13,9 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 mod attended;
 mod call_pairs;
+mod channel_slots;
+use channel_slots::ChannelSlots;
+use rusterisk_core::{CallHandle, TeardownStep};
 mod diagnosis;
 mod dial;
 mod dialplan;
@@ -563,6 +566,9 @@ pub enum Milestone {
 
 #[derive(Clone, Debug)]
 pub enum Signal {
+    MediaReleased {
+        key: CallKey,
+    },
     AttendedTransferRequested {
         key: CallKey,
         refer: rusterisk_sip::AttendedReferSource,
@@ -862,7 +868,7 @@ struct BridgeEntry {
 pub struct Control {
     capacity: usize,
     generation: u64,
-    channels: BTreeMap<ChannelId, ChannelEntry>,
+    channels: ChannelSlots,
     bridges: BTreeMap<ChannelId, BridgeEntry>,
     applications: BTreeMap<String, StasisApplication>,
     event_filters: BTreeMap<StasisApplication, stasis::EventFilters>,
@@ -898,7 +904,8 @@ impl Control {
         incoming: IncomingCall,
         timestamp: &str,
     ) -> Result<Outcome, ControlError> {
-        if self.channels.contains_key(&incoming.id) {
+        let id = &incoming.id;
+        if self.channels.contains_key(id) {
             return Err(ControlError::Conflict(
                 "Channel with given unique ID already exists",
             ));
@@ -936,7 +943,7 @@ impl Control {
         {
             return Err(ControlError::Invalid("Invalid incoming channel parameters"));
         }
-        let generation = self.generation()?;
+        let generation = self.call_generation(0)?;
         let mut call = Call::incoming(generation).apply(CallEvent::Ring).call();
         if let Some(application) = application {
             call = call.enter_stasis(application)?;
@@ -1006,7 +1013,7 @@ impl Control {
                 pending_native: None,
                 pending_websocket: None,
             },
-        );
+        )?;
         Ok(outcome)
     }
 
@@ -1048,7 +1055,7 @@ impl Control {
         Self {
             capacity: capacity.min(64),
             generation: 0,
-            channels: BTreeMap::new(),
+            channels: ChannelSlots::default(),
             bridges: BTreeMap::new(),
             applications: BTreeMap::new(),
             event_filters: BTreeMap::new(),
@@ -1065,6 +1072,20 @@ impl Control {
             transfers: BTreeMap::new(),
             call_pairs: BTreeMap::new(),
         }
+    }
+
+    fn call_generation(&mut self, reserved: u64) -> Result<u64, ControlError> {
+        if self.channels.occupied() + reserved.count_ones() as usize >= self.capacity {
+            return Err(ControlError::Capacity);
+        }
+        for _ in 0..64 {
+            let generation = self.generation()?;
+            let handle = CallHandle::new(generation);
+            if self.channels.available(handle) && reserved & (1 << handle.slot()) == 0 {
+                return Ok(generation);
+            }
+        }
+        Err(ControlError::Capacity)
     }
 
     fn generation(&mut self) -> Result<u64, ControlError> {
@@ -1116,10 +1137,12 @@ impl Control {
         })
     }
     pub(crate) fn has_channel(&self, key: &CallKey) -> bool {
-        self.channels
-            .get(&key.id)
-            .is_some_and(|entry| entry.call.generation() == key.generation)
+        self.channels.by_key(key).is_some()
     }
+    pub(crate) fn media_released(&mut self, key: &CallKey) -> bool {
+        self.channels.acknowledge(key)
+    }
+
     pub fn channel(&self, id: &ChannelId) -> Result<&Channel, ControlError> {
         self.channels
             .get(id)
@@ -1418,7 +1441,7 @@ impl Control {
                         "Invalid parameters for originating a channel",
                     ));
                 }
-                let generation = self.generation()?;
+                let generation = self.call_generation(0)?;
                 let endpoint_resource = endpoint_resource(&endpoint)?.to_owned();
                 let deadline = now_ms
                     .checked_add(u64::from(timeout) * 1000)
@@ -1494,7 +1517,7 @@ impl Control {
                         pending_native: Some(capsule),
                         pending_websocket: None,
                     },
-                );
+                )?;
                 Ok(outcome)
             }
             Action::Hangup(id) => self.end_at(&id, timestamp, 16, now_ms),
@@ -1832,112 +1855,114 @@ impl Control {
         cause: u16,
         now: u64,
     ) -> Result<Outcome, ControlError> {
-        let branch = self.dial_branch(&self.key(id)?);
-        let mut entry = self
+        let key = self.key(id)?;
+        let branch = self.dial_branch(&key);
+        let (mut entry, mut teardown) = self
             .channels
-            .remove(id)
+            .end(id)
             .ok_or(ControlError::NotFound("Channel not found"))?;
-        drop(entry.pending_native.take());
-        drop(entry.pending_websocket.take());
-        self.settings.release(entry.settings)?;
-        self.media_connections
-            .retain(|_, (key, _)| key.id != *id || key.generation != entry.call.generation());
         let application =
             application_name(&self.applications, entry.call.stasis())?.map(str::to_owned);
         let was_in_stasis = matches!(entry.call.stasis(), StasisMembership::Entered(_));
         let mut outcome = Outcome::empty();
-        self.end_channel_playbacks(
-            &CallKey {
-                id: id.clone(),
-                generation: entry.call.generation(),
-            },
-            application.as_deref(),
-            timestamp,
-            &mut outcome,
-        );
-        outcome.append(self.end_paired_call(
-            &CallKey {
-                id: id.clone(),
-                generation: entry.call.generation(),
-            },
-            entry.call.bridge(),
-            timestamp,
-            now,
-        )?);
-        outcome.append(self.end_transfer_participant(&CallKey {
-            id: id.clone(),
-            generation: entry.call.generation(),
-        }));
-        outcome
-            .ended_sources
-            .push(subscriptions::EndedSource::Channel {
-                key: CallKey {
-                    id: id.clone(),
-                    generation: entry.call.generation(),
-                },
-                endpoint: entry.endpoint.clone(),
-            });
-        self.finish_owner_recordings(&MediaOwner::Channel(CallKey {
-            id: id.clone(),
-            generation: entry.call.generation(),
-        }));
-        if let Some(frame) = &mut entry.dialplan {
-            if let Some(mut dial) = frame.dial.take() {
-                outcome.append(self.cancel_dial(&mut dial, timestamp)?);
+        let mut settings = Some(entry.settings);
+        for step in teardown.by_ref() {
+            match step {
+                TeardownStep::Admissions => {
+                    drop(entry.pending_native.take());
+                    drop(entry.pending_websocket.take());
+                    self.settings.release(
+                        settings
+                            .take()
+                            .ok_or(ControlError::Conflict("Call settings already released"))?,
+                    )?;
+                    self.media_connections
+                        .retain(|_, (connection, _)| connection.handle() != key.handle());
+                }
+                TeardownStep::Participants => {
+                    self.end_channel_playbacks(
+                        &key,
+                        application.as_deref(),
+                        timestamp,
+                        &mut outcome,
+                    );
+                    outcome.append(self.end_paired_call(
+                        &key,
+                        entry.call.bridge(),
+                        timestamp,
+                        now,
+                    )?);
+                    outcome.append(self.end_transfer_participant(&key));
+                    outcome
+                        .ended_sources
+                        .push(subscriptions::EndedSource::Channel {
+                            key: key.clone(),
+                            endpoint: entry.endpoint.clone(),
+                        });
+                }
+                TeardownStep::Recordings => {
+                    self.finish_owner_recordings(&MediaOwner::Channel(key.clone()));
+                }
+                TeardownStep::Dial => {
+                    if let Some(frame) = &mut entry.dialplan {
+                        if let Some(mut dial) = frame.dial.take() {
+                            outcome.append(self.cancel_dial(&mut dial, timestamp)?);
+                        }
+                    }
+                }
+                TeardownStep::Bridge => {
+                    if let Some(token) = entry.call.bridge() {
+                        for bridge in self
+                            .bridges
+                            .values_mut()
+                            .filter(|bridge| bridge.token == token)
+                        {
+                            bridge.snapshot.channels.retain(|value| value != id);
+                            outcome.optional_event(
+                                application.as_deref(),
+                                timestamp,
+                                EventKind::ChannelLeftBridge {
+                                    bridge: bridge.snapshot.clone(),
+                                    channel: entry.snapshot.clone(),
+                                },
+                            );
+                            let keys = bridge
+                                .snapshot
+                                .channels
+                                .iter()
+                                .filter_map(|id| {
+                                    self.channels.get(id).map(|member| CallKey {
+                                        id: id.clone(),
+                                        generation: member.call.generation(),
+                                    })
+                                })
+                                .collect();
+                            outcome.effects.push(Effect::Bridge {
+                                id: bridge.snapshot.id.clone(),
+                                generation: bridge.token,
+                                channels: keys,
+                            });
+                        }
+                    }
+                }
+                TeardownStep::Media => {
+                    entry.call = entry.call.apply(CallEvent::Hangup).call();
+                    outcome.history.push(CallHistoryEvent::Finished {
+                        key: key.clone(),
+                        timestamp: timestamp.into(),
+                    });
+                    let released = entry.media_tasks.cancel();
+                    tracing::debug!(channel = %id, generation = entry.call.generation(), tasks = released.iter().flatten().count(), "channel media tasks released");
+                    if let Some(outbox) = &mut entry.dtmf {
+                        outbox.cancel();
+                    }
+                    outcome.effects.push(Effect::Release { key: key.clone() });
+                }
             }
         }
-        if let Some(token) = entry.call.bridge() {
-            for bridge in self
-                .bridges
-                .values_mut()
-                .filter(|bridge| bridge.token == token)
-            {
-                bridge.snapshot.channels.retain(|value| value != id);
-                outcome.optional_event(
-                    application.as_deref(),
-                    timestamp,
-                    EventKind::ChannelLeftBridge {
-                        bridge: bridge.snapshot.clone(),
-                        channel: entry.snapshot.clone(),
-                    },
-                );
-                let keys = bridge
-                    .snapshot
-                    .channels
-                    .iter()
-                    .filter_map(|id| {
-                        self.channels.get(id).map(|entry| CallKey {
-                            id: id.clone(),
-                            generation: entry.call.generation(),
-                        })
-                    })
-                    .collect();
-                outcome.effects.push(Effect::Bridge {
-                    id: bridge.snapshot.id.clone(),
-                    generation: bridge.token,
-                    channels: keys,
-                });
-            }
+        if !self.channels.await_media(teardown) {
+            return Err(ControlError::Conflict("Call teardown is incomplete"));
         }
-        entry.call = entry.call.apply(CallEvent::Hangup).call();
-        outcome.history.push(CallHistoryEvent::Finished {
-            key: CallKey {
-                id: id.clone(),
-                generation: entry.call.generation(),
-            },
-            timestamp: timestamp.into(),
-        });
-        let released = entry.media_tasks.cancel();
-        tracing::debug!(channel = %id, generation = entry.call.generation(), tasks = released.iter().flatten().count(), "channel media tasks released");
-        if let Some(outbox) = &mut entry.dtmf {
-            outbox.cancel();
-        }
-        outcome.effects.push(Effect::Release {
-            key: CallKey {
-                id: id.clone(),
-                generation: entry.call.generation(),
-            },
-        });
         if was_in_stasis {
             outcome.optional_event(
                 application.as_deref(),
@@ -2046,6 +2071,12 @@ impl Control {
         now: u64,
     ) -> Result<Outcome, ControlError> {
         match signal {
+            Signal::MediaReleased { key } => {
+                if !self.media_released(&key) {
+                    tracing::trace!(generation = key.generation, "late media release");
+                }
+                Ok(Outcome::empty())
+            }
             Signal::AttendedTransferRequested {
                 key,
                 refer,
@@ -2080,7 +2111,7 @@ impl Control {
             }
             Signal::PeerDirection { key, direction } => {
                 let mut outcome = Outcome::empty();
-                if let Some(entry) = self.channels.get_mut(&key.id).filter(|entry| {
+                if let Some(entry) = self.channels.by_key_mut(&key).filter(|entry| {
                     entry.call.generation() == key.generation
                         && entry.call.state() != CallState::Ended
                 }) {
@@ -2147,11 +2178,7 @@ impl Control {
                 completion,
             } => self.finish_playback(&MediaOwner::Channel(key), token, completion, timestamp),
             Signal::DtmfReady { key, events } => {
-                if let Some(entry) = self
-                    .channels
-                    .get_mut(&key.id)
-                    .filter(|entry| entry.call.generation() == key.generation)
-                {
+                if let Some(entry) = self.channels.by_key_mut(&key) {
                     if entry.dtmf.is_none() {
                         entry.dtmf = Some(DtmfOutbox::new(events)?);
                     }
@@ -2159,11 +2186,7 @@ impl Control {
                 Ok(Outcome::empty())
             }
             Signal::DtmfFinished { key, token } => {
-                if let Some(entry) = self
-                    .channels
-                    .get_mut(&key.id)
-                    .filter(|entry| entry.call.generation() == key.generation)
-                {
+                if let Some(entry) = self.channels.by_key_mut(&key) {
                     if let Some(outbox) = &mut entry.dtmf {
                         let _released = outbox.finish(token);
                     }
@@ -2176,7 +2199,7 @@ impl Control {
                 duration_ms,
             } => {
                 let mut outcome = Outcome::empty();
-                if let Some(entry) = self.channels.get(&key.id).filter(|entry| {
+                if let Some(entry) = self.channels.by_key(&key).filter(|entry| {
                     entry.call.generation() == key.generation
                         && entry.call.state() == CallState::Up
                         && matches!(entry.call.stasis(), StasisMembership::Entered(_))
@@ -2196,7 +2219,7 @@ impl Control {
             Signal::Terminated { key, cause } => {
                 if self
                     .channels
-                    .get(&key.id)
+                    .by_key(&key)
                     .is_some_and(|entry| entry.call.generation() == key.generation)
                 {
                     self.end_at(&key.id, timestamp, cause, now)
@@ -2207,7 +2230,7 @@ impl Control {
                 }
             }
             Signal::Milestone { key, milestone } => {
-                let Some(entry) = self.channels.get(&key.id) else {
+                let Some(entry) = self.channels.by_key(&key) else {
                     let mut outcome = Outcome::empty();
                     outcome.effects.push(Effect::Release { key });
                     return Ok(outcome);
@@ -2233,7 +2256,7 @@ impl Control {
                 }
                 let entry = self
                     .channels
-                    .get_mut(&key.id)
+                    .by_key_mut(&key)
                     .ok_or(ControlError::NotFound("Channel not found"))?;
                 let mut outcome = Outcome::empty();
                 match milestone {

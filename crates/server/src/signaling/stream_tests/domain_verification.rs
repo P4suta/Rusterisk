@@ -2,7 +2,7 @@ use super::{
     configuration, credentials, failure, initial_call, Action, ChannelId, ControlError, Controller,
     MediaHub, Signaling, TlsContext, TlsFiles,
 };
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tokio::net::TcpListener;
 
 #[tokio::test]
@@ -55,7 +55,8 @@ async fn initial_tls_invites_authenticate_uri_only_domain_certificates() -> Resu
                 },
             )
             .await?;
-        let (socket, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+        let (socket, _) = Wait::Ready
+            .bounded(listener.accept())
             .await
             .map_err(failure)?
             .map_err(failure)?;

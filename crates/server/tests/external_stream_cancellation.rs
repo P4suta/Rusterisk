@@ -3,10 +3,10 @@ use rusterisk_config::Config;
 use rusterisk_server::{
     media::MediaHub, signaling::Signaling, Action, ControlError, Controller, Credentials,
 };
+use rusterisk_test_support::Wait;
 use std::{
     future::{poll_fn, Future},
     task::Poll,
-    time::Duration,
 };
 use tokio::{io::AsyncReadExt, sync::watch};
 
@@ -49,31 +49,31 @@ async fn pending_stream_admission_keeps_registration_progress_and_cancellation_c
             let target = AudioSocketTarget::new(listener.local_addr().map_err(failure)?, [7; 16]).map_err(failure)?;
             let mut request = std::pin::pin!(controller.execute(credentials()?, None, Action::ExternalAudioSocket { id: id.clone(), app: "calls".into(), target }));
             assert!(poll_fn(|context| Poll::Ready(request.as_mut().poll(context).is_pending())).await);
-            let (mut peer, _) = tokio::time::timeout(Duration::from_secs(1), listener.accept()).await.map_err(failure)?.map_err(failure)?;
+            let (mut peer, _) = Wait::Ready.bounded(listener.accept()).await.map_err(failure)?.map_err(failure)?;
             let mut identity = [0; 19];
-            tokio::time::timeout(Duration::from_secs(1), peer.read_exact(&mut identity)).await.map_err(failure)?.map_err(failure)?;
+            Wait::Ready.bounded(peer.read_exact(&mut identity)).await.map_err(failure)?.map_err(failure)?;
             let phone = tokio::net::UdpSocket::bind("127.0.0.1:0").await.map_err(failure)?;
             let local = phone.local_addr().map_err(failure)?;
             let register = format!("REGISTER sip:{signaling_address} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK-pending-stream;rport\r\nFrom: <sip:phone@localhost>;tag=phone\r\nTo: <sip:phone@localhost>\r\nCall-ID: pending-stream\r\nCSeq: 1 REGISTER\r\nContact: <sip:phone@{local}>\r\nExpires: 20\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n");
             phone.send_to(register.as_bytes(), signaling_address).await.map_err(failure)?;
             let mut bytes = [0; 16385];
-            let (size, _) = tokio::time::timeout(Duration::from_secs(1), phone.recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
+            let (size, _) = Wait::Ready.bounded(phone.recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
             assert!(bytes[..size].starts_with(b"SIP/2.0 401 "));
             assert!(poll_fn(|context| Poll::Ready(request.as_mut().poll(context).is_pending())).await);
             peer
         };
-        tokio::time::timeout(Duration::from_secs(1), async {
+        Wait::Ready.bounded(async {
             loop {
                 match controller.execute(credentials()?, None, Action::GetChannel(id.clone())).await {
                     Err(ControlError::NotFound(_)) => return Ok::<(), ControlError>(()),
-                    Ok(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                    Ok(_) => {},
                     Err(error) => return Err(error),
                 }
             }
         }).await.map_err(failure)??;
         resume.send_replace(true);
         let mut byte = [0];
-        assert_eq!(tokio::time::timeout(Duration::from_secs(1), peer.read(&mut byte)).await.map_err(failure)?.map_err(failure)?, 0);
+        assert_eq!(Wait::Ready.bounded(peer.read(&mut byte)).await.map_err(failure)?.map_err(failure)?, 0);
         assert!(matches!(controller.execute(credentials()?, None, Action::GetChannel(id)).await, Err(ControlError::NotFound(_))));
         Ok(())
     }.await;

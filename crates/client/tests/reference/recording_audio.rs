@@ -7,6 +7,7 @@ use rusterisk_client::{
 };
 use rusterisk_media::{AudioFormat, Frame, RtpSender};
 use rusterisk_server::rtp::SocketPair;
+use rusterisk_server::test_time::Wait;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     time::Duration,
@@ -38,41 +39,41 @@ fn destination(channel: Channel) -> Result<SocketAddr, Error> {
 
 enum Observation<'a> {
     Stasis(&'a ChannelId),
-    RecordingStarted(&'a ChannelId),
-    RecordingFinished(&'a ChannelId),
+    RecordingStarted(&'a rusterisk_client::RecordingName),
+    RecordingFinished(&'a rusterisk_client::RecordingName),
 }
 
 async fn observed(session: &mut Session, wanted: Observation<'_>) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        for _ in 0..128 {
-            match (&wanted, session.next_event().await?.kind) {
-                (Observation::Stasis(id), EventKind::StasisStart { channel, .. })
-                    if channel.id == **id =>
-                {
-                    return Ok(())
+    Wait::Ready
+        .bounded(async {
+            for _ in 0..128 {
+                match (&wanted, session.next_event().await?.kind) {
+                    (Observation::Stasis(id), EventKind::StasisStart { channel, .. })
+                        if channel.id == **id =>
+                    {
+                        return Ok(())
+                    }
+                    (
+                        Observation::RecordingStarted(id),
+                        EventKind::RecordingStarted { recording },
+                    ) if recording.name == **id => return Ok(()),
+                    (
+                        Observation::RecordingFinished(id),
+                        EventKind::RecordingFinished { recording },
+                    ) if recording.name == **id => {
+                        return if recording.state == RecordingState::Done {
+                            Ok(())
+                        } else {
+                            Err(Error::Invalid("recording publication failed"))
+                        };
+                    }
+                    _ => {}
                 }
-                (Observation::RecordingStarted(id), EventKind::RecordingStarted { recording })
-                    if recording.name == id.as_str() =>
-                {
-                    return Ok(())
-                }
-                (
-                    Observation::RecordingFinished(id),
-                    EventKind::RecordingFinished { recording },
-                ) if recording.name == id.as_str() => {
-                    return if recording.state == RecordingState::Done {
-                        Ok(())
-                    } else {
-                        Err(Error::Invalid("recording publication failed"))
-                    };
-                }
-                _ => {}
             }
-        }
-        Err(Error::Capacity)
-    })
-    .await
-    .map_err(|_| Error::Timeout)?
+            Err(Error::Capacity)
+        })
+        .await
+        .map_err(|_| Error::Timeout)?
 }
 
 #[derive(Clone, Copy)]
@@ -145,7 +146,8 @@ pub async fn compare(
             Target::Channel => 1,
             Target::Bridge => 2,
         };
-        let recording = ChannelId::try_from(format!("recorded-{label}"))?;
+        let recording = rusterisk_client::RecordingName::try_from(format!("recorded-{label}"))?;
+        let bridge = rusterisk_client::BridgeId::try_from(format!("recorded-{label}"))?;
         let mut peers = Vec::with_capacity(2);
         let mut ids = Vec::with_capacity(2);
         for index in 0..count {
@@ -168,13 +170,13 @@ pub async fn compare(
                     .await?
             }
             Target::Bridge => {
-                client.create_bridge(&recording, "Recording audio").await?;
-                client.add_channels(&recording, &ids).await?;
+                client.create_bridge(&bridge, "Recording audio").await?;
+                client.add_channels(&bridge, &ids).await?;
                 client
-                    .subscribe_resources(application, &[EventSource::Bridge(recording.clone())])
+                    .subscribe_resources(application, &[EventSource::from(bridge.clone())])
                     .await?;
                 client
-                    .record_bridge(&recording, &recording, "wav", Default::default())
+                    .record_bridge(&bridge, &recording, "wav", Default::default())
                     .await?
             }
         };
@@ -182,7 +184,7 @@ pub async fn compare(
             Target::Channel => format!("channel:{}", ids[0]),
             Target::Bridge => format!("bridge:{recording}"),
         };
-        if accepted.name != recording.as_str()
+        if accepted.name != recording
             || accepted.format != "wav"
             || accepted.target_uri != uri
             || !matches!(
@@ -216,9 +218,9 @@ pub async fn compare(
         }
         if matches!(target, Target::Bridge) {
             client
-                .unsubscribe_resources(application, &[EventSource::Bridge(recording.clone())])
+                .unsubscribe_resources(application, &[EventSource::from(bridge.clone())])
                 .await?;
-            client.destroy_bridge(&recording).await?;
+            client.destroy_bridge(&bridge).await?;
         }
     }
     Ok(())
@@ -250,10 +252,9 @@ async fn bridge_input_continues_after_both_media_paths_deliver_audio() -> Result
         }
         Ok::<(), Error>(())
     };
-    tokio::time::timeout(Duration::from_secs(3), async {
-        tokio::try_join!(send_recording_input(&peers), bridge)
-    })
-    .await
-    .map_err(|_| Error::Timeout)??;
+    Wait::Ready
+        .bounded(async { tokio::try_join!(send_recording_input(&peers), bridge) })
+        .await
+        .map_err(|_| Error::Timeout)??;
     Ok(())
 }

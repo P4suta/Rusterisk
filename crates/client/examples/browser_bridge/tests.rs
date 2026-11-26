@@ -1,9 +1,10 @@
 use rusterisk_client::{api::ChannelId, Client, Error};
 use rusterisk_config::Config;
+use rusterisk_server::test_time::Wait;
 use rusterisk_server::{
     Action, Controller, Credentials, Effect, IncomingCall, IncomingTarget, Milestone, Signal,
 };
-use std::{future::IntoFuture, time::Duration};
+use std::future::IntoFuture;
 
 #[tokio::test]
 async fn stopping_during_peer_setup_releases_both_channels_and_the_bridge() -> Result<(), Error> {
@@ -55,12 +56,12 @@ async fn setup_cleanup(end: End) -> Result<(), Error> {
         "PJSIP/bob".into(),
         async { stopped.await.map_err(|_| Error::Closed) },
     ));
-    let operation = tokio::time::timeout(Duration::from_secs(3), async {
+    let operation = Wait::Ready.bounded(async {
         loop {
             if client.application("calls").await.is_ok() {
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+
         }
         let incoming = controller
             .incoming(IncomingCall {
@@ -79,7 +80,7 @@ async fn setup_cleanup(end: End) -> Result<(), Error> {
         loop {
             match effects.recv().await {
                 Some(Effect::Answer { key }) => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+
                     assert!(client.bridges().await?.is_empty());
                     controller
                         .signal(Signal::Milestone {
@@ -119,7 +120,7 @@ async fn setup_cleanup(end: End) -> Result<(), Error> {
                 if preserved && client.bridges().await?.is_empty() {
                     break;
                 }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+
             }
             assert!(!demo.is_finished());
         }
@@ -129,7 +130,7 @@ async fn setup_cleanup(end: End) -> Result<(), Error> {
     .map_err(|_| Error::Timeout)
     .and_then(|result| result);
     let stop_result = stop.send(()).map_err(|_| Error::Closed);
-    let joined = match tokio::time::timeout(Duration::from_secs(4), &mut demo).await {
+    let joined = match Wait::Ready.bounded(&mut demo).await {
         Ok(result) => result.map_err(|_| Error::Closed).and_then(|result| result),
         Err(_) => {
             demo.abort();

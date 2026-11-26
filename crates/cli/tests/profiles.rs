@@ -1,3 +1,5 @@
+#[path = "support/time.rs"]
+pub mod test_time;
 use axum::{
     http::{HeaderMap, StatusCode},
     routing::get,
@@ -8,7 +10,6 @@ use std::{
     io,
     path::Path,
     process::{Output, Stdio},
-    time::Duration,
 };
 use tokio::{net::TcpListener, process::Command};
 
@@ -43,7 +44,9 @@ async fn invoke(config: &Path, arguments: &[&str], password: &[u8]) -> io::Resul
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    tokio::time::timeout(Duration::from_secs(5), child.wait_with_output()).await?
+    crate::test_time::Wait::Ready
+        .bounded(child.wait_with_output())
+        .await?
 }
 
 fn server(auth: &'static str, name: &'static str) -> Router {
@@ -177,10 +180,9 @@ async fn offline_listing_and_invalid_selection_never_contact_a_server() -> io::R
     )
     .await?;
     assert_eq!(failed.status.code(), Some(2));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(35), listener.accept())
-            .await
-            .is_err()
-    );
+    assert!(crate::test_time::Wait::Quiet
+        .bounded(listener.accept())
+        .await
+        .is_err());
     Ok(())
 }

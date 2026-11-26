@@ -6,6 +6,7 @@ use rusterisk_server::{
     http::router, Action, ControlError, Controller, Credentials, IncomingCall, IncomingTarget,
     Milestone, Signal,
 };
+use rusterisk_test_support::Wait;
 use serde_json::Value;
 use tower::ServiceExt;
 
@@ -40,17 +41,18 @@ async fn read_after_signal(
     path: &str,
     applied: impl Fn(&Value) -> bool,
 ) -> Result<Value, ControlError> {
-    tokio::time::timeout(std::time::Duration::from_secs(3), async {
-        loop {
-            let observed = read(app, path).await?;
-            if applied(&observed) {
-                return Ok(observed);
+    Wait::Ready
+        .bounded(async {
+            loop {
+                let observed = read(app, path).await?;
+                if applied(&observed) {
+                    return Ok(observed);
+                }
+                tokio::task::yield_now().await;
             }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| ControlError::Adapter(format!("Signal did not reach {path}")))?
+        })
+        .await
+        .map_err(|_| ControlError::Adapter(format!("Signal did not reach {path}")))?
 }
 
 #[tokio::test]
@@ -63,6 +65,25 @@ async fn diagnosis_follows_dialplan_and_live_call_identity_with_read_only_creden
     let task = tokio::spawn(runner.run());
     let result = async {
         let app = router(controller.clone());
+        let path = "/rusterisk/diagnostics/runtime";
+        let request = Request::builder()
+            .uri(path)
+            .body(Body::empty())
+            .map_err(fail)?;
+        let denied = app
+            .clone()
+            .oneshot(request)
+            .await
+            .unwrap_or_else(|never| match never {});
+        assert_eq!(denied.status().as_u16(), 401);
+        let first = read(&app, path).await?;
+        let second = read(&app, path).await?;
+        assert!(second["control"]["turns"].as_u64() > first["control"]["turns"].as_u64());
+        for name in ["control", "signaling", "media"] {
+            for counter in ["turns", "late_turns", "drops"] {
+                assert!(second[name][counter].is_u64());
+            }
+        }
         let owner = Credentials::new("app".into(), "write".into())?;
         let _phone = controller
             .subscribe(owner.clone(), None, "phone".into())

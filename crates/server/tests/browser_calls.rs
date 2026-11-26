@@ -1,3 +1,4 @@
+use rusterisk_test_support::Wait;
 #[path = "../examples/browser/assets.rs"]
 mod assets;
 #[path = "browser_calls/download_tests.rs"]
@@ -13,7 +14,7 @@ use rusterisk_config::Config;
 use rusterisk_media::Frame;
 use rusterisk_server::{runtime::Server, ControlError};
 use rusterisk_storage::{Recorder, WaveReader};
-use std::{net::SocketAddr, path::Path, time::Duration};
+use std::{net::SocketAddr, path::Path};
 use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -116,7 +117,7 @@ fn stored_audio_requires_both_known_senders_even_when_one_sender_is_loud(
 }
 
 async fn joined(mut task: JoinHandle<Result<(), ControlError>>) -> Result<(), ControlError> {
-    match tokio::time::timeout(Duration::from_secs(6), &mut task).await {
+    match Wait::Shutdown.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?,
         Err(primary) => {
             task.abort();

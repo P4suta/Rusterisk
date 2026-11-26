@@ -2,6 +2,7 @@ use super::*;
 use rusterisk_api::ChannelId;
 use rusterisk_core::{DtmfDigit, DtmfOutbox, DtmfTiming};
 use rusterisk_media::{AudioFormat, ControlKind, RtpPacket};
+use rusterisk_test_support::Wait;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
@@ -71,16 +72,23 @@ async fn a_bridge_queued_before_a_turn_carries_that_turns_audio() -> Result<(), 
         .await
         .map_err(failure)?;
     // A loopback datagram can reach its socket after the sender returns.
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    let input = hub
+        .legs
+        .get(&bob)
+        .ok_or(MediaError::UnknownStream)?
+        .input_observer()?;
+    Wait::Ready
+        .bounded(input.readable())
+        .await
+        .map_err(failure)?
+        .map_err(failure)?;
     hub.tick()?;
     let mut bytes = [0; 1501];
-    let (size, _) = tokio::time::timeout(
-        Duration::from_secs(1),
-        alice_peer.data().recv_from(&mut bytes),
-    )
-    .await
-    .map_err(failure)?
-    .map_err(failure)?;
+    let (size, _) = Wait::Ready
+        .bounded(alice_peer.data().recv_from(&mut bytes))
+        .await
+        .map_err(failure)?
+        .map_err(failure)?;
     let heard = RtpPacket::parse(&bytes[..size])?;
     hub.close().await?;
     assert!(heard
@@ -94,6 +102,63 @@ async fn a_bridge_queued_before_a_turn_carries_that_turns_audio() -> Result<(), 
 const LEG_HELD: usize = 6608;
 // A leg task held two frame channels, and a Tokio channel reserves a block of 32 slots on its first send.
 const TASK_CHANNELS: usize = 2 * 32 * std::mem::size_of::<rusterisk_media::Frame>();
+
+#[tokio::test]
+async fn the_socket_to_socket_g711_turn_allocates_nothing_after_warmup() -> Result<(), MediaError> {
+    let (_handle, mut hub, _notices) = MediaHub::new(2);
+    let left = key("left")?;
+    let right = key("right")?;
+    let mut peers = Vec::new();
+    for (key, sample) in [(&left, 4000_i16), (&right, -7000)] {
+        let socket = leg(&mut hub, key, None)?;
+        let input = hub
+            .legs
+            .get(key)
+            .ok_or(MediaError::UnknownStream)?
+            .input_observer()?;
+        let sender = rusterisk_media::RtpSender::new(AudioFormat::Pcmu, 0, [3; 10])?;
+        peers.push((socket, input, sender, sample));
+    }
+    hub.mixer.bridge(1, &[left, right])?;
+    for turn in 0..50 {
+        let mut bytes = [0; 1501];
+        for (peer, input, sender, sample) in &mut peers {
+            let packet = sender
+                .packet(Frame::new(&[*sample; 160], 8000)?)?
+                .encode()?;
+            peer.data()
+                .send_to(&packet, input.local_addr().map_err(failure)?)
+                .await
+                .map_err(failure)?;
+            Wait::Ready
+                .bounded(input.peek_from(&mut bytes))
+                .await
+                .map_err(failure)?
+                .map_err(failure)?;
+        }
+        let mut result = Ok(());
+        let counted = allocation_counter::measure(|| {
+            result = hub.tick();
+        });
+        result?;
+        if turn > 0 {
+            assert_eq!(counted.count_total, 0, "turn {turn}: {counted:?}");
+        }
+        for ((peer, _, _, _), expected) in peers.iter().zip([-7000, 4000]) {
+            let (size, _) = Wait::Ready
+                .bounded(peer.data().recv_from(&mut bytes))
+                .await
+                .map_err(failure)?
+                .map_err(failure)?;
+            let packet = RtpPacket::parse(&bytes[..size])?;
+            assert_eq!(
+                packet.payload(),
+                [rusterisk_media::mulaw_encode(expected); 160]
+            );
+        }
+    }
+    hub.close().await
+}
 
 #[tokio::test]
 async fn a_g711_leg_stays_within_its_memory_budget() -> Result<(), MediaError> {
@@ -166,7 +231,16 @@ async fn a_leg_reads_at_most_one_window_of_datagrams_in_a_turn() -> Result<(), M
             .map_err(failure)?;
     }
     // A loopback datagram can reach its socket after the sender returns.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let input = hub
+        .legs
+        .get(&flooded)
+        .ok_or(MediaError::UnknownStream)?
+        .input_observer()?;
+    Wait::Ready
+        .bounded(input.readable())
+        .await
+        .map_err(failure)?
+        .map_err(failure)?;
     let mut counts = Vec::with_capacity(3);
     for _ in 0..3 {
         hub.tick()?;
@@ -178,7 +252,7 @@ async fn a_leg_reads_at_most_one_window_of_datagrams_in_a_turn() -> Result<(), M
 }
 
 // Signaling sends a digit sequence to a leg that the media task owns.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_owned_leg_sends_digits_and_reports_their_finish() -> Result<(), MediaError> {
     let (_handle, mut hub, mut notices) = MediaHub::new(4);
     let dialing = key("dialing")?;
@@ -205,25 +279,20 @@ async fn an_owned_leg_sends_digits_and_reports_their_finish() -> Result<(), Medi
         if finished {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::advance(Duration::from_millis(20)).await;
     }
     // The leg also sends the mixer's audio, so the peer looks for the first telephone event.
     let mut bytes = [0; 1501];
     let mut events = 0;
-    while let Ok(Ok((size, _))) = tokio::time::timeout(
-        Duration::from_millis(100),
-        peer.data().recv_from(&mut bytes),
-    )
-    .await
-    {
+    while let Ok(Ok((size, _))) = Wait::Quiet.bounded(peer.data().recv_from(&mut bytes)).await {
         events += usize::from(RtpPacket::parse(&bytes[..size])?.payload_type() == 101);
     }
     hub.command(Command::Release { key: dialing })?;
-    let (size, _) =
-        tokio::time::timeout(Duration::from_secs(1), peer.control().recv_from(&mut bytes))
-            .await
-            .map_err(failure)?
-            .map_err(failure)?;
+    let (size, _) = Wait::Ready
+        .bounded(peer.control().recv_from(&mut bytes))
+        .await
+        .map_err(failure)?
+        .map_err(failure)?;
     let goodbye = rusterisk_media::inspect_rtcp(&bytes[..size])?;
     hub.close().await?;
     assert!(finished, "the leg never reported the finished digits");

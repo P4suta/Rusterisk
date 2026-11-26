@@ -2,14 +2,15 @@ use rusterisk_client::{
     api::{ChannelId, Dialplan, EventKind, EventSource, ExternalRtpTarget, StaticRtpCodec},
     Client, Error, Session,
 };
-use std::{net::Ipv4Addr, time::Duration};
+use rusterisk_server::test_time::Wait;
+use std::net::Ipv4Addr;
 
 async fn entry(
     session: &mut Session,
     id: &ChannelId,
     expected_data: Option<&str>,
 ) -> Result<(Dialplan, Vec<String>), Error> {
-    tokio::time::timeout(Duration::from_secs(4), async {
+    Wait::Ready.bounded(async {
         let mut observed = expected_data.is_none();
         loop {
             let kind = session.next_event().await?.kind;

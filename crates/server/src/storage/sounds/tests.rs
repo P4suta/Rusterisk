@@ -11,7 +11,7 @@ fn catalogue_yields_to_real_lifecycle_commands_before_finishing_the_library_scan
     std::fs::create_dir_all(root.path().join("sounds/en/digits"))?;
     std::fs::write(root.path().join("sounds/en/digits/readme.txt"), b"fixture")?;
     let mut store = Store::open(root.path())?;
-    let mut recordings = RecordingSet::new(root.path().to_owned());
+    let mut recordings = RecordingSet::new(root.path().to_owned(), mpsc::channel(1).1);
     let mut playbacks = PlaybackSet::new(root.path().to_owned());
     let mut files = FileSet::new();
     let (commands, mut input) = mpsc::channel(64);

@@ -1,4 +1,5 @@
 use super::*;
+use rusterisk_test_support::Wait;
 use tokio::io::AsyncWriteExt;
 
 #[tokio::test]
@@ -21,25 +22,26 @@ async fn closing_an_old_tls_flow_preserves_the_replacement_flow() -> Result<(), 
         old.socket.shutdown().await.map_err(failure)?;
         let old_key = old.key;
         drop(old);
-        let closed = tokio::time::timeout(Duration::from_secs(2), async {
-            for _ in 0..16 {
-                match fixture.transport.network.next().await? {
-                    Input::Closed { key, result } => {
-                        result?;
-                        return Ok(key);
-                    }
-                    Input::SetupFinished { result, .. } => result?,
-                    Input::Packet(_) | Input::Prepared(_) | Input::Upgrade(_) => {
-                        return Err(ControlError::Invalid(
-                            "Unexpected event while closing the old TLS flow",
-                        ))
+        let closed = Wait::Ready
+            .bounded(async {
+                for _ in 0..16 {
+                    match fixture.transport.network.next().await? {
+                        Input::Closed { key, result } => {
+                            result?;
+                            return Ok(key);
+                        }
+                        Input::SetupFinished { result, .. } => result?,
+                        Input::Packet(_) | Input::Prepared(_) | Input::Upgrade(_) => {
+                            return Err(ControlError::Invalid(
+                                "Unexpected event while closing the old TLS flow",
+                            ))
+                        }
                     }
                 }
-            }
-            Err(ControlError::Capacity)
-        })
-        .await
-        .map_err(failure)??;
+                Err(ControlError::Capacity)
+            })
+            .await
+            .map_err(failure)??;
         require(
             closed == old_key
                 && !fixture.transport.network.current(old_route)

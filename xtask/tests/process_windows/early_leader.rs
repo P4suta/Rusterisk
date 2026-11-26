@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+use rusterisk_test_support::Wait;
 use rusterisk_windows_job_accounting::active_processes;
 use std::{
     fs::{self, File},
@@ -7,16 +8,13 @@ use std::{
     os::windows::io::AsHandle,
     path::{Path, PathBuf},
     process::ExitStatus,
-    thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 use windows_spawn::{Child, Command, DropPolicy, Job, SpawnOptions, Stdio};
 
 const WORKER_DIRECTORY: &str = "RUSTERISK_EARLY_LEADER_WORKER_DIRECTORY";
 const LEADER_WORKER: &str = "early_leader::leader_worker";
 const DESCENDANT_WORKER: &str = "early_leader::descendant_worker";
-const WAIT_BUDGET: Duration = Duration::from_secs(5);
-const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 fn combine(operation: io::Result<()>, cleanup: io::Result<()>) -> io::Result<()> {
     match (operation, cleanup) {
@@ -25,12 +23,6 @@ fn combine(operation: io::Result<()>, cleanup: io::Result<()>) -> io::Result<()>
             "{operation}; cleanup failed: {cleanup}"
         ))),
     }
-}
-
-fn deadline(budget: Duration) -> io::Result<Instant> {
-    Instant::now()
-        .checked_add(budget)
-        .ok_or_else(|| io::Error::other("Windows process fixture deadline overflow"))
 }
 
 fn reserve_directory() -> io::Result<PathBuf> {
@@ -75,55 +67,37 @@ fn worker_command(directory: &Path, name: &str) -> io::Result<Command> {
 }
 
 fn wait_for_exit(child: &mut Child) -> io::Result<ExitStatus> {
-    let deadline = deadline(WAIT_BUDGET)?;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Windows process fixture exit deadline exceeded",
-            ));
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
+    rusterisk_test_support::signaled(child, Wait::Ready)?;
+    child.wait()
 }
 
 fn wait_for_marker(directory: &Path, name: &str) -> io::Result<()> {
-    let deadline = deadline(WAIT_BUDGET)?;
-    loop {
-        if directory.join(name).try_exists()? {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("Windows process fixture marker deadline exceeded: {name}"),
-            ));
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
+    rusterisk_test_support::file_ready(directory, || {
+        Ok(directory.join(name).try_exists()?.then_some(()))
+    })
 }
 
 fn wait_for_count(job: &Job, expected: u32) -> io::Result<()> {
-    let deadline = deadline(WAIT_BUDGET)?;
-    loop {
-        let count = active_processes(job.as_handle())?;
-        if count == expected {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!("expected {expected} Job members, received {count}"),
-            ));
-        }
-        thread::sleep(POLL_INTERVAL);
+    let count = active_processes(job.as_handle())?;
+    if count == expected {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "expected {expected} Job members, received {count}"
+        )))
     }
 }
 
-fn stop_and_release(job: &Job, child: Option<Child>) -> io::Result<()> {
+fn stop_and_release(job: &Job, child: Option<Child>, directory: &Path) -> io::Result<()> {
+    let descendant = match fs::read_to_string(directory.join("descendant-pid")) {
+        Ok(pid) => pid
+            .parse()
+            .map_err(io::Error::other)
+            .and_then(rusterisk_test_support::process_handle)
+            .map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    };
     let termination = job.terminate(73);
     let reaped = match child {
         Some(mut child) => {
@@ -133,7 +107,11 @@ fn stop_and_release(job: &Job, child: Option<Child>) -> io::Result<()> {
         }
         None => Ok(()),
     };
-    let empty = wait_for_count(job, 0);
+    let exited = descendant.and_then(|child| match child {
+        Some(child) => rusterisk_test_support::signaled(&child, Wait::Ready),
+        None => Ok(()),
+    });
+    let empty = combine(exited, wait_for_count(job, 0));
     combine(combine(termination, reaped), empty)
 }
 
@@ -169,7 +147,7 @@ fn check_early_leader(directory: &Path) -> io::Result<()> {
         }
         Err(error) => (Err(error), Some(leader)),
     };
-    let cleanup = stop_and_release(&job, retained);
+    let cleanup = stop_and_release(&job, retained, directory);
     combine(operation, cleanup)
 }
 
@@ -206,20 +184,17 @@ fn descendant_worker() -> io::Result<()> {
         return Ok(());
     };
     let directory = PathBuf::from(directory);
+    fs::write(
+        directory.join("descendant-pid"),
+        std::process::id().to_string(),
+    )?;
     marker(&directory, "ready")?;
-    let deadline = deadline(Duration::from_secs(15))?;
-    let mut acknowledged = false;
-    loop {
-        if !acknowledged && directory.join("probe").try_exists()? {
-            marker(&directory, "acknowledged")?;
-            acknowledged = true;
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "descendant remained alive beyond the owned cleanup deadline",
-            ));
-        }
-        thread::sleep(POLL_INTERVAL);
-    }
+    wait_for_marker(&directory, "probe")?;
+    marker(&directory, "acknowledged")?;
+    rusterisk_test_support::block_on(async {
+        Wait::Shutdown
+            .bounded(std::future::pending::<()>())
+            .await
+            .map_err(io::Error::other)
+    })
 }

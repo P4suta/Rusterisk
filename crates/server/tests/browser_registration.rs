@@ -1,6 +1,7 @@
 use rusterisk_config::Config;
 use rusterisk_server::{runtime::Server, ControlError};
-use std::{path::Path, time::Duration};
+use rusterisk_test_support::Wait;
+use std::path::Path;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
@@ -35,7 +36,7 @@ async fn browser_signaling_adapter_registers_reconnects_and_refuses_incorrect_cr
             .kill_on_drop(true)
             .spawn()
             .map_err(failure)?;
-        let status = match tokio::time::timeout(Duration::from_secs(15), child.wait()).await {
+        let status = match Wait::Shutdown.bounded(child.wait()).await {
             Ok(result) => result.map_err(failure)?,
             Err(primary) => {
                 child.kill().await.map_err(failure)?;
@@ -51,7 +52,7 @@ async fn browser_signaling_adapter_registers_reconnects_and_refuses_incorrect_cr
     }
     .await;
     controller.shutdown();
-    let cleanup = match tokio::time::timeout(Duration::from_secs(6), &mut serving).await {
+    let cleanup = match Wait::Shutdown.bounded(&mut serving).await {
         Ok(joined) => joined.map_err(failure)?,
         Err(primary) => {
             serving.abort();

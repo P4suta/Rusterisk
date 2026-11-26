@@ -3,7 +3,8 @@ use rusterisk_client::{
     api::{Channel, MediaCommand, MediaControlFormat, MediaEvent},
     Client, Error, MediaBytes, MediaMessage,
 };
-use std::{future::IntoFuture, time::Duration};
+use rusterisk_server::test_time::Wait;
+use std::future::IntoFuture;
 
 fn channel() -> Result<Channel, Error> {
     Ok(serde_json::from_str(
@@ -42,10 +43,10 @@ async fn fixture() -> Result<
 #[tokio::test]
 async fn cancelled_media_reads_preserve_the_connection_and_drop_releases_it() -> Result<(), Error> {
     let (client, mut accepted, server) = fixture().await?;
-    let result = tokio::time::timeout(Duration::from_secs(3), async {
+    let result = Wait::Ready.bounded(async {
         let mut media = client.connect_media(&channel()?, MediaControlFormat::PlainText).await?;
         let mut peer = accepted.recv().await.ok_or(Error::Closed)?;
-        assert!(tokio::time::timeout(Duration::from_millis(10), media.next_message()).await.is_err());
+        assert!(Wait::Quiet.bounded(media.next_message()).await.is_err());
         peer.send(Message::Binary(vec![0xd5; 160].into())).await.map_err(|_| Error::Closed)?;
         assert!(matches!(media.next_message().await?, Some(MediaMessage::Audio(bytes)) if bytes.as_ref() == [0xd5; 160]));
         drop(media);
@@ -62,21 +63,22 @@ async fn invalid_media_events_close_the_connection_before_returning_the_error() 
 {
     for text in ["UNKNOWN", "DTMF_END channel_id:another digit:1"] {
         let (client, mut accepted, server) = fixture().await?;
-        let result = tokio::time::timeout(Duration::from_secs(3), async {
-            let mut media = client
-                .connect_media(&channel()?, MediaControlFormat::PlainText)
-                .await?;
-            let mut peer = accepted.recv().await.ok_or(Error::Closed)?;
-            peer.send(Message::Text(text.into()))
-                .await
-                .map_err(|_| Error::Closed)?;
-            assert!(matches!(media.next_message().await, Err(Error::Invalid(_))));
-            assert!(media.next_message().await?.is_none());
-            assert!(matches!(peer.recv().await, None | Some(Err(_))));
-            Ok::<(), Error>(())
-        })
-        .await
-        .map_err(|_| Error::Timeout);
+        let result = Wait::Ready
+            .bounded(async {
+                let mut media = client
+                    .connect_media(&channel()?, MediaControlFormat::PlainText)
+                    .await?;
+                let mut peer = accepted.recv().await.ok_or(Error::Closed)?;
+                peer.send(Message::Text(text.into()))
+                    .await
+                    .map_err(|_| Error::Closed)?;
+                assert!(matches!(media.next_message().await, Err(Error::Invalid(_))));
+                assert!(media.next_message().await?.is_none());
+                assert!(matches!(peer.recv().await, None | Some(Err(_))));
+                Ok::<(), Error>(())
+            })
+            .await
+            .map_err(|_| Error::Timeout);
         server.abort();
         assert!(server.await.is_err());
         result??;
@@ -129,7 +131,7 @@ async fn media_sessions_negotiate_bearer_sockets_and_keep_audio_and_controls_typ
         assert!(closed.send(()).is_ok());
         Ok::<(), Error>(())
     });
-    let result = tokio::time::timeout(Duration::from_secs(3), async {
+    let result = Wait::Ready.bounded(async {
         let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
         let mut media = client.connect_media(&channel()?, MediaControlFormat::PlainText).await?;
         assert!(matches!(media.start_event(), MediaEvent::MediaStart { optimal_frame_size: 160, .. }));
@@ -141,7 +143,7 @@ async fn media_sessions_negotiate_bearer_sockets_and_keep_audio_and_controls_typ
         observed.await.map_err(|_| Error::Closed)?;
         Ok::<(), Error>(())
     }).await.map_err(|_| Error::Timeout);
-    let exchanged = tokio::time::timeout(Duration::from_secs(1), &mut exchange).await;
+    let exchanged = Wait::Ready.bounded(&mut exchange).await;
     if exchanged.is_err() {
         exchange.abort();
         assert!(exchange.await.is_err());

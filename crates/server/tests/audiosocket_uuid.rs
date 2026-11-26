@@ -9,7 +9,8 @@ use rusterisk_config::Config;
 use rusterisk_server::{
     http::router, media::MediaHub, signaling::Signaling, ControlError, Controller, Credentials,
 };
-use std::{fmt::Display, time::Duration};
+use rusterisk_test_support::Wait;
+use std::fmt::Display;
 use tokio::{io::AsyncReadExt, task::JoinHandle};
 use tower::ServiceExt;
 
@@ -33,7 +34,7 @@ fn request(query: &str) -> Result<Request<Body>, ControlError> {
 }
 
 async fn finish<T, E: Display>(mut task: JoinHandle<Result<T, E>>) -> Result<T, ControlError> {
-    match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+    match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?.map_err(failure),
         Err(primary) => {
             task.abort();
@@ -109,17 +110,17 @@ async fn http_uuid_spelling_survives_stasis_entry_and_preserves_binary_identity(
                     .to_bytes(),
             )?;
             let (mut peer, _) =
-                tokio::time::timeout(Duration::from_secs(1), listener.accept())
+                Wait::Ready.bounded(listener.accept())
                     .await
                     .map_err(failure)?
                     .map_err(failure)?;
             let mut identity = [0; 19];
-            tokio::time::timeout(Duration::from_secs(1), peer.read_exact(&mut identity))
+            Wait::Ready.bounded(peer.read_exact(&mut identity))
                 .await
                 .map_err(failure)?
                 .map_err(failure)?;
             peers.push(peer);
-            let args = tokio::time::timeout(Duration::from_secs(1), async {
+            let args = Wait::Ready.bounded(async {
                 for _ in 0..16 {
                     let event = subscription
                         .events

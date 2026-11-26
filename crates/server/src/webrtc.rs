@@ -1,7 +1,7 @@
 use crate::rtp::SocketPair;
 use base64::Engine as Base64Engine;
 use rusterisk_config::Codec;
-use rusterisk_media::{MediaError, TelephoneFormat};
+use rusterisk_media::{AudioFormat, MediaError, TelephoneFormat};
 use std::{fmt, net::SocketAddr, time::Instant};
 use str0m::{
     change::{SdpAnswer, SdpOffer, SdpPendingOffer},
@@ -345,11 +345,16 @@ impl WebRtcSession {
         self.engine.rtc.is_connected()
     }
 
+    pub(crate) fn audio_format(&self) -> AudioFormat {
+        match self.codec {
+            Codec::Pcmu => AudioFormat::Pcmu,
+            Codec::Pcma => AudioFormat::Pcma,
+            Codec::Opus => AudioFormat::Opus,
+        }
+    }
+
     pub fn telephone(&self) -> Option<TelephoneFormat> {
-        let rate = match self.codec {
-            Codec::Pcmu | Codec::Pcma => 8000,
-            Codec::Opus => 48000,
-        };
+        let rate = self.audio_format().rate();
         self.telephones
             .iter()
             .find(|format| format.rate() == rate)

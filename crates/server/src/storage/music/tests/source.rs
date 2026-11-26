@@ -3,9 +3,9 @@ use crate::storage::{PreparedMusic, StoragePort, StorageWorker, WorkerError};
 use rusterisk_config::MusicOnHold;
 use rusterisk_media::Frame;
 use rusterisk_storage::{Recorder, StorageError};
+use rusterisk_test_support::Wait;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 #[tokio::test]
 async fn a_five_millisecond_track_loops_into_full_frames_without_inserting_silence(
@@ -329,12 +329,10 @@ where
             .map_err(fixture_error)?;
         let result = async {
             let catalog = port.prepare_music(classes).await.map_err(fixture_error)?;
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                check(directory.path().to_owned(), port, catalog),
-            )
-            .await
-            .map_err(|error| fixture_error(format!("music source exercise: {error}")))?
+            Wait::Ready
+                .bounded(check(directory.path().to_owned(), port, catalog))
+                .await
+                .map_err(|error| fixture_error(format!("music source exercise: {error}")))?
         }
         .await;
         finish(result, worker.close().await.map_err(fixture_error))

@@ -15,7 +15,8 @@ use hickory_resolver::proto::{
 use rsipstack::sip::HeadersExt;
 use rusterisk_config::{Protocol, RegistrarUri, TlsFiles};
 use rusterisk_sip::SipStreamDecoder;
-use std::{net::Ipv4Addr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::Ipv4Addr;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, UdpSocket},
@@ -103,14 +104,14 @@ async fn registration(identity: Identity, accepted: bool) -> Result<(), ControlE
             RData::SRV(SRV::new(0, 1, remote.port(), Name::from_ascii("edge.test.").map_err(failure)?)),
         ).await?;
         answer(&dns, "edge.test.", RecordType::A, RData::A(A(Ipv4Addr::LOCALHOST))).await?;
-        let (socket, _address) = tokio::time::timeout(Duration::from_secs(3), registrar.accept())
+        let (socket, _address) = Wait::Ready.bounded(registrar.accept())
             .await.map_err(failure)?.map_err(failure)?;
         let established = context.accept(socket).await;
         if !accepted {
             return match established {
                 Err(_) => Ok(()),
                 Ok(mut peer) => {
-                    let read = tokio::time::timeout(Duration::from_secs(1), peer.read(&mut [0; 1]))
+                    let read = Wait::Ready.bounded(peer.read(&mut [0; 1]))
                         .await.map_err(failure)?;
                     if matches!(read, Ok(0) | Err(_)) {
                         Ok(())
@@ -149,7 +150,7 @@ async fn registration(identity: Identity, accepted: bool) -> Result<(), ControlE
         {
             return Err(ControlError::Invalid("Resolved TLS refresh changed the original domain"));
         }
-        if tokio::time::timeout(Duration::from_millis(100), registrar.accept()).await.is_ok() {
+        if Wait::Quiet.bounded(registrar.accept()).await.is_ok() {
             return Err(ControlError::Invalid("Resolved TLS registration opened another flow"));
         }
         Ok(())

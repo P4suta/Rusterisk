@@ -13,6 +13,7 @@ use rusterisk_server::{
     signaling::Signaling,
     Action, ControlError, Controller, Credentials,
 };
+use rusterisk_test_support::Wait;
 use std::{future::IntoFuture, time::Duration};
 use tokio::sync::mpsc;
 
@@ -67,7 +68,7 @@ async fn configured_client_connections_preserve_authentication_and_exchange_rece
     let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
-    let result = tokio::time::timeout(Duration::from_secs(5), async {
+    let result = Wait::Ready.bounded(async {
         let credentials = Credentials::new("app".into(), "test-password".into())?;
         let mut subscription = controller.subscribe(credentials.clone(), None, "calls".into()).await?;
         let ids = [id("client-left")?, id("client-right")?];

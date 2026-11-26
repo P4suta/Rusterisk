@@ -1,16 +1,15 @@
 use super::ShutdownSignal;
+use rusterisk_test_support::Wait;
 use std::{
     fs,
     io::{self, Write},
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 const DIRECTORY: &str = "RUSTERISK_SHUTDOWN_SIGNAL_WORKER_DIRECTORY";
 const WORKER: &str = "shutdown_signal_tests::shutdown_registration_worker";
-const BUDGET: Duration = Duration::from_secs(3);
-const POLL: Duration = Duration::from_millis(5);
 
 fn combine<T>(operation: io::Result<T>, cleanup: io::Result<()>) -> io::Result<T> {
     match (operation, cleanup) {
@@ -30,25 +29,13 @@ fn marker(directory: &Path, name: &str) -> io::Result<()> {
         .write_all(b"1")
 }
 
-fn wait(child: &mut Child, budget: Duration) -> io::Result<ExitStatus> {
-    let deadline = Instant::now() + budget;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Shutdown signal worker exceeded its exit deadline",
-            ));
-        }
-        std::thread::sleep(POLL);
-    }
+fn wait(child: &mut Child) -> io::Result<ExitStatus> {
+    rusterisk_test_support::child_exit(child, Wait::Ready)
 }
 
 fn stop(child: &mut Child) -> io::Result<()> {
     let termination = child.kill();
-    let reaped = wait(child, Duration::from_secs(1)).map(|_| ());
+    let reaped = wait(child).map(|_| ());
     combine(termination, reaped)
 }
 
@@ -68,7 +55,7 @@ fn send(signal: &str, process: u32) -> io::Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
-    let operation = wait(&mut child, Duration::from_secs(1)).and_then(|status| {
+    let operation = wait(&mut child).and_then(|status| {
         if status.success() {
             Ok(())
         } else {
@@ -81,24 +68,17 @@ fn send(signal: &str, process: u32) -> io::Result<()> {
 }
 
 fn ready(child: &mut Child, directory: &Path) -> io::Result<()> {
-    let deadline = Instant::now() + BUDGET;
-    loop {
+    rusterisk_test_support::file_ready(directory, || {
         if directory.join("ready").try_exists()? {
-            return Ok(());
+            return Ok(Some(()));
         }
         if let Some(status) = child.try_wait()? {
             return Err(io::Error::other(format!(
-                "Shutdown signal worker exited before readiness: {status}"
+                "Shutdown worker exited before readiness: {status}"
             )));
         }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Shutdown signal worker exceeded its readiness deadline",
-            ));
-        }
-        std::thread::sleep(POLL);
-    }
+        Ok(None)
+    })
 }
 
 fn exercise(signal: &str, directory: &Path) -> io::Result<()> {
@@ -113,7 +93,7 @@ fn exercise(signal: &str, directory: &Path) -> io::Result<()> {
         ready(&mut child, directory)?;
         send(signal, child.id())?;
         marker(directory, "release")?;
-        let status = wait(&mut child, BUDGET)?;
+        let status = wait(&mut child)?;
         if status.success() {
             Ok(())
         } else {
@@ -169,20 +149,18 @@ async fn shutdown_registration_worker() -> io::Result<()> {
     let directory = PathBuf::from(directory);
     let mut shutdown = ShutdownSignal::register()?;
     marker(&directory, "ready")?;
-    let deadline = Instant::now() + BUDGET;
-    loop {
-        if directory.join("release").try_exists()? {
-            break;
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Shutdown signal worker was not released",
-            ));
-        }
-        std::thread::sleep(POLL);
-    }
-    tokio::time::timeout(Duration::from_secs(1), shutdown.recv())
+    let mut changes = rusterisk_test_support::DirectoryChanges::new(&directory)?;
+    Wait::Ready
+        .bounded(async {
+            while !directory.join("release").try_exists()? {
+                changes.changed().await?;
+            }
+            Ok::<(), io::Error>(())
+        })
+        .await
+        .map_err(io::Error::other)??;
+    Wait::Ready
+        .bounded(shutdown.recv())
         .await
         .map_err(|_| io::Error::other("Registered shutdown signal was lost before waiting"))??;
     Ok(())

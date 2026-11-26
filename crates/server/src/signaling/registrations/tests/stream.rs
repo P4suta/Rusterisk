@@ -6,8 +6,8 @@ use crate::{
 use rsipstack::sip::{HeadersExt, Method, Request, SipMessage};
 use rusterisk_config::Config;
 use rusterisk_sip::{SipStreamDecoder, StreamItem};
+use rusterisk_test_support::Wait;
 use sha2::{Digest, Sha256};
-use std::time::Duration;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -41,7 +41,7 @@ pub(super) fn configuration(uri: &str) -> Result<Config, ControlError> {
 }
 
 async fn finish(mut task: JoinHandle<Result<(), ControlError>>) -> Result<(), ControlError> {
-    match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+    match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?,
         Err(timeout) => {
             task.abort();
@@ -64,34 +64,35 @@ pub(super) async fn receive<S: AsyncRead + Unpin>(
     peer: &mut S,
     decoder: &mut SipStreamDecoder,
 ) -> Result<Packet, ControlError> {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        let mut byte = [0; 1];
-        loop {
-            if peer.read(&mut byte).await.map_err(failure)? == 0 {
-                return Err(ControlError::Invalid("Registrar signaling flow closed"));
-            }
-            match decoder.push(&byte).map_err(failure)?.1 {
-                Some(StreamItem::Message(bytes)) => {
-                    let source = std::str::from_utf8(&bytes).map_err(failure)?;
-                    let uri = source
-                        .split_once("\r\n")
-                        .and_then(|(line, _)| line.strip_prefix("REGISTER "))
-                        .and_then(|line| line.strip_suffix(" SIP/2.0"))
-                        .ok_or(ControlError::Invalid("Expected REGISTER request line"))?
-                        .to_owned();
-                    let SipMessage::Request(request) =
-                        SipMessage::try_from(bytes.as_slice()).map_err(failure)?
-                    else {
-                        return Err(ControlError::Invalid("Expected REGISTER request"));
-                    };
-                    return Ok(Packet { request, uri });
+    Wait::Ready
+        .bounded(async {
+            let mut byte = [0; 1];
+            loop {
+                if peer.read(&mut byte).await.map_err(failure)? == 0 {
+                    return Err(ControlError::Invalid("Registrar signaling flow closed"));
                 }
-                Some(StreamItem::Crlf) | None => {}
+                match decoder.push(&byte).map_err(failure)?.1 {
+                    Some(StreamItem::Message(bytes)) => {
+                        let source = std::str::from_utf8(&bytes).map_err(failure)?;
+                        let uri = source
+                            .split_once("\r\n")
+                            .and_then(|(line, _)| line.strip_prefix("REGISTER "))
+                            .and_then(|line| line.strip_suffix(" SIP/2.0"))
+                            .ok_or(ControlError::Invalid("Expected REGISTER request line"))?
+                            .to_owned();
+                        let SipMessage::Request(request) =
+                            SipMessage::try_from(bytes.as_slice()).map_err(failure)?
+                        else {
+                            return Err(ControlError::Invalid("Expected REGISTER request"));
+                        };
+                        return Ok(Packet { request, uri });
+                    }
+                    Some(StreamItem::Crlf) | None => {}
+                }
             }
-        }
-    })
-    .await
-    .map_err(failure)?
+        })
+        .await
+        .map_err(failure)?
 }
 
 pub(super) fn reply(request: &Request, status: u16, extra: &str) -> Result<String, ControlError> {
@@ -145,7 +146,7 @@ async fn tcp_registration_authenticates_and_refreshes_on_one_owned_flow() -> Res
     let stopped = controller.shutdown_signal();
     let task = tokio::spawn(signaling.run(stopped));
     let primary: Result<(), ControlError> = async {
-        let (mut peer, _address) = tokio::time::timeout(Duration::from_secs(3), registrar.accept()).await.map_err(failure)?.map_err(failure)?;
+        let (mut peer, _address) = Wait::Ready.bounded(registrar.accept()).await.map_err(failure)?.map_err(failure)?;
         let mut decoder = SipStreamDecoder::new();
         let initial = receive(&mut peer, &mut decoder).await?;
         let contact = format!("<sip:line@{local};transport=tcp>");
@@ -158,7 +159,7 @@ async fn tcp_registration_authenticates_and_refreshes_on_one_owned_flow() -> Res
         }
         let challenge = reply(&initial.request, 401, "WWW-Authenticate: Digest realm=\"rusterisk\", nonce=\"tcp-nonce\", algorithm=SHA-256, qop=\"auth-int\", opaque=\"tcp-opaque\"\r\n")?;
         peer.write_all(&challenge.as_bytes()[..17]).await.map_err(failure)?;
-        if tokio::time::timeout(Duration::from_millis(50), peer.read(&mut [0; 1])).await.is_ok() {
+        if Wait::Quiet.bounded(peer.read(&mut [0; 1])).await.is_ok() {
             return Err(ControlError::Invalid("Registration processed an incomplete challenge"));
         }
         peer.write_all(&challenge.as_bytes()[17..]).await.map_err(failure)?;
@@ -182,7 +183,7 @@ async fn tcp_registration_authenticates_and_refreshes_on_one_owned_flow() -> Res
         {
             return Err(ControlError::Invalid("TCP refresh changed its authenticated registration"));
         }
-        if tokio::time::timeout(Duration::from_millis(100), registrar.accept()).await.is_ok() {
+        if Wait::Quiet.bounded(registrar.accept()).await.is_ok() {
             return Err(ControlError::Invalid("Registration opened a second signaling flow"));
         }
         Ok(())

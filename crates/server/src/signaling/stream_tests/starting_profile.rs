@@ -1,4 +1,5 @@
 use super::{configuration, credentials, failure};
+use crate::signaling::calls;
 use crate::{
     media::MediaHub,
     rtp::SocketPair,
@@ -16,7 +17,8 @@ use rsipstack::sip::{
 use rusterisk_config::{Codec, Dtmf};
 use rusterisk_core::{DtmfDigit, DtmfOutbox, DtmfTiming};
 use rusterisk_sip::Session;
-use std::{net::SocketAddr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::SocketAddr;
 use tokio::{net::UdpSocket, task::JoinHandle};
 
 #[derive(Clone, Copy)]
@@ -98,16 +100,14 @@ impl Fixture {
     async fn subscribe(&mut self) -> Result<(), ControlError> {
         let controller = self.signaling.controller.clone();
         self.subscription = Some(
-            tokio::time::timeout(
-                Duration::from_secs(2),
-                self.signaling.control_until(controller.subscribe(
+            rusterisk_test_support::Wait::Ready
+                .bounded(self.signaling.control_until(controller.subscribe(
                     credentials()?,
                     None,
                     "calls".into(),
-                )),
-            )
-            .await
-            .map_err(failure)???,
+                )))
+                .await
+                .map_err(failure)???,
         );
         Ok(())
     }
@@ -128,20 +128,20 @@ impl Fixture {
                 == bytes.len(),
             "Short incoming profile SIP datagram",
         )?;
-        let packet =
-            match tokio::time::timeout(Duration::from_secs(2), self.signaling.network.next())
-                .await
-                .map_err(failure)??
-            {
-                Input::Packet(packet) => packet,
-                Input::Closed { result, .. } | Input::SetupFinished { result, .. } => {
-                    result?;
-                    return Err(ControlError::Invalid("Incoming profile flow ended"));
-                }
-                Input::Prepared(_) | Input::Upgrade(_) => {
-                    return Err(ControlError::Invalid("Unexpected incoming setup"))
-                }
-            };
+        let packet = match rusterisk_test_support::Wait::Ready
+            .bounded(self.signaling.network.next())
+            .await
+            .map_err(failure)??
+        {
+            Input::Packet(packet) => packet,
+            Input::Closed { result, .. } | Input::SetupFinished { result, .. } => {
+                result?;
+                return Err(ControlError::Invalid("Incoming profile flow ended"));
+            }
+            Input::Prepared(_) | Input::Upgrade(_) => {
+                return Err(ControlError::Invalid("Unexpected incoming setup"))
+            }
+        };
         require(
             packet.peer == self.peer.local_addr().map_err(failure)? && packet.bytes == bytes,
             "Incoming profile packet changed its source or bytes",
@@ -155,11 +155,11 @@ impl Fixture {
 
     async fn receive(&self) -> Result<SipMessage, ControlError> {
         let mut bytes = [0; rusterisk_sip::MAX_MESSAGE + 1];
-        let (length, peer) =
-            tokio::time::timeout(Duration::from_secs(2), self.peer.recv_from(&mut bytes))
-                .await
-                .map_err(failure)?
-                .map_err(failure)?;
+        let (length, peer) = rusterisk_test_support::Wait::Ready
+            .bounded(self.peer.recv_from(&mut bytes))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
         require(
             peer == self.local,
             "Incoming profile response changed its source",
@@ -213,12 +213,13 @@ impl Fixture {
             .await?;
         self.response(100).await?;
         require(
-            self.signaling.calls.len() == 1,
+            self.signaling.records.iter(calls::ACTIVE).count() == 1,
             "Incoming profile was not admitted",
         )?;
         self.signaling
-            .calls
-            .keys()
+            .records
+            .iter(calls::ACTIVE)
+            .map(|(key, _)| key)
             .next()
             .cloned()
             .ok_or(ControlError::Capacity)
@@ -341,7 +342,7 @@ impl Fixture {
 async fn joined<E: std::fmt::Display>(
     mut task: JoinHandle<Result<(), E>>,
 ) -> Result<(), ControlError> {
-    match tokio::time::timeout(Duration::from_secs(3), &mut task).await {
+    match rusterisk_test_support::Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?.map_err(failure),
         Err(primary) => {
             task.abort();
@@ -361,44 +362,45 @@ async fn exercise(admission: Admission) -> Result<(), ControlError> {
     let primary = async {
         fixture.subscribe().await?;
         phase = "authenticated admission";
-        tokio::time::timeout(Duration::from_secs(8), async {
-            let key = fixture.admit().await?;
-            phase = "adapter current settings replacement";
-            fixture.replace_current_settings()?;
-            let progress = match admission {
-                Admission::Early => {
-                    phase = "early transport from the admitted profile";
-                    let mut tasks = rusterisk_core::MediaTasks::new(key.generation);
-                    let token = tasks.reserve(rusterisk_core::MediaTaskKind::Playback)?;
-                    fixture.signaling.start_early_media(&key, token, 10)?;
-                    fixture.signaling.media_answers_for_test(10).await?;
-                    let progress = fixture.response(183).await?;
-                    fixture.starting_media(&progress)?;
-                    Some(progress)
+        rusterisk_test_support::Wait::Scenario
+            .bounded(async {
+                let key = fixture.admit().await?;
+                phase = "adapter current settings replacement";
+                fixture.replace_current_settings()?;
+                let progress = match admission {
+                    Admission::Early => {
+                        phase = "early transport from the admitted profile";
+                        let mut tasks = rusterisk_core::MediaTasks::new(key.generation);
+                        let token = tasks.reserve(rusterisk_core::MediaTaskKind::Playback)?;
+                        fixture.signaling.start_early_media(&key, token, 10)?;
+                        fixture.signaling.media_answers_for_test(10).await?;
+                        let progress = fixture.response(183).await?;
+                        fixture.starting_media(&progress)?;
+                        Some(progress)
+                    }
+                    Admission::Answer => None,
+                };
+                phase = "answer from the admitted profile";
+                fixture.signaling.answer(&key, 11).await?;
+                fixture.signaling.media_answers_for_test(11).await?;
+                let answer = fixture.response(200).await?;
+                fixture.starting_media(&answer)?;
+                if let Some(progress) = progress {
+                    require(
+                        answer.body == progress.body
+                            && answer.to_header().map_err(failure)?
+                                == progress.to_header().map_err(failure)?
+                            && answer.contact_header().map_err(failure)?
+                                == progress.contact_header().map_err(failure)?,
+                        "Answer replaced the early starting transport",
+                    )?;
                 }
-                Admission::Answer => None,
-            };
-            phase = "answer from the admitted profile";
-            fixture.signaling.answer(&key, 11).await?;
-            fixture.signaling.media_answers_for_test(11).await?;
-            let answer = fixture.response(200).await?;
-            fixture.starting_media(&answer)?;
-            if let Some(progress) = progress {
-                require(
-                    answer.body == progress.body
-                        && answer.to_header().map_err(failure)?
-                            == progress.to_header().map_err(failure)?
-                        && answer.contact_header().map_err(failure)?
-                            == progress.contact_header().map_err(failure)?,
-                    "Answer replaced the early starting transport",
-                )?;
-            }
-            phase = "admitted INFO delivery";
-            fixture.starting_digits(&key, &answer).await
-        })
-        .await
-        .map_err(failure)
-        .and_then(|result| result)
+                phase = "admitted INFO delivery";
+                fixture.starting_digits(&key, &answer).await
+            })
+            .await
+            .map_err(failure)
+            .and_then(|result| result)
     }
     .await
     .map_err(|error| failure(format!("incoming starting profile phase={phase}: {error}")));
@@ -421,36 +423,37 @@ async fn a_recording_waits_behind_the_answer_that_it_causes() -> Result<(), Cont
     fixture.signaling.storage = Some(storage);
     let primary = async {
         fixture.subscribe().await?;
-        tokio::time::timeout(Duration::from_secs(8), async {
-            let key = fixture.admit().await?;
-            fixture.replace_current_settings()?;
-            let mut tasks = rusterisk_core::MediaTasks::new(key.generation);
-            let token = tasks.reserve(rusterisk_core::MediaTaskKind::Recording)?;
-            fixture
-                .signaling
-                .effect(
-                    crate::Effect::RecordMedia {
-                        owner: crate::MediaOwner::Channel(key.clone()),
-                        token,
-                        name: rusterisk_api::ChannelId::try_from("held-recording".to_owned())?,
-                        options: Default::default(),
-                    },
-                    10,
+        Wait::Scenario
+            .bounded(async {
+                let key = fixture.admit().await?;
+                fixture.replace_current_settings()?;
+                let mut tasks = rusterisk_core::MediaTasks::new(key.generation);
+                let token = tasks.reserve(rusterisk_core::MediaTaskKind::Recording)?;
+                fixture
+                    .signaling
+                    .effect(
+                        crate::Effect::RecordMedia {
+                            owner: crate::MediaOwner::Channel(key.clone()),
+                            token,
+                            name: rusterisk_api::ChannelId::try_from("held-recording".to_owned())?,
+                            options: Default::default(),
+                        },
+                        10,
+                    )
+                    .await?;
+                require(
+                    fixture.signaling.waits(&key) && fixture.signaling.recordings.is_empty(),
+                    "The recording started before its call answered",
+                )?;
+                fixture.signaling.media_answers_for_test(11).await?;
+                require(
+                    fixture.signaling.recordings.len() == 1,
+                    "The recording did not start after the answer",
                 )
-                .await?;
-            require(
-                fixture.signaling.waits(&key) && fixture.signaling.recordings.is_empty(),
-                "The recording started before its call answered",
-            )?;
-            fixture.signaling.media_answers_for_test(11).await?;
-            require(
-                fixture.signaling.recordings.len() == 1,
-                "The recording did not start after the answer",
-            )
-        })
-        .await
-        .map_err(failure)
-        .and_then(|result| result)
+            })
+            .await
+            .map_err(failure)
+            .and_then(|result| result)
     }
     .await;
     let result = fixture.finish(primary).await;
@@ -464,7 +467,7 @@ async fn an_early_attachment_that_completes_after_a_cancel_releases_its_media(
     let mut fixture = Fixture::new().await?;
     let primary = async {
         fixture.subscribe().await?;
-        tokio::time::timeout(Duration::from_secs(8), async {
+        Wait::Scenario.bounded(async {
             let key = fixture.admit().await?;
             fixture.replace_current_settings()?;
             let mut tasks = rusterisk_core::MediaTasks::new(key.generation);
@@ -485,7 +488,7 @@ async fn an_early_attachment_that_completes_after_a_cancel_releases_its_media(
             fixture.signaling.media_answers_for_test(12).await?;
             require(
                 !matches!(
-                    fixture.signaling.calls.get(&key).map(|call| &call.media),
+                    fixture.signaling.records.get(calls::ACTIVE, &key).map(|call| &call.media),
                     Some(crate::signaling::MediaAdmission::Early(_))
                 ),
                 "A refused progress kept its early transport",
@@ -508,22 +511,16 @@ async fn an_early_attachment_that_completes_after_a_cancel_releases_its_media(
                     77,
                 )
                 .map_err(failure)?;
-            let notice = fixture
-                .signaling
-                .notices
-                .recv()
-                .await
-                .ok_or(ControlError::Capacity)?;
-            require(
-                matches!(
-                    notice,
-                    crate::media::MediaNotice::Attached {
-                        result: Ok(()),
-                        ..
-                    }
-                ),
-                "The early link outlived its refused progress",
-            )
+            loop {
+                let notice = fixture.signaling.notices.recv().await.ok_or(ControlError::Capacity)?;
+                if matches!(&notice, crate::media::MediaNotice::Released { key: released } if released == &key) {
+                    continue;
+                }
+                return require(
+                    matches!(notice, crate::media::MediaNotice::Attached { key: attached, serial: 77, result: Ok(()) } if attached == key),
+                    "The early link outlived its refused progress",
+                );
+            }
         })
         .await
         .map_err(failure)

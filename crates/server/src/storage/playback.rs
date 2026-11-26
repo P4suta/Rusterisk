@@ -51,13 +51,14 @@ enum State {
 
 struct Lease {
     lifetime: Option<oneshot::Sender<()>>,
-    port: StoragePort,
+    wake: mpsc::Sender<()>,
+    stop: tokio::sync::watch::Receiver<bool>,
 }
 
 impl Drop for Lease {
     fn drop(&mut self) {
         drop(self.lifetime.take());
-        self.port.wake();
+        super::notify(&self.wake);
     }
 }
 
@@ -91,7 +92,7 @@ impl PlaybackSource {
     }
 
     pub fn seek_sample(&mut self, sample: u64) -> Result<(), WorkerError> {
-        if !matches!(self.state, State::Active) || *self.lease.port.stop.borrow() {
+        if !matches!(self.state, State::Active) || *self.lease.stop.borrow() {
             return Err(WorkerError::Closed);
         }
         let epoch = self.epoch.checked_add(1).ok_or(WorkerError::Capacity)?;
@@ -105,12 +106,12 @@ impl PlaybackSource {
         self.epoch = epoch;
         self.position = sample;
         self.music = self.music.map(|cursor| cursor.with_sample(sample));
-        self.lease.port.wake();
+        super::notify(&self.lease.wake);
         Ok(())
     }
 
     fn packet(&mut self, packet: Packet) -> Option<Option<Frame>> {
-        self.lease.port.wake();
+        super::notify(&self.lease.wake);
         if packet.epoch != self.epoch {
             return None;
         }
@@ -228,7 +229,8 @@ impl StoragePort {
         let (lifetime, owner) = oneshot::channel();
         let lease = Lease {
             lifetime: Some(lifetime),
-            port: self.clone(),
+            wake: self.wake.clone(),
+            stop: self.stop.clone(),
         };
         let (reply, response) = oneshot::channel();
         self.send(super::Command::Play {
@@ -483,6 +485,7 @@ mod seek_tests {
         let (_stop, stop) = watch::channel(false);
         let (wake, mut wakes) = mpsc::channel(1);
         let port = StoragePort {
+            recording: mpsc::channel(1).0,
             commands,
             stored,
             stop,
@@ -521,6 +524,7 @@ mod seek_tests {
         let (_stop, stop) = watch::channel(false);
         let (wake, _wakes) = mpsc::channel(1);
         let port = StoragePort {
+            recording: mpsc::channel(1).0,
             commands,
             stored,
             stop,

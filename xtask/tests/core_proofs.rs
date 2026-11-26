@@ -7,6 +7,11 @@ const IMAGE: &str = "registry.example/core-proofs@sha256:0123456789abcdef0123456
 mod execution_profile;
 #[path = "core_proofs/settings.rs"]
 mod settings;
+const SLOT_HARNESSES: [&str; 3] = [
+    "proofs::media_release_follows_every_teardown_step",
+    "proofs::a_call_generation_releases_its_slot_once",
+    "proofs::stale_media_notices_preserve_the_reused_slot",
+];
 const TRANSFER_HARNESSES: [&str; 3] = [
     "proofs::transfer_completion_is_absorbing",
     "proofs::transfer_observations_stay_in_their_generation",
@@ -188,6 +193,7 @@ fn results_without_the_attended_contracts_are_rejected() -> Result<(), ProofErro
                 && !PAIR_HARNESSES.contains(&name)
                 && !WAKE_HARNESSES.contains(&name)
                 && !name.starts_with("proofs::settings_")
+                && !SLOT_HARNESSES.contains(&name)
         })
     });
     let count = results.len();
@@ -210,6 +216,7 @@ fn results_without_owned_pair_contracts_are_rejected() -> Result<(), ProofError>
             !PAIR_HARNESSES.contains(&name)
                 && !WAKE_HARNESSES.contains(&name)
                 && !name.starts_with("proofs::settings_")
+                && !SLOT_HARNESSES.contains(&name)
         })
     });
     let count = results.len();
@@ -230,7 +237,7 @@ fn results_without_the_wake_contracts_are_rejected() -> Result<(), ProofError> {
     results.retain(|result| {
         result["harness_id"]
             .as_str()
-            .is_some_and(|name| !WAKE_HARNESSES.contains(&name))
+            .is_some_and(|name| !WAKE_HARNESSES.contains(&name) && !SLOT_HARNESSES.contains(&name))
     });
     let count = results.len();
     for field in ["total_harnesses", "executed", "successful"] {
@@ -254,6 +261,7 @@ fn results_for_only_the_original_six_contracts_are_rejected() -> Result<(), Proo
                 && !PAIR_HARNESSES.contains(&name)
                 && !WAKE_HARNESSES.contains(&name)
                 && !name.starts_with("proofs::settings_")
+                && !SLOT_HARNESSES.contains(&name)
         })
     });
     let count = results.len();

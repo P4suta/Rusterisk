@@ -1,7 +1,4 @@
-use rusterisk_client::{
-    api::{Bridge, ChannelId, InfoSection},
-    Client, Error,
-};
+use rusterisk_client::{api::InfoSection, Bridge, BridgeId, Client, Error};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug)]
@@ -123,7 +120,7 @@ enum Reservation {
     Attempted,
 }
 
-fn bridge_matches(bridge: &Bridge, identifier: &ChannelId) -> bool {
+fn bridge_matches(bridge: &Bridge, identifier: &BridgeId) -> bool {
     bridge.id == *identifier
         && bridge.name == "SDK distribution consumer"
         && bridge.channels.is_empty()
@@ -132,7 +129,7 @@ fn bridge_matches(bridge: &Bridge, identifier: &ChannelId) -> bool {
 async fn operation(
     client: &Client,
     version: &str,
-    identifier: &ChannelId,
+    identifier: &BridgeId,
     reservation: &mut Reservation,
 ) -> Result<(), Failure> {
     let ping = client
@@ -200,7 +197,7 @@ async fn operation(
     Ok(())
 }
 
-async fn cleanup(client: &Client, identifier: &ChannelId) -> Result<(), Failure> {
+async fn cleanup(client: &Client, identifier: &BridgeId) -> Result<(), Failure> {
     match client.destroy_bridge(identifier).await {
         Ok(()) | Err(Error::Api { status: 404, .. }) => {}
         Err(error) => return Err(Failure::request(Operation::Delete, error)),
@@ -223,7 +220,7 @@ async fn cleanup(client: &Client, identifier: &ChannelId) -> Result<(), Failure>
 pub async fn verify(
     client: &Client,
     version: &str,
-    identifier: &ChannelId,
+    identifier: &BridgeId,
 ) -> Result<(), HttpContractError> {
     let mut reservation = Reservation::Unclaimed;
     let operation = match tokio::time::timeout(

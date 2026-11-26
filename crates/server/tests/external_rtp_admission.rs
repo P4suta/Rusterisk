@@ -1,10 +1,10 @@
 use rusterisk_api::{Channel, ChannelId, ExternalRtpTarget, StaticRtpCodec};
 use rusterisk_config::Config;
 use rusterisk_server::{Action, ControlError, Controller, Credentials, Effect, Signal};
+use rusterisk_test_support::Wait;
 use std::{
     future::{poll_fn, Future},
     task::Poll,
-    time::Duration,
 };
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -62,7 +62,8 @@ async fn abandoned_external_requests_release_their_generation_and_reject_late_co
             );
             key
         };
-        let released = tokio::time::timeout(Duration::from_secs(1), effects.recv())
+        let released = Wait::Ready
+            .bounded(effects.recv())
             .await
             .map_err(failure)?
             .ok_or(ControlError::Capacity)?;
@@ -84,7 +85,8 @@ async fn abandoned_external_requests_release_their_generation_and_reject_late_co
                 result: Ok("127.0.0.1:10000".parse().map_err(failure)?),
             })
             .await?;
-        let released = tokio::time::timeout(Duration::from_secs(1), effects.recv())
+        let released = Wait::Ready
+            .bounded(effects.recv())
             .await
             .map_err(failure)?
             .ok_or(ControlError::Capacity)?;
@@ -98,9 +100,7 @@ async fn abandoned_external_requests_release_their_generation_and_reject_late_co
                 result: Ok("127.0.0.1:10002".parse().map_err(failure)?),
             })
             .await?;
-        let response = tokio::time::timeout(Duration::from_secs(1), replacement)
-            .await
-            .map_err(failure)??;
+        let response = Wait::Ready.bounded(replacement).await.map_err(failure)??;
         let channel: Channel =
             serde_json::from_value(response.body.ok_or(ControlError::Capacity)?)?;
         assert_eq!(
@@ -158,9 +158,7 @@ async fn external_replies_wait_for_transport_variables_while_other_requests_prog
                 result: Ok("127.0.0.1:10000".parse().map_err(failure)?),
             })
             .await?;
-        let response = tokio::time::timeout(Duration::from_secs(1), request)
-            .await
-            .map_err(failure)??;
+        let response = Wait::Ready.bounded(request).await.map_err(failure)??;
         let channel: Channel =
             serde_json::from_value(response.body.ok_or(ControlError::Capacity)?)?;
         assert_eq!(
@@ -186,9 +184,7 @@ async fn external_replies_wait_for_transport_variables_while_other_requests_prog
             })
             .await?;
         assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(1), rejected)
-                .await
-                .map_err(failure)?,
+            Wait::Ready.bounded(rejected).await.map_err(failure)?,
             Err(ControlError::Capacity)
         ));
         let released = effects.recv().await.ok_or(ControlError::Capacity)?;

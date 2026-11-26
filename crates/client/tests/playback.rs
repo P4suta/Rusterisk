@@ -1,12 +1,12 @@
 use rusterisk_client::{
-    api::{ChannelId, MediaUri, Playback, PlaybackState, SoundId},
-    Client, Error,
+    api::{ChannelId, MediaUri, PlaybackState, SoundId},
+    Client, Error, Playback,
 };
 use std::{collections::BTreeMap, future::IntoFuture};
 
 fn playback(target: &str) -> Result<Playback, Error> {
     Ok(Playback {
-        id: ChannelId::try_from("announcement".to_owned())?,
+        id: rusterisk_client::PlaybackId::try_from("announcement".to_owned())?,
         media_uri: "sound:digits/one".into(),
         next_media_uri: None,
         target_uri: target.into(),
@@ -48,7 +48,8 @@ async fn playback_methods_use_public_paths_and_preserve_sound_names_and_language
     let result = async {
         let client = Client::new(&format!("http://{address}"), "app", "password")?;
         let target = ChannelId::try_from("phone".to_owned())?;
-        let id = ChannelId::try_from("announcement".to_owned())?;
+        let bridge_id = rusterisk_client::BridgeId::try_from("phone".to_owned())?;
+        let id = rusterisk_client::PlaybackId::try_from("announcement".to_owned())?;
         let language = ChannelId::try_from("ja".to_owned())?;
         let media = MediaUri::Sound(
             SoundId::try_from("digits/one".to_owned())
@@ -62,7 +63,7 @@ async fn playback_methods_use_public_paths_and_preserve_sound_names_and_language
         );
         assert_eq!(
             client
-                .play_bridge(&target, &id, &media, Some(&language))
+                .play_bridge(&bridge_id, &id, &media, Some(&language))
                 .await?,
             playback("bridge:phone")?
         );

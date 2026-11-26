@@ -7,6 +7,7 @@ use rusterisk_server::{
     signaling::Signaling,
     Action, ControlError, Controller, Credentials,
 };
+use rusterisk_test_support::Wait;
 use std::{future::IntoFuture, time::Duration};
 use tokio::sync::mpsc;
 
@@ -49,7 +50,7 @@ async fn refused_protocol(wrong: bool) -> Result<(), ControlError> {
     let signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
-    let result = tokio::time::timeout(Duration::from_secs(2), async {
+    let result = Wait::Ready.bounded(async {
         let credentials = Credentials::new("app".into(), "test-password".into())?;
         let _subscription = controller.subscribe(credentials.clone(), None, "calls".into()).await?;
         let id = ChannelId::try_from("refused".to_owned())?;

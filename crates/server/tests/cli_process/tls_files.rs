@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use super::run;
+use rusterisk_test_support::Wait;
 use std::{
     ffi::OsStr,
     fs::{self, OpenOptions},
@@ -8,8 +9,7 @@ use std::{
     net::{TcpListener, UdpSocket},
     os::unix::fs::FileTypeExt,
     path::Path,
-    process::{Child, Command, ExitStatus, Stdio},
-    time::{Duration, Instant},
+    process::{Child, Command, Stdio},
 };
 
 fn verify(condition: bool, message: impl std::fmt::Display) -> io::Result<()> {
@@ -46,22 +46,6 @@ fn read(path: &Path) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn wait(child: &mut Child, deadline: Instant) -> io::Result<ExitStatus> {
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "mkfifo fixture setup exceeded two seconds",
-            ));
-        }
-        std::thread::sleep(remaining.min(Duration::from_millis(5)));
-    }
-}
-
 fn kill(child: &mut Child) -> io::Result<()> {
     match child.kill() {
         Ok(()) => Ok(()),
@@ -91,13 +75,7 @@ fn fifo(path: &Path) -> io::Result<()> {
         .stdout(output)
         .stderr(diagnostic)
         .spawn()?;
-    let deadline = Instant::now()
-        .checked_add(Duration::from_secs(2))
-        .ok_or_else(|| io::Error::other("mkfifo fixture deadline overflow"));
-    let operation = match deadline {
-        Ok(deadline) => wait(&mut child, deadline),
-        Err(error) => Err(error),
-    };
+    let operation = rusterisk_test_support::child_exit(&mut child, Wait::Ready);
     let stopped = if operation.is_err() {
         kill(&mut child)
     } else {

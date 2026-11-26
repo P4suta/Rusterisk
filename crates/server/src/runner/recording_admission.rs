@@ -86,6 +86,7 @@ impl Runner {
             | Signal::DtmfFinished { .. }
             | Signal::DtmfReceived { .. }
             | Signal::Milestone { .. }
+            | Signal::MediaReleased { .. }
             | Signal::Terminated { .. } => None,
             Signal::ExternalRtpAdmitted { .. } => None,
             Signal::AudioSocketAdmitted { .. } => None,
@@ -369,11 +370,11 @@ mod tests {
         runner
             .drain_effects(tokio::time::Instant::now() + std::time::Duration::from_secs(2))
             .await?;
-        let (releases, bridges, cancellations, recordings) =
-            tokio::time::timeout(std::time::Duration::from_secs(2), drain)
-                .await
-                .map_err(|error| ControlError::Adapter(error.to_string()))?
-                .map_err(|error| ControlError::Adapter(error.to_string()))??;
+        let (releases, bridges, cancellations, recordings) = rusterisk_test_support::Wait::Ready
+            .bounded(drain)
+            .await
+            .map_err(|error| ControlError::Adapter(error.to_string()))?
+            .map_err(|error| ControlError::Adapter(error.to_string()))??;
         assert_eq!((releases, bridges, cancellations), (64, 64, 64));
         for mut reply in replies {
             assert!(matches!(

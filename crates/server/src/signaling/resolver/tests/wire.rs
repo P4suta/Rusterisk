@@ -6,7 +6,7 @@ use hickory_resolver::{
 };
 use rusterisk_config::Protocol;
 use rusterisk_sip::StaticTarget;
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tokio::net::UdpSocket;
 
 fn resolver(socket: &UdpSocket) -> Result<DestinationResolver, ControlError> {
@@ -41,11 +41,11 @@ async fn deadlines_and_cancellation_release_each_query_socket() -> Result<(), Co
             StaticTarget::from_uri(Protocol::Tcp, "sip:phone@peer.test:5070").map_err(failure)?;
         let job = tokio::spawn(async move { query_resolver.resolve(&target).await });
         let mut bytes = [0; 2048];
-        let (size, source) =
-            tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))
-                .await
-                .map_err(failure)?
-                .map_err(failure)?;
+        let (size, source) = Wait::Ready
+            .bounded(socket.recv_from(&mut bytes))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
         let request = Message::from_vec(&bytes[..size]).map_err(failure)?;
         assert!(size <= 1232);
         assert_eq!(
@@ -53,7 +53,8 @@ async fn deadlines_and_cancellation_release_each_query_socket() -> Result<(), Co
             1232
         );
         match end {
-            QueryEnd::Deadline => assert!(tokio::time::timeout(Duration::from_millis(1500), job)
+            QueryEnd::Deadline => assert!(Wait::Ready
+                .bounded(job)
                 .await
                 .map_err(failure)?
                 .map_err(failure)?
@@ -78,7 +79,8 @@ async fn impossible_answer_counts_fail_within_the_query_deadline() -> Result<(),
         StaticTarget::from_uri(Protocol::Udp, "sip:phone@peer.test:5070").map_err(failure)?;
     let job = tokio::spawn(async move { resolver.resolve(&target).await });
     let mut bytes = [0; 2048];
-    let (size, source) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))
+    let (size, source) = Wait::Ready
+        .bounded(socket.recv_from(&mut bytes))
         .await
         .map_err(failure)?
         .map_err(failure)?;
@@ -98,7 +100,8 @@ async fn impossible_answer_counts_fail_within_the_query_deadline() -> Result<(),
         socket.send_to(&response, source).await.map_err(failure)?,
         response.len()
     );
-    assert!(tokio::time::timeout(Duration::from_millis(1500), job)
+    assert!(Wait::Ready
+        .bounded(job)
         .await
         .map_err(failure)?
         .map_err(failure)?

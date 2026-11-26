@@ -1,3 +1,4 @@
+mod calls;
 use crate::clock::Clock;
 use crate::media::{MediaNotice, MediaNotices, MediaPort, Order, Reservation};
 use crate::rtp::SocketPair;
@@ -13,7 +14,7 @@ use rusterisk_media::{AudioTarget, Gate};
 use rusterisk_sip::{
     Datagram, DatagramOrigin, Engine, Outbound, Output, RejectReason, SipEvent, StreamFlowId,
 };
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 
 use tokio::sync::watch;
@@ -131,6 +132,7 @@ impl Received {
 type PlaybackResult = (MediaOwner, MediaTaskToken, Result<(), ControlError>);
 
 pub struct Signaling {
+    records: crate::call_records::CallRecords<calls::Resources>,
     config: Config,
     native_profiles: crate::call_profiles::BoundNativeProfiles,
     startup_native_profiles: crate::call_profiles::BoundNativeProfiles,
@@ -146,18 +148,12 @@ pub struct Signaling {
     network: transport::Network,
     registrations: registrations::Registrations,
     registration_paced: u64,
-    native_pending: BTreeMap<CallKey, outbound::Pending>,
     native_jobs: JoinSet<outbound::Completion>,
     resolver: Result<resolver::DestinationResolver, ControlError>,
     resolution_cache: resolver::ResolutionCache,
-    calls: BTreeMap<CallKey, Active>,
-    pending: BTreeMap<CallKey, Pending>,
     media_serial: u64,
     refer_routes: BTreeMap<(usize, rusterisk_sip::ReferKey), refer_routes::ReferRoute>,
-    external_media: BTreeSet<CallKey>,
-    stream_admissions: BTreeMap<CallKey, external_media::PendingStream>,
     stream_jobs: JoinSet<external_media::StreamCompletion>,
-    websocket_admissions: BTreeMap<CallKey, websocket::PendingWebSocket>,
     websocket_jobs: JoinSet<websocket::Completion>,
     websocket_clients: websocket::PreparedClients,
     storage: Option<StoragePort>,
@@ -372,18 +368,17 @@ impl Signaling {
             network,
             registrations,
             registration_paced: 0,
-            native_pending: BTreeMap::new(),
+            records: crate::call_records::CallRecords::new(),
+
             native_jobs: JoinSet::new(),
             resolver: resolver::DestinationResolver::system(),
             resolution_cache: resolver::ResolutionCache::default(),
-            calls: BTreeMap::new(),
-            pending: BTreeMap::new(),
+
             media_serial: 0,
             refer_routes: BTreeMap::new(),
-            external_media: BTreeSet::new(),
-            stream_admissions: BTreeMap::new(),
+
             stream_jobs: JoinSet::new(),
-            websocket_admissions: BTreeMap::new(),
+
             websocket_jobs: JoinSet::new(),
             websocket_clients,
             storage: None,
@@ -429,6 +424,7 @@ impl Signaling {
     async fn notify(&mut self, signal: Signal) -> Result<(), ControlError> {
         if !self.controller.is_stopping() {
             let now = self.controller.clock().now_ms()?;
+            self.control.activity.control.turn(false, 0);
             self.control.apply_signal(signal, now)?;
         }
         Ok(())
@@ -464,7 +460,7 @@ impl Signaling {
                     return Err(ControlError::Invalid("Expected one direction answer"));
                 }
                 let datagram = datagrams.pop().ok_or(ControlError::Capacity)?;
-                if let Some(call) = self.calls.get_mut(&key) {
+                if let Some(call) = self.records.get_mut(calls::ACTIVE, &key) {
                     if call.direction_reply.is_some() {
                         return Err(ControlError::Conflict("Media negotiation already pending"));
                     }
@@ -476,11 +472,15 @@ impl Signaling {
             }
         }
         datagrams.retain(|packet| {
-            !self.calls.values().any(|call| {
-                call.direction_reply
-                    .as_ref()
-                    .is_some_and(|reply| reply.transmission.matches(listener, packet))
-            })
+            !self
+                .records
+                .iter(calls::ACTIVE)
+                .map(|(_, value)| value)
+                .any(|call| {
+                    call.direction_reply
+                        .as_ref()
+                        .is_some_and(|reply| reply.transmission.matches(listener, packet))
+                })
         });
         self.transmit(listener, datagrams).await?;
         for event in output.events {
@@ -501,8 +501,9 @@ impl Signaling {
             | SipEvent::Answered { id, generation, .. }
             | SipEvent::Ended { id, generation, .. } => key(id.clone(), *generation).map(Some),
             SipEvent::IncomingEnded { id, .. } => Ok(self
-                .pending
-                .keys()
+                .records
+                .iter(calls::MEDIA)
+                .map(|(key, _)| key)
                 .find(|key| key.id.as_str() == id)
                 .cloned()),
             SipEvent::ReferSubscriptionEnded { .. }
@@ -646,7 +647,7 @@ impl Signaling {
                                     release,
                                 },
                                 now,
-                            );
+                            )?;
                         }
                         Ok(AnsweredAttachment::Missing) => {
                             let output = self.listeners[listener]
@@ -719,7 +720,12 @@ impl Signaling {
                     }
                 }
                 SipEvent::IncomingEnded { id, cause } => {
-                    let key = self.calls.keys().find(|key| key.id.as_str() == id).cloned();
+                    let key = self
+                        .records
+                        .iter(calls::ACTIVE)
+                        .map(|(key, _)| key)
+                        .find(|key| key.id.as_str() == id)
+                        .cloned();
                     if let Some(key) = key {
                         self.notify(Signal::Terminated { key, cause }).await?;
                     }
@@ -734,10 +740,10 @@ impl Signaling {
         listener: usize,
         incoming: IncomingCall,
     ) -> Result<(CallKey, PeerMediaDirection), ControlError> {
-        if self.calls.len()
-            + self.external_media.len()
-            + self.stream_admissions.len()
-            + self.websocket_admissions.len()
+        if self.records.iter(calls::ACTIVE).count()
+            + self.records.iter(calls::EXTERNAL).count()
+            + self.records.iter(calls::STREAM).count()
+            + self.records.iter(calls::WEBSOCKET).count()
             >= 64
         {
             return Err(ControlError::Capacity);
@@ -761,7 +767,8 @@ impl Signaling {
         );
         let now = self.controller.clock().now_ms()?;
         let key = self.control.incoming_call(incoming, now)??;
-        self.calls.insert(
+        self.records.insert(
+            calls::ACTIVE,
             key.clone(),
             Active {
                 listener,
@@ -769,7 +776,7 @@ impl Signaling {
                 digits: DigitDelivery::new(dtmf),
                 direction_reply: None,
             },
-        );
+        )?;
         Ok((key, direction))
     }
 
@@ -801,10 +808,10 @@ impl Signaling {
         flow: Option<StreamFlowId>,
         now: u64,
     ) -> Result<(), ControlError> {
-        if self.calls.len()
-            + self.external_media.len()
-            + self.stream_admissions.len()
-            + self.websocket_admissions.len()
+        if self.records.iter(calls::ACTIVE).count()
+            + self.records.iter(calls::EXTERNAL).count()
+            + self.records.iter(calls::STREAM).count()
+            + self.records.iter(calls::WEBSOCKET).count()
             >= 64
         {
             return Err(ControlError::Capacity);
@@ -887,7 +894,8 @@ impl Signaling {
             .map_err(failure)?;
             (MediaAdmission::Rtp(sockets), output)
         };
-        self.calls.insert(
+        self.records.insert(
+            calls::ACTIVE,
             key,
             Active {
                 listener,
@@ -895,7 +903,7 @@ impl Signaling {
                 digits: DigitDelivery::new(dtmf),
                 direction_reply: None,
             },
-        );
+        )?;
         self.output(listener, output, now).await
     }
 
@@ -953,7 +961,7 @@ impl Signaling {
                 }
             }
             Effect::ReserveWebSocket { key } => {
-                self.external_media.insert(key.clone());
+                self.records.insert(calls::EXTERNAL, key.clone(), ())?;
                 self.notify(Signal::DtmfReady {
                     key,
                     events: u16::MAX,
@@ -977,7 +985,7 @@ impl Signaling {
                             release.serial,
                             Waiting::External { local, release },
                             now,
-                        );
+                        )?;
                     }
                     Err(error) => {
                         self.notify(Signal::ExternalRtpAdmitted {
@@ -1006,10 +1014,10 @@ impl Signaling {
                 self.order(Order::EndRecording { token, mode })?
             }
             Effect::Dtmf { key, command } => {
-                if self.external_media.contains(&key)
+                if self.records.get(calls::EXTERNAL, &key).is_some()
                     || self
-                        .calls
-                        .get(&key)
+                        .records
+                        .get(calls::ACTIVE, &key)
                         .is_some_and(|call| matches!(call.digits, DigitDelivery::Media))
                 {
                     match self.media.send_sequence(key.clone(), command) {
@@ -1026,8 +1034,8 @@ impl Signaling {
                     return Ok(());
                 }
                 if let Some(queue) = self
-                    .calls
-                    .get_mut(&key)
+                    .records
+                    .get_mut(calls::ACTIVE, &key)
                     .and_then(|call| call.digits.queue_mut())
                 {
                     if queue.iter().any(|pending| pending.token == command.token) {
@@ -1074,7 +1082,7 @@ impl Signaling {
                     Err(error) => return self.direction_applied(key, direction, Err(error)).await,
                 };
                 self.order(order)?;
-                self.pend(key, serial, Waiting::Direction { direction }, now);
+                self.pend(key, serial, Waiting::Direction { direction }, now)?;
             }
             Effect::Answer { key } => {
                 if let Err(error) = self.answer(&key, now).await {
@@ -1083,7 +1091,7 @@ impl Signaling {
                 }
             }
             Effect::Ring { key } => {
-                if let Some(call) = self.calls.get(&key) {
+                if let Some(call) = self.records.get(calls::ACTIVE, &key) {
                     let listener = call.listener;
                     if self.listeners[listener]
                         .engine
@@ -1104,7 +1112,9 @@ impl Signaling {
                 caller,
                 settings,
             } => {
-                if self.calls.contains_key(&key) || self.native_pending.contains_key(&key) {
+                if self.records.get(calls::ACTIVE, &key).is_some()
+                    || self.records.get(calls::NATIVE, &key).is_some()
+                {
                     return Ok(());
                 }
                 let capsule = self.control.native_profile(&key, settings);
@@ -1187,14 +1197,14 @@ impl Signaling {
                 .map_err(failure)?,
             Effect::Release { key } => {
                 self.cancel_native(&key);
-                if let Some(pending) = self.websocket_admissions.remove(&key) {
+                if let Some(pending) = self.records.remove(calls::WEBSOCKET, &key) {
                     pending.cancel.send_replace(true);
                 }
-                if let Some(pending) = self.stream_admissions.remove(&key) {
+                if let Some(pending) = self.records.remove(calls::STREAM, &key) {
                     pending.cancel.send_replace(true);
                 }
-                self.external_media.remove(&key);
-                if let Some(call) = self.calls.remove(&key) {
+                self.records.remove(calls::EXTERNAL, &key);
+                if let Some(call) = self.records.remove(calls::ACTIVE, &key) {
                     let output = self.terminate(call.listener, &key, now).map_err(failure)?;
                     self.transmit(call.listener, output.datagrams).await?;
                 }
@@ -1286,7 +1296,9 @@ impl Signaling {
             Ok(selection) => selection,
             Err(error) => return self.music_failed(owner, token, error).await,
         };
-        if !self.calls.contains_key(&key) && !self.external_media.contains(&key) {
+        if !self.records.get(calls::ACTIVE, &key).is_some()
+            && !self.records.get(calls::EXTERNAL, &key).is_some()
+        {
             return self
                 .music_failed(
                     owner,
@@ -1354,7 +1366,8 @@ impl Signaling {
     ) -> Result<(), ControlError> {
         let available = match &owner {
             MediaOwner::Channel(key) => {
-                self.calls.contains_key(key) || self.external_media.contains(key)
+                self.records.get(calls::ACTIVE, key).is_some()
+                    || self.records.get(calls::EXTERNAL, key).is_some()
             }
             MediaOwner::Bridge { .. } => true,
         };
@@ -1427,7 +1440,7 @@ impl Signaling {
     }
 
     async fn answer(&mut self, key: &CallKey, now: u64) -> Result<(), ControlError> {
-        if self.external_media.contains(key) {
+        if self.records.get(calls::EXTERNAL, key).is_some() {
             return Ok(());
         }
         let Some((listener, output)) = self.incoming_answer(key, now)? else {
@@ -1455,8 +1468,9 @@ impl Signaling {
             wake.earliest(listener.engine.wake())
         });
         let digits = self
-            .calls
-            .values()
+            .records
+            .iter(calls::ACTIVE)
+            .map(|(_, value)| value)
             .fold(engines, |wake, call| wake.earliest(call.digits.wake()));
         digits
             .earliest(self.pending_wake())
@@ -1483,9 +1497,14 @@ impl Signaling {
     }
 
     async fn digit_tick(&mut self, now: u64) -> Result<(), ControlError> {
-        let keys: Vec<_> = self.calls.keys().cloned().collect();
+        let keys: Vec<_> = self
+            .records
+            .iter(calls::ACTIVE)
+            .map(|(key, _)| key)
+            .cloned()
+            .collect();
         for key in keys {
-            let Some(call) = self.calls.get_mut(&key) else {
+            let Some(call) = self.records.get_mut(calls::ACTIVE, &key) else {
                 continue;
             };
             let Some(command) = call.digits.queue_mut().and_then(|queue| queue.front_mut()) else {
@@ -1512,8 +1531,8 @@ impl Signaling {
                 }
             }
             if finished {
-                self.calls
-                    .get_mut(&key)
+                self.records
+                    .get_mut(calls::ACTIVE, &key)
                     .ok_or(ControlError::Capacity)?
                     .digits
                     .queue_mut()
@@ -1549,9 +1568,12 @@ impl Signaling {
                 return Err(error);
             }
             decisions.settled(before, self.control.wake()?, now);
-            let timer = overdue
-                .timer(self.wake(clock.now_ms()?))
-                .earliest(decisions.timer(self.control.wake()?));
+            let signaling_timer = overdue.timer(self.wake(clock.now_ms()?));
+            let control_timer = decisions.timer(self.control.wake()?);
+            let timer = signaling_timer.earliest(control_timer);
+            let mut signaling_work = true;
+            let mut signaling_late = false;
+            let mut drops = 0;
             before = self.control.wake()?;
             let (prepared, commands) = match &mut self.publication {
                 Some(publication) => (
@@ -1574,6 +1596,7 @@ impl Signaling {
                 },
                 changed = stop.changed() => if changed.is_err() || *stop.borrow() { break; },
                 input = self.control.next() => {
+                    signaling_work = false;
                     let now = clock.now_ms()?;
                     if self.control.handle(input, now)? == Flow::Stop { break; }
                 },
@@ -1585,7 +1608,10 @@ impl Signaling {
                             self.network.admit_upgrade(request, &self.config.origins, admitting);
                         },
                         transport::Input::Packet(packet) => {
-                            if self.registration_received(&packet, now) { continue; }
+                            if self.registration_received(&packet, now) {
+                                self.control.activity.signaling.turn(false, 0);
+                                continue;
+                            }
                             let engine = &mut self.listeners[packet.listener].engine;
                             let output = match packet.route().flow()? {
                                 Some(flow) => engine.receive_on_flow(&packet.bytes, packet.peer, flow, now),
@@ -1594,6 +1620,7 @@ impl Signaling {
                             match output {
                             Ok(output) => self.output(packet.listener, output, now).await?,
                             Err(error) => {
+                                drops = 1;
                                 self.network.refuse(packet.route());
                                 tracing::debug!(transport = %self.listeners[packet.listener].name, %error, "signaling input refused");
                             }
@@ -1617,26 +1644,27 @@ impl Signaling {
                 }
                 notice = self.notices.recv() => match notice {
                     Some(MediaNotice::Answer { key }) => {
-                        if let Some(pending) = self.websocket_admissions.get_mut(&key) { pending.answered = true; }
+                        if let Some(pending) = self.records.get_mut(calls::WEBSOCKET, &key) { pending.answered = true; }
                         else { self.notify(Signal::Milestone { key, milestone: Milestone::Answered }).await?; }
                     },
                     Some(MediaNotice::DtmfFinished { key, token }) => self.notify(Signal::DtmfFinished { key, token }).await?,
                     Some(MediaNotice::Dtmf { key, tone }) => self.notify(Signal::DtmfReceived { key, digit: tone.digit, duration_ms: tone.duration_ms }).await?,
                     Some(MediaNotice::Connected { key }) => {
-                        if let Some(pending) = self.stream_admissions.get_mut(&key) { pending.received = true; }
-                        else if let Some(pending) = self.websocket_admissions.get_mut(&key) { pending.received = true; }
+                        if let Some(pending) = self.records.get_mut(calls::STREAM, &key) { pending.received = true; }
+                        else if let Some(pending) = self.records.get_mut(calls::WEBSOCKET, &key) { pending.received = true; }
                         else { self.notify(Signal::Milestone { key, milestone: Milestone::MediaConnected }).await?; }
                     },
+                    Some(MediaNotice::Released { key }) => self.notify(Signal::MediaReleased { key }).await?,
                     Some(MediaNotice::Stopped { key, result }) => {
-                        if let Some(pending) = self.websocket_admissions.remove(&key) {
+                        if let Some(pending) = self.records.remove(calls::WEBSOCKET, &key) {
                             pending.cancel.send_replace(true);
                             self.notify(Signal::WebSocketAdmitted { key: key.clone(), result: Err(ControlError::Adapter("WebSocket ended during admission".into())) }).await?;
                         }
-                        if let Some(pending) = self.stream_admissions.remove(&key) {
+                        if let Some(pending) = self.records.remove(calls::STREAM, &key) {
                             pending.cancel.send_replace(true);
                             self.notify(Signal::AudioSocketAdmitted { key: key.clone(), result: Err(ControlError::Adapter("AudioSocket ended during admission".into())) }).await?;
                         }
-                        self.external_media.remove(&key);
+                        self.records.remove(calls::EXTERNAL, &key);
                         if let Err(error) = result { tracing::warn!(channel = %key.id.as_str(), generation = key.generation, %error, "media stopped"); }
                         self.notify(Signal::Terminated { key, cause: 16 }).await?;
                     }
@@ -1682,10 +1710,18 @@ impl Signaling {
                 },
                 () = clock.reached(timer) => {
                     let now = clock.now_ms()?;
+                    if due(control_timer, now) {
+                        self.control.activity.control.deadline(control_timer, now);
+                    }
+                    signaling_work = due(signaling_timer, now);
+                    signaling_late = matches!(signaling_timer, Wake::At(at) if at != 0 && now > at);
                     let before = self.wake(now);
                     self.turn(now, clock).await?;
                     overdue.settled(before, self.wake(now), now);
                 }
+            }
+            if signaling_work {
+                self.control.activity.signaling.turn(signaling_late, drops);
             }
         }
         Ok(())
@@ -1783,7 +1819,7 @@ impl Signaling {
         cleanup = cleanup::combine(cleanup, self.finish_native().await);
         cleanup = cleanup::combine(cleanup, self.finish_streams().await);
         cleanup = cleanup::combine(cleanup, self.finish_websockets().await);
-        for (key, call) in std::mem::take(&mut self.calls) {
+        for (key, call) in self.records.drain(calls::ACTIVE) {
             let listener = call.listener;
             drop(call);
             match self.terminate(listener, &key, now) {

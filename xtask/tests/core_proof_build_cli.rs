@@ -18,7 +18,7 @@ fn proof_image_preview_uses_no_daemon_and_reports_owned_limits() -> Result<(), s
         "--pids-limit=256",
         "budget=900s",
         "containers/core-proofs",
-        "rusterisk-core-proofs:kani-0.68.0",
+        "rusterisk-core-proofs:kani-0.68.0-1bf25ce3",
         "docker buildx rm --force rusterisk-core-proofs-preview",
     ] {
         assert!(source.contains(expected), "{expected}");

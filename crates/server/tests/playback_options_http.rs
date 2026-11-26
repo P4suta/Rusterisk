@@ -6,7 +6,7 @@ use rusterisk_server::{
     http::router, ControlError, Controller, Credentials, IncomingCall, IncomingTarget, Milestone,
     Signal,
 };
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tower::ServiceExt;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -41,7 +41,7 @@ async fn playback_timing_validates_before_admission_and_preserves_both_target_op
     .map_err(failure)?;
     let (controller, runner, mut effects) = Controller::new(config, 4);
     let task = tokio::spawn(runner.run());
-    let operation = tokio::time::timeout(Duration::from_secs(3), async {
+    let operation = Wait::Ready.bounded(async {
         let _subscription = controller
             .subscribe(
                 Credentials::new("app".into(), "password".into())?,

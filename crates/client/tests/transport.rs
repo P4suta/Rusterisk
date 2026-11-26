@@ -25,7 +25,7 @@ fn client_settings_reject_credential_urls_and_insecure_external_management() {
 #[tokio::test]
 async fn request_limits_are_checked_before_connecting_to_the_server() -> Result<(), Error> {
     let client = Client::new("http://127.0.0.1:9", "app", "password")?;
-    let id = ChannelId::try_from("conversation".to_owned())?;
+    let id = rusterisk_client::BridgeId::try_from("conversation".to_owned())?;
     for name in ["A".repeat(4097), "&".repeat(1400)] {
         assert!(matches!(
             client.create_bridge(&id, &name).await,
@@ -119,12 +119,12 @@ async fn typed_client_authenticates_and_roundtrips_server_resources() -> Result<
             client.application("../calls").await,
             Err(Error::Id(_))
         ));
-        let id = ChannelId::try_from("conversation".to_owned())?;
+        let id = rusterisk_client::BridgeId::try_from("conversation".to_owned())?;
         let bridge = client.create_bridge(&id, "Conversation").await?;
         assert_eq!(bridge.id, id);
         assert_eq!(client.bridge(&id).await?, bridge);
         assert_eq!(client.bridges().await?, [bridge]);
-        let source = rusterisk_client::api::EventSource::Bridge(id.clone());
+        let source = rusterisk_client::api::EventSource::from(id.clone());
         let subscribed = client
             .subscribe_resources("calls", std::slice::from_ref(&source))
             .await?;

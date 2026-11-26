@@ -10,10 +10,8 @@ use crate::{
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Request, SipMessage};
 use rusterisk_config::Config;
 use rusterisk_core::SettingsLifetimes;
-use std::{
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    time::Duration,
-};
+use rusterisk_test_support::Wait;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::{net::TcpListener, sync::mpsc::error::TryRecvError};
 
 const PEER: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 5061);
@@ -63,13 +61,13 @@ fn received(signaling: &mut Signaling, route: DeliveryRoute, bytes: Vec<u8>, now
 }
 
 async fn resolved(signaling: &mut Signaling, now: u64) -> Result<(), ControlError> {
-    let completed =
-        tokio::time::timeout(Duration::from_secs(2), signaling.registrations.completed())
-            .await
-            .map_err(failure)??
-            .ok_or(ControlError::Invalid(
-                "Missing literal resolution completion",
-            ))?;
+    let completed = Wait::Ready
+        .bounded(signaling.registrations.completed())
+        .await
+        .map_err(failure)??
+        .ok_or(ControlError::Invalid(
+            "Missing literal resolution completion",
+        ))?;
     signaling.registration_completed(completed, now)
 }
 

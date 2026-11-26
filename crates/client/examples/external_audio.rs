@@ -14,7 +14,7 @@ async fn main() -> Result<(), Error> {
     run_audio(
         client,
         ChannelId::try_from(setting("RUSTERISK_APP", Some("calls"))?)?,
-        ChannelId::try_from(setting("RUSTERISK_BRIDGE", None)?)?,
+        rusterisk_client::BridgeId::try_from(setting("RUSTERISK_BRIDGE", None)?)?,
         async { tokio::signal::ctrl_c().await.map_err(Error::from) },
     )
     .await
@@ -35,7 +35,7 @@ fn setting(name: &'static str, default: Option<&str>) -> Result<String, Error> {
 async fn run_audio(
     client: Client,
     application: ChannelId,
-    bridge: ChannelId,
+    bridge: rusterisk_client::BridgeId,
     stop: impl Future<Output = Result<(), Error>>,
 ) -> Result<(), Error> {
     let session = client.subscribe(&application).await?;
@@ -71,7 +71,11 @@ fn tone_frame(phase: u32) -> [u8; 640] {
     bytes
 }
 
-async fn exchange(client: &Client, call: &mut OwnedCall, bridge: &ChannelId) -> Result<(), Error> {
+async fn exchange(
+    client: &Client,
+    call: &mut OwnedCall,
+    bridge: &rusterisk_client::BridgeId,
+) -> Result<(), Error> {
     let accepted = call
         .wait(CallMilestone::Accepted, Duration::from_secs(30))
         .await?;
@@ -118,7 +122,7 @@ mod tests {
     use rusterisk_server::{
         http::router_with_media, media::MediaHub, signaling::Signaling, Controller,
     };
-    use std::{future::IntoFuture, time::Duration};
+    use std::future::IntoFuture;
 
     fn failure(error: impl std::fmt::Display) -> Error {
         Error::WebSocket(error.to_string())
@@ -147,45 +151,45 @@ mod tests {
         let http = tokio::spawn(
             axum::serve(listener, router_with_media(controller.clone(), media)).into_future(),
         );
-        let result = tokio::time::timeout(Duration::from_secs(5), async {
-            let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
-            let bridge = ChannelId::try_from("existing".to_owned())?;
-            client.create_bridge(&bridge, "Existing audio").await?;
-            let (stop, stopped) = tokio::sync::oneshot::channel();
-            let observe = async {
-                loop {
-                    for channel in client.channels().await? {
-                        match client
-                            .variable(&channel.id, "RUSTERISK_MEDIA_CONNECTED")
-                            .await
-                        {
-                            Ok(variable) if variable.value == "1" => {
-                                stop.send(()).map_err(|_| Error::Closed)?;
-                                return Ok::<(), Error>(());
+        let result = rusterisk_server::test_time::Wait::Ready
+            .bounded(async {
+                let client = Client::new(&format!("http://{address}"), "app", "test-password")?;
+                let bridge = rusterisk_client::BridgeId::try_from("existing".to_owned())?;
+                client.create_bridge(&bridge, "Existing audio").await?;
+                let (stop, stopped) = tokio::sync::oneshot::channel();
+                let observe = async {
+                    loop {
+                        for channel in client.channels().await? {
+                            match client
+                                .variable(&channel.id, "RUSTERISK_MEDIA_CONNECTED")
+                                .await
+                            {
+                                Ok(variable) if variable.value == "1" => {
+                                    stop.send(()).map_err(|_| Error::Closed)?;
+                                    return Ok::<(), Error>(());
+                                }
+                                Ok(_) | Err(Error::Api { status: 409, .. }) => {}
+                                Err(error) => return Err(error),
                             }
-                            Ok(_) | Err(Error::Api { status: 409, .. }) => {}
-                            Err(error) => return Err(error),
                         }
                     }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            };
-            tokio::try_join!(
-                super::run_audio(
-                    client.clone(),
-                    ChannelId::try_from("calls".to_owned())?,
-                    bridge.clone(),
-                    async { stopped.await.map_err(|_| Error::Closed) }
-                ),
-                observe
-            )?;
-            assert!(client.channels().await?.is_empty());
-            assert!(client.bridge(&bridge).await?.channels.is_empty());
-            client.destroy_bridge(&bridge).await?;
-            Ok::<(), Error>(())
-        })
-        .await
-        .map_err(|_| Error::Timeout);
+                };
+                tokio::try_join!(
+                    super::run_audio(
+                        client.clone(),
+                        ChannelId::try_from("calls".to_owned())?,
+                        bridge.clone(),
+                        async { stopped.await.map_err(|_| Error::Closed) }
+                    ),
+                    observe
+                )?;
+                assert!(client.channels().await?.is_empty());
+                assert!(client.bridge(&bridge).await?.channels.is_empty());
+                client.destroy_bridge(&bridge).await?;
+                Ok::<(), Error>(())
+            })
+            .await
+            .map_err(|_| Error::Timeout);
         controller.shutdown();
         let signaling_result = signaling.await.map_err(failure)?.map_err(failure);
         let media_result = hub.await.map_err(failure)?.map_err(failure);

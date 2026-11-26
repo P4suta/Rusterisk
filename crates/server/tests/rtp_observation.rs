@@ -14,8 +14,9 @@ use rusterisk_server::{
     rtp::{RtpSession, SocketPair},
     Action, ControlError, Controller, Credentials, IncomingCall, IncomingTarget,
 };
+use rusterisk_test_support::Wait;
 use serde_json::Value;
-use std::{net::Ipv4Addr, time::Duration};
+use std::net::Ipv4Addr;
 use tower::ServiceExt;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -112,12 +113,10 @@ async fn a_reader_observes_peer_datagrams_and_a_reused_channel_starts_without_it
                 .map_err(failure)?;
         }
         let mut packet = [0; MAX_PACKET];
-        assert!(tokio::time::timeout(
-            Duration::from_millis(65),
-            alice.data().recv_from(&mut packet),
-        )
-        .await
-        .is_err());
+        assert!(Wait::Quiet
+            .bounded(alice.data().recv_from(&mut packet),)
+            .await
+            .is_err());
         let idle = read(&app, "a", true).await?.1;
         assert_eq!(idle["local"]["source"], "server_rtp");
         assert_eq!(idle["local"]["rxcount"], 0);
@@ -141,27 +140,27 @@ async fn a_reader_observes_peer_datagrams_and_a_reused_channel_starts_without_it
                     .map_err(failure)?;
             }
         }
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if read(&app, "a", true).await?.1["local"]["rxcount"] == 2
-                    && read(&app, "b", true).await?.1["local"]["rxcount"] == 1
-                {
-                    return Ok::<_, ControlError>(());
+        Wait::Ready
+            .bounded(async {
+                loop {
+                    if read(&app, "a", true).await?.1["local"]["rxcount"] == 2
+                        && read(&app, "b", true).await?.1["local"]["rxcount"] == 1
+                    {
+                        return Ok::<_, ControlError>(());
+                    }
                 }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .map_err(failure)??;
+            })
+            .await
+            .map_err(failure)??;
         assert!(media
             .peer_direction(a.clone(), PeerMediaDirection::SendReceive, Gate::Open)
             .await
             .map_err(failure)?);
-        let (length, sender) =
-            tokio::time::timeout(Duration::from_secs(2), alice.data().recv_from(&mut packet))
-                .await
-                .map_err(failure)?
-                .map_err(failure)?;
+        let (length, sender) = Wait::Ready
+            .bounded(alice.data().recv_from(&mut packet))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
         assert_eq!(sender, destinations[0]);
         assert_eq!(
             RtpPacket::parse(&packet[..length])

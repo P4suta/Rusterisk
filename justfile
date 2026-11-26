@@ -12,6 +12,10 @@ policy:
 core-msrv:
     cargo run --locked --target-dir target/xtask --package xtask -- core-msrv
 
+[positional-arguments]
+server-footprint +args:
+    cargo run --locked --target-dir target/xtask --package xtask -- server-footprint "$@"
+
 node-check:
     cargo run --locked --target-dir target/xtask --package xtask -- node-check
 

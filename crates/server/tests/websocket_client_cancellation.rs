@@ -1,12 +1,12 @@
-use rusterisk_api::{ChannelId, MediaControlFormat, MediaDirection, MediaFormat};
+use rusterisk_api::{ChannelId, EventKind, MediaControlFormat, MediaDirection, MediaFormat};
 use rusterisk_config::Config;
 use rusterisk_server::{
     media::MediaHub, signaling::Signaling, Action, ControlError, Controller, Credentials,
 };
+use rusterisk_test_support::Wait;
 use std::{
     future::{poll_fn, Future},
     task::Poll,
-    time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -49,8 +49,8 @@ async fn cancelled_during(retry: bool) -> Result<(), ControlError> {
         .1;
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
-    let result = tokio::time::timeout(Duration::from_secs(4), async {
-        let _subscription = controller.subscribe(credentials()?, None, "calls".into()).await?;
+    let result = Wait::Scenario.bounded(async {
+        let mut subscription = controller.subscribe(credentials()?, None, "calls".into()).await?;
         let id = ChannelId::try_from("cancelled".to_owned())?;
         let mut peer = {
             let mut request = std::pin::pin!(controller.execute(credentials()?, None, Action::ExternalWebSocketClient { id: id.clone(), app: "calls".into(), client: "agent".into(), format: MediaFormat::Pcmu, control_format: Some(MediaControlFormat::Json), direction: MediaDirection::Both, auto_answer: true, data: String::new() }));
@@ -63,23 +63,23 @@ async fn cancelled_during(retry: bool) -> Result<(), ControlError> {
             let register = format!("REGISTER sip:{signaling_address} SIP/2.0\r\nVia: SIP/2.0/UDP {local};branch=z9hG4bK-pending-websocket;rport\r\nFrom: <sip:phone@localhost>;tag=phone\r\nTo: <sip:phone@localhost>\r\nCall-ID: pending-websocket\r\nCSeq: 1 REGISTER\r\nContact: <sip:phone@{local}>\r\nExpires: 20\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n");
             phone.send_to(register.as_bytes(), signaling_address).await.map_err(failure)?;
             let mut bytes = [0; 16385];
-            let (size, _) = tokio::time::timeout(Duration::from_secs(1), phone.recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
+            let (size, _) = Wait::Ready.bounded(phone.recv_from(&mut bytes)).await.map_err(failure)?.map_err(failure)?;
             assert!(bytes[..size].starts_with(b"SIP/2.0 401 "));
             assert!(poll_fn(|context| Poll::Ready(request.as_mut().poll(context).is_pending())).await);
             peer
         };
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                match controller.execute(credentials()?, None, Action::GetChannel(id.clone())).await {
-                    Err(ControlError::NotFound(_)) => return Ok::<(), ControlError>(()),
-                    Ok(_) => tokio::time::sleep(Duration::from_millis(10)).await,
-                    Err(error) => return Err(error),
-                }
+        loop {
+            let event = subscription.events.recv().await.ok_or(ControlError::Capacity)?;
+            if matches!(event.kind, EventKind::ChannelDestroyed { channel, .. } if channel.id == id) {
+                break;
             }
-        }).await.map_err(failure)??;
+        }
         let mut byte = [0];
-        assert_eq!(tokio::time::timeout(Duration::from_secs(1), peer.read(&mut byte)).await.map_err(failure)?.map_err(failure)?, 0);
-        assert!(tokio::time::timeout(Duration::from_millis(1200), listener.accept()).await.is_err());
+        assert_eq!(Wait::Ready.bounded(peer.read(&mut byte)).await.map_err(failure)?.map_err(failure)?, 0);
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_millis(1200)).await;
+        tokio::time::resume();
+        assert!(Wait::Quiet.bounded(listener.accept()).await.is_err());
         assert!(matches!(controller.execute(credentials()?, None, Action::GetChannel(id)).await, Err(ControlError::NotFound(_))));
         Ok::<(), ControlError>(())
     }).await.map_err(failure);

@@ -76,6 +76,7 @@ impl Runner {
 
     // Applies one input, and reports whether the control loop continues.
     pub(crate) fn handle(&mut self, input: Input, now: u64) -> Result<Flow, ControlError> {
+        self.activity.control.turn(false, 0);
         match input.0 {
             Kind::Reloaded(result) => result?,
             Kind::Stored(result) => {

@@ -1,11 +1,12 @@
 use rusterisk_client::{
     api::{
-        ApiError, Bridge, BridgeVideoMode, ChannelId, EventFilter, EventFilterRequest, EventKind,
+        ApiError, BridgeVideoMode, ChannelId, EventFilter, EventFilterRequest, EventKind,
         EventSource, ExternalRtpTarget, StaticRtpCodec,
     },
-    Client, Error,
+    Bridge, BridgeId, Client, Error, Session,
 };
-use std::{net::Ipv4Addr, time::Duration};
+use rusterisk_server::test_time::Wait;
+use std::net::Ipv4Addr;
 #[path = "reference/ari_routes.rs"]
 mod ari_routes;
 #[path = "reference/dialplan_routes.rs"]
@@ -68,19 +69,20 @@ async fn compare_external_admission(
         .is_some_and(|value| value
             .parse::<u16>()
             .is_ok_and(|port| port > 0 && port < u16::MAX)));
-    tokio::time::timeout(Duration::from_secs(3), async {
-        for _ in 0..32 {
-            if let EventKind::StasisStart { channel, args } = session.next_event().await?.kind {
-                if channel.id == id {
-                    assert_eq!(args, ["media", "agent"]);
-                    return Ok(());
+    Wait::Ready
+        .bounded(async {
+            for _ in 0..32 {
+                if let EventKind::StasisStart { channel, args } = session.next_event().await?.kind {
+                    if channel.id == id {
+                        assert_eq!(args, ["media", "agent"]);
+                        return Ok(());
+                    }
                 }
             }
-        }
-        Err(Error::Capacity)
-    })
-    .await
-    .map_err(|_| Error::Timeout)??;
+            Err(Error::Capacity)
+        })
+        .await
+        .map_err(|_| Error::Timeout)??;
     client.hangup(&id).await
 }
 
@@ -93,8 +95,30 @@ fn audio_bridge(mut bridge: Bridge, expected_mode: BridgeVideoMode) -> Bridge {
     bridge
 }
 
-async fn compare_bridges(actual: &Client, reference: &Client) -> Result<(), Error> {
-    let id = ChannelId::try_from("compat-bridge".to_owned())?;
+async fn bridge_destroyed(session: &mut Session, id: &BridgeId) -> Result<(), Error> {
+    Wait::Ready
+        .bounded(async {
+            loop {
+                if matches!(
+                    session.next_event().await?.kind,
+                    EventKind::BridgeDestroyed { bridge } if bridge.id == *id
+                ) {
+                    return Ok(());
+                }
+            }
+        })
+        .await
+        .map_err(|_| Error::Invalid("bridge destruction event deadline"))?
+}
+
+async fn compare_bridges(
+    actual: &Client,
+    reference: &Client,
+    app: &str,
+    actual_session: &mut Session,
+    reference_session: &mut Session,
+) -> Result<(), Error> {
+    let id = BridgeId::try_from("compat-bridge".to_owned())?;
     let created = actual.create_bridge(&id, "Conversation").await?;
     let expected = reference.create_bridge(&id, "Conversation").await?;
     assert_eq!(
@@ -122,12 +146,20 @@ async fn compare_bridges(actual: &Client, reference: &Client) -> Result<(), Erro
         rejection(actual.create_bridge(&id, "Duplicate").await)?,
         rejection(reference.create_bridge(&id, "Duplicate").await)?
     );
-    actual.destroy_bridge(&id).await?;
-    reference.destroy_bridge(&id).await?;
+    let source = EventSource::from(id.clone());
     assert_eq!(
-        rejection(actual.bridge(&id).await)?,
-        rejection(reference.bridge(&id).await)?
+        actual
+            .subscribe_resources(app, std::slice::from_ref(&source))
+            .await?,
+        reference.subscribe_resources(app, &[source]).await?
     );
+    actual.destroy_bridge(&id).await?;
+    let missing = rejection(actual.bridge(&id).await)?;
+    assert_eq!(missing.0, 404);
+    reference.destroy_bridge(&id).await?;
+    bridge_destroyed(actual_session, &id).await?;
+    bridge_destroyed(reference_session, &id).await?;
+    assert_eq!(missing, rejection(reference.bridge(&id).await)?);
     assert_eq!(
         rejection(actual.destroy_bridge(&id).await)?,
         rejection(reference.destroy_bridge(&id).await)?
@@ -148,7 +180,7 @@ async fn compare_subscriptions(
     reference: &Client,
     app: &str,
 ) -> Result<(), Error> {
-    let id = ChannelId::try_from("observed".to_owned())?;
+    let id = rusterisk_client::BridgeId::try_from("observed".to_owned())?;
     for text in ["endpoint:PJSIP/phone", "endpoint:PJSIP"] {
         let endpoint =
             EventSource::try_from(text).map_err(|_| Error::Invalid("endpoint source"))?;
@@ -181,7 +213,7 @@ async fn compare_subscriptions(
     );
     actual.create_bridge(&id, "Observed").await?;
     reference.create_bridge(&id, "Observed").await?;
-    let source = EventSource::Bridge(id.clone());
+    let source = EventSource::from(id.clone());
     for _ in 0..2 {
         assert_eq!(
             actual
@@ -214,7 +246,7 @@ async fn compare_subscriptions(
                 .await
         )?
     );
-    let missing = EventSource::Bridge(ChannelId::try_from("missing".to_owned())?);
+    let missing = EventSource::Bridge(rusterisk_client::BridgeId::try_from("missing".to_owned())?);
     let batch = [source.clone(), missing];
     assert_eq!(
         rejection(actual.subscribe_resources(app, &batch).await)?,
@@ -228,17 +260,17 @@ async fn compare_subscriptions(
     reference.destroy_bridge(&id).await?;
     assert_eq!(actual.application(app).await?, released);
     // Asterisk unsubscribes in its bridge snapshot callback.
-    let reference_released = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            let application = reference.application(app).await?;
-            if !application.bridge_ids.contains(&id) {
-                return Ok::<_, Error>(application);
+    let reference_released = Wait::Ready
+        .bounded(async {
+            loop {
+                let application = reference.application(app).await?;
+                if !application.bridge_ids.contains(&id) {
+                    return Ok::<_, Error>(application);
+                }
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .map_err(|_| Error::Invalid("reference bridge subscription cleanup deadline"))??;
+        })
+        .await
+        .map_err(|_| Error::Invalid("reference bridge subscription cleanup deadline"))??;
     assert_eq!(reference_released, released);
     assert_eq!(
         rejection(
@@ -288,7 +320,7 @@ async fn compare_existing_client(actual: &str, reference: &str) -> Result<(), Er
         .stdout(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()?;
-    let status = match tokio::time::timeout(Duration::from_secs(30), child.wait()).await {
+    let status = match Wait::Shutdown.bounded(child.wait()).await {
         Ok(status) => status?,
         Err(_) => {
             child.kill().await?;
@@ -310,16 +342,16 @@ async fn resource_queries_and_app_subscriptions_match_the_reference() -> Result<
     let reference_address = std::env::var("RUSTERISK_REFERENCE_URL")
         .map_err(|_| Error::Invalid("reference URL is required"))?;
     let reference = Client::new(&reference_address, "app", "test-password")?;
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if reference.ping().await.is_ok() {
-                break;
+    Wait::Shutdown
+        .bounded(async {
+            loop {
+                if reference.ping().await.is_ok() {
+                    break;
+                }
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-    })
-    .await
-    .map_err(|_| Error::Timeout)?;
+        })
+        .await
+        .map_err(|_| Error::Timeout)?;
     let mut outgoing = external_websocket_clients::Fixture::start().await?;
     let result = compare_resources(reference_address, reference, &mut outgoing).await;
     let cleanup = outgoing.shutdown().await;
@@ -372,7 +404,6 @@ async fn compare_resources(
             actual.applications().await?,
             reference.applications().await?
         );
-        compare_bridges(actual, &reference).await?;
         request_bodies::compare(
             actual,
             &format!("http://{address}"),
@@ -487,6 +518,14 @@ async fn compare_resources(
             rejection(actual.application("missing").await)?,
             rejection(reference.application("missing").await)?
         );
+        compare_bridges(
+            actual,
+            &reference,
+            app.as_str(),
+            &mut actual_session,
+            &mut reference_session,
+        )
+        .await?;
         compare_external_admission(actual, &mut actual_session, app.as_str()).await?;
         compare_external_admission(&reference, &mut reference_session, app.as_str()).await?;
         dialplan_routes::compare(&reference, &mut reference_session, app.as_str()).await?;

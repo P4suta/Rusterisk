@@ -139,7 +139,8 @@ impl Server {
             .await
             .map_err(failure)?;
         let (controller, control, _effects) = Controller::new(config.clone(), capacity);
-        let (media_port, media, notices) = MediaHub::new(capacity);
+        let (media_port, mut media, notices) = MediaHub::new(capacity);
+        media.activity = controller.activity.media.clone();
         let music = match storage_port
             .prepare_music(config.music_on_hold.clone())
             .await

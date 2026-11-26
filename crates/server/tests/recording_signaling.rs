@@ -4,7 +4,7 @@ use rusterisk_server::media::{MediaHub, RecordingEnd};
 use rusterisk_server::signaling::Signaling;
 use rusterisk_server::storage::StorageWorker;
 use rusterisk_server::{Action, ControlError, Controller, Credentials};
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
@@ -18,7 +18,8 @@ fn credentials() -> Result<Credentials, ControlError> {
 async fn event(
     events: &mut tokio::sync::mpsc::Receiver<rusterisk_api::Event>,
 ) -> Result<EventKind, ControlError> {
-    Ok(tokio::time::timeout(Duration::from_secs(2), events.recv())
+    Ok(Wait::Ready
+        .bounded(events.recv())
         .await
         .map_err(failure)?
         .ok_or(ControlError::Capacity)?

@@ -1,6 +1,8 @@
 #![no_std]
 
 mod attended_transfer;
+mod call_table;
+pub use call_table::{CallHandle, CallTable, Teardown, TeardownStep};
 mod dial_failure;
 mod dial_fork;
 mod dialplan;

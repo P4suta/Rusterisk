@@ -8,7 +8,9 @@ The crate uses `no_std`, has no dependencies, and supports Rust 1.89.
 `rusterisk-client` sends typed HTTP requests and owns call and event lifetimes.
 The API and client packages require Rust 1.99.
 
-The client reexports resource types through `rusterisk_client::api`.
+Use `ChannelId`, `BridgeId`, `PlaybackId`, and `RecordingName` from `rusterisk_client` when calling typed operations.
+Construct each identifier with `try_from`, or reuse the identifier returned by the corresponding resource.
+The client reexports the ARI wire models through `rusterisk_client::api`.
 A server is a separate runtime dependency.
 Operation availability depends on the selected server and its configuration.
 The [Rusterisk repository](https://github.com/P4suta/Rusterisk) contains the compatibility contract, configuration examples, and integration fixtures.

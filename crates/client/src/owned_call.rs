@@ -344,7 +344,7 @@ mod tests {
                 calls.event(&event)?;
                 calls.event(&event)?;
                 assert_eq!(calls.probes.len(), 1);
-                let (id, result) = tokio::time::timeout(Duration::from_secs(1), calls.probes.join_next()).await.map_err(|_| Error::Timeout)?.ok_or(Error::Closed)?.map_err(|_| Error::Closed)?;
+                let (id, result) = rusterisk_server::test_time::Wait::Ready.bounded(calls.probes.join_next()).await.map_err(|_| Error::Timeout)?.ok_or(Error::Closed)?.map_err(|_| Error::Closed)?;
                 calls.probed(id, result);
                 assert_eq!(received.borrow().progress.has_reached(CallMilestone::MediaConnected), status == 200 && value == "1");
                 assert_eq!(received.borrow().media_probe_failure.as_ref().and_then(|failure| failure.status), if status == 503 { Some(503) } else { None });

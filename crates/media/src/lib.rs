@@ -51,23 +51,25 @@ impl std::fmt::Display for MediaError {
 
 impl std::error::Error for MediaError {}
 
+pub type Frame = PcmFrame<MAX_SAMPLES>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Frame {
-    samples: [i16; MAX_SAMPLES],
+pub struct PcmFrame<const N: usize> {
+    samples: [i16; N],
     len: usize,
     rate: u32,
 }
 
-impl Frame {
+impl<const N: usize> PcmFrame<N> {
     pub fn new(samples: &[i16], rate: u32) -> Result<Self, MediaError> {
         if samples.is_empty()
-            || samples.len() > MAX_SAMPLES
+            || samples.len() > N.min(MAX_SAMPLES)
             || !matches!(rate, 8000 | 12000 | 16000 | 24000 | 32000 | 44100 | 48000)
         {
             return Err(MediaError::InvalidFrame);
         }
         let mut frame = Self {
-            samples: [0; MAX_SAMPLES],
+            samples: [0; N],
             len: samples.len(),
             rate,
         };
@@ -82,6 +84,22 @@ impl Frame {
         self.rate
     }
 
+    pub fn fit<const M: usize>(&self) -> Result<PcmFrame<M>, MediaError> {
+        PcmFrame::new(self.samples(), self.rate)
+    }
+
+    pub fn expanded(&self) -> Frame {
+        let mut samples = [0; MAX_SAMPLES];
+        samples[..self.len].copy_from_slice(self.samples());
+        Frame {
+            samples,
+            len: self.len,
+            rate: self.rate,
+        }
+    }
+}
+
+impl Frame {
     pub fn resample(&self, rate: u32) -> Result<Self, MediaError> {
         if rate == self.rate {
             return Ok(*self);

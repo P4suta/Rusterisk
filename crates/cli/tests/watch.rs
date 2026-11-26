@@ -1,9 +1,10 @@
+#[path = "support/time.rs"]
+pub mod test_time;
 use axum::{http::HeaderMap, routing::get, Router};
 use serde_json::Value;
 use std::{
     io,
     process::{Output, Stdio},
-    time::Duration,
 };
 use tokio::{net::TcpListener, process::Command};
 
@@ -48,7 +49,7 @@ async fn run(body: &'static str, json: bool) -> io::Result<Output> {
         .kill_on_drop(true)
         .spawn()?;
     tokio::select! {
-        out=tokio::time::timeout(Duration::from_secs(5),child.wait_with_output())=>out?,
+        out=crate::test_time::Wait::Ready.bounded(child.wait_with_output())=>out?,
         stopped = axum::serve(listener,app)=>Err(io::Error::other(format!("server stopped: {stopped:?}"))),
     }
 }

@@ -1,6 +1,7 @@
 use super::{failure, BranchNamespace, ControlError, Peer};
 use rsipstack::sip::{headers::untyped::ToTypedHeader, HeadersExt, Method, Request, SipMessage};
-use std::{net::SocketAddr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::SocketAddr;
 
 fn same_dialog(message: &SipMessage, local: &Request) -> Result<bool, ControlError> {
     let (received_from, received_to, received_id) = match message {
@@ -55,7 +56,7 @@ pub(super) async fn end(
         .send_to(bye.as_bytes(), target)
         .await
         .map_err(failure)?;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    Wait::Ready.bounded(async {
         let response = async {
             let message = receive(ending, target).await?;
             if !same_dialog(&message, local)? {

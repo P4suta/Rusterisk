@@ -101,11 +101,13 @@ impl MediaHub {
             .telephone()
             .map(DigitSupport::Rfc4733)
             .unwrap_or(DigitSupport::Unsupported);
+        let rate = session.audio_format().rate();
         let leg = crate::webrtc::WebRtcLeg::new(session, direction)?;
         self.install_link(
             key.clone(),
             Port::owned(direction, support),
             mode.gate(direction),
+            rate,
         )?;
         self.webrtc_legs.insert(key, leg);
         Ok(())

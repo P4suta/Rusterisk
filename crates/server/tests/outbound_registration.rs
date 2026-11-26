@@ -1,7 +1,8 @@
 use rsipstack::sip::{HeadersExt, Method, SipMessage};
 use rusterisk_config::{Config, Protocol, RegistrarUri};
 use rusterisk_server::{media::MediaHub, signaling::Signaling, ControlError, Controller};
-use std::{net::SocketAddr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tokio::task::JoinHandle;
 #[path = "outbound_registration/authentication.rs"]
@@ -12,7 +13,7 @@ fn failure(error: impl std::fmt::Display) -> ControlError {
 }
 
 async fn finish(mut task: JoinHandle<Result<(), ControlError>>) -> Result<(), ControlError> {
-    match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+    match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?,
         Err(timeout) => {
             task.abort();
@@ -76,17 +77,18 @@ async fn configured_udp_registration_advertises_the_owned_signaling_address(
     let signaling = tokio::spawn(signaling.run(stopped));
     let result: Result<(), ControlError> = async {
         let mut bytes = [0; 16385];
-        if tokio::time::timeout(Duration::from_millis(500), peer.recv_from(&mut bytes))
+        if Wait::Observation
+            .bounded(peer.recv_from(&mut bytes))
             .await
             .is_ok()
         {
             return Err(ControlError::Invalid("Registration preceded initial delay"));
         }
-        let (size, address) =
-            tokio::time::timeout(Duration::from_secs(3), peer.recv_from(&mut bytes))
-                .await
-                .map_err(failure)?
-                .map_err(failure)?;
+        let (size, address) = Wait::Ready
+            .bounded(peer.recv_from(&mut bytes))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
         if address != local {
             return Err(ControlError::Invalid(
                 "Registration used a different listener",
@@ -137,11 +139,10 @@ async fn configured_udp_registration_advertises_the_owned_signaling_address(
     let signaling_result = finish(signaling).await;
     outcome(result, signaling_result)?;
     let _rebound = UdpSocket::bind(local).await.map_err(failure)?;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(50), peer.recv_from(&mut [0; 16385]))
-            .await
-            .is_err()
-    );
+    assert!(Wait::Quiet
+        .bounded(peer.recv_from(&mut [0; 16385]))
+        .await
+        .is_err());
     Ok(())
 }
 
@@ -184,8 +185,7 @@ async fn settings_without_registrations_keep_the_listener_silent_and_release_it_
         .1;
     let stopped = controller.shutdown_signal();
     let signaling = tokio::spawn(signaling.run(stopped));
-    let result =
-        tokio::time::timeout(Duration::from_millis(100), peer.recv_from(&mut [0; 16385])).await;
+    let result = Wait::Quiet.bounded(peer.recv_from(&mut [0; 16385])).await;
     controller.shutdown();
     let signaling_result = finish(signaling).await;
     let primary = if result.is_err() {

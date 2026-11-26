@@ -1,6 +1,6 @@
 use super::config;
 use crate::{media::MediaHub, signaling::Signaling, ControlError, Controller};
-use std::{future::Future, net::UdpSocket, pin::Pin, time::Duration};
+use std::{future::Future, net::UdpSocket, time::Duration};
 use tokio::sync::watch;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -25,48 +25,65 @@ fn requests(registrars: &[UdpSocket]) -> usize {
         .count()
 }
 
-async fn run<F>(serving: &mut Pin<&mut F>, duration: Duration) -> Result<(), ControlError>
-where
-    F: Future<Output = Result<(), ControlError>>,
-{
-    tokio::select! {
-        biased;
-        () = tokio::time::sleep(duration) => Ok(()),
-        served = serving => Err(failure(format!("the signaling task stopped: {served:?}"))),
-    }
-}
-
 #[tokio::test(start_paused = true)]
 async fn registrations_that_fall_due_together_leave_one_interval_apart() -> Result<(), ControlError>
+{
+    let peers = ["127.0.0.1:19001", "127.0.0.1:19002", "127.0.0.1:19003"];
+    let config = config(&peers, 0)?;
+    let (controller, runner, _effects) = Controller::new(config.clone(), 16);
+    let (media, _hub, notices) = MediaHub::new(16);
+    tokio::time::resume();
+    let mut signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
+    let mut sent = signaling.network.capture_datagrams()?;
+    let (_stopper, mut stop) = watch::channel(false);
+    tokio::time::pause();
+    let mut serving = std::pin::pin!(signaling.serve(&mut stop, controller.clock()));
+    let mut arrivals = Vec::with_capacity(peers.len());
+    let mut destinations = std::collections::BTreeSet::new();
+    for _ in &peers {
+        let (at, packet) = tokio::select! {
+            packet = sent.recv() => packet.ok_or(ControlError::Capacity)?,
+            stopped = &mut serving => return Err(failure(format!("signaling stopped: {stopped:?}"))),
+            () = tokio::time::sleep(Duration::from_secs(3)) => return Err(failure("registration deadline expired")),
+        };
+        assert!(packet.bytes.starts_with(b"REGISTER "));
+        destinations.insert(packet.peer.to_string());
+        arrivals.push(at);
+    }
+    assert_eq!(destinations.into_iter().collect::<Vec<_>>(), peers);
+    for pair in arrivals.windows(2) {
+        assert_eq!(pair[1] - pair[0], Duration::from_millis(20));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn each_registrar_receives_its_request_on_a_live_datagram_socket() -> Result<(), ControlError>
 {
     let registrars = [registrar()?, registrar()?, registrar()?];
     let peers = registrars
         .iter()
-        .map(|registrar| registrar.local_addr().map(|peer| peer.to_string()))
+        .map(|socket| socket.local_addr().map(|peer| peer.to_string()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(failure)?;
-    let peers = peers.iter().map(String::as_str).collect::<Vec<_>>();
-    let config = config(&peers, 0)?;
+    let config = config(&peers.iter().map(String::as_str).collect::<Vec<_>>(), 0)?;
     let (controller, runner, _effects) = Controller::new(config.clone(), 16);
     let (media, _hub, notices) = MediaHub::new(16);
     let mut signaling = Signaling::bind(config, controller.clone(), runner, media, notices).await?;
     let (_stopper, mut stop) = watch::channel(false);
-    let mut serving = std::pin::pin!(signaling.serve(&mut stop, controller.clock()));
-    run(&mut serving, Duration::from_millis(999)).await?;
-    assert_eq!(requests(&registrars), 0);
-    let mut arrivals = Vec::new();
-    for instant in 1000_u64..1400 {
-        run(&mut serving, Duration::from_millis(1)).await?;
-        let arrived = requests(&registrars);
-        assert!(arrived <= 1, "{arrived} registrations left at {instant} ms");
-        arrivals.extend(std::iter::repeat_n(instant, arrived));
+    let receiving = async {
+        for registrar in registrars {
+            let socket = tokio::net::UdpSocket::from_std(registrar).map_err(failure)?;
+            let mut bytes = [0; 2048];
+            let (size, _) = socket.recv_from(&mut bytes).await.map_err(failure)?;
+            assert!(bytes[..size].starts_with(b"REGISTER "));
+        }
+        Ok(())
+    };
+    tokio::select! {
+        result = rusterisk_test_support::Wait::Ready.bounded(receiving) => result.map_err(failure)?,
+        stopped = signaling.serve(&mut stop, controller.clock()) => Err(failure(format!("signaling stopped: {stopped:?}"))),
     }
-    assert_eq!(arrivals.len(), 3, "registrations left at {arrivals:?}");
-    assert!(
-        arrivals.windows(2).all(|pair| pair[1] - pair[0] >= 20),
-        "registrations left at {arrivals:?}"
-    );
-    Ok(())
 }
 
 #[tokio::test(start_paused = true)]

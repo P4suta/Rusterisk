@@ -3,6 +3,7 @@ use rusterisk_api::{Channel, ChannelId, ChannelState, EventKind};
 use rusterisk_config::{Codec, Config};
 use rusterisk_core::PeerMediaDirection;
 use rusterisk_media::{Frame, MediaError};
+use rusterisk_test_support::Wait;
 #[path = "webrtc_leg/driver.rs"]
 mod webrtc_driver;
 
@@ -81,7 +82,8 @@ fn channels() -> (Channels, Application) {
 
 async fn answer(signal: &UdpSocket) -> Result<(WebRtcSession, direction::Dialog), MediaError> {
     let mut bytes = [0; 16385];
-    let (size, server) = tokio::time::timeout(Duration::from_secs(2), signal.recv_from(&mut bytes))
+    let (size, server) = Wait::Ready
+        .bounded(signal.recv_from(&mut bytes))
         .await
         .map_err(failure)?
         .map_err(failure)?;
@@ -111,7 +113,7 @@ async fn answer(signal: &UdpSocket) -> Result<(WebRtcSession, direction::Dialog)
 async fn finished(
     mut task: tokio::task::JoinHandle<Result<WebRtcStats, MediaError>>,
 ) -> Result<WebRtcStats, MediaError> {
-    match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+    match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?,
         Err(primary) => {
             task.abort();
@@ -163,7 +165,7 @@ async fn bridge_calls(
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let mut applications = Vec::with_capacity(2);
     let mut jobs = Vec::with_capacity(2);
-    let result = tokio::time::timeout(Duration::from_secs(7), async {
+    let result = Wait::Scenario.bounded(async {
         let credentials = Credentials::new("app".into(), "test-password".into()).map_err(failure)?;
         let mut events = controller.subscribe(credentials.clone(), None, "calls".into()).await.map_err(failure)?;
         let mut ids = Vec::with_capacity(2);

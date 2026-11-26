@@ -7,6 +7,7 @@ use rusterisk_server::{
     Credentials,
 };
 use rusterisk_sip::Session;
+use rusterisk_test_support::Wait;
 use std::{
     net::{Ipv4Addr, SocketAddr},
     time::Duration,
@@ -154,94 +155,95 @@ async fn bridge_calls(origin: CallOrigin) -> Result<(), ControlError> {
     target.set_ip(Ipv4Addr::LOCALHOST.into());
     let hub = tokio::spawn(hub.run(controller.shutdown_signal()));
     let signaling = tokio::spawn(signaling.run(controller.shutdown_signal()));
-    let result = tokio::time::timeout(Duration::from_secs(6), async {
-        let credentials = Credentials::new("app".into(), "test-password".into())?;
-        let mut events = controller
-            .subscribe(credentials.clone(), None, "calls".into())
-            .await?;
-        let mut ids = Vec::with_capacity(2);
-        let mut targets = Vec::with_capacity(2);
-        for (index, name) in ["left", "right"].into_iter().enumerate() {
-            if index == 0 && matches!(origin, CallOrigin::Device) {
-                let (id, target) = incoming::answer_device(
-                    &signals[index],
-                    &audio[index],
-                    target,
-                    &controller,
-                    &credentials,
-                    &mut events.events,
-                )
+    let result = Wait::Scenario
+        .bounded(async {
+            let credentials = Credentials::new("app".into(), "test-password".into())?;
+            let mut events = controller
+                .subscribe(credentials.clone(), None, "calls".into())
                 .await?;
+            let mut ids = Vec::with_capacity(2);
+            let mut targets = Vec::with_capacity(2);
+            for (index, name) in ["left", "right"].into_iter().enumerate() {
+                if index == 0 && matches!(origin, CallOrigin::Device) {
+                    let (id, target) = incoming::answer_device(
+                        &signals[index],
+                        &audio[index],
+                        target,
+                        &controller,
+                        &credentials,
+                        &mut events.events,
+                    )
+                    .await?;
+                    ids.push(id);
+                    targets.push(target);
+                    continue;
+                }
+                let id = ChannelId::try_from(name.to_owned())?;
+                controller
+                    .execute(
+                        credentials.clone(),
+                        None,
+                        Action::Originate {
+                            id: id.clone(),
+                            endpoint: format!("PJSIP/{name}"),
+                            app: "calls".into(),
+                            args: Vec::new(),
+                            caller: "100".into(),
+                            timeout: 3,
+                        },
+                    )
+                    .await?;
+                targets.push(answer(&signals[index], &audio[index]).await?);
+                loop {
+                    if let EventKind::StasisStart { channel, .. } = events
+                        .events
+                        .recv()
+                        .await
+                        .ok_or(ControlError::Capacity)?
+                        .kind
+                    {
+                        if channel.id == id {
+                            assert_eq!(channel.state, ChannelState::Up);
+                            break;
+                        }
+                    }
+                }
                 ids.push(id);
-                targets.push(target);
-                continue;
             }
-            let id = ChannelId::try_from(name.to_owned())?;
+            let bridge = ChannelId::try_from("rtp-route-bridge".to_owned())?;
             controller
                 .execute(
                     credentials.clone(),
                     None,
-                    Action::Originate {
-                        id: id.clone(),
-                        endpoint: format!("PJSIP/{name}"),
-                        app: "calls".into(),
-                        args: Vec::new(),
-                        caller: "100".into(),
-                        timeout: 3,
+                    Action::CreateBridge {
+                        id: bridge.clone(),
+                        name: "RTP routes".into(),
                     },
                 )
                 .await?;
-            targets.push(answer(&signals[index], &audio[index]).await?);
-            loop {
-                if let EventKind::StasisStart { channel, .. } = events
-                    .events
-                    .recv()
-                    .await
-                    .ok_or(ControlError::Capacity)?
-                    .kind
-                {
-                    if channel.id == id {
-                        assert_eq!(channel.state, ChannelState::Up);
-                        break;
-                    }
-                }
-            }
-            ids.push(id);
-        }
-        let bridge = ChannelId::try_from("rtp-route-bridge".to_owned())?;
-        controller
-            .execute(
-                credentials.clone(),
-                None,
-                Action::CreateBridge {
-                    id: bridge.clone(),
-                    name: "RTP routes".into(),
-                },
-            )
-            .await?;
-        controller
-            .execute(
-                credentials.clone(),
-                None,
-                Action::AddChannels {
-                    bridge: bridge.clone(),
-                    channels: ids.clone(),
-                },
-            )
-            .await?;
-        exchange(&audio, &targets).await?;
-        for id in ids {
             controller
-                .execute(credentials.clone(), None, Action::Hangup(id))
+                .execute(
+                    credentials.clone(),
+                    None,
+                    Action::AddChannels {
+                        bridge: bridge.clone(),
+                        channels: ids.clone(),
+                    },
+                )
                 .await?;
-        }
-        controller
-            .execute(credentials, None, Action::DestroyBridge(bridge))
-            .await?;
-        Ok::<(), ControlError>(())
-    })
-    .await
-    .map_err(failure);
+            exchange(&audio, &targets).await?;
+            for id in ids {
+                controller
+                    .execute(credentials.clone(), None, Action::Hangup(id))
+                    .await?;
+            }
+            controller
+                .execute(credentials, None, Action::DestroyBridge(bridge))
+                .await?;
+            Ok::<(), ControlError>(())
+        })
+        .await
+        .map_err(failure);
     controller.shutdown();
     let signaling = signaling.await.map_err(failure);
     let hub = hub.await.map_err(failure);

@@ -12,6 +12,7 @@ fn informational_modes_do_not_require_configuration_and_validation_is_distinct_f
     assert_eq!(
         parse(&[])?,
         Command::Run {
+            log_level: tracing::level_filters::LevelFilter::INFO,
             directory: PathBuf::from("config"),
             data_directory: PathBuf::from("data"),
         }
@@ -47,6 +48,7 @@ fn persistence_paths_are_explicit_bounded_and_independent_of_configuration() -> 
     assert_eq!(
         parse(&["--config-dir", "settings", "--data-dir", "private calls"])?,
         Command::Run {
+            log_level: tracing::level_filters::LevelFilter::INFO,
             directory: PathBuf::from("settings"),
             data_directory: PathBuf::from("private calls"),
         }
@@ -85,4 +87,14 @@ fn invalid_or_unbounded_arguments_have_explicit_failures() {
         parse(&["--config-dir", &"a".repeat(4097)]),
         Err(CliError::Capacity)
     );
+}
+
+#[test]
+fn startup_accepts_only_named_log_levels() -> Result<(), CliError> {
+    for level in ["trace", "debug", "info", "warn", "error", "off"] {
+        assert!(parse(&["--log-level", level]).is_ok(), "{level}");
+    }
+    assert!(parse(&["--log-level", "verbose"]).is_err());
+    assert!(parse(&["--log-level", "info", "--log-level", "debug"]).is_err());
+    Ok(())
 }

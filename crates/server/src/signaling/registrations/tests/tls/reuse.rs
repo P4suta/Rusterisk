@@ -5,7 +5,7 @@ use crate::{
     signaling::{registrations::tests::reuse, Signaling},
     ControlError, Controller,
 };
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tokio::net::TcpListener;
 
 #[tokio::test]
@@ -30,7 +30,8 @@ async fn initial_tls_registrations_reuse_the_verified_profile_before_connecting(
         .1;
     let task = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let primary: Result<(), ControlError> = async {
-        let (socket, _address) = tokio::time::timeout(Duration::from_secs(3), registrar.accept())
+        let (socket, _address) = Wait::Ready
+            .bounded(registrar.accept())
             .await
             .map_err(failure)?
             .map_err(failure)?;

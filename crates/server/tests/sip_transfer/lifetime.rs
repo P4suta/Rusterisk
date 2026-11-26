@@ -1,13 +1,13 @@
 use super::failure;
 use rusterisk_server::ControlError;
-use std::{fmt::Display, time::Duration};
+use rusterisk_test_support::Wait;
+use std::fmt::Display;
 use tokio::task::JoinHandle;
 
 pub(super) async fn finish<T, E: Display>(
     mut task: JoinHandle<Result<T, E>>,
-    limit: Duration,
 ) -> Result<T, ControlError> {
-    match tokio::time::timeout(limit, &mut task).await {
+    match Wait::Shutdown.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?.map_err(failure),
         Err(primary) => {
             task.abort();

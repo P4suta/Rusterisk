@@ -3,14 +3,15 @@ use super::{
     OPTIONS,
 };
 use crate::signaling::cleanup;
+use rusterisk_test_support::Wait;
 use std::time::Duration;
 use tokio::{
     io::AsyncWriteExt,
-    net::{TcpListener, TcpStream},
+    net::TcpStream,
     sync::{mpsc, watch},
 };
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn accepted_silence_keeps_the_five_second_first_message_deadline() -> Result<(), ControlError>
 {
     let mut network = network().await?;
@@ -18,8 +19,9 @@ async fn accepted_silence_keeps_the_five_second_first_message_deadline() -> Resu
         .await
         .map_err(failure)?;
     let primary: Result<(), ControlError> = async {
+        let start = tokio::time::Instant::now();
         let Input::Closed { result, .. } =
-            tokio::time::timeout(Duration::from_secs(6), network.next())
+            rusterisk_test_support::virtual_window(Duration::from_secs(6), network.next())
                 .await
                 .map_err(failure)??
         else {
@@ -27,6 +29,7 @@ async fn accepted_silence_keeps_the_five_second_first_message_deadline() -> Resu
                 "Silent accepted stream emitted a packet",
             ));
         };
+        assert_eq!(start.elapsed(), Duration::from_secs(5));
         if !matches!(
             result,
             Err(ControlError::Invalid("Signaling frame timed out"))
@@ -43,23 +46,10 @@ async fn accepted_silence_keeps_the_five_second_first_message_deadline() -> Resu
 }
 
 async fn partial_deadline(role: StreamRole, complete_first: bool) -> Result<(), ControlError> {
-    let listener = TcpListener::bind("127.0.0.1:0").await.map_err(failure)?;
-    let address = listener.local_addr().map_err(failure)?;
-    let (socket, mut peer) = match role {
-        StreamRole::Accepted => {
-            let peer = TcpStream::connect(address).await.map_err(failure)?;
-            let (socket, _address) = listener.accept().await.map_err(failure)?;
-            (socket, peer)
-        }
-        StreamRole::Initiated => {
-            let socket = TcpStream::connect(address).await.map_err(failure)?;
-            let (peer, _address) = listener.accept().await.map_err(failure)?;
-            (socket, peer)
-        }
-    };
+    let (socket, mut peer) = tokio::io::duplex(1);
     let key = ConnectionKey {
         listener: 0,
-        peer: socket.peer_addr().map_err(failure)?,
+        peer: "127.0.0.1:5060".parse().map_err(failure)?,
         generation: 1,
     };
     let (packets, input) = mpsc::channel(8);
@@ -69,7 +59,8 @@ async fn partial_deadline(role: StreamRole, complete_first: bool) -> Result<(), 
     let primary: Result<(), ControlError> = async {
         if complete_first {
             peer.write_all(OPTIONS).await.map_err(failure)?;
-            let complete = tokio::time::timeout(Duration::from_secs(1), received.recv())
+            let complete = Wait::Ready
+                .bounded(received.recv())
                 .await
                 .map_err(failure)?
                 .ok_or(ControlError::Capacity)?;
@@ -81,15 +72,18 @@ async fn partial_deadline(role: StreamRole, complete_first: bool) -> Result<(), 
                 ));
             }
         }
+        let start = tokio::time::Instant::now();
         peer.write_all(b"OPTIONS sip:localhost SIP/2.0\r\nContent-Length:")
             .await
             .map_err(failure)?;
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::advance(Duration::from_secs(3)).await;
         peer.write_all(b" 0").await.map_err(failure)?;
-        let expired = tokio::time::timeout(Duration::from_secs(3), received.recv())
+        let expired = Wait::Ready
+            .bounded(received.recv())
             .await
             .map_err(failure)?
             .ok_or(ControlError::Capacity)?;
+        assert_eq!(start.elapsed(), Duration::from_secs(5));
         if expired.key != key
             || !matches!(
                 expired.item,
@@ -105,7 +99,7 @@ async fn partial_deadline(role: StreamRole, complete_first: bool) -> Result<(), 
     .await;
     stop.send_replace(true);
     drop((peer, packets));
-    let cleanup = match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+    let cleanup = match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure).and_then(|result| result),
         Err(timeout) => {
             task.abort();
@@ -120,23 +114,23 @@ async fn partial_deadline(role: StreamRole, complete_first: bool) -> Result<(), 
     cleanup::combine(primary, cleanup)
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn accepted_partial_frames_keep_their_original_deadline() -> Result<(), ControlError> {
     partial_deadline(StreamRole::Accepted, false).await
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn initiated_partial_frames_keep_their_original_deadline() -> Result<(), ControlError> {
     partial_deadline(StreamRole::Initiated, false).await
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn accepted_partial_frames_after_complete_messages_keep_their_original_deadline(
 ) -> Result<(), ControlError> {
     partial_deadline(StreamRole::Accepted, true).await
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn initiated_partial_frames_after_complete_messages_keep_their_original_deadline(
 ) -> Result<(), ControlError> {
     partial_deadline(StreamRole::Initiated, true).await

@@ -1,6 +1,7 @@
 use super::Server;
 use crate::ControlError;
 use rusterisk_config::Config;
+use rusterisk_test_support::Wait;
 use std::time::Duration;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -36,19 +37,28 @@ async fn parks_in_an_idle_hour(interval: Option<Duration>) -> Result<u64, Contro
             }
         })
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    controller
+        .authorize(
+            crate::Credentials::new("app".into(), "idle-password".into())?,
+            None,
+            true,
+        )
+        .await?;
     tokio::time::pause();
     tokio::time::sleep(Duration::from_secs(60)).await;
     let metrics = tokio::runtime::Handle::current().metrics();
     let before = metrics.worker_park_count(0);
+    let activity = controller.activity.snapshot();
     tokio::time::sleep(Duration::from_secs(3600)).await;
     let parks = metrics.worker_park_count(0).saturating_sub(before);
+    assert_eq!(controller.activity.snapshot(), activity);
     if let Some(ticking) = ticking {
         ticking.abort();
     }
     tokio::time::resume();
     controller.shutdown();
-    let served = tokio::time::timeout(Duration::from_secs(10), serving)
+    let served = Wait::Shutdown
+        .bounded(serving)
         .await
         .map_err(failure)?
         .map_err(failure)?;

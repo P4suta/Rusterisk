@@ -12,7 +12,8 @@ use crate::{
 use rsipstack::sip::HeadersExt;
 use rusterisk_config::{Config, Protocol, TlsFiles};
 use rusterisk_sip::SipStreamDecoder;
-use std::{net::SocketAddr, time::Duration};
+use rusterisk_test_support::Wait;
+use std::net::SocketAddr;
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
@@ -130,7 +131,7 @@ async fn finish(
     primary: Result<(), ControlError>,
 ) -> Result<(), ControlError> {
     controller.shutdown();
-    let result = match tokio::time::timeout(Duration::from_secs(2), &mut task).await {
+    let result = match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure).and_then(|result| result),
         Err(timeout) => {
             task.abort();
@@ -175,7 +176,7 @@ async fn registration(protocol: Protocol) -> Result<(), ControlError> {
     let contact = format!("<{scheme}:line@{local};transport=tcp>");
     let task = tokio::spawn(signaling.run(controller.shutdown_signal()));
     let primary = async {
-        let (mut socket, _peer) = tokio::time::timeout(Duration::from_secs(3), registrar.accept()).await.map_err(failure)?.map_err(failure)?;
+        let (mut socket, _peer) = Wait::Ready.bounded(registrar.accept()).await.map_err(failure)?.map_err(failure)?;
         let exchange = async {
             match &context {
                 Some(context) => {

@@ -5,6 +5,7 @@ use rusterisk_config::Config;
 use rusterisk_media::{mulaw_decode, AudioFormat, Frame, RtpPacket, RtpSender};
 use rusterisk_server::{rtp::SocketPair, runtime::Server, ControlError};
 use rusterisk_storage::Recorder;
+use rusterisk_test_support::Wait;
 use std::{net::SocketAddr, path::Path, time::Duration};
 use tokio_tungstenite::tungstenite::{client::IntoClientRequest, http::HeaderValue, Message};
 
@@ -34,7 +35,7 @@ fn combine(
 async fn joined<E: std::fmt::Display>(
     mut task: tokio::task::JoinHandle<Result<(), E>>,
 ) -> Result<(), ControlError> {
-    match tokio::time::timeout(Duration::from_secs(3), &mut task).await {
+    match Wait::Ready.bounded(&mut task).await {
         Ok(result) => result.map_err(failure)?.map_err(failure),
         Err(primary) => {
             task.abort();
@@ -117,7 +118,7 @@ async fn command(
 }
 
 async fn started(events: &mut Events, expected: &str) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    Wait::Ready.bounded(async {
         for _ in 0..64 {
             let message = events.next().await.ok_or(ControlError::Capacity)?.map_err(failure)?;
             let event: Event = serde_json::from_str(message.to_text().map_err(failure)?)?;
@@ -132,33 +133,36 @@ async fn started(events: &mut Events, expected: &str) -> Result<(), ControlError
 }
 
 async fn closed(events: &mut Events) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(2), async {
-        events.close(None).await.map_err(failure)?;
-        for _ in 0..64 {
-            match events.next().await.transpose().map_err(failure)? {
-                Some(Message::Close(None)) => {
-                    if events.next().await.transpose().map_err(failure)?.is_some() {
-                        return Err(ControlError::Invalid("Event TCP connection remained open"));
+    Wait::Ready
+        .bounded(async {
+            events.close(None).await.map_err(failure)?;
+            for _ in 0..64 {
+                match events.next().await.transpose().map_err(failure)? {
+                    Some(Message::Close(None)) => {
+                        if events.next().await.transpose().map_err(failure)?.is_some() {
+                            return Err(ControlError::Invalid(
+                                "Event TCP connection remained open",
+                            ));
+                        }
+                        return Ok(());
                     }
-                    return Ok(());
-                }
-                Some(Message::Text(_)) => {}
-                Some(
-                    Message::Binary(_)
-                    | Message::Ping(_)
-                    | Message::Pong(_)
-                    | Message::Close(Some(_))
-                    | Message::Frame(_),
-                )
-                | None => {
-                    return Err(ControlError::Invalid("Event close response missing"));
+                    Some(Message::Text(_)) => {}
+                    Some(
+                        Message::Binary(_)
+                        | Message::Ping(_)
+                        | Message::Pong(_)
+                        | Message::Close(Some(_))
+                        | Message::Frame(_),
+                    )
+                    | None => {
+                        return Err(ControlError::Invalid("Event close response missing"));
+                    }
                 }
             }
-        }
-        Err(ControlError::Capacity)
-    })
-    .await
-    .map_err(failure)?
+            Err(ControlError::Capacity)
+        })
+        .await
+        .map_err(failure)?
 }
 
 struct Peer {
@@ -250,7 +254,7 @@ async fn audio(
     expected: [i32; 2],
     required: u8,
 ) -> Result<(), ControlError> {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    Wait::Ready.bounded(async {
         let mut clock = tokio::time::interval(Duration::from_millis(20));
         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut sent = 0;
@@ -295,7 +299,7 @@ async fn run(root: &Path, frame: Frame, repetitions: usize) -> Result<(), Contro
     let mut left = Peer::new(81)?;
     let mut right = Peer::new(82)?;
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(Wait::Ready.duration())
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(failure)?;
@@ -312,91 +316,92 @@ async fn run(root: &Path, frame: Frame, repetitions: usize) -> Result<(), Contro
     };
     let mut events = None;
     let mut phase = "event connection";
-    let result = tokio::time::timeout(Duration::from_secs(10), async {
-        let mut event_request = format!("ws://{address}/ari/events?app=music")
-            .into_client_request()
-            .map_err(failure)?;
-        let mut authorization = HeaderValue::from_static("Basic YXBwOnRlc3QtcGFzc3dvcmQ=");
-        authorization.set_sensitive(true);
-        event_request
-            .headers_mut()
-            .insert("Authorization", authorization);
-        events = Some(
-            tokio_tungstenite::connect_async(event_request)
-                .await
-                .map_err(failure)?
-                .0,
-        );
-        let events = events.as_mut().ok_or(ControlError::Capacity)?;
-        phase = "external channels";
-        left.create(&http, address, "root").await?;
-        started(events, "root").await?;
-        right.create(&http, address, "winner").await?;
-        started(events, "winner").await?;
-        command(
-            &http,
-            address,
-            Method::POST,
-            "bridges/music",
-            &[("type", "mixing,proxy_media")],
-        )
-        .await?;
-        for channel in ["root", "winner"] {
+    let result = Wait::Scenario
+        .bounded(async {
+            let mut event_request = format!("ws://{address}/ari/events?app=music")
+                .into_client_request()
+                .map_err(failure)?;
+            let mut authorization = HeaderValue::from_static("Basic YXBwOnRlc3QtcGFzc3dvcmQ=");
+            authorization.set_sensitive(true);
+            event_request
+                .headers_mut()
+                .insert("Authorization", authorization);
+            events = Some(
+                tokio_tungstenite::connect_async(event_request)
+                    .await
+                    .map_err(failure)?
+                    .0,
+            );
+            let events = events.as_mut().ok_or(ControlError::Capacity)?;
+            phase = "external channels";
+            left.create(&http, address, "root").await?;
+            started(events, "root").await?;
+            right.create(&http, address, "winner").await?;
+            started(events, "winner").await?;
+            command(
+                &http,
+                address,
+                Method::POST,
+                "bridges/music",
+                &[("type", "mixing,proxy_media")],
+            )
+            .await?;
+            for channel in ["root", "winner"] {
+                command(
+                    &http,
+                    address,
+                    Method::POST,
+                    "bridges/music/addChannel",
+                    &[("channel", channel)],
+                )
+                .await?;
+            }
+            phase = "initial received audio";
+            audio(&mut left, &mut right, [4000, -7000], [-7000, 4000], 4).await?;
+            command(
+                &http,
+                address,
+                Method::POST,
+                "bridges/music/removeChannel",
+                &[("channel", "winner")],
+            )
+            .await?;
+            phase = "start music";
+            let status = request(&http, address, Method::POST, "channels/root/moh", &[])
+                .await?
+                .status();
+            if status != reqwest::StatusCode::NO_CONTENT {
+                return Err(failure(format!(
+                    "Expected music HTTP 204, received {}",
+                    status.as_u16()
+                )));
+            }
+            phase = "looped music received audio";
+            audio(&mut left, &mut right, [4000, -7000], [1200, 0], 12).await?;
             command(
                 &http,
                 address,
                 Method::POST,
                 "bridges/music/addChannel",
-                &[("channel", channel)],
+                &[("channel", "winner")],
             )
             .await?;
-        }
-        phase = "initial received audio";
-        audio(&mut left, &mut right, [4000, -7000], [-7000, 4000], 4).await?;
-        command(
-            &http,
-            address,
-            Method::POST,
-            "bridges/music/removeChannel",
-            &[("channel", "winner")],
-        )
-        .await?;
-        phase = "start music";
-        let status = request(&http, address, Method::POST, "channels/root/moh", &[])
-            .await?
-            .status();
-        if status != reqwest::StatusCode::NO_CONTENT {
-            return Err(failure(format!(
-                "Expected music HTTP 204, received {}",
-                status.as_u16()
-            )));
-        }
-        phase = "looped music received audio";
-        audio(&mut left, &mut right, [4000, -7000], [1200, 0], 12).await?;
-        command(
-            &http,
-            address,
-            Method::POST,
-            "bridges/music/addChannel",
-            &[("channel", "winner")],
-        )
-        .await?;
-        phase = "stop music";
-        let status = request(&http, address, Method::DELETE, "channels/root/moh", &[])
-            .await?
-            .status();
-        if status != reqwest::StatusCode::NO_CONTENT {
-            return Err(failure(format!(
-                "Expected stop music HTTP 204, received {}",
-                status.as_u16()
-            )));
-        }
-        phase = "resumed received audio";
-        audio(&mut left, &mut right, [9000, -5000], [-5000, 9000], 4).await
-    })
-    .await
-    .map_err(failure)
-    .and_then(|result| result);
+            phase = "stop music";
+            let status = request(&http, address, Method::DELETE, "channels/root/moh", &[])
+                .await?
+                .status();
+            if status != reqwest::StatusCode::NO_CONTENT {
+                return Err(failure(format!(
+                    "Expected stop music HTTP 204, received {}",
+                    status.as_u16()
+                )));
+            }
+            phase = "resumed received audio";
+            audio(&mut left, &mut right, [9000, -5000], [-5000, 9000], 4).await
+        })
+        .await
+        .map_err(failure)
+        .and_then(|result| result);
     if result.is_err() {
         eprintln!("Music-on-hold boundary failed: phase={phase}");
     }

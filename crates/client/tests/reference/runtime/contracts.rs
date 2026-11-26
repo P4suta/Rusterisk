@@ -3,12 +3,12 @@ use crate::{music_on_hold, sounds, Client, Error};
 use rusterisk_client::api::ChannelId;
 use rusterisk_config::Config;
 use rusterisk_server::storage::StorageWorker;
+use rusterisk_server::test_time::Wait;
 use std::{
     future::Future,
     io::Write,
     net::{Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 const MUSIC: &str =
@@ -34,7 +34,8 @@ fn merged(primary: Result<(), Error>, cleanup: Result<(), Error>) -> Result<(), 
 }
 
 async fn bounded<T>(future: impl Future<Output = Result<T, Error>>) -> Result<T, Error> {
-    tokio::time::timeout(Duration::from_secs(3), future)
+    Wait::Ready
+        .bounded(future)
         .await
         .map_err(|_| Error::Timeout)?
 }

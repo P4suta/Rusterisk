@@ -2,7 +2,6 @@ use crate::{
     alaw_decode, alaw_encode, mulaw_decode, mulaw_encode, EncodedAudio, Frame, MediaError,
     OpusCodec, PcmFramer, RtpPacket, MAX_DECODED_SAMPLES, MAX_PACKET, MAX_SAMPLES,
 };
-use std::collections::VecDeque;
 
 struct DecodedAudio<'a> {
     samples: &'a [i16],
@@ -238,65 +237,33 @@ enum Received {
     Signal(u16),
 }
 
-// The whole frames that a receiver holds ready for playout.
-const READY_FRAMES: usize = 10;
-
 struct FrameAssembly {
-    // Decoded samples in arrival order: whole frames first, then at most one partial frame.
-    samples: VecDeque<i16>,
-    frame_len: usize,
-    rate: u32,
+    frames: PcmFramer,
     timestamp: Option<u32>,
 }
 
 impl FrameAssembly {
-    fn new(format: AudioFormat) -> Self {
-        let rate = format.rate();
-        let frame_len = rate as usize / 50;
-        Self {
-            samples: VecDeque::with_capacity((READY_FRAMES + 1) * frame_len),
-            frame_len,
-            rate,
+    fn new(format: AudioFormat) -> Result<Self, MediaError> {
+        Ok(Self {
+            frames: PcmFramer::new(format.rate())?,
             timestamp: None,
-        }
+        })
     }
 
     fn clear(&mut self) {
-        self.samples.clear();
+        self.frames.clear();
         self.timestamp = None;
     }
 
-    fn reserved_bytes(&self) -> usize {
-        self.samples.capacity() * std::mem::size_of::<i16>()
-    }
-
-    // Takes the oldest whole frame.
-    fn pop(&mut self) -> Result<Option<Frame>, MediaError> {
-        if self.samples.len() < self.frame_len {
-            return Ok(None);
-        }
-        let mut frame = [0; MAX_SAMPLES];
-        for (slot, sample) in frame.iter_mut().zip(self.samples.drain(..self.frame_len)) {
-            *slot = sample;
-        }
-        Frame::new(&frame[..self.frame_len], self.rate).map(Some)
-    }
-
     fn push(&mut self, audio: DecodedAudio<'_>, timestamp: u32) -> Result<(), MediaError> {
-        if audio.rate != self.rate {
+        if audio.rate != self.frames.rate() {
             return Err(MediaError::InvalidFrame);
         }
         // A gap in the timestamps drops the partial frame and keeps the whole ones.
         if self.timestamp != Some(timestamp) {
-            let whole = self.samples.len() - self.samples.len() % self.frame_len;
-            self.samples.truncate(whole);
+            self.frames.discard_partial();
         }
-        let ready = self.samples.len() / self.frame_len;
-        let partial = self.samples.len() % self.frame_len;
-        if ready + (partial + audio.samples.len()) / self.frame_len > READY_FRAMES {
-            return Err(MediaError::Capacity);
-        }
-        self.samples.extend(audio.samples.iter().copied());
+        self.frames.push_samples(audio.samples)?;
         self.timestamp = Some(timestamp.wrapping_add(audio.samples.len() as u32));
         Ok(())
     }
@@ -337,7 +304,7 @@ impl RtpReceiver {
         self.packets.capacity() * std::mem::size_of::<Received>()
             + self.spare.capacity() * std::mem::size_of::<Vec<u8>>()
             + self.spare.iter().map(Vec::capacity).sum::<usize>()
-            + self.assembly.reserved_bytes()
+            + self.assembly.frames.reserved_bytes()
     }
 
     pub fn new(format: AudioFormat, payload_type: u8) -> Result<Self, MediaError> {
@@ -351,7 +318,7 @@ impl RtpReceiver {
             next: None,
             packets: Vec::with_capacity(16),
             spare: Vec::with_capacity(16),
-            assembly: FrameAssembly::new(format),
+            assembly: FrameAssembly::new(format)?,
         })
     }
 
@@ -414,7 +381,7 @@ impl RtpReceiver {
     }
 
     pub fn pop(&mut self) -> Result<Option<Frame>, MediaError> {
-        if let Some(frame) = self.assembly.pop()? {
+        if let Some(frame) = self.assembly.frames.pop() {
             return Ok(Some(frame));
         }
         while !self.packets.is_empty() {
@@ -444,7 +411,7 @@ impl RtpReceiver {
                         }
                     };
                     self.assembly.push(decoded, timestamp)?;
-                    if let Some(frame) = self.assembly.pop()? {
+                    if let Some(frame) = self.assembly.frames.pop() {
                         return Ok(Some(frame));
                     }
                 }

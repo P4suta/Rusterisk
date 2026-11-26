@@ -6,7 +6,7 @@ use http_body_util::BodyExt;
 use rusterisk_api::{Channel, MediaControlFormat, MediaDirection};
 use rusterisk_config::Config;
 use rusterisk_server::{http::router, ControlError, Controller, Credentials, Effect, Signal};
-use std::time::Duration;
+use rusterisk_test_support::Wait;
 use tower::ServiceExt;
 
 fn failure(error: impl std::fmt::Display) -> ControlError {
@@ -28,7 +28,7 @@ async fn client_http_creation_waits_for_attachment_and_resolves_the_global_forma
         .with_websocket_configuration("[global]\ncontrol_message_format=json\n", "[agent]\ntype=websocket_client\nconnection_type=per_call_config\nuri=ws://127.0.0.1:18080/media\nprotocols=media\nreconnect_attempts=1\n").map_err(failure)?;
     let (controller, runner, mut effects) = Controller::new(config, 4);
     let runner = tokio::spawn(runner.run());
-    let result = tokio::time::timeout(Duration::from_secs(2), async {
+    let result = Wait::Ready.bounded(async {
         let _subscription = controller.subscribe(Credentials::new("app".into(), "test-password".into())?, None, "calls".into()).await?;
         let app = router(controller.clone());
         let query = "app=calls&transport=websocket&encapsulation=none&format=ulaw&connection_type=client&channelId=external&direction=out&transport_data=n&data=media,agent";

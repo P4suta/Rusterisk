@@ -1,9 +1,9 @@
 use rusterisk_client::{
     api::{
-        ChannelId, EventKind, EventSource, ExternalRtpTarget, MediaUri, Playback,
-        PlaybackMilliseconds, PlaybackOptions, PlaybackState, SoundId, StaticRtpCodec,
+        ChannelId, EventKind, EventSource, ExternalRtpTarget, MediaUri, PlaybackMilliseconds,
+        PlaybackOptions, PlaybackState, SoundId, StaticRtpCodec,
     },
-    Client, Error, Session,
+    Client, Error, Playback, Session,
 };
 use rusterisk_media::{mulaw_decode, RtpPacket};
 use rusterisk_server::rtp::SocketPair;
@@ -19,27 +19,27 @@ const SEEK_STEP_MS: u32 = 7000;
 pub(super) const INTERRUPTION_OFFSET_MS: u32 = 24_000;
 
 pub(super) async fn removed<F: std::future::Future<Output = Result<Playback, Error>>>(
-    id: &ChannelId,
+    id: &rusterisk_client::PlaybackId,
     mut lookup: impl FnMut() -> F,
 ) -> Result<(), Error> {
-    tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            match lookup().await {
-                Err(Error::Api { status: 404, .. }) => return Ok(()),
-                Err(error) => return Err(error),
-                Ok(snapshot) if snapshot.id == *id && snapshot.state == PlaybackState::Done => {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-                Ok(_) => {
-                    return Err(Error::Invalid(
-                        "finished playback identity or state changed",
-                    ))
+    rusterisk_server::test_time::Wait::Ready
+        .bounded(async {
+            loop {
+                match lookup().await {
+                    Err(Error::Api { status: 404, .. }) => return Ok(()),
+                    Err(error) => return Err(error),
+                    Ok(snapshot) if snapshot.id == *id && snapshot.state == PlaybackState::Done => {
+                    }
+                    Ok(_) => {
+                        return Err(Error::Invalid(
+                            "finished playback identity or state changed",
+                        ))
+                    }
                 }
             }
-        }
-    })
-    .await
-    .map_err(|_| Error::Invalid("finished playback removal deadline"))?
+        })
+        .await
+        .map_err(|_| Error::Invalid("finished playback removal deadline"))?
 }
 
 pub fn prepare(root: &Path) -> Result<(), Error> {
@@ -147,31 +147,35 @@ async fn received_by(
 ) -> Result<(), Error> {
     let mut packets = 0;
     let mut last = None;
-    let result = tokio::time::timeout_at(deadline, async {
-        let mut window = AudioWindow::new(sample);
-        let mut bytes = [0; 2049];
-        for _ in 0..64 {
-            let (size, _) = peer.data().recv_from(&mut bytes).await?;
-            let packet = RtpPacket::parse(&bytes[..size])
-                .map_err(|_| Error::Invalid("playback audio packet"))?;
-            packets += 1;
-            last = Some((
-                packet.payload_type(),
-                packet.payload().len(),
-                packet.sequence(),
-                packet.timestamp(),
-                packet.ssrc(),
-                packet.payload().first().copied().map(mulaw_decode),
-            ));
-            if window.observe(&packet) {
-                return Ok(());
+    let result = rusterisk_server::test_time::Wait::Ready
+        .bounded(async {
+            let mut window = AudioWindow::new(sample);
+            let mut bytes = [0; 2049];
+            for _ in 0..64 {
+                let (size, _) = peer.data().recv_from(&mut bytes).await?;
+                if tokio::time::Instant::now() > deadline {
+                    return Err(Error::Timeout);
+                }
+                let packet = RtpPacket::parse(&bytes[..size])
+                    .map_err(|_| Error::Invalid("playback audio packet"))?;
+                packets += 1;
+                last = Some((
+                    packet.payload_type(),
+                    packet.payload().len(),
+                    packet.sequence(),
+                    packet.timestamp(),
+                    packet.ssrc(),
+                    packet.payload().first().copied().map(mulaw_decode),
+                ));
+                if window.observe(&packet) {
+                    return Ok(());
+                }
             }
-        }
-        Err(Error::Capacity)
-    })
-    .await
-    .map_err(|_| Error::Timeout)
-    .and_then(|result| result);
+            Err(Error::Capacity)
+        })
+        .await
+        .map_err(|_| Error::Timeout)
+        .and_then(|result| result);
     if let Err(error) = &result {
         eprintln!("playback audio failed: phase={phase}, expected={sample}, packets={packets}, last={last:?}, error={error}");
     }
@@ -181,36 +185,38 @@ async fn received_by(
 #[derive(Clone, Copy, Debug)]
 enum Observation<'a> {
     Stasis(&'a ChannelId),
-    Finished(&'a ChannelId),
+    Finished(&'a rusterisk_client::PlaybackId),
 }
 
 async fn observed(session: &mut Session, wanted: Observation<'_>) -> Result<(), Error> {
-    let result = tokio::time::timeout(Duration::from_secs(3), async {
-        for _ in 0..64 {
-            let kind = session.next_event().await?.kind;
-            match (&wanted, kind) {
-                (Observation::Stasis(id), EventKind::StasisStart { channel, .. })
-                    if channel.id == **id =>
-                {
-                    return Ok(())
+    let result = rusterisk_server::test_time::Wait::Ready
+        .bounded(async {
+            for _ in 0..64 {
+                let kind = session.next_event().await?.kind;
+                match (&wanted, kind) {
+                    (Observation::Stasis(id), EventKind::StasisStart { channel, .. })
+                        if channel.id == **id =>
+                    {
+                        return Ok(())
+                    }
+                    (
+                        Observation::Finished(id),
+                        EventKind::PlaybackFinished { playback: ended },
+                    ) if ended.id == **id => {
+                        return if ended.state == PlaybackState::Done {
+                            Ok(())
+                        } else {
+                            Err(Error::Invalid("playback finished unsuccessfully"))
+                        };
+                    }
+                    _ => {}
                 }
-                (Observation::Finished(id), EventKind::PlaybackFinished { playback: ended })
-                    if ended.id == **id =>
-                {
-                    return if ended.state == PlaybackState::Done {
-                        Ok(())
-                    } else {
-                        Err(Error::Invalid("playback finished unsuccessfully"))
-                    };
-                }
-                _ => {}
             }
-        }
-        Err(Error::Capacity)
-    })
-    .await
-    .map_err(|_| Error::Timeout)
-    .and_then(|result| result);
+            Err(Error::Capacity)
+        })
+        .await
+        .map_err(|_| Error::Timeout)
+        .and_then(|result| result);
     if let Err(error) = &result {
         eprintln!("playback event wait failed: wanted={wanted:?}, error={error}");
     }
@@ -259,8 +265,8 @@ pub async fn compare(
             Target::Bridge => "bridge",
         };
         let id = ChannelId::try_from(format!("position-{label}"))?;
-        let bridge = ChannelId::try_from(format!("position-mix-{label}"))?;
-        let playback = ChannelId::try_from(format!("position-play-{label}"))?;
+        let bridge = rusterisk_client::BridgeId::try_from(format!("position-mix-{label}"))?;
+        let playback = rusterisk_client::PlaybackId::try_from(format!("position-play-{label}"))?;
         let peer = SocketPair::bind(Ipv4Addr::UNSPECIFIED.into(), 0, 0)?;
         let destination = SocketAddr::new(callback.into(), peer.local_addr()?.port());
         let destination = ExternalRtpTarget::new(destination, StaticRtpCodec::Pcmu)
@@ -279,7 +285,7 @@ pub async fn compare(
                         .add_channels(&bridge, std::slice::from_ref(&id))
                         .await?;
                     client
-                        .subscribe_resources(application, &[EventSource::Bridge(bridge.clone())])
+                        .subscribe_resources(application, &[EventSource::from(bridge.clone())])
                         .await?;
                     client.play_bridge(&bridge, &playback, &media, None).await?
                 }
@@ -354,7 +360,7 @@ pub async fn compare(
                 let operation = combine(
                     operation,
                     client
-                        .unsubscribe_resources(application, &[EventSource::Bridge(bridge.clone())])
+                        .unsubscribe_resources(application, &[EventSource::from(bridge.clone())])
                         .await
                         .map(|_| ()),
                 );
@@ -373,8 +379,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_finished_playback_must_disappear_after_its_terminal_snapshot() -> Result<(), Error> {
-        use rusterisk_client::api::{ApiError, ChannelId, Playback, PlaybackState};
-        let id = ChannelId::try_from("completed".to_owned())?;
+        use rusterisk_client::{
+            api::{ApiError, PlaybackState},
+            Playback, PlaybackId,
+        };
+        let id = PlaybackId::try_from("completed".to_owned())?;
         let snapshot = Playback {
             id: id.clone(),
             media_uri: "sound:hello".into(),
@@ -395,7 +404,7 @@ mod tests {
         })
         .await?;
         assert!(replies.next().is_none());
-        let wrong = ChannelId::try_from("different".to_owned())?;
+        let wrong = PlaybackId::try_from("different".to_owned())?;
         assert!(
             super::removed(&wrong, || std::future::ready(Ok(snapshot.clone())))
                 .await

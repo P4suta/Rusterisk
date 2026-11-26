@@ -192,7 +192,8 @@ mod tests {
         }));
         started.await.map_err(|_| ControlError::Capacity)?;
         drop(response);
-        tokio::time::timeout(Duration::from_secs(1), query)
+        rusterisk_test_support::Wait::Ready
+            .bounded(query)
             .await
             .map_err(|error| ControlError::Adapter(error.to_string()))?
             .map_err(|error| ControlError::Adapter(error.to_string()))?;

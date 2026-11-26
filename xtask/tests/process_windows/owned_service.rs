@@ -1,5 +1,6 @@
 #![cfg(windows)]
 
+use rusterisk_test_support::Wait;
 use rusterisk_windows_job_accounting::active_processes;
 use std::{
     fs::{self, OpenOptions},
@@ -8,7 +9,7 @@ use std::{
     os::windows::io::AsHandle,
     path::{Path, PathBuf},
     task::{Context, Poll, Waker},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::signal::windows::{ctrl_c, CtrlC};
 use windows_spawn::{Child, Command, CreationFlags, DropPolicy, Job, SpawnOptions, Stdio};
@@ -24,9 +25,7 @@ const OBSERVER: &str = "RUSTERISK_OWNED_SERVICE_OBSERVER";
 const ADDRESS: &str = "RUSTERISK_OWNED_SERVICE_ADDRESS";
 const WORKER: &str = "owned_service::owned_service_worker";
 const HELPER: &str = env!("CARGO_BIN_EXE_xtask");
-const POLL_INTERVAL: Duration = Duration::from_millis(5);
-const READY_BUDGET: Duration = Duration::from_secs(5);
-const IO_BUDGET: Duration = Duration::from_secs(2);
+const IO_BUDGET: Duration = Wait::Io.duration();
 
 fn checked<T>(result: Result<T, impl std::fmt::Display>) -> io::Result<T> {
     result.map_err(|error| io::Error::other(error.to_string()))
@@ -48,12 +47,6 @@ fn combine<T>(operation: io::Result<T>, cleanup: io::Result<()>) -> io::Result<T
             "{operation}; owned service cleanup failed: {cleanup}"
         ))),
     }
-}
-
-fn deadline(budget: Duration) -> io::Result<Instant> {
-    Instant::now()
-        .checked_add(budget)
-        .ok_or_else(|| io::Error::other("Owned service fixture deadline overflow"))
 }
 
 fn reserve_directory() -> io::Result<PathBuf> {
@@ -129,77 +122,27 @@ fn signal(listener: &mut CtrlC) -> io::Result<bool> {
 }
 
 fn accept(listener: &TcpListener) -> io::Result<TcpStream> {
-    listener.set_nonblocking(true)?;
-    let deadline = deadline(READY_BUDGET)?;
-    loop {
-        match listener.accept() {
-            Ok((stream, _)) => {
-                stream.set_nonblocking(false)?;
-                stream.set_read_timeout(Some(IO_BUDGET))?;
-                stream.set_write_timeout(Some(IO_BUDGET))?;
-                return Ok(stream);
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(error) => return Err(error),
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Owned service descendant never connected",
-            ));
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
+    let stream = rusterisk_test_support::accept(listener, Wait::Ready)?;
+    stream.set_read_timeout(Some(IO_BUDGET))?;
+    stream.set_write_timeout(Some(IO_BUDGET))?;
+    Ok(stream)
 }
 
 fn wait_marker(root: &Path, name: &str) -> io::Result<()> {
-    let deadline = deadline(READY_BUDGET)?;
-    loop {
-        match read(root, name) {
-            Ok(bytes) => return verify(bytes == b"1", "Owned service readiness marker differs"),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Owned service readiness marker deadline exceeded",
-            ));
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
+    rusterisk_test_support::file_ready(root, || match read(root, name) {
+        Ok(bytes) => verify(bytes == b"1", "Owned service readiness marker differs").map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    })
 }
 
-fn wait_child(child: &mut Child, budget: Duration) -> io::Result<std::process::ExitStatus> {
-    let deadline = deadline(budget)?;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Owned service fixture child deadline exceeded",
-            ));
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
+fn wait_child(child: &mut Child, wait: Wait) -> io::Result<std::process::ExitStatus> {
+    rusterisk_test_support::signaled(child, wait)?;
+    child.wait()
 }
 
 fn wait_descendant(child: &mut std::process::Child) -> io::Result<()> {
-    let deadline = deadline(READY_BUDGET)?;
-    loop {
-        if child.try_wait()?.is_some() {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Owned service descendant termination deadline exceeded",
-            ));
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
+    rusterisk_test_support::child_exit(child, Wait::Ready).map(|_| ())
 }
 
 fn release_descendant(child: &mut std::process::Child) -> io::Result<()> {
@@ -216,18 +159,13 @@ fn release_descendant(child: &mut std::process::Child) -> io::Result<()> {
 }
 
 fn empty(job: &Job) -> io::Result<()> {
-    let deadline = deadline(READY_BUDGET)?;
-    loop {
-        if active_processes(job.as_handle())? == 0 {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Owned service fixture Job did not become empty",
-            ));
-        }
-        std::thread::sleep(POLL_INTERVAL);
+    let count = active_processes(job.as_handle())?;
+    if count == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "Job still contains {count} processes after teardown"
+        )))
     }
 }
 
@@ -235,7 +173,7 @@ fn release_parent(job: &Job, child: Option<Child>) -> io::Result<()> {
     let termination = job.terminate(72);
     let reaped = match child {
         Some(mut child) => {
-            let result = wait_child(&mut child, READY_BUDGET).map(|_| ());
+            let result = wait_child(&mut child, Wait::Ready).map(|_| ());
             drop(child);
             result
         }
@@ -266,7 +204,7 @@ fn consoleless_parent(root: &Path) -> io::Result<()> {
     drop(command);
     let (operation, child) = match started {
         Ok(mut child) => {
-            let operation = wait_child(&mut child, Duration::from_secs(40)).and_then(|status| {
+            let operation = wait_child(&mut child, Wait::Browser).and_then(|status| {
                 verify(status.success(), "Consoleless owned service parent failed")
             });
             (operation, Some(child))
@@ -277,22 +215,14 @@ fn consoleless_parent(root: &Path) -> io::Result<()> {
 }
 
 fn service_ready(service: &mut RunningCommand<'_>, root: &Path) -> io::Result<SocketAddr> {
-    let deadline = deadline(READY_BUDGET)?;
-    loop {
+    rusterisk_test_support::file_ready(root, || {
         checked(service.poll())?;
         match read(root, "service-ready") {
-            Ok(bytes) => return checked(checked(std::str::from_utf8(&bytes))?.parse()),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+            Ok(bytes) => checked(checked(std::str::from_utf8(&bytes))?.parse()).map(Some),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
         }
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Owned service did not publish readiness",
-            ));
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
+    })
 }
 
 fn disconnected(error: &io::Error) -> bool {
@@ -389,44 +319,42 @@ fn parent(root: &Path) -> io::Result<()> {
 }
 
 fn descendant(root: &Path) -> io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut interruption = ctrl_c()?;
     verify(
         !signal(&mut interruption)?,
         "Owned service descendant was interrupted before readiness",
     )?;
-    let mut stream = TcpStream::connect_timeout(&address(OBSERVER)?, IO_BUDGET)?;
-    stream.set_read_timeout(Some(Duration::from_millis(50)))?;
-    stream.set_write_timeout(Some(IO_BUDGET))?;
-    stream.write_all(b"R")?;
-    publish(root, "descendant-ready", b"1")?;
-    let deadline = deadline(Duration::from_secs(30))?;
-    loop {
-        let mut byte = [0];
-        match stream.read(&mut byte) {
-            Ok(0) => {
-                return Err(io::Error::other(
-                    "Owned service observer closed before Job cleanup",
-                ))
+    rusterisk_test_support::block_on(async {
+        let mut stream = Wait::Io
+            .bounded(tokio::net::TcpStream::connect(address(OBSERVER)?))
+            .await
+            .map_err(io::Error::other)??;
+        Wait::Io
+            .bounded(stream.write_all(b"R"))
+            .await
+            .map_err(io::Error::other)??;
+        publish(root, "descendant-ready", b"1")?;
+        let probes = async {
+            let mut byte = [0];
+            loop {
+                tokio::select! {
+                    signal = interruption.recv() => {
+                        signal.ok_or_else(|| io::Error::other("Owned service signal receiver closed"))?;
+                    }
+                    read = stream.read(&mut byte) => {
+                        verify(read? == 1, "Owned service observer closed before Job cleanup")?;
+                        verify(byte == *b"P", "Owned service descendant probe differs")?;
+                        stream.write_all(b"A").await?;
+                    }
+                }
             }
-            Ok(_) => {
-                verify(byte == *b"P", "Owned service descendant probe differs")?;
-                stream.write_all(b"A")?;
-            }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                ) => {}
-            Err(error) => return Err(error),
-        }
-        signal(&mut interruption)?;
-        if Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "Owned service descendant outlived its cleanup budget",
-            ));
-        }
-    }
+        };
+        Wait::Shutdown
+            .bounded(probes)
+            .await
+            .map_err(io::Error::other)?
+    })
 }
 
 fn service(root: &Path) -> io::Result<()> {
@@ -447,36 +375,28 @@ fn service(root: &Path) -> io::Result<()> {
             "service-ready",
             listener.local_addr()?.to_string().as_bytes(),
         )?;
-        let deadline = deadline(Duration::from_secs(30))?;
-        loop {
-            if signal(&mut interruption)? {
-                return publish(root, "graceful-stop", b"1");
-            }
-            match listener.accept() {
-                Ok((mut stream, _)) => {
-                    stream.set_nonblocking(false)?;
-                    stream.set_read_timeout(Some(IO_BUDGET))?;
-                    stream.set_write_timeout(Some(IO_BUDGET))?;
-                    let mut byte = [0];
-                    stream.read_exact(&mut byte)?;
-                    verify(byte == *b"C", "Owned service client request differs")?;
-                    stream.write_all(b"A")?;
-                    verify(
-                        stream.read(&mut byte)? == 0,
-                        "Owned service client did not close its request",
-                    )?;
+        rusterisk_test_support::block_on(async {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::from_std(listener)?;
+            Wait::Shutdown.bounded(async {
+                loop {
+                    let (mut stream, _) = tokio::select! {
+                        signal = interruption.recv() => {
+                            signal.ok_or_else(|| io::Error::other("Owned service signal receiver closed"))?;
+                            return publish(root, "graceful-stop", b"1");
+                        }
+                        accepted = listener.accept() => accepted?,
+                    };
+                    Wait::Ready.bounded(async {
+                        let mut byte = [0];
+                        stream.read_exact(&mut byte).await?;
+                        verify(byte == *b"C", "Owned service client request differs")?;
+                        stream.write_all(b"A").await?;
+                        verify(stream.read(&mut byte).await? == 0, "Owned service client did not close its request")
+                    }).await.map_err(io::Error::other)??;
                 }
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                Err(error) => return Err(error),
-            }
-            if Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Owned service did not receive graceful shutdown",
-                ));
-            }
-            std::thread::sleep(POLL_INTERVAL);
-        }
+            }).await.map_err(io::Error::other)?
+        })
     })();
     let cleanup = if operation.is_err() {
         release_descendant(&mut descendant)

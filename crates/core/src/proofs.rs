@@ -1370,6 +1370,89 @@ fn digit_sequences_change_only_at_their_wake() {
 }
 
 #[kani::proof]
+#[kani::unwind(8)]
+fn media_release_follows_every_teardown_step() {
+    use crate::{CallHandle, CallTable, TeardownStep};
+    let key = CallHandle::new(1 + u64::from(kani::any::<u8>()) * 64);
+    let prefix = kani::any::<u8>() % 7;
+    let mut table = CallTable::<1>::new();
+    assert!(table.admit(key));
+    let Some(mut cleanup) = table.teardown(key) else {
+        assert!(false, "missing teardown");
+        return;
+    };
+    let expected = [
+        TeardownStep::Admissions,
+        TeardownStep::Participants,
+        TeardownStep::Recordings,
+        TeardownStep::Dial,
+        TeardownStep::Bridge,
+        TeardownStep::Media,
+    ];
+    for step in expected.iter().take(usize::from(prefix)) {
+        assert!(!table.acknowledge(key));
+        assert!(cleanup.next() == Some(*step));
+    }
+    assert!(table.await_media(cleanup) == (prefix == 6));
+    assert!(table.acknowledge(key) == (prefix == 6));
+    kani::cover!(prefix == 0);
+    kani::cover!(prefix == 6);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+fn a_call_generation_releases_its_slot_once() {
+    use crate::{CallHandle, CallTable};
+    let key = CallHandle::new(1 + u64::from(kani::any::<u8>()) * 64);
+    let mut table = CallTable::<1>::new();
+    assert!(table.admit(key));
+    let Some(mut cleanup) = table.teardown(key) else {
+        assert!(false, "missing teardown");
+        return;
+    };
+    assert!(table.teardown(key).is_none());
+    for _step in cleanup.by_ref() {}
+    assert!(table.await_media(cleanup));
+    assert!(!table.admit(key));
+    let released = table.acknowledge(key);
+    assert!(released);
+    assert!(!table.acknowledge(key));
+    assert!(!table.admit(key));
+    kani::cover!(released);
+}
+
+#[kani::proof]
+#[kani::unwind(8)]
+fn stale_media_notices_preserve_the_reused_slot() {
+    use crate::{CallHandle, CallTable};
+    let generation = 1 + u64::from(kani::any::<u8>()) * 64;
+    let old = CallHandle::new(generation);
+    let new = CallHandle::new(generation + 64);
+    let mut table = CallTable::<1>::new();
+    assert!(table.admit(old));
+    let Some(mut cleanup) = table.teardown(old) else {
+        assert!(false, "missing old teardown");
+        return;
+    };
+    for _step in cleanup.by_ref() {}
+    assert!(table.await_media(cleanup));
+    assert!(table.acknowledge(old));
+    assert!(table.admit(new));
+    assert!(table.teardown(old).is_none());
+    assert!(!table.acknowledge(old));
+    let Some(mut cleanup) = table.teardown(new) else {
+        assert!(false, "missing replacement teardown");
+        return;
+    };
+    for _step in cleanup.by_ref() {}
+    assert!(table.await_media(cleanup));
+    assert!(!table.acknowledge(old));
+    let released = table.acknowledge(new);
+    assert!(released);
+    kani::cover!(released);
+}
+
+#[kani::proof]
 #[kani::unwind(12)]
 fn terminal_release_is_absorbing() {
     let generation: u64 = kani::any();

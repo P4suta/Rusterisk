@@ -6,6 +6,7 @@ use rusterisk_server::{
     media_websocket::{MediaLinkOptions, MediaSocket, SocketMessage},
     CallKey,
 };
+use rusterisk_test_support::Wait;
 use std::{future::IntoFuture, time::Duration};
 use tokio::sync::{mpsc, watch};
 
@@ -128,7 +129,7 @@ async fn duplex(format: MediaFormat) -> Result<(), MediaError> {
     let (media, hub, mut notices) = MediaHub::new(4);
     let (stop, stopped) = watch::channel(false);
     let task = tokio::spawn(hub.run(stopped));
-    let result = tokio::time::timeout(Duration::from_secs(3), async {
+    let result = Wait::Ready.bounded(async {
         let (mut left, _) = tokio_tungstenite::connect_async(format!("ws://{address}/media"))
             .await
             .map_err(failure)?;
