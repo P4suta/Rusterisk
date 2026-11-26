@@ -90,6 +90,28 @@ async fn a_bridge_queued_before_a_turn_carries_that_turns_audio() -> Result<(), 
     Ok(())
 }
 
+// A G.711 leg held this many bytes inline and in reserved memory when the budget took effect.
+const LEG_HELD: usize = 6608;
+// A leg task held two frame channels, and a Tokio channel reserves a block of 32 slots on its first send.
+const TASK_CHANNELS: usize = 2 * 32 * std::mem::size_of::<rusterisk_media::Frame>();
+
+#[tokio::test]
+async fn a_g711_leg_stays_within_its_memory_budget() -> Result<(), MediaError> {
+    let (_handle, mut hub, _notices) = MediaHub::new(4);
+    let measured = key("measured")?;
+    let _peer = leg(&mut hub, &measured, None)?;
+    let owned = hub.legs.get(&measured).ok_or(MediaError::UnknownStream)?;
+    let held = std::mem::size_of::<RtpLeg>() + owned.reserved_bytes();
+    hub.close().await?;
+    const { assert!(TASK_CHANNELS > LEG_HELD * 5 / 4) };
+    assert!(held <= LEG_HELD * 5 / 4, "a G.711 leg holds {held} bytes");
+    assert!(
+        held * 10 >= LEG_HELD * 5 / 4 * 6,
+        "a G.711 leg holds {held} bytes, so the budget can shrink"
+    );
+    Ok(())
+}
+
 // A peer floods a leg, and each turn reads one reorder window of its datagrams.
 #[tokio::test]
 async fn a_leg_reads_at_most_one_window_of_datagrams_in_a_turn() -> Result<(), MediaError> {

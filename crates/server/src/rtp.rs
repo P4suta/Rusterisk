@@ -373,6 +373,14 @@ impl RtpLeg {
         &mut self.measurements
     }
 
+    // The heap memory that the leg reserves, which a footprint test bounds.
+    #[cfg(test)]
+    pub(crate) fn reserved_bytes(&self) -> usize {
+        self.receiver.reserved_bytes()
+            + self.sources.capacity() * std::mem::size_of::<SentSource>()
+            + self.commands.capacity() * std::mem::size_of::<RtpDigitCommand>()
+    }
+
     #[cfg(test)]
     pub(crate) fn local_addr(&self) -> Result<SocketAddr, MediaError> {
         self.data.local_addr().map_err(failure)
