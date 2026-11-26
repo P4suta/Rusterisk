@@ -127,9 +127,15 @@ impl Combined {
         for index in 0..CHANNELS {
             let peer = peer(index)?;
             let now = u64::try_from(index).map_err(failure)?;
+            let initial = invite(index, peer, 1, "");
+            let started = Instant::now();
             let challenged = engine
-                .receive(invite(index, peer, 1, "").as_bytes(), peer, now)
+                .receive(initial.as_bytes(), peer, now)
                 .map_err(failure)?;
+            turns.push(Turn {
+                input: "challenge",
+                elapsed: started.elapsed(),
+            });
             let challenge = challenged
                 .datagrams
                 .first()
@@ -141,9 +147,14 @@ impl Combined {
                     &format!("z9hG4bK-ACK-1-{}", peer.port()),
                     &format!("z9hG4bK-invite-{index}-1"),
                 );
+            let started = Instant::now();
             engine
                 .receive(acknowledged.as_bytes(), peer, now)
                 .map_err(failure)?;
+            turns.push(Turn {
+                input: "challenge acknowledgment",
+                elapsed: started.elapsed(),
+            });
             let invitation = invite(index, peer, 2, &authorization);
             let started = Instant::now();
             let offered = engine
@@ -199,9 +210,9 @@ impl Combined {
                 .ok_or(ControlError::Invalid("The engine sent no answer"))?
                 .bytes
                 .clone();
-            engine
-                .receive(&in_dialog(&answer, "ACK", 2, peer)?, peer, now)
-                .map_err(failure)?;
+            let acknowledged = in_dialog(&answer, "ACK", 2, peer)?;
+            let started = Instant::now();
+            engine.receive(&acknowledged, peer, now).map_err(failure)?;
             control.signal(
                 Signal::Milestone {
                     key: key.clone(),
@@ -209,6 +220,10 @@ impl Combined {
                 },
                 STAMP,
             )?;
+            turns.push(Turn {
+                input: "answer acknowledgment",
+                elapsed: started.elapsed(),
+            });
             calls.push(Call {
                 peer,
                 bye: in_dialog(&answer, "BYE", 3, peer)?,
@@ -217,14 +232,16 @@ impl Combined {
         }
         for (index, pair) in keys.chunks(2).enumerate() {
             let bridge = ChannelId::try_from(format!("bridge-{index}"))?;
-            control.apply(
-                Action::CreateBridge {
-                    id: bridge.clone(),
-                    name: String::new(),
-                },
-                STAMP,
-                100,
-            )?;
+            let create = Action::CreateBridge {
+                id: bridge.clone(),
+                name: String::new(),
+            };
+            let started = Instant::now();
+            control.apply(create, STAMP, 100)?;
+            turns.push(Turn {
+                input: "create bridge",
+                elapsed: started.elapsed(),
+            });
             let members = pair.iter().map(|key| key.id.clone()).collect();
             let started = Instant::now();
             control.apply(
@@ -318,51 +335,42 @@ impl Combined {
     }
 
     // The loader task parses and prepares the replacement, and the owner validates and commits it.
-    fn reload(&mut self) -> Result<[Turn; 2], ControlError> {
+    fn reload(&mut self) -> Result<Turn, ControlError> {
         let replacement = configuration(2)?;
         let prepared =
             PreparedEngineConfiguration::prepare(replacement.clone()).map_err(failure)?;
         let settings = CallSettings::configured(&replacement);
         let started = Instant::now();
         let candidate = self.control.prepare_configuration(replacement, settings)?;
-        let prepare = started.elapsed();
-        let started = Instant::now();
         self.control.commit_configuration(candidate)?;
         self.control.configuration_published(STAMP.into());
         self.engine.publish_configuration(prepared);
-        let commit = started.elapsed();
-        Ok([
-            Turn {
-                input: "reload validation",
-                elapsed: prepare,
-            },
-            Turn {
-                input: "reload commit",
-                elapsed: commit,
-            },
-        ])
+        Ok(Turn {
+            input: "reload",
+            elapsed: started.elapsed(),
+        })
     }
 }
 
 // Every channel starts, answers, and joins a bridge.
-// Every channel then hangs up at once while a reload validates and commits between the hangups.
-// A second set of calls then ends in one shutdown decision.
+// The first group reloads halfway through individual hangups.
+// The second group reloads with all calls active and ends them in one shutdown decision.
 fn trial() -> Result<Vec<Turn>, ControlError> {
-    let mut turns = Vec::with_capacity(CHANNELS * 4);
+    let mut turns = Vec::with_capacity(CHANNELS * 13 + 3);
     let mut combined = Combined::established(&mut turns)?;
-    let mut reload = None;
     for index in 0..CHANNELS {
         if index == CHANNELS / 2 {
-            let [validation, commit] = combined.reload()?;
-            turns.push(validation);
-            reload = Some(commit);
-        }
-        if index == CHANNELS * 3 / 4 {
-            turns.extend(reload.take());
+            turns.push(combined.reload()?);
         }
         turns.push(combined.hangup(index, 1000)?);
     }
     let mut ended = Combined::established(&mut turns)?;
+    let starting_generation = ended.control.configuration_generation();
+    turns.push(ended.reload()?);
+    assert_ne!(
+        ended.control.configuration_generation(),
+        starting_generation
+    );
     turns.push(ended.shutdown(2000)?);
     Ok(turns)
 }
@@ -384,16 +392,19 @@ fn median(mut values: Vec<Duration>) -> Option<Duration> {
 }
 
 #[test]
-fn a_combined_trial_takes_one_turn_for_each_hangup_and_each_reload_step() -> Result<(), ControlError>
-{
+fn a_trial_times_each_input_and_reloads_before_the_simultaneous_shutdown(
+) -> Result<(), ControlError> {
     let turns = trial()?;
     for (input, count) in [
+        ("challenge", CHANNELS * 2),
+        ("challenge acknowledgment", CHANNELS * 2),
         ("invitation", CHANNELS * 2),
         ("answer", CHANNELS * 2),
+        ("answer acknowledgment", CHANNELS * 2),
+        ("create bridge", CHANNELS),
         ("bridge", CHANNELS),
         ("hangup", CHANNELS),
-        ("reload validation", 1),
-        ("reload commit", 1),
+        ("reload", 2),
         ("shutdown", 1),
     ] {
         assert_eq!(
@@ -402,6 +413,9 @@ fn a_combined_trial_takes_one_turn_for_each_hangup_and_each_reload_step() -> Res
             "{input}"
         );
     }
+    assert!(
+        matches!(turns.as_slice(), [.., reload, shutdown] if reload.input == "reload" && shutdown.input == "shutdown")
+    );
     Ok(())
 }
 
