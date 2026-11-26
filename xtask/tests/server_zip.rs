@@ -106,7 +106,7 @@ fn zip_candidates_must_match_every_captured_file_and_its_metadata() -> io::Resul
 #[test]
 fn zip_readback_rejects_changed_regular_content_and_extra_entries() -> io::Result<()> {
     let payload = payload()?;
-    for extra in [false, true] {
+    for (changed, extra) in [(false, false), (true, false), (false, true)] {
         let mut archive = zip::ZipWriter::new_stream(Vec::new());
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated)
@@ -116,9 +116,15 @@ fn zip_readback_rejects_changed_regular_content_and_extra_entries() -> io::Resul
         for (index, (path, bytes)) in payload.files().enumerate() {
             archive.start_file(
                 format!("{}/{path}", payload.name().root()),
-                options.unix_permissions(if index == 0 { 0o755 } else { 0o644 }),
+                options.unix_permissions(
+                    if matches!(path, "bin/rusterisk.exe" | "bin/rusterisk-cli.exe") {
+                        0o755
+                    } else {
+                        0o644
+                    },
+                ),
             )?;
-            if !extra && index == 1 {
+            if changed && index == 1 {
                 let mut changed = bytes.to_vec();
                 changed[0] ^= 1;
                 archive.write_all(&changed)?;
@@ -130,7 +136,10 @@ fn zip_readback_rejects_changed_regular_content_and_extra_entries() -> io::Resul
             archive.start_file(format!("{}/extra", payload.name().root()), options)?;
             archive.write_all(b"extra")?;
         }
-        assert!(check_server_zip(&payload, &archive.finish()?.into_inner()).is_err());
+        assert_eq!(
+            check_server_zip(&payload, &archive.finish()?.into_inner()).is_ok(),
+            !changed && !extra
+        );
     }
     Ok(())
 }
