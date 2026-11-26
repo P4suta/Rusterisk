@@ -80,6 +80,22 @@ async fn diagnosis_follows_dialplan_and_live_call_identity_with_read_only_creden
         assert!(browser["conditions"]
             .as_array()
             .is_some_and(|items| !items.is_empty()));
+        for name in [
+            "registered_extensions",
+            "incoming_sip_trunk",
+            "outgoing_sip_trunk",
+        ] {
+            let profile = verified
+                .iter()
+                .find(|profile| profile["path"] == name)
+                .ok_or(ControlError::Invalid("Missing verified SIP call path"))?;
+            assert_eq!(profile["signaling"], "SIP over UDP");
+            assert_eq!(profile["media"], "RTP");
+            assert_eq!(profile["codec"], "PCMU");
+            assert!(profile["conditions"]
+                .as_array()
+                .is_some_and(|conditions| !conditions.is_empty()));
+        }
         let operations = capabilities["operations"]
             .as_array()
             .ok_or(ControlError::Invalid("Missing operation capabilities"))?;

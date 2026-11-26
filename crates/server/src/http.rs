@@ -490,6 +490,13 @@ async fn dispatch(
     }
     if method == Method::GET && segments == ["rusterisk", "capabilities"] {
         use rusterisk_api::capabilities::{Capabilities, OperationCapability, VerifiedCallPath};
+        let sip_call_profile = |path: &str, condition: &str| VerifiedCallPath {
+            path: path.into(),
+            signaling: "SIP over UDP".into(),
+            media: "RTP".into(),
+            codec: "PCMU".into(),
+            conditions: [condition.to_owned()].into(),
+        };
         let operations = rusterisk_api::OPERATIONS
             .iter()
             .map(|operation| OperationCapability {
@@ -500,18 +507,22 @@ async fn dispatch(
         return Ok(Json(Capabilities {
             reference: rusterisk_api::REFERENCE_VERSION.into(),
             operations,
-            verified_call_paths: [VerifiedCallPath {
+            verified_call_paths: Vec::from([
+                sip_call_profile("registered_extensions", "Two registered phones on extensions 101 and 102"),
+                sip_call_profile("incoming_sip_trunk", "Authenticated trunk to a registered phone by dialed number"),
+                sip_call_profile("outgoing_sip_trunk", "Registered phone to a static trunk contact with an explicit destination number"),
+                VerifiedCallPath {
                 path: "webrtc_application".into(),
                 signaling: "SIP over WebSocket".into(),
                 media: "DTLS-SRTP".into(),
                 codec: "PCMU".into(),
-                conditions: vec![
+                conditions: Vec::from([
                     "Chromium on Linux ARM64".into(),
                     "Two registered endpoints in a Stasis mixing bridge".into(),
                     "ICE host candidates on an isolated network".into(),
-                ],
-            }]
-            .into(),
+                ]),
+            },
+            ]),
         })
         .into_response());
     }
