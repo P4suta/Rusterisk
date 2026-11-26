@@ -183,11 +183,44 @@ impl Store {
                 .ok_or(StorageError::InvalidName)?;
             connection.execute("INSERT INTO recordings (name,format,outcome) VALUES (?1,'wav','interrupted') ON CONFLICT(name) DO UPDATE SET outcome='interrupted'", [name])?;
         }
-        Ok(Self {
+        let mut store = Self {
             connection,
             recordings,
             _lock: lock,
-        })
+        };
+        store.reconcile_recordings()?;
+        Ok(store)
+    }
+
+    fn reconcile_recordings(&mut self) -> Result<(), StorageError> {
+        let recordings = self.recordings()?;
+        let transaction = self.connection.transaction()?;
+        transaction.execute_batch(
+            "CREATE TEMP TABLE published_recordings (name TEXT PRIMARY KEY NOT NULL)",
+        )?;
+        {
+            let mut insert = transaction.prepare("INSERT INTO published_recordings VALUES (?1)")?;
+            for recording in recordings {
+                let path = self.recordings.join(format!("{}.wav", recording.name));
+                match WaveReader::open(&path) {
+                    Ok(_) => {
+                        insert.execute([&recording.name])?;
+                    }
+                    Err(StorageError::InvalidWave) => {}
+                    Err(StorageError::Io(error))
+                        if error.kind() == std::io::ErrorKind::UnexpectedEof => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        transaction.execute_batch(
+            "INSERT OR IGNORE INTO recordings (name, format, outcome)
+                 SELECT name, 'wav', 'completed' FROM published_recordings;
+             DELETE FROM recordings WHERE name NOT IN (SELECT name FROM published_recordings);
+             DROP TABLE published_recordings;",
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn start_call(&mut self, id: &str, timestamp: &str) -> Result<(), StorageError> {
