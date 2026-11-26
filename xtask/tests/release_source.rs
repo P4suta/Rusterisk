@@ -117,6 +117,27 @@ fn one_release_source_contains_each_runner_projection_and_its_governing_inputs()
 }
 
 #[test]
+fn isolated_release_checks_use_the_captured_proposal_configuration() -> io::Result<()> {
+    using_source("proposal-config", |captured, source| {
+        let proposal = source.join("release-plz.toml");
+        assert!(
+            proposal.is_file(),
+            "the isolated fast check needs release-plz.toml"
+        );
+        assert_eq!(
+            std::fs::read(&proposal)?.as_slice(),
+            include_bytes!("../../release-plz.toml")
+        );
+        std::fs::write(proposal, b"[workspace]\ngit_only = true\n")?;
+        assert!(matches!(
+            captured.check(source),
+            Err(xtask::release_check::ReleaseSourceError::Changed)
+        ));
+        Ok(())
+    })
+}
+
+#[test]
 fn captured_release_inputs_supply_every_registered_policy_decision() -> io::Result<()> {
     using_source("policy-decisions", |_captured, source| {
         let exceptions: xtask::Exceptions = toml::from_str(&std::fs::read_to_string(
