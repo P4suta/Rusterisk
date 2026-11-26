@@ -192,12 +192,12 @@ fn browser() -> Result<crate::webrtc::WebRtcSession, MediaError> {
     Ok(session)
 }
 
-// Runs the next queued command and then every attachment that still waits.
+// Runs all queued media commands in arrival order.
 fn settle(hub: &mut MediaHub) -> Result<(), MediaError> {
     let command = hub.commands.try_recv().map_err(failure)?;
-    hub.ordered(command)?;
-    while let Ok(attachment) = hub.webrtc.try_recv() {
-        hub.webrtc_attachment(attachment)?;
+    hub.command(command)?;
+    while let Ok(command) = hub.commands.try_recv() {
+        hub.command(command)?;
     }
     Ok(())
 }
@@ -220,6 +220,209 @@ async fn a_bridge_command_finds_the_webrtc_attachment_that_was_queued_before_it(
     hub.close().await?;
     assert!(attached);
     assert!(!stopped);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_attachment_without_a_reply_reports_its_result_as_a_notice() -> Result<(), MediaError> {
+    let (handle, mut hub, mut notices) = MediaHub::new(4);
+    let key = key()?;
+    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    // The media task refuses a second link for one call.
+    for (serial, admitted) in [(31, true), (32, false)] {
+        handle.start_attachment(
+            key.clone(),
+            SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?,
+            RtpSession {
+                remote: peer.local_addr().map_err(failure)?,
+                format: AudioFormat::Pcmu,
+                payload_type: 0,
+                telephone: None,
+            },
+            PeerMediaDirection::SendReceive,
+            AttachmentMode::Answered,
+            serial,
+        )?;
+        settle(&mut hub)?;
+        let reported = matches!(
+            notices.try_recv(),
+            Ok(MediaNotice::Attached { key: attached, serial: numbered, result })
+                if attached == key && numbered == serial && result.is_ok() == admitted
+        );
+        assert!(reported, "admitted={admitted}");
+    }
+    handle.start_webrtc_attachment(
+        key.clone(),
+        browser()?,
+        PeerMediaDirection::SendReceive,
+        AttachmentMode::Answered,
+        33,
+    )?;
+    handle.release(key.clone())?;
+    settle(&mut hub)?;
+    let refused = matches!(
+        notices.try_recv(),
+        Ok(MediaNotice::Attached { key: attached, serial: 33, result: Err(_) }) if attached == key
+    );
+    hub.close().await?;
+    assert!(refused);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ordinary_notices_keep_their_capacity_while_a_webrtc_attachment_waits(
+) -> Result<(), MediaError> {
+    let (handle, mut hub, mut notices) = MediaHub::new(4);
+    let key = key()?;
+    for _ in 0..127 {
+        hub.notice(MediaNotice::Connected { key: key.clone() })?;
+    }
+    let _release = handle.start_webrtc_attachment(
+        key.clone(),
+        browser()?,
+        PeerMediaDirection::SendReceive,
+        AttachmentMode::Answered,
+        1,
+    )?;
+    hub.notice(MediaNotice::Connected { key: key.clone() })?;
+    assert!(matches!(
+        hub.notice(MediaNotice::Connected { key: key.clone() }),
+        Err(MediaError::Capacity)
+    ));
+    let _second_release = handle.start_webrtc_attachment(
+        CallKey {
+            id: ChannelId::try_from("second".to_owned()).map_err(failure)?,
+            generation: 1,
+        },
+        browser()?,
+        PeerMediaDirection::SendReceive,
+        AttachmentMode::Answered,
+        2,
+    )?;
+    settle(&mut hub)?;
+    for _ in 0..128 {
+        assert!(
+            matches!(notices.try_recv(), Ok(MediaNotice::Connected { key: received }) if received == key)
+        );
+    }
+    for serial in [1, 2] {
+        assert!(
+            matches!(notices.try_recv(), Ok(MediaNotice::Attached { serial: received, result: Ok(()), .. }) if received == serial)
+        );
+    }
+    hub.close().await
+}
+
+#[tokio::test]
+async fn accepted_direction_keeps_its_notice_slot_under_load() -> Result<(), MediaError> {
+    let (handle, mut hub, mut notices) = MediaHub::new(4);
+    let key = key()?;
+    handle.start_peer_direction(
+        key.clone(),
+        PeerMediaDirection::SendOnly,
+        Gate::Open,
+        Gate::Open,
+        1,
+    )?;
+    let mut pending = Vec::new();
+    while let Ok(slot) = hub.notices.completions.clone().try_reserve_owned() {
+        pending.push(slot);
+    }
+    assert_eq!(pending.len(), 127);
+    for _ in 0..128 {
+        hub.notice(MediaNotice::Connected { key: key.clone() })?;
+    }
+    let refused = handle.start_peer_direction(
+        key.clone(),
+        PeerMediaDirection::SendOnly,
+        Gate::Open,
+        Gate::Open,
+        2,
+    );
+    settle(&mut hub)?;
+    let mut completed = Vec::new();
+    while let Ok(notice) = notices.try_recv() {
+        if let MediaNotice::DirectionApplied { serial, result, .. } = notice {
+            completed.push((serial, result?));
+        }
+    }
+    hub.close().await?;
+    assert!(matches!(refused, Err(MediaError::Capacity)));
+    assert_eq!(completed, [(1, false)]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_direction_change_without_a_reply_reports_whether_it_applied() -> Result<(), MediaError> {
+    let (handle, mut hub, mut notices) = MediaHub::new(4);
+    let key = key()?;
+    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    for (serial, applied) in [(41, false), (42, true)] {
+        handle.start_peer_direction(
+            key.clone(),
+            PeerMediaDirection::SendOnly,
+            Gate::OutgoingMuted,
+            Gate::OutgoingMuted,
+            serial,
+        )?;
+        settle(&mut hub)?;
+        let reported = matches!(
+            notices.try_recv(),
+            Ok(MediaNotice::DirectionApplied {
+                key: changed,
+                serial: numbered,
+                result: Ok(result),
+            }) if changed == key && numbered == serial && result == applied
+        );
+        assert!(reported, "applied={applied}");
+        if !applied {
+            datagram(&mut hub, key.clone(), &peer)?;
+        }
+    }
+    hub.close().await
+}
+
+#[tokio::test]
+async fn a_replacement_webrtc_answer_survives_release_of_the_expired_attachment(
+) -> Result<(), MediaError> {
+    let (handle, mut hub, mut notices) = MediaHub::new(4);
+    let key = key()?;
+    let expired = handle.start_webrtc_attachment(
+        key.clone(),
+        browser()?,
+        PeerMediaDirection::SendReceive,
+        AttachmentMode::Early,
+        1,
+    )?;
+    expired.send(key.clone());
+    let _replacement = handle.start_webrtc_attachment(
+        key.clone(),
+        browser()?,
+        PeerMediaDirection::SendReceive,
+        AttachmentMode::Answered,
+        2,
+    )?;
+    settle(&mut hub)?;
+    let mut admitted = Vec::new();
+    while let Ok(MediaNotice::Attached { serial, result, .. }) = notices.try_recv() {
+        if result.is_ok() {
+            admitted.push(serial);
+        }
+    }
+    let (_stop, mut stopped) = watch::channel(false);
+    let mut frames = FrameClock::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while hub.workers.len() > 1 {
+            hub.turn(&mut stopped, &mut frames).await?;
+        }
+        Ok::<_, MediaError>(())
+    })
+    .await
+    .map_err(failure)??;
+    let installed = hub.ports.contains_key(&key);
+    hub.close().await?;
+    assert_eq!(admitted, [1, 2]);
+    assert!(installed, "the expired link cannot remove the replacement");
     Ok(())
 }
 

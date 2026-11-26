@@ -415,7 +415,7 @@ mod tests {
             Err(ControlError::Capacity)
         ));
         assert!(
-            matches!(effects.try_recv().map_err(|_| ControlError::Capacity)?, Effect::EndRecording { token: current, mode: crate::media::RecordingEnd::Cancel } if current == token)
+            matches!(effects.try_recv().map_err(|_| ControlError::Capacity)?, Effect::EndRecording { token: current, mode: crate::media::RecordingEnd::Cancel, .. } if current == token)
         );
         runner.apply_signal(
             Signal::RecordingAdmitted {

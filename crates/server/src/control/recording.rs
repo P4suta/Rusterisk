@@ -268,6 +268,7 @@ impl Control {
         entry.phase = Phase::Ending(mode);
         let mut outcome = Outcome::empty();
         outcome.effects.push(Effect::EndRecording {
+            owner: entry.owner.clone(),
             token: entry.token,
             mode,
         });

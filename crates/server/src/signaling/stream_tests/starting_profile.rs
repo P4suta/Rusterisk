@@ -368,7 +368,10 @@ async fn exercise(admission: Admission) -> Result<(), ControlError> {
             let progress = match admission {
                 Admission::Early => {
                     phase = "early transport from the admitted profile";
-                    fixture.signaling.prepare_early_media(&key, 10).await?;
+                    let mut tasks = rusterisk_core::MediaTasks::new(key.generation);
+                    let token = tasks.reserve(rusterisk_core::MediaTaskKind::Playback)?;
+                    fixture.signaling.start_early_media(&key, token, 10)?;
+                    fixture.signaling.media_answers_for_test(10).await?;
                     let progress = fixture.response(183).await?;
                     fixture.starting_media(&progress)?;
                     Some(progress)
@@ -377,6 +380,7 @@ async fn exercise(admission: Admission) -> Result<(), ControlError> {
             };
             phase = "answer from the admitted profile";
             fixture.signaling.answer(&key, 11).await?;
+            fixture.signaling.media_answers_for_test(11).await?;
             let answer = fixture.response(200).await?;
             fixture.starting_media(&answer)?;
             if let Some(progress) = progress {
@@ -405,6 +409,128 @@ async fn exercise(admission: Admission) -> Result<(), ControlError> {
 async fn an_incoming_adapter_keeps_its_admission_settings_until_answer() -> Result<(), ControlError>
 {
     exercise(Admission::Answer).await
+}
+
+#[tokio::test]
+async fn a_recording_waits_behind_the_answer_that_it_causes() -> Result<(), ControlError> {
+    let directory = tempfile::tempdir().map_err(failure)?;
+    let (storage, worker) = crate::storage::StorageWorker::start(directory.path().to_owned())
+        .await
+        .map_err(failure)?;
+    let mut fixture = Fixture::new().await?;
+    fixture.signaling.storage = Some(storage);
+    let primary = async {
+        fixture.subscribe().await?;
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let key = fixture.admit().await?;
+            fixture.replace_current_settings()?;
+            let mut tasks = rusterisk_core::MediaTasks::new(key.generation);
+            let token = tasks.reserve(rusterisk_core::MediaTaskKind::Recording)?;
+            fixture
+                .signaling
+                .effect(
+                    crate::Effect::RecordMedia {
+                        owner: crate::MediaOwner::Channel(key.clone()),
+                        token,
+                        name: rusterisk_api::ChannelId::try_from("held-recording".to_owned())?,
+                        options: Default::default(),
+                    },
+                    10,
+                )
+                .await?;
+            require(
+                fixture.signaling.waits(&key) && fixture.signaling.recordings.is_empty(),
+                "The recording started before its call answered",
+            )?;
+            fixture.signaling.media_answers_for_test(11).await?;
+            require(
+                fixture.signaling.recordings.len() == 1,
+                "The recording did not start after the answer",
+            )
+        })
+        .await
+        .map_err(failure)
+        .and_then(|result| result)
+    }
+    .await;
+    let result = fixture.finish(primary).await;
+    let result = combine(result, worker.close().await.map_err(failure));
+    combine(result, directory.close().map_err(failure))
+}
+
+#[tokio::test]
+async fn an_early_attachment_that_completes_after_a_cancel_releases_its_media(
+) -> Result<(), ControlError> {
+    let mut fixture = Fixture::new().await?;
+    let primary = async {
+        fixture.subscribe().await?;
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let key = fixture.admit().await?;
+            fixture.replace_current_settings()?;
+            let mut tasks = rusterisk_core::MediaTasks::new(key.generation);
+            let token = tasks.reserve(rusterisk_core::MediaTaskKind::Playback)?;
+            fixture.signaling.start_early_media(&key, token, 10)?;
+            let peer = fixture.peer.local_addr().map_err(failure)?;
+            let cancel = format!("CANCEL sip:100@{} SIP/2.0\r\nVia: SIP/2.0/UDP {peer};branch=z9hG4bK-incoming-profile-2;rport\r\nFrom: <sip:phone@localhost>;tag=starting-peer\r\nTo: <sip:100@localhost>\r\nCall-ID: incoming-starting-profile\r\nCSeq: 2 CANCEL\r\nMax-Forwards: 70\r\nContent-Length: 0\r\n\r\n", fixture.local);
+            fixture.send(cancel.as_bytes(), 11).await?;
+            let mut statuses = [0_u16; 2];
+            for status in &mut statuses {
+                let SipMessage::Response(response) = fixture.receive().await? else {
+                    return Err(ControlError::Invalid("Expected a response to the CANCEL"));
+                };
+                *status = response.status_code.code();
+            }
+            statuses.sort_unstable();
+            require(statuses == [200, 487], "The CANCEL did not end the invitation")?;
+            fixture.signaling.media_answers_for_test(12).await?;
+            require(
+                !matches!(
+                    fixture.signaling.calls.get(&key).map(|call| &call.media),
+                    Some(crate::signaling::MediaAdmission::Early(_))
+                ),
+                "A refused progress kept its early transport",
+            )?;
+            let ip = "127.0.0.1".parse().map_err(failure)?;
+            fixture
+                .signaling
+                .media
+                .start_attachment(
+                    key.clone(),
+                    SocketPair::bind(ip, 0, 0).map_err(failure)?,
+                    crate::rtp::RtpSession {
+                        remote: fixture.audio.local_addr().map_err(failure)?,
+                        format: rusterisk_media::AudioFormat::Pcmu,
+                        payload_type: 0,
+                        telephone: None,
+                    },
+                    rusterisk_core::PeerMediaDirection::SendReceive,
+                    crate::media::AttachmentMode::Early,
+                    77,
+                )
+                .map_err(failure)?;
+            let notice = fixture
+                .signaling
+                .notices
+                .recv()
+                .await
+                .ok_or(ControlError::Capacity)?;
+            require(
+                matches!(
+                    notice,
+                    crate::media::MediaNotice::Attached {
+                        result: Ok(()),
+                        ..
+                    }
+                ),
+                "The early link outlived its refused progress",
+            )
+        })
+        .await
+        .map_err(failure)
+        .and_then(|result| result)
+    }
+    .await;
+    fixture.finish(primary).await
 }
 
 #[tokio::test]

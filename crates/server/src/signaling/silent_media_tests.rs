@@ -1,19 +1,28 @@
 use super::{cleanup::combine, failure, Active, DigitDelivery, MediaAdmission, Signaling};
+use super::{Outcome, Waiting};
 use crate::media::{MediaHub, MediaNotice, PlaybackControl, Queued};
+use crate::rtp::SocketPair;
 use crate::storage::{MusicSelection, StorageWorker};
 use crate::{
     Action, CallKey, ControlError, Controller, Credentials, Effect, IncomingCall, IncomingTarget,
     MediaOwner,
 };
-use rusterisk_api::{ChannelId, MediaUri, RecordingOptions};
+use rusterisk_api::{
+    ChannelId, ChannelState, EventKind, ExternalRtpTarget, MediaUri, RecordingOptions,
+    StaticRtpCodec,
+};
+use rusterisk_config::Codec;
 use rusterisk_config::Config;
+use rusterisk_core::Wake;
+use rusterisk_core::{AudioGate, PeerMediaDirection};
 use rusterisk_core::{
     DtmfCommand, DtmfDigit, DtmfOutbox, DtmfTiming, MediaTaskKind, MediaTaskToken, MediaTasks,
     RecordingControl,
 };
 use rusterisk_media::{Frame, MediaError};
-use rusterisk_sip::{Output, SipEvent};
+use rusterisk_sip::{Direction, Output, Session, SessionSecurity, SipEvent};
 use rusterisk_storage::Recorder;
+use std::net::Ipv4Addr;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
@@ -487,6 +496,464 @@ async fn a_full_command_queue_fails_one_digit_delivery_and_keeps_signaling_runni
         .await
         .map_err(|_| ControlError::Invalid("The turn waited for queue space"))??;
         fixture.registers().await
+    })
+    .await
+}
+
+// Originates a call through control and records it with sockets that the media task has not attached.
+async fn dialed(
+    fixture: &mut Silent,
+) -> Result<(CallKey, crate::Subscription, SipEvent), ControlError> {
+    let credentials = Credentials::new("app".into(), "test-password".into())?;
+    let subscription = fixture
+        .controller
+        .subscribe(credentials.clone(), None, "app".into())
+        .await?;
+    fixture
+        .controller
+        .execute(
+            credentials,
+            None,
+            Action::Originate {
+                id: id("dialed")?,
+                endpoint: "PJSIP/phone".into(),
+                app: "app".into(),
+                args: Vec::new(),
+                caller: "100".into(),
+                timeout: 30,
+            },
+        )
+        .await?;
+    let Effect::Start { key, .. } = fixture
+        .signaling
+        .effects
+        .recv()
+        .await
+        .ok_or(ControlError::Capacity)?
+    else {
+        return Err(ControlError::Invalid("Expected the start effect"));
+    };
+    let sockets = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    fixture.signaling.calls.insert(
+        key.clone(),
+        Active {
+            listener: 0,
+            media: MediaAdmission::Rtp(sockets),
+            digits: DigitDelivery::Media,
+            direction_reply: None,
+        },
+    );
+    let answered = SipEvent::Answered {
+        id: key.id.as_str().into(),
+        generation: key.generation,
+        session: Session {
+            remote: peer.local_addr().map_err(failure)?,
+            codec: Codec::Pcmu,
+            payload_type: 0,
+            telephone: None,
+            direction: Direction::SendRecv,
+            security: SessionSecurity::Rtp,
+        },
+    };
+    Ok((key, subscription, answered))
+}
+
+impl Silent {
+    async fn receive(&mut self, event: SipEvent, now: u64) -> Result<(), ControlError> {
+        tokio::time::timeout(
+            UNRELATED,
+            self.signaling.output_for_test(
+                0,
+                Output {
+                    datagrams: Vec::new(),
+                    events: Vec::from([event]),
+                },
+                now,
+            ),
+        )
+        .await
+        .map_err(|_| ControlError::Invalid("The turn waited for the media task"))?
+    }
+}
+
+#[tokio::test]
+async fn a_recording_stop_waits_with_its_channel_reservation() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (key, _subscription, answered) = dialed(fixture).await?;
+        fixture
+            .controller
+            .signal(crate::Signal::Milestone {
+                key: key.clone(),
+                milestone: crate::Milestone::Answered,
+            })
+            .await?;
+        fixture.receive(answered, 0).await?;
+        fixture
+            .apply(Action::RecordChannel {
+                channel: key.id.clone(),
+                name: id("held-stop")?,
+                options: RecordingOptions::default(),
+            })
+            .await?;
+        fixture
+            .apply(Action::EndRecording {
+                name: id("held-stop")?,
+                mode: crate::media::RecordingEnd::Cancel,
+            })
+            .await?;
+        assert_eq!(fixture.queued(), Some(Queued::Other));
+        assert_eq!(fixture.queued(), None);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn an_expired_attachment_releases_through_a_full_command_queue() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (key, _subscription, answered) = dialed(fixture).await?;
+        fixture.receive(answered, 0).await?;
+        while fixture.signaling.media.bridge(71, Vec::new()).is_ok() {}
+        fixture.signaling.expire_pending(5000).await?;
+        let mut releases = 0;
+        while let Some(command) = fixture.queued() {
+            if command == Queued::Release {
+                releases += 1;
+            }
+        }
+        assert_eq!(releases, 1);
+        assert_eq!(fixture.signaling.waiting_serial(&key), None);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn an_answered_attachment_leaves_the_turn_free() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (_key, _subscription, answered) = dialed(fixture).await?;
+        fixture.receive(answered, 0).await?;
+        assert_eq!(fixture.queued(), Some(Queued::Other));
+        fixture.registers().await
+    })
+    .await
+}
+
+fn label(kind: &EventKind) -> Option<&'static str> {
+    if matches!(kind, EventKind::ChannelStateChange { channel } if channel.state == ChannelState::Up)
+    {
+        Some("answered")
+    } else if matches!(kind, EventKind::ChannelDtmfReceived { .. }) {
+        Some("digit")
+    } else if matches!(kind, EventKind::ChannelDestroyed { .. }) {
+        Some("destroyed")
+    } else {
+        None
+    }
+}
+
+// The labelled events of one call up to its end, in the order that control published them.
+async fn published(
+    subscription: &mut crate::Subscription,
+) -> Result<Vec<&'static str>, ControlError> {
+    let mut labels = Vec::new();
+    tokio::time::timeout(UNRELATED, async {
+        while labels.last() != Some(&"destroyed") {
+            let event = subscription
+                .events
+                .recv()
+                .await
+                .ok_or(ControlError::Capacity)?;
+            labels.extend(label(&event.kind));
+        }
+        Ok::<(), ControlError>(())
+    })
+    .await
+    .map_err(failure)??;
+    Ok(labels)
+}
+
+#[tokio::test]
+async fn an_unanswered_attachment_ends_its_call_with_cause_21_at_its_deadline(
+) -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (_key, mut subscription, answered) = dialed(fixture).await?;
+        fixture.receive(answered, 100).await?;
+        let clock = fixture.signaling.controller.clock();
+        assert_eq!(fixture.signaling.wake(100), Wake::At(5100));
+        fixture.signaling.turn(5099, clock).await?;
+        assert_eq!(fixture.signaling.pending_wake(), Wake::At(5100));
+        fixture.signaling.turn(5100, clock).await?;
+        assert_eq!(fixture.signaling.pending_wake(), Wake::Idle);
+        assert_eq!(fixture.queued(), Some(Queued::Other));
+        assert_eq!(fixture.queued(), Some(Queued::Release));
+        assert_eq!(destroyed(&mut subscription).await?, 21);
+        Ok(())
+    })
+    .await
+}
+
+// The cause with which control ended the call.
+async fn destroyed(subscription: &mut crate::Subscription) -> Result<u16, ControlError> {
+    tokio::time::timeout(UNRELATED, async {
+        loop {
+            let event = subscription
+                .events
+                .recv()
+                .await
+                .ok_or(ControlError::Capacity)?;
+            if let EventKind::ChannelDestroyed { cause, .. } = event.kind {
+                return Ok::<u16, ControlError>(cause);
+            }
+        }
+    })
+    .await
+    .map_err(failure)?
+}
+
+#[tokio::test]
+async fn a_direction_change_that_cannot_start_ends_its_call_and_not_the_signaling_task(
+) -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (key, mut subscription, _answered) = dialed(fixture).await?;
+        let (_other, token) = unattached(fixture)?;
+        while fixture.signaling.media.stop_playback(token).is_ok() {}
+        fixture
+            .turn(Effect::PeerDirection {
+                key,
+                direction: PeerMediaDirection::SendOnly,
+                gate: AudioGate::Open,
+                generated_audio_gate: AudioGate::Open,
+            })
+            .await?;
+        assert_eq!(destroyed(&mut subscription).await?, 21);
+        Ok(())
+    })
+    .await
+}
+
+impl Silent {
+    // Answers the attachment that the call waits for.
+    async fn attached(&mut self, key: &CallKey, now: u64) -> Result<(), ControlError> {
+        let serial = self
+            .signaling
+            .waiting_serial(key)
+            .ok_or(ControlError::Invalid("The call does not wait"))?;
+        self.signaling
+            .completed(key.clone(), Outcome::Attached(serial, Ok(())), now)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn an_answer_to_an_expired_wait_completes_no_later_wait() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let key = CallKey {
+            id: id("external")?,
+            generation: 9,
+        };
+        let local = "127.0.0.1:4000".parse().map_err(failure)?;
+        let release = fixture
+            .signaling
+            .media
+            .reserve_attachment_release(1)
+            .map_err(failure)?;
+        fixture
+            .signaling
+            .pend(key.clone(), 1, Waiting::External { local, release }, 0);
+        fixture.signaling.expire_pending(5000).await?;
+        assert_eq!(fixture.queued(), Some(Queued::Release));
+        let release = fixture
+            .signaling
+            .media
+            .reserve_attachment_release(2)
+            .map_err(failure)?;
+        fixture
+            .signaling
+            .pend(key.clone(), 2, Waiting::External { local, release }, 5001);
+        fixture
+            .signaling
+            .completed(key.clone(), Outcome::Attached(1, Ok(())), 5002)
+            .await?;
+        assert_eq!(fixture.signaling.waiting_serial(&key), Some(2));
+        assert!(!fixture.signaling.external_media.contains(&key));
+        fixture
+            .signaling
+            .completed(key.clone(), Outcome::Attached(2, Ok(())), 5003)
+            .await?;
+        assert_eq!(fixture.signaling.waiting_serial(&key), None);
+        assert!(fixture.signaling.external_media.contains(&key));
+        assert_eq!(fixture.queued(), None);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_held_direction_change_keeps_the_release_behind_its_own_wait() -> Result<(), ControlError>
+{
+    silent(async |fixture: &mut Silent| {
+        let (key, _subscription, answered) = dialed(fixture).await?;
+        fixture.receive(answered, 0).await?;
+        fixture
+            .turn(Effect::PeerDirection {
+                key: key.clone(),
+                direction: PeerMediaDirection::SendOnly,
+                gate: AudioGate::Open,
+                generated_audio_gate: AudioGate::Open,
+            })
+            .await?;
+        fixture.turn(Effect::Release { key: key.clone() }).await?;
+        let attachment = fixture.signaling.waiting_serial(&key);
+        fixture.attached(&key, 1).await?;
+        let direction = fixture
+            .signaling
+            .waiting_serial(&key)
+            .ok_or(ControlError::Invalid("The direction change did not wait"))?;
+        assert_ne!(Some(direction), attachment);
+        assert!(fixture.signaling.calls.contains_key(&key));
+        fixture
+            .signaling
+            .completed(key.clone(), Outcome::Direction(direction, Ok(true)), 2)
+            .await?;
+        assert!(!fixture.signaling.calls.contains_key(&key));
+        assert_eq!(fixture.signaling.pending_wake(), Wake::Idle);
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_call_that_holds_too_much_ends_once_and_is_released_after_its_wait(
+) -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (key, mut subscription, answered) = dialed(fixture).await?;
+        fixture.receive(answered, 0).await?;
+        for now in 1..=18 {
+            fixture
+                .receive(
+                    SipEvent::DtmfReceived {
+                        id: key.id.as_str().into(),
+                        generation: key.generation,
+                        digit: DtmfDigit::Five,
+                        duration_ms: 40,
+                    },
+                    now,
+                )
+                .await?;
+        }
+        assert_eq!(destroyed(&mut subscription).await?, 42);
+        assert!(fixture.signaling.calls.contains_key(&key));
+        fixture.attached(&key, 19).await?;
+        assert!(!fixture.signaling.calls.contains_key(&key));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn events_for_a_waiting_call_follow_its_answer_in_arrival_order() -> Result<(), ControlError>
+{
+    silent(async |fixture: &mut Silent| {
+        let (key, mut subscription, answered) = dialed(fixture).await?;
+        fixture.receive(answered, 0).await?;
+        fixture
+            .receive(
+                SipEvent::DtmfReceived {
+                    id: key.id.as_str().into(),
+                    generation: key.generation,
+                    digit: DtmfDigit::Five,
+                    duration_ms: 40,
+                },
+                1,
+            )
+            .await?;
+        fixture
+            .receive(
+                SipEvent::Ended {
+                    id: key.id.as_str().into(),
+                    generation: key.generation,
+                    cause: 16,
+                },
+                2,
+            )
+            .await?;
+        fixture.attached(&key, 3).await?;
+        assert_eq!(
+            published(&mut subscription).await?,
+            ["answered", "digit", "destroyed"]
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_direction_change_leaves_the_turn_free() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (key, _token) = unattached(fixture)?;
+        fixture
+            .turn(Effect::PeerDirection {
+                key,
+                direction: PeerMediaDirection::SendOnly,
+                gate: AudioGate::Open,
+                generated_audio_gate: AudioGate::Open,
+            })
+            .await?;
+        assert_eq!(fixture.queued(), Some(Queued::Other));
+        fixture.registers().await
+    })
+    .await
+}
+
+#[tokio::test]
+async fn an_external_connection_leaves_the_turn_free() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+        let target =
+            ExternalRtpTarget::new(peer.local_addr().map_err(failure)?, StaticRtpCodec::Pcmu)
+                .map_err(failure)?;
+        fixture
+            .turn(Effect::ConnectExternalRtp {
+                key: CallKey {
+                    id: id("external")?,
+                    generation: 9,
+                },
+                target,
+            })
+            .await?;
+        assert_eq!(fixture.queued(), Some(Queued::Other));
+        fixture.registers().await
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_release_for_a_waiting_call_follows_its_answer() -> Result<(), ControlError> {
+    silent(async |fixture: &mut Silent| {
+        let (key, mut subscription, answered) = dialed(fixture).await?;
+        fixture.receive(answered, 0).await?;
+        fixture.turn(Effect::Release { key: key.clone() }).await?;
+        assert!(fixture.signaling.calls.contains_key(&key));
+        fixture.attached(&key, 1).await?;
+        assert!(!fixture.signaling.calls.contains_key(&key));
+        assert_eq!(fixture.signaling.pending_wake(), Wake::Idle);
+        let answered = tokio::time::timeout(UNRELATED, async {
+            loop {
+                let event = subscription
+                    .events
+                    .recv()
+                    .await
+                    .ok_or(ControlError::Capacity)?;
+                if label(&event.kind) == Some("answered") {
+                    return Ok::<(), ControlError>(());
+                }
+            }
+        })
+        .await
+        .map_err(failure)?;
+        answered
     })
     .await
 }

@@ -5,6 +5,7 @@ use crate::CallKey;
 use rusterisk_core::{DtmfCommand, DtmfToken, DtmfTone, MediaTaskToken, PeerMediaDirection};
 use rusterisk_media::{AudioTarget, Frame, Gate, MediaError, Mixer, TelephoneFormat};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinSet;
@@ -13,6 +14,9 @@ mod admission_tests;
 #[cfg(test)]
 mod frame_timing_tests;
 mod measurements;
+mod notices;
+pub use notices::MediaNotices;
+use notices::NoticeSender;
 mod probe;
 #[cfg(test)]
 mod queued;
@@ -46,6 +50,18 @@ pub enum MediaNotice {
     Stopped {
         key: CallKey,
         result: Result<LinkStats, MediaError>,
+    },
+    // The answer to an attachment that its sender numbered and queued without a reply.
+    Attached {
+        key: CallKey,
+        serial: u64,
+        result: Result<(), MediaError>,
+    },
+    // The answer to a direction change that its sender numbered and queued without a reply.
+    DirectionApplied {
+        key: CallKey,
+        serial: u64,
+        result: Result<bool, MediaError>,
     },
 }
 
@@ -159,8 +175,9 @@ enum Command {
         session: RtpSession,
         direction: PeerMediaDirection,
         mode: AttachmentMode,
-        reply: oneshot::Sender<Result<(), MediaError>>,
+        reply: Completion<()>,
     },
+    AttachWebRtc(usize),
     AttachAudioSocket {
         key: CallKey,
         socket: tokio::net::TcpStream,
@@ -187,19 +204,69 @@ enum Command {
         direction: PeerMediaDirection,
         gate: Gate,
         generated_audio_gate: Gate,
-        reply: oneshot::Sender<Result<bool, MediaError>>,
+        reply: Completion<bool>,
     },
+}
+
+// How the media task answers a queued command.
+// A notice carries the number that its sender gave the command.
+pub(crate) enum Completion<T> {
+    Reply(oneshot::Sender<Result<T, MediaError>>),
+    Notice(u64, mpsc::OwnedPermit<()>),
+}
+
+impl<T> Completion<T> {
+    // A sender that dropped its reply no longer wants the command.
+    fn abandoned(&self) -> bool {
+        match self {
+            Self::Reply(reply) => reply.is_closed(),
+            Self::Notice(..) => false,
+        }
+    }
+}
+
+pub(crate) struct AttachmentRelease {
+    pub(crate) serial: u64,
+    command: mpsc::OwnedPermit<Command>,
+}
+
+impl AttachmentRelease {
+    pub(crate) fn send(self, key: CallKey) {
+        self.command.send(Command::Release { key });
+    }
 }
 
 #[derive(Clone)]
 pub struct MediaPort {
     commands: mpsc::Sender<Command>,
+    notices: mpsc::WeakSender<()>,
     websocket: mpsc::Sender<streams::WebSocketAttachment<axum::extract::ws::WebSocket>>,
     client_websocket: mpsc::Sender<streams::WebSocketAttachment<streams::ClientSocket>>,
-    webrtc: mpsc::Sender<webrtc::Attachment>,
+    webrtc: [std::sync::mpsc::SyncSender<webrtc::Attachment>; webrtc::SLOTS],
 }
 
 impl MediaPort {
+    fn completion<T>(&self, serial: u64) -> Result<Completion<T>, MediaError> {
+        self.notices
+            .upgrade()
+            .ok_or(MediaError::UnknownStream)?
+            .try_reserve_owned()
+            .map(|slot| Completion::Notice(serial, slot))
+            .map_err(|_| MediaError::Capacity)
+    }
+
+    pub(crate) fn reserve_attachment_release(
+        &self,
+        serial: u64,
+    ) -> Result<AttachmentRelease, MediaError> {
+        let command = self
+            .commands
+            .clone()
+            .try_reserve_owned()
+            .map_err(|_| MediaError::Capacity)?;
+        Ok(AttachmentRelease { serial, command })
+    }
+
     pub(crate) fn queue_music(
         &self,
         key: CallKey,
@@ -473,10 +540,54 @@ impl MediaPort {
                 session,
                 direction,
                 mode,
-                reply,
+                reply: Completion::Reply(reply),
             })
             .map_err(|_| MediaError::Capacity)?;
         Ok(AttachmentReceipt { response })
+    }
+
+    // The media task reports the result of this attachment as a notice with the same number.
+    pub(crate) fn start_attachment(
+        &self,
+        key: CallKey,
+        sockets: SocketPair,
+        session: RtpSession,
+        direction: PeerMediaDirection,
+        mode: AttachmentMode,
+        serial: u64,
+    ) -> Result<AttachmentRelease, MediaError> {
+        let release = self.reserve_attachment_release(serial)?;
+        self.commands
+            .try_send(Command::Attach {
+                key,
+                sockets,
+                session,
+                direction,
+                mode,
+                reply: self.completion(serial)?,
+            })
+            .map_err(|_| MediaError::Capacity)?;
+        Ok(release)
+    }
+
+    // The media task reports the result of this direction change as a notice with the same number.
+    pub(crate) fn start_peer_direction(
+        &self,
+        key: CallKey,
+        direction: PeerMediaDirection,
+        gate: Gate,
+        generated_audio_gate: Gate,
+        serial: u64,
+    ) -> Result<(), MediaError> {
+        self.commands
+            .try_send(Command::PeerDirection {
+                key,
+                direction,
+                gate,
+                generated_audio_gate,
+                reply: self.completion(serial)?,
+            })
+            .map_err(|_| MediaError::Capacity)
     }
     pub fn release(&self, key: CallKey) -> Result<(), MediaError> {
         self.commands
@@ -557,7 +668,7 @@ impl MediaPort {
                 direction,
                 gate,
                 generated_audio_gate,
-                reply,
+                reply: Completion::Reply(reply),
             })
             .map_err(|_| MediaError::Capacity)?;
         tokio::time::timeout(Duration::from_secs(5), response)
@@ -581,6 +692,7 @@ struct SavedMusic {
     cursor: MusicCursor,
 }
 struct Port {
+    worker: Option<tokio::task::Id>,
     measurements: Option<watch::Receiver<crate::rtp::Measurements>>,
     connection_lease: Option<crate::MediaConnectionLease>,
     answers: Option<mpsc::Receiver<()>>,
@@ -634,8 +746,8 @@ pub struct MediaHub {
     commands: mpsc::Receiver<Command>,
     websocket: mpsc::Receiver<streams::WebSocketAttachment<axum::extract::ws::WebSocket>>,
     client_websocket: mpsc::Receiver<streams::WebSocketAttachment<streams::ClientSocket>>,
-    webrtc: mpsc::Receiver<webrtc::Attachment>,
-    notices: mpsc::Sender<MediaNotice>,
+    webrtc: [std::sync::mpsc::Receiver<webrtc::Attachment>; webrtc::SLOTS],
+    notices: NoticeSender,
     mixer: Mixer<CallKey>,
     ports: BTreeMap<CallKey, Port>,
     workers: JoinSet<(CallKey, Result<LinkStats, MediaError>)>,
@@ -661,15 +773,18 @@ impl MediaHub {
             }
         }
     }
-    pub fn new(capacity: usize) -> (MediaPort, Self, mpsc::Receiver<MediaNotice>) {
+    pub fn new(capacity: usize) -> (MediaPort, Self, MediaNotices) {
         let (commands, receiver) = mpsc::channel(128);
         let (websocket, websocket_receiver) = mpsc::channel(8);
         let (client_websocket, client_websocket_receiver) = mpsc::channel(8);
-        let (webrtc, webrtc_receiver) = mpsc::channel(8);
-        let (notices, events) = mpsc::channel(128);
+        let slots = std::array::from_fn(|_| std::sync::mpsc::sync_channel(1));
+        let webrtc = slots.each_ref().map(|(sender, _)| sender.clone());
+        let webrtc_receiver = slots.map(|(_, receiver)| receiver);
+        let (notices, events) = notices::channel();
         (
             MediaPort {
                 commands,
+                notices: notices.completions.downgrade(),
                 websocket,
                 client_websocket,
                 webrtc,
@@ -694,9 +809,7 @@ impl MediaHub {
     }
 
     fn notice(&self, notice: MediaNotice) -> Result<(), MediaError> {
-        self.notices
-            .try_send(notice)
-            .map_err(|_| MediaError::Capacity)
+        self.notices.try_send(notice)
     }
 
     fn remove(&mut self, key: &CallKey) -> Result<(), MediaError> {
@@ -729,8 +842,37 @@ impl MediaHub {
         let link = RtpLink::new(sockets, session, channels)?;
         port.measurements = Some(link.observations());
         self.install_link(key.clone(), port, mode.gate(initial_direction))?;
-        self.workers.spawn(async move { (key, link.run().await) });
+        self.spawn_link(key, link.run())
+    }
+
+    fn spawn_link(
+        &mut self,
+        key: CallKey,
+        link: impl Future<Output = Result<LinkStats, MediaError>> + Send + 'static,
+    ) -> Result<(), MediaError> {
+        let port = self.ports.get_mut(&key).ok_or(MediaError::UnknownStream)?;
+        let task = self.workers.spawn(async move { (key, link.await) });
+        port.worker = Some(task.id());
         Ok(())
+    }
+
+    fn complete(
+        &mut self,
+        key: &CallKey,
+        result: Result<(), MediaError>,
+        reply: Completion<()>,
+    ) -> Result<(), MediaError> {
+        match reply {
+            Completion::Reply(reply) => self.complete_attachment(key, result, reply),
+            Completion::Notice(serial, slot) => self.notices.send_reserved(
+                slot,
+                MediaNotice::Attached {
+                    key: key.clone(),
+                    serial,
+                    result,
+                },
+            ),
+        }
     }
 
     fn complete_attachment(
@@ -746,17 +888,18 @@ impl MediaHub {
         Ok(())
     }
 
-    // The signaling task queues a WebRTC attachment before any later command for its call.
-    fn ordered(&mut self, command: Command) -> Result<(), MediaError> {
-        while let Ok(attachment) = self.webrtc.try_recv() {
-            self.webrtc_attachment(attachment)?;
-        }
-        self.command(command)
-    }
-
     fn command(&mut self, command: Command) -> Result<(), MediaError> {
         self.remember_music();
         match command {
+            Command::AttachWebRtc(slot) => {
+                let attachment = self
+                    .webrtc
+                    .get(slot)
+                    .ok_or(MediaError::InvalidRoute)?
+                    .try_recv()
+                    .map_err(|_| MediaError::InvalidRoute)?;
+                self.webrtc_attachment(attachment)?;
+            }
             Command::Probe { key, challenge } => {
                 if self.probes.len() < self.capacity && !challenge.closed() {
                     self.probes.entry(key).or_insert(challenge);
@@ -953,9 +1096,9 @@ impl MediaHub {
                 mode,
                 reply,
             } => {
-                if !reply.is_closed() {
+                if !reply.abandoned() {
                     let result = self.attach(key.clone(), sockets, session, direction, mode);
-                    self.complete_attachment(&key, result, reply)?;
+                    self.complete(&key, result, reply)?;
                 }
             }
             Command::Release { key } => self.remove(&key)?,
@@ -1006,7 +1149,7 @@ impl MediaHub {
                 generated_audio_gate,
                 reply,
             } => {
-                if !reply.is_closed() {
+                if !reply.abandoned() {
                     let result = if let Some(port) = self.ports.get_mut(&key) {
                         self.mixer
                             .gates(&key, gate, generated_audio_gate)
@@ -1018,8 +1161,22 @@ impl MediaHub {
                     } else {
                         Ok(false)
                     };
-                    if reply.send(result).is_err() {
-                        tracing::debug!(channel = %key.id, generation = key.generation, "media direction receiver closed");
+                    match reply {
+                        Completion::Reply(reply) => {
+                            if reply.send(result).is_err() {
+                                tracing::debug!(channel = %key.id, generation = key.generation, "media direction receiver closed");
+                            }
+                        }
+                        Completion::Notice(serial, slot) => {
+                            self.notices.send_reserved(
+                                slot,
+                                MediaNotice::DirectionApplied {
+                                    key,
+                                    serial,
+                                    result,
+                                },
+                            )?;
+                        }
                     }
                 }
             }
@@ -1173,7 +1330,7 @@ impl MediaHub {
         tokio::select! {
             changed = stop.changed() => if changed.is_err() || *stop.borrow() { return Ok(Turn::Stop); },
             command = self.commands.recv() => match command {
-                Some(command) => self.ordered(command)?,
+                Some(command) => self.command(command)?,
                 None => return Ok(Turn::Stop),
             },
             attachment = self.websocket.recv() => match attachment {
@@ -1184,13 +1341,9 @@ impl MediaHub {
                 Some(attachment) => self.websocket_attachment(attachment)?,
                 None => return Ok(Turn::Stop),
             },
-            attachment = self.webrtc.recv() => match attachment {
-                Some(attachment) => self.webrtc_attachment(attachment)?,
-                None => return Ok(Turn::Stop),
-            },
-            result = self.workers.join_next(), if !self.workers.is_empty() => {
-                let (key, result) = result.ok_or(MediaError::InvalidRoute)?.map_err(|error| MediaError::Transport(error.to_string()))?;
-                if self.ports.contains_key(&key) {
+            result = self.workers.join_next_with_id(), if !self.workers.is_empty() => {
+                let (id, (key, result)) = result.ok_or(MediaError::InvalidRoute)?.map_err(|error| MediaError::Transport(error.to_string()))?;
+                if self.ports.get(&key).is_some_and(|port| port.worker == Some(id)) {
                     self.remove(&key)?;
                     self.notice(MediaNotice::Stopped { key, result })?;
                 }

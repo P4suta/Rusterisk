@@ -1,9 +1,13 @@
-use super::{cleanup, failure, media, MediaAdmission, PendingWebRtc, PreparedAnswer, Signaling};
+use super::{
+    cleanup, failure, media, MediaAdmission, PendingWebRtc, PreparedAnswer, Signaling, Waiting,
+};
 use crate::{
-    media::{AttachmentMode, AttachmentReceipt},
+    media::{AttachmentMode, AttachmentRelease},
     rtp::SocketPair,
     CallKey, ControlError, Signal,
 };
+use rusterisk_core::MediaTaskToken;
+use rusterisk_media::MediaError;
 use rusterisk_sip::{Session, SessionSecurity, WebRtcDescription};
 
 impl Signaling {
@@ -42,14 +46,21 @@ impl Signaling {
     }
 
     fn queue_early_attachment(
-        &self,
+        &mut self,
         key: &CallKey,
-    ) -> Result<(AttachmentReceipt, PreparedAnswer), ControlError> {
+    ) -> Result<(PreparedAnswer, AttachmentRelease), ControlError> {
         let (admission, answer, offered) = self.incoming_media(key)?;
-        let receipt = admission
-            .attach(&self.media, key.clone(), &offered, AttachmentMode::Early)
+        let serial = self.next_serial();
+        let release = admission
+            .attach(
+                &self.media,
+                key.clone(),
+                &offered,
+                AttachmentMode::Early,
+                serial,
+            )
             .map_err(failure)?;
-        Ok((receipt, answer))
+        Ok((answer, release))
     }
 
     pub(super) fn incoming_media(
@@ -107,48 +118,68 @@ impl Signaling {
         Ok((admission, answer, offered))
     }
 
-    pub(super) async fn prepare_early_media(
+    // Queues the early attachment and reports whether the call now waits for the media task.
+    pub(super) fn start_early_media(
         &mut self,
         key: &CallKey,
+        token: MediaTaskToken,
         now: u64,
-    ) -> Result<(), ControlError> {
+    ) -> Result<bool, ControlError> {
         let call = self
             .calls
             .get(key)
             .ok_or(ControlError::NotFound("Channel not found"))?;
         let listener = call.listener;
         match &call.media {
-            MediaAdmission::Early(_) | MediaAdmission::Attached => return Ok(()),
+            MediaAdmission::Early(_) | MediaAdmission::Attached => return Ok(false),
             MediaAdmission::Rtp(_) | MediaAdmission::WebRtc(_) => {
                 return Err(ControlError::Unsupported)
             }
             MediaAdmission::Incoming(_) => {}
         }
-        let (receipt, answer) = self.queue_early_attachment(key)?;
-        receipt.wait().await.map_err(failure)?;
+        let (answer, release) = self.queue_early_attachment(key)?;
+        self.pend(
+            key.clone(),
+            release.serial,
+            Waiting::Early {
+                release,
+                listener,
+                token,
+                answer,
+            },
+            now,
+        );
+        Ok(true)
+    }
+
+    // The engine keeps running during the wait, so it can refuse the progress that it accepted before.
+    pub(super) async fn early_attached(
+        &mut self,
+        key: &CallKey,
+        listener: usize,
+        answer: PreparedAnswer,
+        attached: Result<AttachmentRelease, MediaError>,
+        now: u64,
+    ) -> Result<(), ControlError> {
+        let release = attached.map_err(failure)?;
         let progress = match answer.progress(&mut self.listeners[listener].engine, key, now) {
             Ok(output) => output,
             Err(error) => {
-                return cleanup::combine(
-                    Err(failure(error)),
-                    self.media.release(key.clone()).map_err(failure),
-                )
+                release.send(key.clone());
+                return Err(failure(error));
             }
         };
         let Some(call) = self.calls.get_mut(key) else {
-            return cleanup::combine(
-                Err(ControlError::NotFound(
-                    "Channel generation no longer active",
-                )),
-                self.media.release(key.clone()).map_err(failure),
-            );
+            release.send(key.clone());
+            return Err(ControlError::NotFound(
+                "Channel generation no longer active",
+            ));
         };
         call.media = MediaAdmission::Early(answer);
         if let Err(error) = self.transmit(listener, progress.datagrams).await {
-            let result =
-                cleanup::combine(Err(error), self.media.release(key.clone()).map_err(failure));
+            release.send(key.clone());
             return cleanup::combine(
-                result,
+                Err(error),
                 self.notify(Signal::Terminated {
                     key: key.clone(),
                     cause: 41,

@@ -1,5 +1,5 @@
 use crate::clock::Clock;
-use crate::media::{MediaNotice, MediaPort, Reservation};
+use crate::media::{MediaNotice, MediaNotices, MediaPort, Reservation};
 use crate::rtp::SocketPair;
 use crate::storage::{PlaybackMedia, StoragePort};
 use crate::{
@@ -26,6 +26,8 @@ use media::{AnsweredAttachment, MediaAdmission, PendingWebRtc, PreparedAnswer};
 #[cfg(test)]
 mod negotiation_tests;
 mod outbound;
+mod pending;
+use pending::{Held, Outcome, Pending, Waiting};
 #[cfg(test)]
 mod playback_admission_tests;
 mod publication;
@@ -127,7 +129,7 @@ pub struct Signaling {
     controller: Controller,
     effects: mpsc::Receiver<Effect>,
     media: MediaPort,
-    notices: mpsc::Receiver<MediaNotice>,
+    notices: MediaNotices,
     listeners: Vec<Listener>,
     network: transport::Network,
     registrations: registrations::Registrations,
@@ -137,6 +139,8 @@ pub struct Signaling {
     resolver: Result<resolver::DestinationResolver, ControlError>,
     resolution_cache: resolver::ResolutionCache,
     calls: BTreeMap<CallKey, Active>,
+    pending: BTreeMap<CallKey, Pending>,
+    media_serial: u64,
     refer_routes: BTreeMap<(usize, rusterisk_sip::ReferKey), refer_routes::ReferRoute>,
     external_media: BTreeSet<CallKey>,
     stream_admissions: BTreeMap<CallKey, external_media::PendingStream>,
@@ -152,6 +156,40 @@ pub struct Signaling {
 fn failure(error: impl std::fmt::Display) -> ControlError {
     ControlError::Adapter(error.to_string())
 }
+// The call that an effect names, which holds the effect while it waits for the media task.
+// An effect that names a task token or a bridge passes, and the media task keeps its order.
+fn effect_call(effect: &Effect) -> Option<&CallKey> {
+    match effect {
+        Effect::RejectRefer { source, .. } | Effect::ReferProgress { source, .. } => Some(source),
+        Effect::RecordMedia { owner, .. }
+        | Effect::EndRecording { owner, .. }
+        | Effect::PlayMedia { owner, .. } => match owner {
+            MediaOwner::Channel(key) => Some(key),
+            MediaOwner::Bridge { .. } => None,
+        },
+        Effect::ConnectWebSocket { key, .. }
+        | Effect::ReserveWebSocket { key }
+        | Effect::ConnectAudioSocket { key, .. }
+        | Effect::ConnectExternalRtp { key, .. }
+        | Effect::StartMusic { key, .. }
+        | Effect::PrepareEarlyMusic { key, .. }
+        | Effect::MusicClassUnavailable { key }
+        | Effect::Playback { key, .. }
+        | Effect::Dtmf { key, .. }
+        | Effect::Gate { key, .. }
+        | Effect::PeerDirection { key, .. }
+        | Effect::Answer { key }
+        | Effect::Ring { key }
+        | Effect::Start { key, .. }
+        | Effect::Release { key } => Some(key),
+        Effect::ControlRecording { .. }
+        | Effect::ControlPlayback { .. }
+        | Effect::Bridge { .. }
+        | Effect::ReleaseBridge { .. }
+        | Effect::DialBridge { .. } => None,
+    }
+}
+
 fn key(id: String, generation: u64) -> Result<CallKey, ControlError> {
     Ok(CallKey {
         id: ChannelId::try_from(id)?,
@@ -196,7 +234,7 @@ impl Signaling {
         controller: Controller,
         effects: mpsc::Receiver<Effect>,
         media: MediaPort,
-        notices: mpsc::Receiver<MediaNotice>,
+        notices: MediaNotices,
     ) -> Result<Self, ControlError> {
         if config.transports.len() > rusterisk_config::MAX_TRANSPORTS {
             return Err(ControlError::Capacity);
@@ -239,6 +277,8 @@ impl Signaling {
             resolver: resolver::DestinationResolver::system(),
             resolution_cache: resolver::ResolutionCache::default(),
             calls: BTreeMap::new(),
+            pending: BTreeMap::new(),
+            media_serial: 0,
             refer_routes: BTreeMap::new(),
             external_media: BTreeSet::new(),
             stream_admissions: BTreeMap::new(),
@@ -309,7 +349,6 @@ impl Signaling {
         now: u64,
     ) -> Result<(), ControlError> {
         self.prune_refer_routes(listener, now)?;
-        let settings = self.registrations.settings_epoch;
         let mut datagrams = output.datagrams;
         for event in &output.events {
             if let SipEvent::PeerDirection {
@@ -343,6 +382,54 @@ impl Signaling {
         });
         self.transmit(listener, datagrams).await?;
         for event in output.events {
+            self.sip_event(listener, event, now).await?;
+        }
+        Ok(())
+    }
+
+    // The call that an event names, which holds the event while it waits for the media task.
+    fn event_call(&self, event: &SipEvent) -> Result<Option<CallKey>, ControlError> {
+        match event {
+            SipEvent::ForkTeardownFailed { id, generation, .. }
+            | SipEvent::AttendedTransferRequested { id, generation, .. }
+            | SipEvent::BlindTransferRequested { id, generation, .. }
+            | SipEvent::PeerDirection { id, generation, .. }
+            | SipEvent::DtmfReceived { id, generation, .. }
+            | SipEvent::Ringing { id, generation }
+            | SipEvent::Answered { id, generation, .. }
+            | SipEvent::Ended { id, generation, .. } => key(id.clone(), *generation).map(Some),
+            SipEvent::IncomingEnded { id, .. } => Ok(self
+                .pending
+                .keys()
+                .find(|key| key.id.as_str() == id)
+                .cloned()),
+            SipEvent::ReferSubscriptionEnded { .. }
+            | SipEvent::EndpointContact { .. }
+            | SipEvent::Incoming { .. } => Ok(None),
+        }
+    }
+
+    async fn sip_event(
+        &mut self,
+        listener: usize,
+        event: SipEvent,
+        now: u64,
+    ) -> Result<(), ControlError> {
+        let call = self.event_call(&event)?;
+        match self.hold(call, Held::Event { listener, event }).await? {
+            Some(Held::Event { listener, event }) => self.apply_event(listener, event, now).await,
+            Some(Held::Effect(_)) | None => Ok(()),
+        }
+    }
+
+    async fn apply_event(
+        &mut self,
+        listener: usize,
+        event: SipEvent,
+        now: u64,
+    ) -> Result<(), ControlError> {
+        let settings = self.registrations.settings_epoch;
+        {
             match event {
                 SipEvent::AttendedTransferRequested {
                     id,
@@ -382,7 +469,7 @@ impl Signaling {
                             Ok(()) => {}
                             Err(ControlError::Conflict(_) | ControlError::NotFound(_)) => {
                                 tracing::debug!("stale endpoint contact observation rejected");
-                                continue;
+                                return Ok(());
                             }
                             Err(error) => return Err(error),
                         }
@@ -441,56 +528,34 @@ impl Signaling {
                     session,
                 } => {
                     let key = key(id, generation)?;
-                    let attached = match self.queue_answered_attachment(&key, &session) {
-                        Ok(AnsweredAttachment::Existing) => Some(Ok(())),
-                        Ok(AnsweredAttachment::Pending(receipt)) => Some(receipt.wait().await),
-                        Ok(AnsweredAttachment::Missing) => None,
-                        Err(error) => Some(Err(error)),
-                    };
-                    if let Some(attached) = attached {
-                        let direction = peer_direction(session.direction);
-                        match attached {
-                            Ok(()) => {
-                                self.notify(Signal::PeerDirection {
-                                    key: key.clone(),
-                                    direction,
-                                })
-                                .await?;
-                                let events = match &self
-                                    .calls
-                                    .get(&key)
-                                    .ok_or(ControlError::Capacity)?
-                                    .digits
-                                {
-                                    DigitDelivery::Signaling(_) => Some(u16::MAX),
-                                    DigitDelivery::Media => {
-                                        session.telephone.map(|format| format.events())
-                                    }
-                                };
-                                if let Some(events) = events {
-                                    self.notify(Signal::DtmfReady {
-                                        key: key.clone(),
-                                        events,
-                                    })
-                                    .await?;
-                                }
-                                self.notify(Signal::Milestone {
-                                    key,
-                                    milestone: Milestone::Answered,
-                                })
-                                .await?
-                            }
-                            Err(error) => {
-                                tracing::warn!(channel = %key.id.as_str(), generation = key.generation, %error, "media admission failed");
-                                self.notify(Signal::Terminated { key, cause: 21 }).await?;
-                            }
+                    let direction = peer_direction(session.direction);
+                    let events = session.telephone.map(|format| format.events());
+                    match self.queue_answered_attachment(&key, &session) {
+                        Ok(AnsweredAttachment::Existing) => {
+                            self.answered(key, direction, events, Ok(())).await?;
                         }
-                    } else {
-                        let output = self.listeners[listener]
-                            .engine
-                            .cancel(key.id.as_str(), key.generation, now)
-                            .map_err(failure)?;
-                        self.transmit(listener, output.datagrams).await?;
+                        Ok(AnsweredAttachment::Pending(release)) => {
+                            self.pend(
+                                key,
+                                release.serial,
+                                Waiting::Answered {
+                                    direction,
+                                    events,
+                                    release,
+                                },
+                                now,
+                            );
+                        }
+                        Ok(AnsweredAttachment::Missing) => {
+                            let output = self.listeners[listener]
+                                .engine
+                                .cancel(key.id.as_str(), key.generation, now)
+                                .map_err(failure)?;
+                            self.transmit(listener, output.datagrams).await?;
+                        }
+                        Err(error) => {
+                            self.answered(key, direction, events, Err(error)).await?;
+                        }
                     }
                 }
                 SipEvent::Ended {
@@ -732,6 +797,14 @@ impl Signaling {
     }
 
     async fn effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
+        let call = effect_call(&effect).cloned();
+        match self.hold(call, Held::Effect(effect)).await? {
+            Some(Held::Effect(effect)) => self.apply_effect(effect, now).await,
+            Some(Held::Event { .. }) | None => Ok(()),
+        }
+    }
+
+    async fn apply_effect(&mut self, effect: Effect, now: u64) -> Result<(), ControlError> {
         match effect {
             Effect::RejectRefer {
                 source,
@@ -794,25 +867,22 @@ impl Signaling {
                 }
             }
             Effect::ConnectExternalRtp { key, target } => {
-                let result = self.connect_external_rtp(key.clone(), target).await;
-                if let Err(operation) = &result {
-                    self.external_media.remove(&key);
-                    if let Err(cleanup) = self.media.release(key.clone()) {
-                        return Err(ControlError::Adapter(format!("External media admission failed: {operation}, cleanup failed: {cleanup}")));
+                match self.start_external_rtp(key.clone(), target) {
+                    Ok((local, release)) => {
+                        self.pend(
+                            key,
+                            release.serial,
+                            Waiting::External { local, release },
+                            now,
+                        );
                     }
-                }
-                let admitted = result.is_ok();
-                self.notify(Signal::ExternalRtpAdmitted {
-                    key: key.clone(),
-                    result,
-                })
-                .await?;
-                if admitted {
-                    self.notify(Signal::Milestone {
-                        key,
-                        milestone: Milestone::Answered,
-                    })
-                    .await?;
+                    Err(error) => {
+                        self.notify(Signal::ExternalRtpAdmitted {
+                            key,
+                            result: Err(error),
+                        })
+                        .await?;
+                    }
                 }
             }
             Effect::RecordMedia {
@@ -829,7 +899,7 @@ impl Signaling {
                     tracing::warn!(?token, %error, "recording control failed");
                 }
             }
-            Effect::EndRecording { token, mode } => {
+            Effect::EndRecording { token, mode, .. } => {
                 self.media.stop_recording(token, mode).map_err(failure)?
             }
             Effect::Dtmf { key, command } => {
@@ -891,31 +961,17 @@ impl Signaling {
                 gate,
                 generated_audio_gate,
             } => {
-                let applied = self
-                    .media
-                    .peer_direction_with_generated_audio(
-                        key.clone(),
-                        direction,
-                        audio_gate(gate),
-                        audio_gate(generated_audio_gate),
-                    )
-                    .await
-                    .map_err(failure)?;
-                if let Some(call) = self.calls.get_mut(&key) {
-                    if call
-                        .direction_reply
-                        .as_ref()
-                        .is_some_and(|reply| reply.direction == direction)
-                    {
-                        let reply = call.direction_reply.take().ok_or(ControlError::Capacity)?;
-                        if applied {
-                            if !self.network.send_deferred(reply.transmission).await? {
-                                self.notify(Signal::Terminated { key, cause: 41 }).await?;
-                            }
-                        } else {
-                            self.notify(Signal::Terminated { key, cause: 21 }).await?;
-                        }
-                    }
+                let serial = self.next_serial();
+                let started = self.media.start_peer_direction(
+                    key.clone(),
+                    direction,
+                    audio_gate(gate),
+                    audio_gate(generated_audio_gate),
+                    serial,
+                );
+                match started {
+                    Ok(()) => self.pend(key, serial, Waiting::Direction { direction }, now),
+                    Err(error) => self.direction_applied(key, direction, Err(error)).await?,
                 }
             }
             Effect::Answer { key } => {
@@ -1012,10 +1068,14 @@ impl Signaling {
                 self.start_music(key, token, selection).await?;
             }
             Effect::PrepareEarlyMusic { key, token } => {
-                let result = self.prepare_early_media(&key, now).await;
-                if let Err(error) = &result {
-                    tracing::warn!(channel = %key.id, generation = key.generation, ?token, %error, "early media preparation failed");
-                }
+                let result = match self.start_early_media(&key, token, now) {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => Ok(()),
+                    Err(error) => {
+                        tracing::warn!(channel = %key.id, generation = key.generation, ?token, %error, "early media preparation failed");
+                        Err(error)
+                    }
+                };
                 self.notify(Signal::EarlyMediaPrepared { key, token, result })
                     .await?;
             }
@@ -1301,11 +1361,13 @@ impl Signaling {
             .calls
             .values()
             .fold(engines, |wake, call| wake.earliest(call.digits.wake()));
-        digits.earliest(match self.registration_wake(now) {
-            Wake::At(at) => Wake::At(at.max(self.registration_paced)),
-            Wake::Now => Wake::At(self.registration_paced),
-            Wake::Idle => Wake::Idle,
-        })
+        digits
+            .earliest(self.pending_wake())
+            .earliest(match self.registration_wake(now) {
+                Wake::At(at) => Wake::At(at.max(self.registration_paced)),
+                Wake::Now => Wake::At(self.registration_paced),
+                Wake::Idle => Wake::Idle,
+            })
     }
 
     async fn turn(&mut self, now: u64, clock: Clock) -> Result<(), ControlError> {
@@ -1316,6 +1378,7 @@ impl Signaling {
             }
         }
         self.digit_tick(now).await?;
+        self.expire_pending(now).await?;
         if now >= self.registration_paced && self.registration_turn(now).await? {
             self.registration_paced = clock.now_ms()?.saturating_add(REGISTRATION_INTERVAL_MS);
         }
@@ -1467,6 +1530,14 @@ impl Signaling {
                         if let Err(error) = result { tracing::warn!(channel = %key.id.as_str(), generation = key.generation, %error, "media stopped"); }
                         self.notify(Signal::Terminated { key, cause: 16 }).await?;
                     }
+                    Some(MediaNotice::Attached { key, serial, result }) => {
+                        let now = clock.now_ms()?;
+                        self.completed(key, Outcome::Attached(serial, result), now).await?;
+                    },
+                    Some(MediaNotice::DirectionApplied { key, serial, result }) => {
+                        let now = clock.now_ms()?;
+                        self.completed(key, Outcome::Direction(serial, result), now).await?;
+                    },
                     None => { if !*stop.borrow() { return Err(ControlError::Adapter("Media task stopped".into())); } break; }
                 },
                 result = self.playbacks.join_next(), if !self.playbacks.is_empty() => {

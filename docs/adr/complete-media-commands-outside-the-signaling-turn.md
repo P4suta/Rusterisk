@@ -7,17 +7,19 @@ status: proposed
 
 ## Context
 
-The signaling task awaits media replies inside its turn at eleven places, each for up to five seconds.
-One silent media task delays every unrelated SIP response.
+Eleven media operations can each delay unrelated signaling responses for five seconds.
 
 ## Decision
 
-Queue each media command in the turn without waiting, which keeps command order.
-A reply that is only logged goes away.
-A reservation hands its receipt to the job that owns the operation.
-An attachment or a direction change stays in the call record as a pending completion with a deadline.
-The media task reports that completion in a notice naming the call.
-A completion for a call that no longer waits releases its media.
+Queue media commands in arrival order without waiting.
+Omit replies used only for logging.
+The responsible job receives the reservation receipt.
+The call record holds the deadline for each pending attachment or direction change.
+A numbered media notice completes its matching wait.
+Ordinary notices and command completions each have 128 slots in one delivery queue.
+A notice holds its slot until signaling reads it.
+Expiry releases the attachment.
+Eight slots hold WebRTC sessions while the command queue orders their slot numbers with releases.
 
 ## Alternatives
 
@@ -26,10 +28,11 @@ Commands sent by the control task give one call two unordered routes.
 
 ## Consequences
 
-Events for one call can arrive during a pending attachment, so each pending state defines their order.
+Each pending state orders events for its call.
 Reconsider when one task owns signaling and control decisions.
 
 ## Confirmation
 
-Tests must show a `REGISTER` response while a media task never answers.
-Tests must show that an unanswered attachment ends its call with cause 21.
+An unrelated `REGISTER` must receive a response during a silent attachment.
+Expiry must end the waiting call with cause 21.
+A replacement WebRTC link must survive the expired worker.

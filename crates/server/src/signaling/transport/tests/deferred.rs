@@ -91,6 +91,7 @@ async fn media_acknowledgements_never_send_old_answers_on_replacement_connection
                 1,
             )
             .await?;
+        signaling.media_answers_for_test(1).await?;
         assert!(matches!(
             current.packets.try_recv(),
             Err(TryRecvError::Empty)
@@ -109,6 +110,7 @@ async fn media_acknowledgements_never_send_old_answers_on_replacement_connection
                 3,
             )
             .await?;
+        signaling.media_answers_for_test(3).await?;
         assert_eq!(
             current.packets.try_recv().map_err(failure)?,
             b"current answer"

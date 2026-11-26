@@ -31,6 +31,7 @@ impl Port {
         let (direction, directed) = watch::channel(initial_direction);
         (
             Self {
+                worker: None,
                 measurements: None,
                 connection_lease: None,
                 answers: None,
@@ -119,8 +120,7 @@ impl MediaHub {
         let (port, channels) = Port::new(PeerMediaDirection::SendReceive, DigitSupport::Stream);
         let link = AudioSocketLink::new(socket, channels, rate)?;
         self.install_link(key.clone(), port, Gate::Open)?;
-        self.workers.spawn(async move { (key, link.run().await) });
-        Ok(())
+        self.spawn_link(key, link.run())
     }
 
     pub(super) fn attach_websocket<S: MediaSocket + 'static>(
@@ -146,8 +146,7 @@ impl MediaHub {
         port.connection_lease = lease;
         let link = WebSocketMediaLink::new(socket, channels, options, answer)?;
         self.install_link(key.clone(), port, Gate::Open)?;
-        self.workers.spawn(async move { (key, link.run().await) });
-        Ok(())
+        self.spawn_link(key, link.run())
     }
 }
 

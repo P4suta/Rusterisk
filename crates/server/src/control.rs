@@ -476,6 +476,7 @@ pub enum Effect {
         operation: RecordingControl,
     },
     EndRecording {
+        owner: MediaOwner,
         token: MediaTaskToken,
         mode: RecordingEnd,
     },

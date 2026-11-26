@@ -173,7 +173,7 @@ fn recording_admission_controls_and_publication_are_separate_owned_transitions(
         0,
     )?;
     assert!(
-        matches!(&stopped.effects[..], [Effect::EndRecording { token: current, mode: RecordingEnd::Finish }] if *current == token)
+        matches!(&stopped.effects[..], [Effect::EndRecording { token: current, mode: RecordingEnd::Finish, .. }] if *current == token)
     );
     assert!(stopped.events.is_empty());
     let finished = control.signal(

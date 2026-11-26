@@ -1,5 +1,5 @@
 use crate::{
-    media::{AttachmentMode, AttachmentReceipt, MediaPort},
+    media::{AttachmentMode, AttachmentRelease, MediaPort},
     rtp::{RtpSession, SocketPair},
     webrtc::{WebRtcOffer, WebRtcSession},
     CallKey, ControlError,
@@ -86,7 +86,7 @@ pub(super) enum PendingWebRtc {
 
 pub(super) enum AnsweredAttachment {
     Existing,
-    Pending(AttachmentReceipt),
+    Pending(AttachmentRelease),
     Missing,
 }
 
@@ -96,13 +96,20 @@ impl super::Signaling {
         key: &CallKey,
         session: &Session,
     ) -> Result<AnsweredAttachment, MediaError> {
+        let serial = self.next_serial();
         let Some(call) = self.calls.get_mut(key) else {
             return Ok(AnsweredAttachment::Missing);
         };
         match std::mem::replace(&mut call.media, MediaAdmission::Attached) {
             MediaAdmission::Early(_) => Ok(AnsweredAttachment::Existing),
             admission @ (MediaAdmission::Rtp(_) | MediaAdmission::WebRtc(_)) => admission
-                .attach(&self.media, key.clone(), session, AttachmentMode::Answered)
+                .attach(
+                    &self.media,
+                    key.clone(),
+                    session,
+                    AttachmentMode::Answered,
+                    serial,
+                )
                 .map(AnsweredAttachment::Pending),
             MediaAdmission::Incoming(_) | MediaAdmission::Attached => {
                 Ok(AnsweredAttachment::Missing)
@@ -112,13 +119,15 @@ impl super::Signaling {
 }
 
 impl MediaAdmission {
+    // The media task reports the result as a notice that names the call.
     pub(super) fn attach(
         self,
         media: &MediaPort,
         key: CallKey,
         session: &Session,
         mode: AttachmentMode,
-    ) -> Result<AttachmentReceipt, MediaError> {
+        serial: u64,
+    ) -> Result<AttachmentRelease, MediaError> {
         let direction = super::peer_direction(session.direction);
         match (self, &session.security) {
             (Self::Rtp(sockets), SessionSecurity::Rtp) => {
@@ -134,7 +143,7 @@ impl MediaAdmission {
                             .with_events(format.events())
                     })
                     .transpose()?;
-                media.queue_attachment(
+                media.start_attachment(
                     key,
                     sockets,
                     RtpSession {
@@ -145,6 +154,7 @@ impl MediaAdmission {
                     },
                     direction,
                     mode,
+                    serial,
                 )
             }
             (Self::WebRtc(pending), SessionSecurity::WebRtc(description)) => {
@@ -152,7 +162,7 @@ impl MediaAdmission {
                     PendingWebRtc::Offer(offer) => offer.accept_answer(description.as_str())?,
                     PendingWebRtc::Session(session) => session,
                 };
-                media.queue_webrtc_attachment(key, rtc, direction, mode)
+                media.start_webrtc_attachment(key, rtc, direction, mode, serial)
             }
             (Self::Rtp(_), SessionSecurity::WebRtc(_))
             | (Self::WebRtc(_), SessionSecurity::Rtp)
