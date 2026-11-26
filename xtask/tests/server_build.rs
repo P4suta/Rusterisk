@@ -72,31 +72,37 @@ fn server_builds_select_both_release_executables_with_locked_bounded_steps() -> 
         assert_eq!(fetch.budget, Duration::from_secs(180));
         let build = plan.step(ServerBuildPhase::Build);
         let target_dir = state.join("target");
-        assert_eq!(
-            build.arguments,
-            [
-                "build",
-                "--locked",
-                "--offline",
-                "--release",
-                "--package",
-                "rusterisk-server",
-                "--package",
-                "rusterisk-cli",
-                "--bin",
-                "rusterisk",
-                "--bin",
-                "rusterisk-cli",
-                "--target",
-                target.triple(),
-                "--jobs",
-                "2",
-                "--target-dir",
-                target_dir
-                    .to_str()
-                    .ok_or_else(|| std::io::Error::other("fixture path is not UTF-8"))?,
-            ]
-        );
+        let mut expected = Vec::from([
+            "build",
+            "--locked",
+            "--offline",
+            "--release",
+            "--package",
+            "rusterisk-server",
+            "--package",
+            "rusterisk-cli",
+            "--bin",
+            "rusterisk",
+            "--bin",
+            "rusterisk-cli",
+            "--target",
+            target.triple(),
+            "--jobs",
+            "2",
+            "--target-dir",
+            target_dir
+                .to_str()
+                .ok_or_else(|| std::io::Error::other("fixture path is not UTF-8"))?,
+        ]);
+        if target == ServerTarget::LinuxArm64 {
+            expected.extend([
+                "--config",
+                r#"profile.release.package.libsqlite3-sys.opt-level="s""#,
+                "--config",
+                r#"profile.release.package.rusterisk-server.opt-level="s""#,
+            ]);
+        }
+        assert_eq!(build.arguments, expected);
         assert_eq!(build.budget, Duration::from_secs(900));
         assert_eq!(plan.source(), source);
         assert_eq!(plan.state(), state);

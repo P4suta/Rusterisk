@@ -155,7 +155,7 @@ impl ServerBuildPlan {
 
     pub fn step(&self, phase: ServerBuildPhase) -> Step {
         let jobs = self.limits.jobs().to_string();
-        let (arguments, seconds) = match phase {
+        let (mut arguments, seconds) = match phase {
             ServerBuildPhase::Fetch => (
                 ["fetch", "--locked", "--target", self.target.triple()]
                     .map(str::to_owned)
@@ -188,6 +188,14 @@ impl ServerBuildPlan {
                 self.limits.build_timeout().as_secs(),
             ),
         };
+        if phase == ServerBuildPhase::Build && self.target == ServerTarget::LinuxArm64 {
+            arguments.extend([
+                "--config".to_owned(),
+                r#"profile.release.package.libsqlite3-sys.opt-level="s""#.to_owned(),
+                "--config".to_owned(),
+                r#"profile.release.package.rusterisk-server.opt-level="s""#.to_owned(),
+            ]);
+        }
         Step {
             arguments,
             budget: Duration::from_secs(seconds),
