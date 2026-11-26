@@ -1471,21 +1471,19 @@ impl MediaHub {
         self.end_closed_legs()?;
         self.fail_legs()?;
         self.remember_music();
-        let frames = self.playbacks.tick()?;
-        let mut playback = Vec::with_capacity(frames.len());
-        let mut music = Vec::with_capacity(frames.len());
-        for (target, frame) in frames {
-            if self.playbacks.is_music(&target) {
-                let AudioTarget::Channel(key) = target else {
-                    return Err(MediaError::InvalidRoute);
-                };
-                let port = self.ports.get(&key).ok_or(MediaError::UnknownStream)?;
-                music.push((key, port.generated_audio_gate, frame));
-            } else {
-                playback.push((target, frame));
-            }
-        }
-        let audio = self.mixer.tick_with_music(&playback, &music)?;
+        self.playbacks.render(tokio::time::Instant::now())?;
+        let music = self.playbacks.music_frames().map(|(key, frame)| {
+            (
+                key,
+                self.ports
+                    .get(key)
+                    .map_or(Gate::Closed, |port| port.generated_audio_gate),
+                frame,
+            )
+        });
+        let audio = self
+            .mixer
+            .tick_with_sources(self.playbacks.playback_frames(), music)?;
         self.recordings.bridges(&audio.bridges)?;
         for (key, frame) in &audio.channels {
             let port = self.ports.get(key).ok_or(MediaError::UnknownStream)?;

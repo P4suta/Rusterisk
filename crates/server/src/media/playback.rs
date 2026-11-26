@@ -40,6 +40,7 @@ enum Purpose {
 }
 
 struct Playback {
+    frame: Option<Frame>,
     target: AudioTarget<CallKey>,
     source: Source,
     completed: oneshot::Sender<Result<(), MediaError>>,
@@ -107,6 +108,7 @@ impl Playbacks {
         self.entries.insert(
             token,
             Playback {
+                frame: None,
                 target,
                 source: Source::Waiting,
                 completed,
@@ -137,6 +139,7 @@ impl Playbacks {
         !self.entries.is_empty()
     }
 
+    #[cfg(test)]
     pub fn is_music(&self, target: &AudioTarget<CallKey>) -> bool {
         self.entries
             .values()
@@ -282,14 +285,45 @@ impl Playbacks {
         }
     }
 
+    #[cfg(test)]
     pub fn tick(&mut self) -> Result<Vec<(AudioTarget<CallKey>, Frame)>, MediaError> {
         self.tick_at(Instant::now())
     }
 
+    #[cfg(test)]
     fn tick_at(&mut self, now: Instant) -> Result<Vec<(AudioTarget<CallKey>, Frame)>, MediaError> {
-        let mut frames = Vec::with_capacity(self.entries.len());
+        self.render(now)?;
+        Ok(self
+            .entries
+            .values()
+            .filter_map(|entry| Some((entry.target.clone(), entry.frame?)))
+            .collect())
+    }
+
+    pub fn playback_frames(&self) -> impl Iterator<Item = (&AudioTarget<CallKey>, &Frame)> + Clone {
+        self.entries
+            .values()
+            .filter_map(|entry| match entry.purpose {
+                Purpose::Playback => Some((&entry.target, entry.frame.as_ref()?)),
+                Purpose::Music(_) => None,
+            })
+    }
+
+    pub fn music_frames(&self) -> impl Iterator<Item = (&CallKey, &Frame)> + Clone {
+        self.entries
+            .values()
+            .filter_map(|entry| match (&entry.purpose, &entry.target) {
+                (Purpose::Music(_), AudioTarget::Channel(key)) => {
+                    Some((key, entry.frame.as_ref()?))
+                }
+                _ => None,
+            })
+    }
+
+    pub fn render(&mut self, now: Instant) -> Result<(), MediaError> {
         let mut finished = Vec::new();
         for (token, entry) in &mut self.entries {
+            entry.frame = None;
             if entry.completed.is_closed() {
                 finished.push((*token, Ok(())));
                 continue;
@@ -318,7 +352,7 @@ impl Playbacks {
                     let frame = frame.resample(48000)?;
                     let mut samples = [0; 960];
                     samples[..frame.samples().len()].copy_from_slice(frame.samples());
-                    frames.push((entry.target.clone(), Frame::new(&samples, 48000)?));
+                    entry.frame = Some(Frame::new(&samples, 48000)?);
                     entry.progress = now;
                 }
                 Ok(Poll::Ready(None)) => finished.push((*token, Ok(()))),
@@ -338,7 +372,7 @@ impl Playbacks {
         for (token, result) in finished {
             self.end(token, result);
         }
-        Ok(frames)
+        Ok(())
     }
 
     pub fn close(&mut self) {

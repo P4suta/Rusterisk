@@ -214,15 +214,30 @@ impl<K: Ord + Clone> Mixer<K> {
         playback: &[(AudioTarget<K>, Frame)],
         music: &[(K, Gate, Frame)],
     ) -> Result<&MixedAudio<K>, MediaError> {
+        self.tick_with_sources(
+            playback.iter().map(|(target, frame)| (target, frame)),
+            music.iter().map(|(key, gate, frame)| (key, *gate, frame)),
+        )
+    }
+
+    pub fn tick_with_sources<'a>(
+        &mut self,
+        playback: impl Iterator<Item = (&'a AudioTarget<K>, &'a Frame)> + Clone,
+        music: impl Iterator<Item = (&'a K, Gate, &'a Frame)> + Clone,
+    ) -> Result<&MixedAudio<K>, MediaError>
+    where
+        K: 'a,
+    {
         if playback
-            .len()
-            .checked_add(music.len())
+            .clone()
+            .count()
+            .checked_add(music.clone().count())
             .filter(|count| *count <= 64)
             .is_none()
         {
             return Err(MediaError::Capacity);
         }
-        for (target, frame) in playback {
+        for (target, frame) in playback.clone() {
             if frame.rate() != 48000 || frame.samples().len() != MAX_SAMPLES {
                 return Err(MediaError::InvalidFrame);
             }
@@ -233,15 +248,15 @@ impl<K: Ord + Clone> Mixer<K> {
                 AudioTarget::Channel(_) | AudioTarget::Bridge(_) => {}
             }
         }
-        if music.iter().enumerate().any(|(index, (key, _, _))| {
+        if music.clone().enumerate().any(|(index, (key, _, _))| {
             music
-                .iter()
+                .clone()
                 .skip(index + 1)
                 .any(|(other, _, _)| other == key)
         }) {
             return Err(MediaError::InvalidRoute);
         }
-        for (key, _, frame) in music {
+        for (key, _, frame) in music.clone() {
             if frame.rate() != 48000 || frame.samples().len() != MAX_SAMPLES {
                 return Err(MediaError::InvalidFrame);
             }
@@ -281,7 +296,7 @@ impl<K: Ord + Clone> Mixer<K> {
             }
             heard.push(frame);
         }
-        for (target, _) in playback {
+        for (target, _) in playback.clone() {
             match target {
                 AudioTarget::Bridge(bridge) => {
                     bridge_sum(sums, *bridge, 48000);
@@ -302,7 +317,7 @@ impl<K: Ord + Clone> Mixer<K> {
         {
             let mut sum = [0i32; MAX_SAMPLES];
             if let Some((_, generated_gate, frame)) =
-                music.iter().find(|(target, _, _)| target == key)
+                music.clone().find(|(target, _, _)| *target == key)
             {
                 if generated_gate.sends() {
                     add(&mut sum, &frame.resample(input.mix_rate)?);
@@ -323,7 +338,7 @@ impl<K: Ord + Clone> Mixer<K> {
                         }
                     }
                 }
-                for (target, frame) in playback {
+                for (target, frame) in playback.clone() {
                     let permitted = match target {
                         AudioTarget::Channel(destination) => {
                             destination == key && input.generated_audio_gate.sends()
@@ -345,7 +360,7 @@ impl<K: Ord + Clone> Mixer<K> {
         mixed.bridges.clear();
         for index in order.iter() {
             let bridge = &mut sums[*index];
-            for (target, frame) in playback {
+            for (target, frame) in playback.clone() {
                 if *target == AudioTarget::Bridge(bridge.id) {
                     add(&mut bridge.samples, &frame.resample(bridge.rate)?);
                 }
