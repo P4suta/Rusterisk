@@ -41,14 +41,7 @@ impl Operation {
     }
 
     pub(super) fn cancelling(&self) -> Result<(), StorageError> {
-        let changed = self.connect()?.execute(
-            "UPDATE recording_operations SET phase='cancelling' WHERE id=?1 AND phase='writing'",
-            [self.id],
-        )?;
-        if changed != 1 {
-            return Err(StorageError::InvalidState);
-        }
-        Ok(())
+        mark_cancelling(&self.connect()?, self.id)
     }
 
     pub(super) fn forget(&self) -> Result<(), StorageError> {
@@ -60,6 +53,18 @@ impl Operation {
     pub(super) fn completed(&self) -> Result<(), StorageError> {
         publish_catalog(&mut self.connect()?, self.id, "completed")
     }
+}
+
+fn mark_cancelling(connection: &Connection, id: i64) -> Result<(), StorageError> {
+    let changed = connection.execute(
+        "UPDATE recording_operations SET phase='cancelling' WHERE id=?1
+         AND (phase='writing' OR (operation='copy' AND phase='publishing'))",
+        [id],
+    )?;
+    if changed != 1 {
+        return Err(StorageError::InvalidState);
+    }
+    Ok(())
 }
 
 fn publish_catalog(

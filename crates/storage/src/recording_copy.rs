@@ -92,6 +92,9 @@ impl RecordingCopy {
         self.operation.publishing(None, bytes)?;
         drop(self.file);
         let publication = std::fs::hard_link(&self.path, self.path.with_extension("wav"));
+        if publication.is_err() {
+            self.operation.cancelling()?;
+        }
         let cleanup = std::fs::remove_file(&self.path);
         match (publication, cleanup) {
             (Ok(()), Ok(())) => {}

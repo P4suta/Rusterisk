@@ -52,6 +52,75 @@ fn restart_finishes_a_synchronized_copy_with_its_source_bytes_and_catalog_row(
 }
 
 #[test]
+fn a_copy_collision_preserves_unrelated_audio_and_its_catalog_across_restart(
+) -> Result<(), StorageError> {
+    let directory = tempfile::tempdir()?;
+    let root = directory.path();
+    let store = Store::open(root)?;
+    for (name, sample) in [("source", 1000), ("other", 2000)] {
+        let mut capture = rusterisk_storage::Recorder::create(root, name, 8000)?;
+        capture.write(rusterisk_media::Frame::new(&[sample; 160], 8000)?)?;
+        capture.finish()?;
+    }
+    let db = rusqlite::Connection::open(root.join("calls.sqlite3"))?;
+    let files = root.join("recordings");
+    for name in ["before-link", "after-refusal"] {
+        let mut copy = store.prepare_recording_copy("source", name)?;
+        while !copy.is_ready() {
+            copy.advance()?;
+        }
+        let path = files.join(format!("{name}.wav"));
+        std::fs::copy(files.join("other.wav"), &path)?;
+        db.execute(
+            "INSERT INTO recordings(name,format,outcome) VALUES (?1,'wav','interrupted')",
+            [name],
+        )?;
+        if name == "before-link" {
+            db.execute(
+                "UPDATE recording_operations SET phase='publishing',final_bytes=?1 WHERE name=?2",
+                (
+                    u32::try_from(std::fs::metadata(path)?.len())
+                        .map_err(|_| StorageError::Capacity)?,
+                    name,
+                ),
+            )?;
+            drop(copy);
+        } else {
+            db.execute_batch("CREATE TRIGGER pause_cleanup BEFORE DELETE ON recording_operations BEGIN SELECT RAISE(ABORT,'pause'); END;")?;
+            assert!(copy.finish().is_err());
+            db.execute_batch("DROP TRIGGER pause_cleanup")?;
+        }
+    }
+    drop(store);
+    for _ in 0..2 {
+        let _reopened = Store::open(root)?;
+        for name in ["before-link", "after-refusal"] {
+            assert_eq!(
+                std::fs::read(files.join(format!("{name}.wav")))?,
+                std::fs::read(files.join("other.wav"))?
+            );
+            assert_eq!(
+                db.query_row(
+                    "SELECT outcome FROM recordings WHERE name=?1",
+                    [name],
+                    |row| row.get::<_, String>(0)
+                )?,
+                "interrupted"
+            );
+            assert!(!files.join(format!("{name}.copying")).exists());
+        }
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM recording_operations", [], |row| row
+                .get::<_, u32>(
+                0
+            ))?,
+            0
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn interrupted_append_publication_preserves_the_trimmed_audio_and_never_repeats_the_prefix(
 ) -> Result<(), StorageError> {
     use rusterisk_api::RecordingIfExists::{Append, Fail};

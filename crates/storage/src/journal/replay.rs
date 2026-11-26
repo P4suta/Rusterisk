@@ -54,8 +54,14 @@ pub(crate) fn pending(connection: &mut Connection, directory: &Path) -> Result<(
                 match entry.phase.as_str() {
                     "writing" | "cancelling" => discard(connection, entry.id, &stage)?,
                     "publishing" => {
-                        publish_copy(&stage, entry.bytes.ok_or(StorageError::InvalidState)?)?;
-                        publish_catalog(connection, entry.id, "completed")?;
+                        match publish_copy(&stage, entry.bytes.ok_or(StorageError::InvalidState)?) {
+                            Ok(()) => publish_catalog(connection, entry.id, "completed")?,
+                            Err(StorageError::Exists) => {
+                                super::mark_cancelling(connection, entry.id)?;
+                                discard(connection, entry.id, &stage)?;
+                            }
+                            Err(error) => return Err(error),
+                        }
                     }
                     _ => return Err(StorageError::InvalidState),
                 }
@@ -118,7 +124,10 @@ fn publish_copy(stage: &Path, expected: u32) -> Result<(), StorageError> {
         match std::fs::hard_link(stage, &destination) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                crate::confirm_same_audio(&mut file, &destination)?
+                match crate::confirm_same_audio(&mut file, &destination) {
+                    Err(StorageError::InvalidState) => return Err(StorageError::Exists),
+                    result => result?,
+                }
             }
             Err(error) => return Err(error.into()),
         }
