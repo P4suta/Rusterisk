@@ -112,6 +112,7 @@ pub(super) async fn call(
     exchange(&mut left, &mut right, (-7000, 4000))
         .await
         .map_err(|error| failure(format!("RTP {number}: {error}")))?;
+    recover_after_reordered_audio(&mut left, &mut right).await?;
     dialog_request(caller, target, &answer, Method::Bye, 3).await?;
     let (reply, ()) = tokio::try_join!(final_response(&caller.signal), finish_bye(&callee.signal))
         .map_err(|error| failure(format!("BYE {number}: {error}")))?;
@@ -121,6 +122,38 @@ pub(super) async fn call(
         ));
     }
     Ok(())
+}
+
+async fn recover_after_reordered_audio(
+    left: &mut AudioPeer<'_>,
+    right: &mut AudioPeer<'_>,
+) -> Result<(), ControlError> {
+    let earlier = |peer: &mut AudioPeer<'_>| -> Result<rusterisk_media::EncodedRtp, ControlError> {
+        peer.sender
+            .packet(rusterisk_media::Frame::new(&[peer.sample; 160], 8000).map_err(failure)?)
+            .map_err(failure)?
+            .encode()
+            .map_err(failure)
+    };
+    let mut delivery = tokio::time::interval(std::time::Duration::from_millis(30));
+    delivery.tick().await;
+    let delayed = [earlier(left)?, earlier(right)?];
+    left.send().await?;
+    right.send().await?;
+    delivery.tick().await;
+    for (socket, target, packet) in [
+        (left.socket, left.target, &delayed[0]),
+        (right.socket, right.target, &delayed[1]),
+    ] {
+        socket
+            .data()
+            .send_to(packet, target)
+            .await
+            .map_err(failure)?;
+    }
+    left.sample = -3000;
+    right.sample = 8000;
+    exchange(left, right, (8000, -3000)).await
 }
 
 async fn exercise(
