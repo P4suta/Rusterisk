@@ -15,19 +15,32 @@ use tokio::{sync::watch, task::JoinSet};
 
 type Metrics = [u64; 5];
 
-fn sample(pid: u32) -> Result<(u64, u64), ControlError> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).map_err(failure)?;
-    let (_, fields) = stat
-        .rsplit_once(") ")
-        .ok_or(ControlError::Invalid("Invalid process statistics"))?;
-    let ticks = |index| -> Result<u64, ControlError> {
-        fields
-            .split_whitespace()
-            .nth(index)
-            .ok_or(ControlError::Invalid("Missing CPU tick count"))?
-            .parse()
-            .map_err(failure)
-    };
+#[test]
+fn the_process_cpu_clock_observes_work_shorter_than_a_scheduler_tick() -> Result<(), ControlError> {
+    let pid = std::process::id();
+    let start = process_cpu_ns(pid)?;
+    for n in 0_u64..20_000 {
+        std::hint::black_box(n.wrapping_mul(73));
+    }
+    let elapsed = process_cpu_ns(pid)? - start;
+    assert!(elapsed > 0);
+    assert_ne!(elapsed % 10_000_000, 0);
+    Ok(())
+}
+
+fn process_cpu_ns(pid: u32) -> Result<u64, ControlError> {
+    use nix::{sys::time::TimeValLike, time::ClockId, unistd::Pid};
+    let pid = Pid::from_raw(i32::try_from(pid).map_err(failure)?);
+    let clock = ClockId::pid_cpu_clock_id(pid).map_err(failure)?;
+    clock
+        .now()
+        .map_err(failure)?
+        .num_nanoseconds()
+        .try_into()
+        .map_err(failure)
+}
+
+fn resident_kib(pid: u32) -> Result<u64, ControlError> {
     let status = fs::read_to_string(format!("/proc/{pid}/status")).map_err(failure)?;
     let rss: u64 = status
         .lines()
@@ -36,7 +49,7 @@ fn sample(pid: u32) -> Result<(u64, u64), ControlError> {
         .ok_or(ControlError::Invalid("Missing resident memory"))?
         .parse()
         .map_err(failure)?;
-    Ok((ticks(11)? + ticks(12)?, rss))
+    Ok(rss)
 }
 
 struct Leg {
@@ -192,10 +205,10 @@ async fn measure(process: &ChildServer, count: u8) -> Result<Metrics, ControlErr
             Duration::from_secs(1),
         );
         sample_deadlines.tick().await;
-        let start_ticks = sample(pid)?.0;
+        let cpu_start = process_cpu_ns(pid)?;
         sample_deadlines.tick().await;
-        let (end_ticks, active_rss) = sample(pid)?;
-        let cpu_ticks = end_ticks - start_ticks;
+        let cpu_ns = process_cpu_ns(pid)? - cpu_start;
+        let active_rss = resident_kib(pid)?;
         done.send_replace(true);
         let mut completed = Vec::with_capacity(usize::from(count / 2));
         while let Some(call) = calls.join_next().await {
@@ -265,9 +278,9 @@ async fn measure(process: &ChildServer, count: u8) -> Result<Metrics, ControlErr
             return Err(ControlError::Invalid("Load calls survived hangup"));
         }
         Ok([
-            cpu_ticks,
+            cpu_ns,
             active_rss,
-            sample(pid)?.1,
+            resident_kib(pid)?,
             audio_us[0],
             audio_us[1],
         ])
@@ -343,19 +356,13 @@ pub(super) async fn compare() -> Result<(), ControlError> {
                         "Load {count}, round {round}, build {build}: {error}"
                     ))
                 })?;
-                println!("legs={count} round={round} build={build} cpu_ticks={} rss_kib={} released_kib={} left_us={} right_us={}", result[0], result[1], result[2], result[3], result[4]);
+                println!("legs={count} round={round} build={build} cpu_ns={} rss_kib={} released_kib={} left_us={} right_us={}", result[0], result[1], result[2], result[3], result[4]);
                 *row = result;
             }
         }
-        for (index, label) in [
-            "cpu_ticks",
-            "rss_kib",
-            "released_kib",
-            "left_us",
-            "right_us",
-        ]
-        .iter()
-        .enumerate()
+        for (index, label) in ["cpu_ns", "rss_kib", "released_kib", "left_us", "right_us"]
+            .iter()
+            .enumerate()
         {
             let baseline = samples.map(|row| row[0][index]);
             let candidate = samples.map(|row| row[1][index]);

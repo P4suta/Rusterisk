@@ -2530,6 +2530,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "jiff",
+ "nix 0.32.0",
  "opus",
  "percent-encoding",
  "rand 0.10.4",

@@ -85,5 +85,11 @@ rcgen = { version = "0.14.10", default-features = false, features = [
 ] }
 tempfile = "3.27"
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+nix = { version = "=0.32.0", default-features = false, features = [
+  "process",
+  "time",
+] }
+
 [lints]
 workspace = true
