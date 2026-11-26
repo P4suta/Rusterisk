@@ -37,6 +37,44 @@ async fn media_command_and_notice_queues_report_when_the_receiver_has_stopped(
 }
 
 #[tokio::test]
+async fn a_missing_bridge_leg_can_report_its_end_after_the_queue_drains() -> Result<(), MediaError>
+{
+    let (_port, mut hub, mut notices) = MediaHub::new(2);
+    let missing = key(1)?;
+    for _ in 0..128 {
+        hub.notice(MediaNotice::Answer {
+            key: missing.clone(),
+        })?;
+    }
+    hub.command(super::Command::Bridge {
+        id: 7,
+        members: Vec::from([missing.clone(), key(2)?]),
+    })?;
+    hub.release_call(missing.clone())?;
+    for _ in 0..128 {
+        assert!(matches!(notices.try_recv(), Ok(MediaNotice::Answer { .. })));
+    }
+    let (_shutdown, mut stop) = watch::channel(false);
+    let mut clock = FrameClock::new();
+    let mut stopped = Vec::new();
+    let mut released = false;
+    for _ in 0..3 {
+        hub.turn(&mut stop, &mut clock).await?;
+        match notices.try_recv() {
+            Ok(MediaNotice::Stopped {
+                key,
+                result: Err(MediaError::UnknownStream),
+            }) => stopped.push(key.generation),
+            Ok(MediaNotice::Released { key }) if key == missing => released = true,
+            _ => return Err(MediaError::InvalidRoute),
+        }
+    }
+    assert_eq!(stopped, [1, 2]);
+    assert!(released);
+    hub.close().await
+}
+
+#[tokio::test]
 async fn all_release_notices_survive_a_full_notice_channel() -> Result<(), MediaError> {
     let (_port, mut hub, mut notices) = MediaHub::new(64);
     let first = key(1)?;
@@ -46,7 +84,7 @@ async fn all_release_notices_survive_a_full_notice_channel() -> Result<(), Media
     for generation in 1..=64 {
         hub.release_call(key(generation)?)?;
     }
-    assert_eq!(hub.release_notices.len(), 64);
+    assert_eq!(hub.terminal_notices.len(), 64);
     while let Ok(notice) = notices.try_recv() {
         assert!(matches!(notice, MediaNotice::Answer { .. }));
     }
@@ -58,7 +96,7 @@ async fn all_release_notices_survive_a_full_notice_channel() -> Result<(), Media
             matches!(notices.try_recv(), Ok(MediaNotice::Released { key }) if key.generation == generation)
         );
     }
-    assert!(hub.release_notices.is_empty());
+    assert!(hub.terminal_notices.is_empty());
     hub.close().await
 }
 

@@ -163,6 +163,7 @@ impl NoticeSender {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn try_send(&self, notice: MediaNotice) -> Result<(), MediaError> {
         let slot = self
             .ordinary

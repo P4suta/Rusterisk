@@ -797,6 +797,24 @@ enum StreamRelease {
     Requested,
 }
 
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum TerminalNotice {
+    MissingStream,
+    Released,
+}
+
+impl TerminalNotice {
+    fn for_call(self, key: CallKey) -> MediaNotice {
+        match self {
+            Self::MissingStream => MediaNotice::Stopped {
+                key,
+                result: Err(MediaError::UnknownStream),
+            },
+            Self::Released => MediaNotice::Released { key },
+        }
+    }
+}
+
 pub struct MediaHub {
     capacity: usize,
     commands: mpsc::Receiver<Command>,
@@ -816,7 +834,7 @@ pub struct MediaHub {
     failed: Vec<(CallKey, MediaError)>,
     workers: JoinSet<(CallKey, Result<LinkStats, MediaError>)>,
     stream_releases: BTreeMap<rusterisk_core::CallHandle, StreamRelease>,
-    release_notices: BTreeMap<u8, CallKey>,
+    terminal_notices: BTreeMap<(u8, TerminalNotice), CallKey>,
     pub(crate) activity: crate::activity::Meter,
     dropped: u64,
     recordings: Recordings,
@@ -873,7 +891,7 @@ impl MediaHub {
                 failed: Vec::with_capacity(4),
                 workers: JoinSet::new(),
                 stream_releases: BTreeMap::new(),
-                release_notices: BTreeMap::new(),
+                terminal_notices: BTreeMap::new(),
                 activity: crate::activity::Meter::default(),
                 dropped: 0,
                 recordings: Recordings::new(),
@@ -884,26 +902,22 @@ impl MediaHub {
         )
     }
 
+    #[cfg(test)]
     fn notice(&self, notice: MediaNotice) -> Result<(), MediaError> {
         self.notices.try_send(notice)
     }
 
-    fn release_notice(&mut self, key: CallKey) -> Result<(), MediaError> {
-        match self.notices.ordinary.clone().try_reserve_owned() {
-            Ok(slot) => self
-                .notices
-                .send_reserved(slot, MediaNotice::Released { key })?,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                let slot = key.handle().slot();
-                if self
-                    .release_notices
-                    .get(&slot)
-                    .is_none_or(|pending| pending.generation < key.generation)
-                {
-                    self.release_notices.insert(slot, key);
-                }
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => return Err(MediaError::ServiceClosed),
+    fn terminal_notice(&mut self, kind: TerminalNotice, key: CallKey) -> Result<(), MediaError> {
+        if let Some(slot) = self.notices.ordinary_slot()? {
+            return self.notices.send_reserved(slot, kind.for_call(key));
+        }
+        let slot = (key.handle().slot(), kind);
+        if self
+            .terminal_notices
+            .get(&slot)
+            .is_none_or(|pending| pending.generation < key.generation)
+        {
+            self.terminal_notices.insert(slot, key);
         }
         Ok(())
     }
@@ -914,7 +928,7 @@ impl MediaHub {
             *stream = StreamRelease::Requested;
             return Ok(());
         }
-        self.release_notice(key)
+        self.terminal_notice(TerminalNotice::Released, key)
     }
 
     fn remove(&mut self, key: &CallKey) -> Result<Option<notices::LegNotices>, MediaError> {
@@ -1285,10 +1299,7 @@ impl MediaHub {
                     if self.ports.contains_key(&key) {
                         active.push(key);
                     } else {
-                        self.notice(MediaNotice::Stopped {
-                            key,
-                            result: Err(MediaError::UnknownStream),
-                        })?;
+                        self.terminal_notice(TerminalNotice::MissingStream, key)?;
                     }
                 }
                 self.mixer.bridge(id, &active)?;
@@ -1563,17 +1574,17 @@ impl MediaHub {
                 Some(attachment) => self.websocket_attachment(attachment)?,
                 None => return Ok(Turn::Stop),
             },
-            slot = self.notices.ordinary.clone().reserve_owned(), if !self.release_notices.is_empty() => {
+            slot = self.notices.ordinary.clone().reserve_owned(), if !self.terminal_notices.is_empty() => {
                 let slot = slot.map_err(|_| MediaError::ServiceClosed)?;
-                if let Some((_, key)) = self.release_notices.pop_first() {
-                    self.notices.send_reserved(slot, MediaNotice::Released { key })?;
+                if let Some(((_, kind), key)) = self.terminal_notices.pop_first() {
+                    self.notices.send_reserved(slot, kind.for_call(key))?;
                 }
             }
             result = self.workers.join_next(), if !self.workers.is_empty() => {
                 let (key, result) = result.ok_or(MediaError::InvalidRoute)?.map_err(|error| MediaError::Transport(error.to_string()))?;
                 let release = self.stream_releases.remove(&key.handle());
                 if release == Some(StreamRelease::Requested) {
-                    self.release_notice(key)?;
+                    self.terminal_notice(TerminalNotice::Released, key)?;
                 } else if self.ports.contains_key(&key) {
                     self.stop_leg(key, result)?;
                 }
