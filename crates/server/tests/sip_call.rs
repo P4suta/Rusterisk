@@ -489,7 +489,8 @@ async fn stable_audio(peer: &SocketPair, expected: i32) -> Result<(), ControlErr
             for _ in 0..100 {
                 let (size, _) = peer.data().recv_from(&mut bytes).await.map_err(failure)?;
                 let packet = RtpPacket::parse(&bytes[..size]).map_err(failure)?;
-                if packet.payload().len() == 160
+                if packet.payload_type() == 0
+                    && packet.payload().len() == 160
                     && packet
                         .payload()
                         .iter()
@@ -509,6 +510,28 @@ async fn stable_audio(peer: &SocketPair, expected: i32) -> Result<(), ControlErr
         })
         .await
         .map_err(failure)?
+}
+
+#[tokio::test]
+async fn pcmu_audio_with_an_unnegotiated_payload_type_cannot_validate_a_call(
+) -> Result<(), ControlError> {
+    let ip = Ipv4Addr::LOCALHOST.into();
+    let peer = SocketPair::bind(ip, 0, 0).map_err(failure)?;
+    let mut sender = RtpSender::new(AudioFormat::Pcmu, 8, [3; 10]).map_err(failure)?;
+    let frame = Frame::new(&[4000; 160], 8000).map_err(failure)?;
+    for _ in 0..100 {
+        let packet = sender
+            .packet(frame)
+            .map_err(failure)?
+            .encode()
+            .map_err(failure)?;
+        peer.data()
+            .send_to(&packet, peer.local_addr().map_err(failure)?)
+            .await
+            .map_err(failure)?;
+    }
+    assert!(stable_audio(&peer, 4000).await.is_err());
+    Ok(())
 }
 
 async fn exchange(
