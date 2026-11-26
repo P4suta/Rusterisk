@@ -1,4 +1,8 @@
 mod candidate;
+mod github;
+#[cfg(test)]
+mod protocol_tests;
+mod registry;
 
 use std::{io, path::Path};
 
