@@ -193,7 +193,7 @@ impl ServerBuildPlan {
                 "--config".to_owned(),
                 r#"profile.release.package.libsqlite3-sys.opt-level="s""#.to_owned(),
                 "--config".to_owned(),
-                r#"profile.release.package.rusterisk-server.opt-level="s""#.to_owned(),
+                "profile.release.package.rusterisk-server.codegen-units=1".to_owned(),
             ]);
         }
         Step {

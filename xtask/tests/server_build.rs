@@ -99,7 +99,7 @@ fn server_builds_select_both_release_executables_with_locked_bounded_steps() -> 
                 "--config",
                 r#"profile.release.package.libsqlite3-sys.opt-level="s""#,
                 "--config",
-                r#"profile.release.package.rusterisk-server.opt-level="s""#,
+                "profile.release.package.rusterisk-server.codegen-units=1",
             ]);
         }
         assert_eq!(build.arguments, expected);
