@@ -81,6 +81,7 @@ impl Invariant {
                 | "SettingsLifetimes::cancel"
                 | "SettingsLifetimes::commit"
                 | "SettingsLifetimes::retain"
+                | "SettingsLifetimes::retain_unpublished"
                 | "SettingsLifetimes::release"
                 | "SettingsError::into_reference",
             ) => Some(Self::Settings),
