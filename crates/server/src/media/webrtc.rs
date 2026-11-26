@@ -96,7 +96,7 @@ impl MediaHub {
         direction: PeerMediaDirection,
         mode: AttachmentMode,
     ) -> Result<(), MediaError> {
-        self.check_link(&key)?;
+        let notices = self.reserve_link(&key)?;
         let support = session
             .telephone()
             .map(DigitSupport::Rfc4733)
@@ -105,7 +105,7 @@ impl MediaHub {
         let leg = crate::webrtc::WebRtcLeg::new(session, direction)?;
         self.install_link(
             key.clone(),
-            Port::owned(direction, support),
+            Port::owned(direction, support, notices),
             mode.gate(direction),
             rate,
         )?;

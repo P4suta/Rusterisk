@@ -49,11 +49,11 @@ macro_rules! stream_rates {
         }
 
         macro_rules! with_stream_port {
-            ($selected:expr, |$port:ident, $channels:ident| $body:block) => {
+            ($selected:expr, $notices:expr, |$port:ident, $channels:ident| $body:block) => {
                 match $selected {
                     $( $rate => {
                         let ($port, $channels) = Port::with_frames(
-                            PeerMediaDirection::SendReceive, DigitSupport::Stream, TaskFrames::$variant
+                            PeerMediaDirection::SendReceive, DigitSupport::Stream, $notices, TaskFrames::$variant
                         );
                         $body
                     }, )+

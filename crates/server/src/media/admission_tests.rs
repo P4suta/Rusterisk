@@ -17,6 +17,54 @@ fn key() -> Result<CallKey, MediaError> {
 }
 
 #[tokio::test]
+async fn both_phones_receive_audio_while_ordinary_notices_are_full() -> Result<(), MediaError> {
+    let (_port, mut hub, mut notices) = MediaHub::new(2);
+    let left = named("left")?;
+    let right = CallKey {
+        id: ChannelId::try_from("right".to_owned()).map_err(failure)?,
+        generation: 2,
+    };
+    let first = owned_leg(&mut hub, &left)?;
+    let second = owned_leg(&mut hub, &right)?;
+    hub.mixer.bridge(1, &[left.clone(), right.clone()])?;
+    for _ in 0..hub.notices.ordinary.max_capacity() {
+        hub.notice(MediaNotice::Answer { key: left.clone() })?;
+    }
+    for (peer, key, sample) in [(&first, &left, 0x55), (&second, &right, 0x22)] {
+        let leg = hub.legs.get(key).ok_or(MediaError::UnknownStream)?;
+        let packet = rusterisk_media::RtpPacket::new(0, 1, 160, 7, &[sample; 160])?;
+        peer.data()
+            .send_to(&packet.encode()?, leg.local_addr()?)
+            .await
+            .map_err(failure)?;
+        Wait::Ready
+            .bounded(leg.input_observer()?.peek_from(&mut [0; 1]))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
+    }
+    hub.tick()?;
+    for (peer, expected) in [(&first, 0x22), (&second, 0x55)] {
+        let mut bytes = [0; 1501];
+        let (size, _) = Wait::Ready
+            .bounded(peer.data().recv_from(&mut bytes))
+            .await
+            .map_err(failure)?
+            .map_err(failure)?;
+        let packet = rusterisk_media::RtpPacket::parse(&bytes[..size])?;
+        assert_eq!(packet.payload(), &[expected; 160]);
+    }
+    let mut connected = std::collections::BTreeSet::new();
+    while let Ok(notice) = notices.try_recv() {
+        if let MediaNotice::Connected { key } = notice {
+            assert!(connected.insert(key));
+        }
+    }
+    assert_eq!(connected, [left, right].into());
+    hub.close().await
+}
+
+#[tokio::test]
 async fn measurement_reply_preserves_the_capture_time_and_counts() -> Result<(), MediaError> {
     let (_handle, mut hub, _notices) = MediaHub::new(4);
     let key = key()?;
@@ -33,7 +81,11 @@ async fn measurement_reply_preserves_the_capture_time_and_counts() -> Result<(),
         PeerMediaDirection::SendReceive,
     )?;
     leg.measurements_mut().local.rxcount = 7;
-    let port = Port::owned(PeerMediaDirection::SendReceive, DigitSupport::Unsupported);
+    let port = Port::owned(
+        PeerMediaDirection::SendReceive,
+        DigitSupport::Unsupported,
+        hub.notices.reserve_leg()?,
+    );
     hub.install_link(key.clone(), port, Gate::Open, 8000)?;
     hub.legs.insert(key.clone(), leg);
     let (reply, response) = oneshot::channel();
@@ -51,6 +103,67 @@ async fn measurement_reply_preserves_the_capture_time_and_counts() -> Result<(),
     assert!((before..=after).contains(&captured));
     assert_eq!(sample.local.rxcount, 7);
     Ok(())
+}
+
+#[tokio::test]
+async fn a_failed_leg_reports_its_stop_and_returns_its_ports_under_notice_pressure(
+) -> Result<(), MediaError> {
+    let (_handle, mut hub, mut notices) = MediaHub::new(1);
+    let original = key()?;
+    let peer = owned_leg(&mut hub, &original)?;
+    let address = hub
+        .legs
+        .get(&original)
+        .ok_or(MediaError::UnknownStream)?
+        .local_addr()?;
+    for _ in 0..hub.notices.ordinary.max_capacity() {
+        hub.notice(MediaNotice::Answer {
+            key: original.clone(),
+        })?;
+    }
+    hub.failed
+        .push((original.clone(), MediaError::InvalidPacket));
+    hub.fail_legs()?;
+    hub.release_call(original.clone())?;
+    let mut stops = 0;
+    while let Ok(notice) = notices.try_recv() {
+        if let MediaNotice::Stopped { key, result } = notice {
+            assert_eq!(key, original);
+            assert!(matches!(result, Err(MediaError::InvalidPacket)));
+            stops += 1;
+        }
+    }
+    assert_eq!(stops, 1);
+    let (_shutdown, mut stop) = watch::channel(false);
+    hub.turn(&mut stop, &mut FrameClock::new()).await?;
+    assert!(matches!(notices.try_recv(), Ok(MediaNotice::Released { key }) if key == original));
+    let replacement = CallKey {
+        id: original.id,
+        generation: original.generation + 64,
+    };
+    hub.attach(
+        replacement.clone(),
+        SocketPair::bind(
+            address.ip(),
+            address.port(),
+            address
+                .port()
+                .checked_add(1)
+                .ok_or(MediaError::InvalidRoute)?,
+        )
+        .map_err(failure)?,
+        RtpSession {
+            remote: peer.local_addr().map_err(failure)?,
+            format: AudioFormat::Pcmu,
+            payload_type: 0,
+            telephone: None,
+        },
+        PeerMediaDirection::SendReceive,
+        AttachmentMode::Answered,
+    )?;
+    speak(&peer, &hub, &replacement, 1).await?;
+    received(&mut hub, &replacement, 1).await?;
+    hub.close().await
 }
 
 fn datagram(hub: &mut MediaHub, key: CallKey, peer: &SocketPair) -> Result<(), MediaError> {

@@ -655,10 +655,6 @@ impl MediaPort {
     }
 }
 
-enum Connection {
-    Waiting,
-    Connected,
-}
 enum DigitSupport {
     Unsupported,
     Rfc4733(TelephoneFormat),
@@ -692,7 +688,7 @@ struct Port {
     digit_support: DigitSupport,
     generated_audio_gate: Gate,
     saved_music: Option<SavedMusic>,
-    connection: Connection,
+    notices: notices::LegNotices,
 }
 
 // The parts of the media task that take one owned leg's turn output.
@@ -748,11 +744,7 @@ impl Delivery<'_> {
         match self.mixer.push(key, frame) {
             Ok(()) => {
                 if let Some(port) = self.ports.get_mut(key) {
-                    if matches!(port.connection, Connection::Waiting) {
-                        port.connection = Connection::Connected;
-                        self.notices
-                            .try_send(MediaNotice::Connected { key: key.clone() })?;
-                    }
+                    port.notices.connected(self.notices, key)?;
                 }
             }
             Err(_) => *self.dropped += 1,
@@ -919,7 +911,7 @@ impl MediaHub {
         self.release_notice(key)
     }
 
-    fn remove(&mut self, key: &CallKey) -> Result<(), MediaError> {
+    fn remove(&mut self, key: &CallKey) -> Result<Option<notices::LegNotices>, MediaError> {
         self.probes.remove(key);
         self.recordings.release(key);
         self.playbacks.release(key);
@@ -942,6 +934,18 @@ impl MediaHub {
             if !self.mixer.remove(key) {
                 return Err(MediaError::InvalidRoute);
             }
+            return Ok(Some(port.notices));
+        }
+        Ok(None)
+    }
+
+    fn stop_leg(
+        &mut self,
+        key: CallKey,
+        result: Result<LinkStats, MediaError>,
+    ) -> Result<(), MediaError> {
+        if let Some(notices) = self.remove(&key)? {
+            notices.stopped(&self.notices, key, result)?;
         }
         Ok(())
     }
@@ -958,11 +962,7 @@ impl MediaHub {
                 .remove(&key)
                 .map(crate::webrtc::WebRtcLeg::finish)
                 .unwrap_or_default();
-            self.remove(&key)?;
-            self.notice(MediaNotice::Stopped {
-                key,
-                result: Ok(stats.audio),
-            })?;
+            self.stop_leg(key, Ok(stats.audio))?;
         }
         Ok(())
     }
@@ -971,11 +971,7 @@ impl MediaHub {
     fn fail_legs(&mut self) -> Result<(), MediaError> {
         while let Some((key, error)) = self.failed.pop() {
             tracing::warn!(channel = %key.id, generation = key.generation, %error, "media leg failed");
-            self.remove(&key)?;
-            self.notice(MediaNotice::Stopped {
-                key,
-                result: Err(error),
-            })?;
+            self.stop_leg(key, Err(error))?;
         }
         Ok(())
     }
@@ -988,13 +984,13 @@ impl MediaHub {
         initial_direction: PeerMediaDirection,
         mode: AttachmentMode,
     ) -> Result<(), MediaError> {
-        self.check_link(&key)?;
+        let notices = self.reserve_link(&key)?;
         let support = session
             .telephone
             .map(DigitSupport::Rfc4733)
             .unwrap_or(DigitSupport::Unsupported);
         let leg = RtpLeg::new(sockets, session, initial_direction)?;
-        let port = Port::owned(initial_direction, support);
+        let port = Port::owned(initial_direction, support, notices);
         self.install_link(
             key.clone(),
             port,
@@ -1429,11 +1425,7 @@ impl MediaHub {
                     self.recordings.channel(key, frame);
                     match self.mixer.push(key, frame) {
                         Ok(()) => {
-                            if matches!(port.connection, Connection::Waiting) {
-                                port.connection = Connection::Connected;
-                                self.notices
-                                    .try_send(MediaNotice::Connected { key: key.clone() })?;
-                            }
+                            port.notices.connected(&self.notices, key)?;
                         }
                         Err(_) => self.dropped += 1,
                     }
@@ -1573,8 +1565,7 @@ impl MediaHub {
                 if release == Some(StreamRelease::Requested) {
                     self.release_notice(key)?;
                 } else if self.ports.contains_key(&key) {
-                    self.remove(&key)?;
-                    self.notice(MediaNotice::Stopped { key, result })?;
+                    self.stop_leg(key, result)?;
                 }
             }
             result = self.recordings.workers.join_next(), if !self.recordings.workers.is_empty() => {

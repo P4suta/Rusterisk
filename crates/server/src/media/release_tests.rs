@@ -77,7 +77,7 @@ async fn a_stream_acknowledges_release_after_its_worker_exits() -> Result<(), Me
     hub.attach_audiosocket(call.clone(), accepted.0, 8000)?;
     hub.release_call(call.clone())?;
     assert!(matches!(
-        hub.check_link(&call),
+        hub.reserve_link(&call),
         Err(MediaError::InvalidRoute)
     ));
     assert!(matches!(
@@ -88,7 +88,7 @@ async fn a_stream_acknowledges_release_after_its_worker_exits() -> Result<(), Me
     let (_shutdown, mut stop) = watch::channel(false);
     hub.turn(&mut stop, &mut FrameClock::new()).await?;
     assert!(hub.workers.is_empty());
-    assert!(hub.check_link(&call).is_ok());
+    assert!(hub.reserve_link(&call).is_ok());
     assert!(matches!(notices.try_recv(), Ok(MediaNotice::Released { key }) if key == call));
     drop(client);
     hub.close().await
