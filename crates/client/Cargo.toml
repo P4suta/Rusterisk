@@ -23,8 +23,8 @@ name = "browser_bridge"
 test = true
 
 [dependencies]
-rusterisk-api = { version = "0.1.0", path = "../api" }
-rusterisk-core = { version = "0.1.0", path = "../core" }
+rusterisk-api = { version = "0.2.0", path = "../api" }
+rusterisk-core = { version = "0.2.0", path = "../core" }
 uuid = { version = "1.22.0", features = ["v4"] }
 tracing = "0.1.44"
 serde.workspace = true

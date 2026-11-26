@@ -2446,7 +2446,7 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "schemars",
  "serde",
@@ -2455,7 +2455,7 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "jiff",
@@ -2469,7 +2469,7 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -2491,7 +2491,7 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rsipstack",
  "tempfile",
@@ -2500,11 +2500,11 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "rusterisk-media"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "allocation-counter",
  "bytes",
@@ -2519,7 +2519,7 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "allocation-counter",
  "axum",
@@ -2570,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-sip"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.4.3",
  "hmac 0.13.0",
@@ -2586,7 +2586,7 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rusqlite",
  "rusterisk-api",
@@ -2596,7 +2596,7 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-test-support"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "notify",
  "signal-hook",
@@ -2607,7 +2607,7 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-windows-job-accounting"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "windows-sys 0.61.2",
 ]
@@ -4072,7 +4072,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "proc-macro2",
