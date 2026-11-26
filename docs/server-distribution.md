@@ -101,6 +101,15 @@ The release gate uses one Cargo job for the SDK consumer on Windows.
 mise x -- cargo run --locked --target-dir target/xtask --package xtask -- distribution server verify --candidate "$server_candidate" --sdk-candidate "$sdk_candidate" --consumer-jobs 1
 ```
 
+To exercise a native archive with two phones, set `RUSTERISK_PACKAGED_ROOT` to its extracted directory.
+To exercise a database upgrade, point `RUSTERISK_BASELINE_SERVER` at a server with schema version 2 and `RUSTERISK_CANDIDATE_SERVER` at the extracted candidate executable.
+The checks create temporary settings and data directories and use loopback ports.
+
+```sh
+cargo test --locked -p rusterisk-server --test sip_call the_packaged_phones -- --ignored
+cargo test --locked -p rusterisk-server --test process_recovery the_candidate_upgrades -- --ignored
+```
+
 On Apple silicon, request [Rosetta execution](https://developer.apple.com/documentation/apple-silicon/building-a-universal-macos-binary) explicitly when checking a macOS Intel candidate.
 
 ```sh
