@@ -7,8 +7,8 @@ status: proposed
 
 ## Context
 
-Median idle memory on Linux x86-64 reached 17,364 KiB against a baseline maximum of 17,284 KiB.
-After the idle trial, the median reached 17,580 KiB against a maximum of 17,536 KiB.
+On Linux x86-64, median idle memory reached 17,364 KiB and exceeded the baseline limit by 80 KiB.
+After the idle trial, the median reached 17,580 KiB and exceeded the limit by 44 KiB.
 
 ## Decision
 
