@@ -272,9 +272,13 @@ async fn measure(process: &ChildServer, count: u8) -> Result<Metrics, ControlErr
             Duration::from_secs(1),
         );
         sample_deadlines.tick().await;
+        let wall_start = Instant::now();
         let cpu_start = process_cpu_ns(pid)?;
         sample_deadlines.tick().await;
-        let cpu_ns = process_cpu_ns(pid)? - cpu_start;
+        let cpu_ns = super::cpu_per_second(cpu_start, process_cpu_ns(pid)?, wall_start.elapsed())
+            .ok_or(ControlError::Invalid(
+            "Invalid process CPU sampling interval",
+        ))?;
         let active_rss = resident_kib(pid)?;
         done.send_replace(true);
         let mut completed = Vec::with_capacity(usize::from(count));
@@ -398,8 +402,11 @@ async fn trial(binary: &Path, count: u8) -> Result<Metrics, ControlError> {
 
 pub(super) async fn compare() -> Result<(), ControlError> {
     let quota = fs::read_to_string("/sys/fs/cgroup/cpu.max").map_err(failure)?;
-    if quota.trim() != "200000 100000" {
-        return Err(ControlError::Invalid("Load comparison requires two CPUs"));
+    let status = fs::read_to_string("/proc/self/status").map_err(failure)?;
+    if !super::two_cpu_profile(&quota, &status) {
+        return Err(ControlError::Invalid(
+            "Load comparison requires a two-CPU quota and affinity",
+        ));
     }
     let binary = |variable| {
         std::env::var_os(variable)
@@ -420,13 +427,19 @@ pub(super) async fn compare() -> Result<(), ControlError> {
                         "Load {count}, round {round}, build {build}: {error}"
                     ))
                 })?;
-                println!("legs={count} round={round} build={build} cpu_ns={} rss_kib={} released_kib={} left_us={} right_us={}", result[0], result[1], result[2], result[3], result[4]);
+                println!("legs={count} round={round} build={build} cpu_ns_per_second={} rss_kib={} released_kib={} left_us={} right_us={}", result[0], result[1], result[2], result[3], result[4]);
                 *row = result;
             }
         }
-        for (index, label) in ["cpu_ns", "rss_kib", "released_kib", "left_us", "right_us"]
-            .iter()
-            .enumerate()
+        for (index, label) in [
+            "cpu_ns_per_second",
+            "rss_kib",
+            "released_kib",
+            "left_us",
+            "right_us",
+        ]
+        .iter()
+        .enumerate()
         {
             let baseline = samples.map(|row| row[0][index]);
             let candidate = samples.map(|row| row[1][index]);
