@@ -363,9 +363,28 @@ async fn check_cli(cli: &Path, config: &Config, address: SocketAddr) -> Result<(
             )));
         }
         let report: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        let sdk = rusterisk_client::Client::new(
+            &format!("http://{address}"),
+            &user.name,
+            user.password.expose(),
+        )
+        .map_err(failure)?;
         if command.get(1) == Some(&"extension") {
+            let route = sdk
+                .diagnose_extension("internal", "101")
+                .await
+                .map_err(failure)?;
+            assert_eq!(
+                serde_json::from_value::<rusterisk_api::diagnosis::RouteDiagnosis>(report.clone())?,
+                route
+            );
             assert_eq!(report["destinations"][0]["endpoint"], "alice");
         } else {
+            let runtime = sdk.diagnose_runtime().await.map_err(failure)?;
+            assert_eq!(
+                report["call_slots"],
+                serde_json::to_value(runtime.call_slots)?
+            );
             assert_eq!(report["call_slots"]["active"], 0);
             assert_eq!(report["call_slots"]["limit"], 64);
         }

@@ -56,6 +56,14 @@ impl Client {
         Self::decode_response(response).await
     }
 
+    pub async fn diagnose_runtime(&self) -> Result<api::diagnosis::RuntimeActivity, Error> {
+        let response = self
+            .prepare_management_request(api::ManagementOperation::DiagnoseRuntime, &[])?
+            .send()
+            .await?;
+        Self::decode_response(response).await
+    }
+
     pub async fn reload_configuration(&self) -> Result<(), Error> {
         let operation = api::ManagementOperation::ReloadConfiguration;
         let response = self
