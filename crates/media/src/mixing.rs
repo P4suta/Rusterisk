@@ -34,6 +34,14 @@ struct Input {
 pub struct Mixer<K> {
     capacity: usize,
     inputs: BTreeMap<K, Input>,
+    // A tick reuses this storage, so a steady set of members allocates nothing.
+    heard: Vec<Option<Frame>>,
+    sums: Vec<(u64, [i32; MAX_SAMPLES])>,
+    order: Vec<usize>,
+    mixed: MixedAudio<K>,
+    // The frame passes of the last tick, which a test bounds by the member count.
+    #[cfg(test)]
+    passes: usize,
 }
 
 pub struct MixedAudio<K> {
@@ -52,6 +60,15 @@ impl<K: Ord + Clone> Mixer<K> {
         Self {
             capacity: capacity.min(64),
             inputs: BTreeMap::new(),
+            heard: Vec::new(),
+            sums: Vec::new(),
+            order: Vec::new(),
+            mixed: MixedAudio {
+                channels: Vec::new(),
+                bridges: Vec::new(),
+            },
+            #[cfg(test)]
+            passes: 0,
         }
     }
 
@@ -143,25 +160,26 @@ impl<K: Ord + Clone> Mixer<K> {
     }
 
     pub fn tick(&mut self) -> Result<Vec<(K, Frame)>, MediaError> {
-        Ok(self.tick_with_recordings()?.channels)
+        Ok(self.tick_with_recordings()?.channels.clone())
     }
 
-    pub fn tick_with_recordings(&mut self) -> Result<MixedAudio<K>, MediaError> {
+    pub fn tick_with_recordings(&mut self) -> Result<&MixedAudio<K>, MediaError> {
         self.tick_with_playback(&[])
     }
 
     pub fn tick_with_playback(
         &mut self,
         playback: &[(AudioTarget<K>, Frame)],
-    ) -> Result<MixedAudio<K>, MediaError> {
+    ) -> Result<&MixedAudio<K>, MediaError> {
         self.tick_with_music(playback, &[])
     }
 
+    // The result stays valid until the next tick.
     pub fn tick_with_music(
         &mut self,
         playback: &[(AudioTarget<K>, Frame)],
         music: &[(K, Gate, Frame)],
-    ) -> Result<MixedAudio<K>, MediaError> {
+    ) -> Result<&MixedAudio<K>, MediaError> {
         if playback
             .len()
             .checked_add(music.len())
@@ -181,13 +199,12 @@ impl<K: Ord + Clone> Mixer<K> {
                 AudioTarget::Channel(_) | AudioTarget::Bridge(_) => {}
             }
         }
-        if music
-            .iter()
-            .map(|(key, _, _)| key)
-            .collect::<BTreeSet<_>>()
-            .len()
-            != music.len()
-        {
+        if music.iter().enumerate().any(|(index, (key, _, _))| {
+            music
+                .iter()
+                .skip(index + 1)
+                .any(|(other, _, _)| other == key)
+        }) {
             return Err(MediaError::InvalidRoute);
         }
         for (key, _, frame) in music {
@@ -198,95 +215,200 @@ impl<K: Ord + Clone> Mixer<K> {
                 return Err(MediaError::UnknownStream);
             }
         }
-        let frames: Vec<_> = self
-            .inputs
-            .iter_mut()
-            .map(|(key, input)| {
-                let frame = input.frames.pop_front();
-                (
-                    key.clone(),
-                    input.bridge,
-                    input.gate,
-                    input.generated_audio_gate,
-                    frame.filter(|_| input.gate.receives()),
-                )
-            })
-            .collect();
-        let mut output = Vec::with_capacity(frames.len());
-        for (key, bridge, gate, generated_audio_gate, _) in &frames {
+        let Self {
+            inputs,
+            heard,
+            sums,
+            order,
+            mixed,
+            ..
+        } = self;
+        // Each bridge adds every received voice once.
+        heard.clear();
+        sums.clear();
+        #[cfg(test)]
+        let mut passes = 0_usize;
+        for input in inputs.values_mut() {
+            let frame = input.frames.pop_front().filter(|_| input.gate.receives());
+            if let Some(bridge) = input.bridge {
+                if let (Some(sum), Some(frame)) = (bridge_sum(sums, bridge), &frame) {
+                    add(sum, frame);
+                    #[cfg(test)]
+                    {
+                        passes += 1;
+                    }
+                }
+            }
+            heard.push(frame);
+        }
+        for (target, _) in playback {
+            match target {
+                AudioTarget::Bridge(bridge) => {
+                    bridge_sum(sums, *bridge);
+                }
+                AudioTarget::Channel(_) => {}
+            }
+        }
+        // The stored keys change only when the members change.
+        if !mixed.channels.iter().map(|(key, _)| key).eq(inputs.keys()) {
+            let silence = Frame::new(&[0; MAX_SAMPLES], 48000)?;
+            mixed.channels.clear();
+            mixed
+                .channels
+                .extend(inputs.keys().map(|key| (key.clone(), silence)));
+        }
+        for (((key, input), heard), (_, output)) in
+            inputs.iter().zip(heard.iter()).zip(&mut mixed.channels)
+        {
             let mut sum = [0i32; MAX_SAMPLES];
             if let Some((_, generated_gate, frame)) =
                 music.iter().find(|(target, _, _)| target == key)
             {
                 if generated_gate.sends() {
-                    for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
-                        *sum = i32::from(*sample);
-                    }
+                    add(&mut sum, frame);
                 }
             } else {
-                if bridge.is_some() && gate.sends() {
-                    for (source, source_bridge, _, _, frame) in &frames {
-                        if source != key && source_bridge == bridge {
-                            if let Some(frame) = frame {
-                                for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
-                                    *sum += i32::from(*sample);
-                                }
-                            }
+                // A member hears its bridge without its own voice.
+                if let Some(bridge) = input.bridge.filter(|_| input.gate.sends()) {
+                    if let Some((_, total)) = sums.iter().find(|(id, _)| *id == bridge) {
+                        sum = *total;
+                    }
+                    if let Some(own) = heard {
+                        for (sum, sample) in sum.iter_mut().zip(own.samples()) {
+                            *sum -= i32::from(*sample);
+                        }
+                        #[cfg(test)]
+                        {
+                            passes += 1;
                         }
                     }
                 }
                 for (target, frame) in playback {
                     let permitted = match target {
                         AudioTarget::Channel(destination) => {
-                            destination == key && generated_audio_gate.sends()
+                            destination == key && input.generated_audio_gate.sends()
                         }
                         AudioTarget::Bridge(destination) => {
-                            Some(*destination) == *bridge && gate.sends()
+                            Some(*destination) == input.bridge && input.gate.sends()
                         }
                     };
                     if permitted {
-                        for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
-                            *sum += i32::from(*sample);
-                        }
+                        add(&mut sum, frame);
                     }
                 }
             }
-            let samples = sum.map(|sample| sample.clamp(i16::MIN.into(), i16::MAX.into()) as i16);
-            output.push((key.clone(), Frame::new(&samples, 48000)?));
+            *output = clamped(sum)?;
         }
-        let bridge_ids = frames
-            .iter()
-            .filter_map(|(_, bridge, _, _, _)| *bridge)
-            .chain(playback.iter().filter_map(|(target, _)| match target {
-                AudioTarget::Bridge(bridge) => Some(*bridge),
-                AudioTarget::Channel(_) => None,
-            }))
-            .collect::<BTreeSet<_>>();
-        let mut bridges = Vec::with_capacity(bridge_ids.len());
-        for bridge in bridge_ids {
-            let mut sum = [0i32; MAX_SAMPLES];
-            for (_, source_bridge, _, _, frame) in &frames {
-                if *source_bridge == Some(bridge) {
-                    if let Some(frame) = frame {
-                        for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
-                            *sum += i32::from(*sample);
-                        }
-                    }
-                }
-            }
+        order.clear();
+        order.extend(0..sums.len());
+        order.sort_unstable_by_key(|index| sums.get(*index).map(|(bridge, _)| *bridge));
+        mixed.bridges.clear();
+        for index in order.iter() {
+            let Some((bridge, mut sum)) = sums.get(*index).copied() else {
+                continue;
+            };
             for (target, frame) in playback {
                 if *target == AudioTarget::Bridge(bridge) {
-                    for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
-                        *sum += i32::from(*sample);
-                    }
+                    add(&mut sum, frame);
                 }
             }
-            let samples = sum.map(|sample| sample.clamp(i16::MIN.into(), i16::MAX.into()) as i16);
-            bridges.push((bridge, Frame::new(&samples, 48000)?));
+            mixed.bridges.push((bridge, clamped(sum)?));
         }
-        Ok(MixedAudio {
-            channels: output,
-            bridges,
-        })
+        #[cfg(test)]
+        {
+            self.passes = passes;
+        }
+        Ok(&self.mixed)
+    }
+}
+
+fn add(sum: &mut [i32; MAX_SAMPLES], frame: &Frame) {
+    for (sum, sample) in sum.iter_mut().zip(frame.samples()) {
+        *sum += i32::from(*sample);
+    }
+}
+
+fn clamped(sum: [i32; MAX_SAMPLES]) -> Result<Frame, MediaError> {
+    Frame::new(
+        &sum.map(|sample| sample.clamp(i16::MIN.into(), i16::MAX.into()) as i16),
+        48000,
+    )
+}
+
+// The running sum of one bridge, which starts at silence.
+fn bridge_sum(
+    sums: &mut Vec<(u64, [i32; MAX_SAMPLES])>,
+    bridge: u64,
+) -> Option<&mut [i32; MAX_SAMPLES]> {
+    if !sums.iter().any(|(id, _)| *id == bridge) {
+        sums.push((bridge, [0; MAX_SAMPLES]));
+    }
+    sums.iter_mut()
+        .find(|(id, _)| *id == bridge)
+        .map(|(_, sum)| sum)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Frame, MediaError, Mixer};
+
+    #[test]
+    fn a_steady_set_of_members_reuses_the_stored_result() -> Result<(), MediaError> {
+        let mut mixer = Mixer::new(8);
+        let keys: Vec<u32> = (0..4).collect();
+        for key in &keys {
+            mixer.insert(*key)?;
+        }
+        mixer.bridge(1, &keys)?;
+        let mut stored = Vec::with_capacity(3);
+        for _ in 0..3 {
+            for key in &keys {
+                mixer.push(key, Frame::new(&[100; 960], 48000)?)?;
+            }
+            let mixed = mixer.tick_with_music(&[], &[])?;
+            stored.push((mixed.channels.as_ptr(), mixed.bridges.as_ptr()));
+            assert_eq!(mixed.channels.len(), 4);
+        }
+        assert_eq!(stored[1], stored[2]);
+        let capacities = (
+            mixer.heard.capacity(),
+            mixer.sums.capacity(),
+            mixer.order.capacity(),
+        );
+        mixer.tick_with_music(&[], &[])?;
+        assert_eq!(
+            capacities,
+            (
+                mixer.heard.capacity(),
+                mixer.sums.capacity(),
+                mixer.order.capacity()
+            )
+        );
+        mixer.insert(9)?;
+        assert_eq!(mixer.tick_with_music(&[], &[])?.channels.len(), 5);
+        Ok(())
+    }
+
+    #[test]
+    fn the_frame_passes_of_a_bridge_tick_grow_with_its_member_count() -> Result<(), MediaError> {
+        for members in [2_u32, 8, 64] {
+            let mut mixer = Mixer::new(64);
+            let keys: Vec<u32> = (0..members).collect();
+            for key in &keys {
+                mixer.insert(*key)?;
+            }
+            mixer.bridge(1, &keys)?;
+            for key in &keys {
+                mixer.push(key, Frame::new(&[100; 960], 48000)?)?;
+            }
+            mixer.passes = 0;
+            mixer.tick()?;
+            assert!(
+                mixer.passes <= 2 * members as usize,
+                "{members} members took {} frame passes",
+                mixer.passes
+            );
+        }
+        Ok(())
     }
 }
