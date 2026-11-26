@@ -173,6 +173,7 @@ impl Store {
                 interrupted.push(entry.path());
             }
         }
+        journal::replay_deletions(&mut connection, &recordings)?;
         for path in interrupted {
             if path.extension().is_some_and(|value| value == "copying") {
                 std::fs::remove_file(path)?;
@@ -307,11 +308,9 @@ impl Store {
     }
 
     pub fn delete_recording(&mut self, name: &str) -> Result<(), StorageError> {
-        let path = self.recording_path(name)?;
-        std::fs::remove_file(path).map_err(recording_io_error)?;
-        self.connection
-            .execute("DELETE FROM recordings WHERE name=?1", [name])?;
-        Ok(())
+        self.recording_path(name)?;
+        let id = journal::begin(&self.connection, name, "delete", "deleting", None)?;
+        journal::unlink(&mut self.connection, &self.recordings, name, id)
     }
 
     pub fn recordings(&self) -> Result<Vec<rusterisk_api::StoredRecording>, StorageError> {
