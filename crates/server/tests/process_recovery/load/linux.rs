@@ -179,11 +179,12 @@ impl Leg {
                 )?;
                 let arrival = packet
                     .cmsgs()?
-                    .find_map(|message| match message {
-                        ControlMessageOwned::ScmTimestampns(time) => {
+                    .find_map(|message| {
+                        if let ControlMessageOwned::ScmTimestampns(time) = message {
                             UNIX_EPOCH.checked_add(time.into())
+                        } else {
+                            None
                         }
-                        _ => None,
                     })
                     .ok_or_else(|| {
                         io::Error::new(
