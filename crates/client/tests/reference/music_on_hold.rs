@@ -1,7 +1,7 @@
 use rusterisk_client::{
     api::{
-        Channel, ChannelId, EventKind, ExternalRtpTarget, MediaUri, PlaybackMilliseconds,
-        PlaybackOptions, PlaybackState, SoundId, StaticRtpCodec,
+        Channel, ChannelId, EventKind, EventSource, ExternalRtpTarget, MediaUri,
+        PlaybackMilliseconds, PlaybackOptions, PlaybackState, SoundId, StaticRtpCodec,
     },
     Client, Error, MuteDirection, Session,
 };
@@ -191,6 +191,7 @@ struct Resources {
     peers: [Peer; 2],
     bridge: rusterisk_client::BridgeId,
     bridge_lifetime: Lifetime,
+    subscribed_to_bridge: bool,
     playback: rusterisk_client::PlaybackId,
     playback_lifetime: Lifetime,
 }
@@ -204,6 +205,7 @@ impl Resources {
             ],
             bridge: rusterisk_client::BridgeId::try_from("music-bridge".to_owned())?,
             bridge_lifetime: Lifetime::Unused,
+            subscribed_to_bridge: false,
             playback: rusterisk_client::PlaybackId::try_from("music-interruption".to_owned())?,
             playback_lifetime: Lifetime::Unused,
         })
@@ -214,6 +216,7 @@ impl Resources {
         client: &Client,
         session: &mut Session,
         app: &str,
+        server: ComparisonServer,
     ) -> Result<(), Error> {
         missing(bounded(client.bridge(&self.bridge)).await)?;
         missing(bounded(client.playback(&self.playback)).await)?;
@@ -224,6 +227,11 @@ impl Resources {
         let bridge = bounded(client.create_bridge(&self.bridge, "Music comparison")).await?;
         self.bridge_lifetime = Lifetime::Admitted;
         require(bridge.id == self.bridge, "MOH bridge identity changed")?;
+        if matches!(server, ComparisonServer::Asterisk) {
+            bounded(client.subscribe_resources(app, &[EventSource::from(self.bridge.clone())]))
+                .await?;
+            self.subscribed_to_bridge = true;
+        }
         bounded(client.add_channels(
             &self.bridge,
             &[self.peers[0].id.clone(), self.peers[1].id.clone()],
@@ -273,13 +281,14 @@ impl Resources {
             self.bridge_lifetime,
             Lifetime::Requested | Lifetime::Admitted
         ) {
-            cleanup = combine(
-                cleanup,
-                deleted(
-                    bounded(client.destroy_bridge(&self.bridge)).await,
-                    self.bridge_lifetime,
-                ),
-            );
+            let removal = bounded(client.destroy_bridge(&self.bridge)).await;
+            if self.subscribed_to_bridge && removal.is_ok() {
+                cleanup = combine(
+                    cleanup,
+                    super::bridge_destroyed(session, &self.bridge).await,
+                );
+            }
+            cleanup = combine(cleanup, deleted(removal, self.bridge_lifetime));
             cleanup = combine(cleanup, missing(bounded(client.bridge(&self.bridge)).await));
             self.bridge_lifetime = Lifetime::Released;
         }
@@ -646,7 +655,7 @@ pub async fn compare(
         resources.peers[1].socket.control_addr()?,
     ];
     let operation = Wait::Scenario
-        .bounded(resources.prepare(client, session, application))
+        .bounded(resources.prepare(client, session, application, server))
         .await
         .map_err(|_| Error::Timeout)
         .and_then(|result| result);

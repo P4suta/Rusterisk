@@ -3,7 +3,7 @@ use rusterisk_client::{
         ApiError, BridgeVideoMode, ChannelId, EventFilter, EventFilterRequest, EventKind,
         EventSource, ExternalRtpTarget, StaticRtpCodec,
     },
-    Bridge, Client, Error,
+    Bridge, BridgeId, Client, Error, Session,
 };
 use rusterisk_server::test_time::Wait;
 use std::net::Ipv4Addr;
@@ -95,8 +95,30 @@ fn audio_bridge(mut bridge: Bridge, expected_mode: BridgeVideoMode) -> Bridge {
     bridge
 }
 
-async fn compare_bridges(actual: &Client, reference: &Client) -> Result<(), Error> {
-    let id = rusterisk_client::BridgeId::try_from("compat-bridge".to_owned())?;
+async fn bridge_destroyed(session: &mut Session, id: &BridgeId) -> Result<(), Error> {
+    Wait::Ready
+        .bounded(async {
+            loop {
+                if matches!(
+                    session.next_event().await?.kind,
+                    EventKind::BridgeDestroyed { bridge } if bridge.id == *id
+                ) {
+                    return Ok(());
+                }
+            }
+        })
+        .await
+        .map_err(|_| Error::Invalid("bridge destruction event deadline"))?
+}
+
+async fn compare_bridges(
+    actual: &Client,
+    reference: &Client,
+    app: &str,
+    actual_session: &mut Session,
+    reference_session: &mut Session,
+) -> Result<(), Error> {
+    let id = BridgeId::try_from("compat-bridge".to_owned())?;
     let created = actual.create_bridge(&id, "Conversation").await?;
     let expected = reference.create_bridge(&id, "Conversation").await?;
     assert_eq!(
@@ -124,12 +146,20 @@ async fn compare_bridges(actual: &Client, reference: &Client) -> Result<(), Erro
         rejection(actual.create_bridge(&id, "Duplicate").await)?,
         rejection(reference.create_bridge(&id, "Duplicate").await)?
     );
-    actual.destroy_bridge(&id).await?;
-    reference.destroy_bridge(&id).await?;
+    let source = EventSource::from(id.clone());
     assert_eq!(
-        rejection(actual.bridge(&id).await)?,
-        rejection(reference.bridge(&id).await)?
+        actual
+            .subscribe_resources(app, std::slice::from_ref(&source))
+            .await?,
+        reference.subscribe_resources(app, &[source]).await?
     );
+    actual.destroy_bridge(&id).await?;
+    let missing = rejection(actual.bridge(&id).await)?;
+    assert_eq!(missing.0, 404);
+    reference.destroy_bridge(&id).await?;
+    bridge_destroyed(actual_session, &id).await?;
+    bridge_destroyed(reference_session, &id).await?;
+    assert_eq!(missing, rejection(reference.bridge(&id).await)?);
     assert_eq!(
         rejection(actual.destroy_bridge(&id).await)?,
         rejection(reference.destroy_bridge(&id).await)?
@@ -374,7 +404,6 @@ async fn compare_resources(
             actual.applications().await?,
             reference.applications().await?
         );
-        compare_bridges(actual, &reference).await?;
         request_bodies::compare(
             actual,
             &format!("http://{address}"),
@@ -489,6 +518,14 @@ async fn compare_resources(
             rejection(actual.application("missing").await)?,
             rejection(reference.application("missing").await)?
         );
+        compare_bridges(
+            actual,
+            &reference,
+            app.as_str(),
+            &mut actual_session,
+            &mut reference_session,
+        )
+        .await?;
         compare_external_admission(actual, &mut actual_session, app.as_str()).await?;
         compare_external_admission(&reference, &mut reference_session, app.as_str()).await?;
         dialplan_routes::compare(&reference, &mut reference_session, app.as_str()).await?;
