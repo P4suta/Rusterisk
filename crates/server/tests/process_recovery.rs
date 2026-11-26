@@ -161,6 +161,10 @@ fn recovery_audio_oracle_rejects_silence_wrong_audio_and_short_transients(
 #[tokio::test]
 async fn forced_process_exit_recovers_audio_and_history_through_the_next_server_start(
 ) -> Result<(), ControlError> {
+    recovery(None, Path::new(env!("CARGO_BIN_EXE_rusterisk"))).await
+}
+
+async fn recovery(previous: Option<&Path>, next: &Path) -> Result<(), ControlError> {
     let root = tempfile::tempdir().map_err(failure)?;
     let settings = root.path().join("config");
     let data = root.path().join("data");
@@ -170,7 +174,10 @@ async fn forced_process_exit_recovers_audio_and_history_through_the_next_server_
         ("ari.conf", "[app]\ntype=user\npassword=test-password\n"),
         ("pjsip.conf", ""),
         ("rtp.conf", ""),
-        ("extensions.conf", ""),
+        (
+            "extensions.conf",
+            "[installed]\nexten => 707,1,Stasis(recovery)\n",
+        ),
     ] {
         std::fs::write(settings.join(name), source).map_err(failure)?;
     }
@@ -180,7 +187,11 @@ async fn forced_process_exit_recovers_audio_and_history_through_the_next_server_
         .timeout(Wait::Io.duration())
         .build()
         .map_err(failure)?;
-    let mut first = ChildServer::start(&settings, &data, root.path().join("first.log")).await?;
+    let log = root.path().join("first.log");
+    let mut first = match previous {
+        Some(binary) => ChildServer::start_from(binary, &settings, &data, log).await?,
+        None => ChildServer::start(&settings, &data, log).await?,
+    };
     let first_operation = Wait::Scenario
         .bounded(async {
             let mut events = events(first.address()).await?;
@@ -293,6 +304,11 @@ async fn forced_process_exit_recovers_audio_and_history_through_the_next_server_
                 ));
             }
             let db = rusqlite::Connection::open(data.join("calls.sqlite3")).map_err(failure)?;
+            if previous.is_some() {
+                let version: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0)).map_err(failure)?;
+                assert_eq!(version, 2);
+                return Ok(());
+            }
             let writing: u32 = db.query_row(
                 "SELECT count(*) FROM recording_operations WHERE name='interrupted' AND operation='create' AND phase='writing'",
                 [], |row| row.get(0),
@@ -305,8 +321,52 @@ async fn forced_process_exit_recovers_audio_and_history_through_the_next_server_
         .and_then(|result| result);
     let first_cleanup = first.terminate().await.map(|_| ());
     combine(first_operation, first_cleanup)?;
-    let mut restarted =
-        ChildServer::start(&settings, &data, root.path().join("restarted.log")).await?;
+    let audio = std::fs::read(data.join("recordings/complete.wav")).map_err(failure)?;
+    if previous.is_some() {
+        let backup = root.path().join("backup");
+        std::fs::create_dir(&backup).map_err(failure)?;
+        copy_tree(&settings, &backup.join("config"))?;
+        copy_tree(&data, &backup.join("data"))?;
+        verify_install(next, root.path(), &client, &audio).await?;
+        let restored = root.path().join("restored");
+        copy_tree(&backup, &restored)?;
+        verify_install(next, &restored, &client, &audio).await
+    } else {
+        verify_install(next, root.path(), &client, &audio).await
+    }
+}
+
+fn copy_tree(source: &Path, target: &Path) -> Result<(), ControlError> {
+    std::fs::create_dir(target).map_err(failure)?;
+    for entry in std::fs::read_dir(source).map_err(failure)? {
+        let entry = entry.map_err(failure)?;
+        let destination = target.join(entry.file_name());
+        let kind = entry.file_type().map_err(failure)?;
+        if kind.is_dir() {
+            copy_tree(&entry.path(), &destination)?;
+        } else if kind.is_file() {
+            std::fs::copy(entry.path(), destination).map_err(failure)?;
+        } else {
+            return Err(ControlError::Invalid("Unexpected backup entry"));
+        }
+    }
+    Ok(())
+}
+
+async fn verify_install(
+    binary: &Path,
+    root: &Path,
+    client: &reqwest::Client,
+    audio: &[u8],
+) -> Result<(), ControlError> {
+    let data = root.join("data");
+    let mut restarted = ChildServer::start_from(
+        binary,
+        &root.join("config"),
+        &data,
+        root.join("restarted.log"),
+    )
+    .await?;
     let recovered = async {
         if history(&data, "completed-call")? != "completed"
             || history(&data, "interrupted-call")? != "interrupted"
@@ -316,7 +376,7 @@ async fn forced_process_exit_recovers_audio_and_history_through_the_next_server_
             ));
         }
         let channels: Vec<Channel> = request(
-            &client,
+            client,
             restarted.address(),
             reqwest::Method::GET,
             "channels",
@@ -330,7 +390,7 @@ async fn forced_process_exit_recovers_audio_and_history_through_the_next_server_
             return Err(ControlError::Adapter("restart restored live calls".into()));
         }
         let recordings: Vec<StoredRecording> = request(
-            &client,
+            client,
             restarted.address(),
             reqwest::Method::GET,
             "recordings/stored",
@@ -354,6 +414,33 @@ async fn forced_process_exit_recovers_audio_and_history_through_the_next_server_
         for name in ["complete", "interrupted"] {
             verify_signal(&data.join(format!("recordings/{name}.wav")))?;
         }
+        let downloaded = request(
+            client,
+            restarted.address(),
+            reqwest::Method::GET,
+            "recordings/stored/complete/file",
+            &[],
+        )
+        .await?
+        .bytes()
+        .await
+        .map_err(failure)?;
+        assert_eq!(downloaded.as_ref(), audio);
+        let route: serde_json::Value = client
+            .get(format!(
+                "http://{}/rusterisk/diagnostics/extensions/installed/707",
+                restarted.address()
+            ))
+            .basic_auth("app", Some("test-password"))
+            .send()
+            .await
+            .map_err(failure)?
+            .error_for_status()
+            .map_err(failure)?
+            .json()
+            .await
+            .map_err(failure)?;
+        assert_eq!(route["application"], "recovery");
         if data.join("recordings/interrupted.partial").exists() {
             return Err(ControlError::Adapter(
                 "partial recording survived recovery".into(),
@@ -363,4 +450,37 @@ async fn forced_process_exit_recovers_audio_and_history_through_the_next_server_
     }
     .await;
     combine(recovered, restarted.terminate().await.map(|_| ()))
+}
+
+#[tokio::test]
+async fn an_unavailable_distribution_binary_cannot_start_a_process_check(
+) -> Result<(), ControlError> {
+    let root = tempfile::tempdir().map_err(failure)?;
+    let missing = root.path().join("missing-server");
+    assert!(ChildServer::start_from(
+        &missing,
+        root.path(),
+        &root.path().join("data"),
+        root.path().join("server.log")
+    )
+    .await
+    .is_err());
+    root.close().map_err(failure)
+}
+
+#[tokio::test]
+#[ignore = "Requires the previous and candidate server executables."]
+async fn the_candidate_upgrades_old_recordings_and_restores_the_stopped_backup(
+) -> Result<(), ControlError> {
+    let previous = std::env::var_os("RUSTERISK_BASELINE_SERVER")
+        .map(std::path::PathBuf::from)
+        .ok_or(ControlError::Invalid(
+            "The previous server binary is required",
+        ))?;
+    let next = std::env::var_os("RUSTERISK_CANDIDATE_SERVER")
+        .map(std::path::PathBuf::from)
+        .ok_or(ControlError::Invalid(
+            "The candidate server binary is required",
+        ))?;
+    recovery(Some(&previous), &next).await
 }

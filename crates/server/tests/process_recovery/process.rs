@@ -82,6 +82,21 @@ fn ready_line(path: &Path) -> Result<Option<SocketAddr>, ControlError> {
 
 impl ChildServer {
     pub async fn start(settings: &Path, data: &Path, log: PathBuf) -> Result<Self, ControlError> {
+        Self::start_from(
+            Path::new(env!("CARGO_BIN_EXE_rusterisk")),
+            settings,
+            data,
+            log,
+        )
+        .await
+    }
+
+    pub async fn start_from(
+        binary: &Path,
+        settings: &Path,
+        data: &Path,
+        log: PathBuf,
+    ) -> Result<Self, ControlError> {
         let mut last = None;
         for attempt in 0..4 {
             let reservation = std::net::TcpListener::bind("127.0.0.1:0").map_err(failure)?;
@@ -95,7 +110,14 @@ impl ChildServer {
             )
             .map_err(failure)?;
             drop(reservation);
-            match Self::spawn(settings, data, log.with_extension(format!("{attempt}.log"))).await {
+            match Self::spawn(
+                binary,
+                settings,
+                data,
+                log.with_extension(format!("{attempt}.log")),
+            )
+            .await
+            {
                 Ok(server) => return Ok(server),
                 Err(primary) => {
                     let occupied = match std::net::TcpListener::bind(address) {
@@ -115,10 +137,15 @@ impl ChildServer {
         Err(last.unwrap_or(ControlError::Capacity))
     }
 
-    async fn spawn(settings: &Path, data: &Path, log: PathBuf) -> Result<Self, ControlError> {
+    async fn spawn(
+        binary: &Path,
+        settings: &Path,
+        data: &Path,
+        log: PathBuf,
+    ) -> Result<Self, ControlError> {
         let output = File::create_new(&log).map_err(failure)?;
         let errors = File::create_new(log.with_extension("stderr")).map_err(failure)?;
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rusterisk"))
+        let mut child = Command::new(binary)
             .arg("--config-dir")
             .arg(settings)
             .arg("--data-dir")
