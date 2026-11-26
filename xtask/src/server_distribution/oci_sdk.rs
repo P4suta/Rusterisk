@@ -6,7 +6,7 @@ use super::{
 use crate::distribution::{PreparedSdkHttpConsumer, SdkContents, SdkHttpTarget};
 use std::{
     io::{self, Read, Write},
-    net::{TcpListener, UdpSocket},
+    net::{SocketAddr, TcpListener, UdpSocket},
     os::unix::fs::{DirBuilderExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Command,
@@ -44,6 +44,33 @@ pub(crate) fn copy_archive(source: &Path, destination: &Path, maximum: u64) -> i
     let mut permissions = destination.metadata()?.permissions();
     permissions.set_readonly(true);
     destination.set_permissions(permissions)
+}
+
+fn write_runtime_config(
+    server: &ServerCandidate,
+    execution: &Path,
+    http: SocketAddr,
+    sip: SocketAddr,
+) -> io::Result<PathBuf> {
+    let configuration = ServerRuntimeConfig::capture(http, sip, |path| {
+        server
+            .files()
+            .find(|(name, _)| *name == path)
+            .map(|(_, bytes)| bytes.to_vec())
+            .ok_or_else(|| io::Error::other("OCI runtime sample configuration missing"))
+    })?;
+    let config = execution.join("config");
+    std::fs::DirBuilder::new().mode(0o700).create(&config)?;
+    for (path, bytes) in configuration.files() {
+        let name = path
+            .strip_prefix("config/")
+            .ok_or_else(|| io::Error::other("OCI runtime configuration path changed"))?;
+        let path = config.join(name);
+        write(&path, bytes)?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
+    }
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755))?;
+    Ok(config)
 }
 
 pub fn verify_server_oci_sdk_with(
@@ -101,27 +128,12 @@ pub fn verify_server_oci_sdk_with(
         )?;
         let http_reservation = TcpListener::bind("127.0.0.1:0")?;
         let sip_reservation = UdpSocket::bind("127.0.0.1:0")?;
-        let configuration = ServerRuntimeConfig::capture(
+        let config = write_runtime_config(
+            &server,
+            &execution,
             http_reservation.local_addr()?,
             sip_reservation.local_addr()?,
-            |path| {
-                server
-                    .files()
-                    .find(|(name, _)| *name == path)
-                    .map(|(_, bytes)| bytes.to_vec())
-                    .ok_or_else(|| io::Error::other("OCI runtime sample configuration missing"))
-            },
         )?;
-        let config = execution.join("config");
-        std::fs::DirBuilder::new().mode(0o755).create(&config)?;
-        for (path, bytes) in configuration.files() {
-            let path = path
-                .strip_prefix("config/")
-                .ok_or_else(|| io::Error::other("OCI runtime configuration path changed"))?;
-            let path = config.join(path);
-            write(&path, bytes)?;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
-        }
         prepared = Some(
             PreparedSdkHttpConsumer::prepare_with(
                 &contents,
@@ -251,27 +263,12 @@ where
         )?;
         let http_reservation = TcpListener::bind("127.0.0.1:0")?;
         let sip_reservation = UdpSocket::bind("127.0.0.1:0")?;
-        let configuration = ServerRuntimeConfig::capture(
+        let config = write_runtime_config(
+            server,
+            scope.execution,
             http_reservation.local_addr()?,
             sip_reservation.local_addr()?,
-            |path| {
-                server
-                    .files()
-                    .find(|(name, _)| *name == path)
-                    .map(|(_, bytes)| bytes.to_vec())
-                    .ok_or_else(|| io::Error::other("OCI runtime sample configuration missing"))
-            },
         )?;
-        let config = scope.execution.join("config");
-        std::fs::DirBuilder::new().mode(0o755).create(&config)?;
-        for (path, bytes) in configuration.files() {
-            let path = path
-                .strip_prefix("config/")
-                .ok_or_else(|| io::Error::other("OCI runtime configuration path changed"))?;
-            let path = config.join(path);
-            write(&path, bytes)?;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644))?;
-        }
         prepared = Some(
             PreparedSdkHttpConsumer::prepare_with(
                 contents,

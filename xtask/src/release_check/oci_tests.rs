@@ -146,8 +146,10 @@ fn invalid_oci_graph_cannot_start_preparation_or_docker_commands() -> io::Result
 fn a_real_sdk_preparation_spawn_failure_cannot_return_an_oci_outcome() -> io::Result<()> {
     let target = linux_target()?;
     using(target.server_target(), |captured, paths| {
+        use std::os::unix::fs::PermissionsExt;
         let supervisor = CommandSupervisor::new().map_err(io::Error::other)?;
         let mut commands = 0;
+        let mut mount_mode = None;
         let missing = paths
             .sdk
             .with_file_name("missing-oci-sdk-preparation-program");
@@ -165,6 +167,8 @@ fn a_real_sdk_preparation_spawn_failure_cannot_return_an_oci_outcome() -> io::Re
             supervisor,
             |command: &mut Command, budget: Duration| {
                 commands += 1;
+                let config = fs::symlink_metadata(paths.execution.join("config"))?;
+                mount_mode = Some(config.permissions().mode() & 0o7777);
                 require(
                     command.get_program() == "cargo",
                     "OCI verification did not prepare its SDK consumer first",
@@ -184,6 +188,7 @@ fn a_real_sdk_preparation_spawn_failure_cannot_return_an_oci_outcome() -> io::Re
             commands == 1,
             "OCI verification continued after failed SDK preparation",
         )?;
+        assert_eq!(mount_mode, Some(0o755), "OCI configuration mount mode");
         require(
             error.to_string().contains("process failed"),
             "OCI verification lost its native spawn failure",
@@ -193,4 +198,22 @@ fn a_real_sdk_preparation_spawn_failure_cannot_return_an_oci_outcome() -> io::Re
             "OCI SDK preparation failure retained owned state",
         )
     })
+}
+
+#[test]
+fn the_container_can_traverse_its_configuration_mount_under_a_private_umask() -> io::Result<()> {
+    crate::process::run(
+        Command::new("sh")
+            .args(["-c", "umask 077; exec \"$@\"", "sh"])
+            .arg(std::env::current_exe()?)
+            .args([
+                "--exact",
+                concat!(
+                    "release_check::oci::tests::",
+                    "a_real_sdk_preparation_spawn_failure_cannot_return_an_oci_outcome",
+                ),
+            ]),
+        Duration::from_secs(30),
+    )
+    .map_err(io::Error::other)
 }
