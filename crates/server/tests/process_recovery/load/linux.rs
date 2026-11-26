@@ -56,8 +56,24 @@ struct Leg {
     peer: SocketPair,
     target: SocketAddr,
     sender: RtpSender,
+    next_packet: tokio::time::Instant,
     signal: i16,
     heard: Option<Duration>,
+}
+
+#[tokio::test]
+async fn a_negotiated_phone_sends_audio_before_its_bridge_exists() -> Result<(), ControlError> {
+    let peer = SocketPair::bind(Ipv4Addr::LOCALHOST.into(), 0, 0).map_err(failure)?;
+    let receiver = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).map_err(failure)?;
+    receiver.set_nonblocking(true).map_err(failure)?;
+    let target = receiver.local_addr().map_err(failure)?;
+    let leg = Leg::negotiated(peer, target, 0).await?;
+    let mut bytes = [0; 1500];
+    let (length, source) = receiver.recv_from(&mut bytes).map_err(failure)?;
+    assert_eq!(source, leg.peer.local_addr().map_err(failure)?);
+    let packet = RtpPacket::parse(&bytes[..length]).map_err(failure)?;
+    assert_eq!(packet.payload(), [rusterisk_media::mulaw_encode(4000); 160]);
+    Ok(())
 }
 
 impl Leg {
@@ -92,13 +108,20 @@ impl Leg {
         let port = vars
             .get("UNICASTRTP_LOCAL_PORT")
             .ok_or(ControlError::Invalid("Missing RTP port"))?;
-        Ok(Self {
+        Self::negotiated(peer, format!("{ip}:{port}").parse().map_err(failure)?, n).await
+    }
+
+    async fn negotiated(peer: SocketPair, target: SocketAddr, n: u8) -> Result<Self, ControlError> {
+        let mut leg = Self {
             peer,
-            target: format!("{ip}:{port}").parse().map_err(failure)?,
+            target,
             sender: RtpSender::new(AudioFormat::Pcmu, 0, [n + 1; 10]).map_err(failure)?,
+            next_packet: tokio::time::Instant::now() + Duration::from_millis(20),
             signal: if n.is_multiple_of(2) { 4000 } else { -7000 },
             heard: None,
-        })
+        };
+        leg.transmit().await?;
+        Ok(leg)
     }
 
     async fn transmit(&mut self) -> Result<(), ControlError> {
@@ -124,7 +147,7 @@ impl Leg {
     ) -> Result<(), ControlError> {
         let expected = if self.signal > 0 { -7000 } else { 4000 };
         let mut buffer = [0; 1501];
-        let mut clock = tokio::time::interval(Duration::from_millis(20));
+        let mut clock = tokio::time::interval_at(self.next_packet, Duration::from_millis(20));
         clock.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
@@ -176,8 +199,14 @@ async fn measure(process: &ChildServer, count: u8) -> Result<Metrics, ControlErr
         let (done, stop) = watch::channel(false);
         for pair in 0..count / 2 {
             let start = Instant::now();
-            let mut left = Leg::open(&client, addr, 2 * pair).await?;
-            let mut right = Leg::open(&client, addr, 2 * pair + 1).await?;
+            for n in [2 * pair, 2 * pair + 1] {
+                let mut leg = Leg::open(&client, addr, n).await?;
+                let lifetime = stop.clone();
+                calls.spawn(async move {
+                    leg.drive(start, lifetime).await?;
+                    Ok::<_, ControlError>((n, leg))
+                });
+            }
             let bridge = format!("bridges/pair-{pair}");
             request(&client, addr, Method::POST, &bridge, &[("type", "mixing")]).await?;
             request(
@@ -191,14 +220,6 @@ async fn measure(process: &ChildServer, count: u8) -> Result<Metrics, ControlErr
                 )],
             )
             .await?;
-            let lifetime = stop.clone();
-            calls.spawn(async move {
-                tokio::try_join!(
-                    left.drive(start, lifetime.clone()),
-                    right.drive(start, lifetime)
-                )?;
-                Ok::<_, ControlError>((pair, [left, right]))
-            });
         }
         let mut sample_deadlines = tokio::time::interval_at(
             tokio::time::Instant::now() + Duration::from_millis(300),
@@ -210,16 +231,15 @@ async fn measure(process: &ChildServer, count: u8) -> Result<Metrics, ControlErr
         let cpu_ns = process_cpu_ns(pid)? - cpu_start;
         let active_rss = resident_kib(pid)?;
         done.send_replace(true);
-        let mut completed = Vec::with_capacity(usize::from(count / 2));
+        let mut completed = Vec::with_capacity(usize::from(count));
         while let Some(call) = calls.join_next().await {
             completed.push(call.map_err(failure)??);
         }
-        completed.sort_unstable_by_key(|(pair, _)| *pair);
-        let legs: Vec<_> = completed.into_iter().flat_map(|(_, pair)| pair).collect();
+        completed.sort_unstable_by_key(|(n, _)| *n);
         let mut audio_us = [0; 2];
         let mut release = tokio::time::interval(Duration::from_millis(20));
         release.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        for (n, leg) in legs.iter().enumerate() {
+        for (n, leg) in &completed {
             if n % 2 == 0 {
                 release.tick().await;
                 request(
@@ -235,7 +255,8 @@ async fn measure(process: &ChildServer, count: u8) -> Result<Metrics, ControlErr
                 .heard
                 .ok_or(ControlError::Invalid("Missing received audio at load"))?;
             let micros = u64::try_from(heard.as_micros()).map_err(failure)?;
-            audio_us[n % 2] = audio_us[n % 2].max(micros);
+            let direction = usize::from(n % 2);
+            audio_us[direction] = audio_us[direction].max(micros);
             let path = format!("channels/load-{n}");
             Wait::Ready
                 .bounded(async {
