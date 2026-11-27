@@ -110,6 +110,10 @@ interop *arguments="":
 release-check *arguments="--dry-run":
     cargo run --locked --target-dir target/xtask --package xtask -- release-check {{ arguments }}
 
+[positional-arguments]
+release-publication +args:
+    cargo run --locked --target-dir target/xtask --package xtask -- release-publication "$@"
+
 core-proofs *arguments="--dry-run":
     cargo run --locked --target-dir target/xtask --package xtask -- core-proofs {{ arguments }}
 

@@ -3,6 +3,8 @@ mod fixture;
 #[cfg(unix)]
 #[path = "release_publication/providers.rs"]
 mod providers;
+#[path = "release_publication/workflow.rs"]
+mod workflow;
 use fixture::{plan, SOURCE};
 use std::{fs, io};
 
