@@ -5,7 +5,7 @@ use super::{
 };
 use serde::{de::DeserializeOwned, Deserialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Write},
     path::Path,
@@ -86,6 +86,28 @@ fn page(release: &Release<'_>) -> io::Result<Option<Page>> {
 
 fn assets(page: &Page) -> io::Result<Vec<Asset>> {
     list(&format!("releases/{}/assets?per_page=100", page.id))
+}
+
+fn pending_uploads(page: &Page, expected: &BTreeMap<String, String>) -> io::Result<Vec<String>> {
+    let (failed, uploaded): (Vec<_>, Vec<_>) = assets(page)?
+        .into_iter()
+        .partition(|asset| page.draft && asset.state == "starter" && asset.size == Some(0));
+    let pending = missing(expected, &uploaded)?;
+    let mut replaceable: BTreeSet<_> = pending.iter().collect();
+    for asset in &failed {
+        if !replaceable.remove(&asset.name) {
+            return Err(invalid(format!("unexpected failed upload {}", asset.name)));
+        }
+    }
+    for asset in failed {
+        gh(&[
+            "api",
+            "--method",
+            "DELETE",
+            &api(&format!("releases/assets/{}", asset.id)),
+        ])?;
+    }
+    Ok(pending)
 }
 
 fn download(assets: &[Asset], name: &str, checksum: &str, cap: usize) -> io::Result<Vec<u8>> {
@@ -209,7 +231,7 @@ pub(super) fn stage(release: &Release<'_>, directory: &Path, submit: bool) -> io
         .iter()
         .map(|(name, (_, sum))| (name.clone(), sum.clone()))
         .collect();
-    for name in missing(&expected, &assets(&page)?)? {
+    for name in pending_uploads(&page, &expected)? {
         if !page.draft {
             return Err(invalid("cannot change a published release"));
         }

@@ -15,6 +15,8 @@ case "$*" in
   *git/ref/tags/*) cat "$STATE/ref" ;;
   *git/tags/*) cat "$STATE/tag" ;;
   *immutable-releases*) echo '{"enabled":true}' ;;
+  *'--method DELETE'*'/releases/assets/333')
+    cp "$STATE/after-delete" "$STATE/assets"; echo cleanup >> "$STATE/writes" ;;
   *releases/assets/21*) cat "$STATE/manifest" ;;
   *releases/assets/20*) cat "$STATE/archive" ;;
   *'/releases/1/assets?'*) cat "$STATE/assets" ;;
@@ -204,6 +206,49 @@ fn publishing_resumes_from_the_registry_and_the_immutable_release() -> io::Resul
     assert_eq!(
         fs::read_to_string(provider.file("writes"))?,
         "registry\npage\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn only_empty_expected_starter_assets_on_a_draft_can_be_recovered() -> io::Result<()> {
+    let provider = Provider::new()?;
+    let mut assets: Vec<Vec<serde_json::Value>> =
+        serde_json::from_slice(&fs::read(provider.file("complete"))?)?;
+    let name = "rusterisk-0.2.0-aarch64-apple-darwin.tar.gz";
+    assets[0].retain(|asset| asset["name"] != name);
+    fs::write(provider.file("after-delete"), serde_json::to_vec(&assets)?)?;
+    let starter = json!({"id":333,"name":name,"state":"starter","size":0,"digest":null});
+    for (page, change) in [
+        ("draft", json!({"size":1})),
+        ("draft", json!({"size":null})),
+        ("draft", json!({"name":"unrelated.zip"})),
+        ("draft", json!({"state":"uploaded"})),
+        ("public", json!({})),
+    ] {
+        let mut invalid = starter.clone();
+        if let Some(fields) = change.as_object() {
+            for (key, value) in fields {
+                invalid[key] = value.clone();
+            }
+        }
+        let mut inventory = assets.clone();
+        inventory[0].push(invalid);
+        fs::write(provider.file("assets"), serde_json::to_vec(&inventory)?)?;
+        fs::copy(provider.file(page), provider.file("pages"))?;
+        assert!(!provider
+            .run("stage", &provider.file("local"))?
+            .status
+            .success());
+        assert_eq!(fs::read_to_string(provider.file("writes"))?, "");
+    }
+    assets[0].push(starter);
+    fs::write(provider.file("assets"), serde_json::to_vec(&assets)?)?;
+    fs::copy(provider.file("draft"), provider.file("pages"))?;
+    provider.succeeds("stage", &provider.file("local"))?;
+    assert_eq!(
+        fs::read_to_string(provider.file("writes"))?,
+        "cleanup\nasset\n"
     );
     Ok(())
 }
