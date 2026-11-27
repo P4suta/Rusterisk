@@ -7,7 +7,7 @@ status: proposed
 
 ## Context
 
-Five server archives, two Linux images, the standalone CLI, and their inventories are verified on different hosts.
+Different hosts verify five server archives, two Linux images, the standalone CLI, and their inventories.
 The CLI archive embeds its source commit.
 
 ## Decision
@@ -25,7 +25,7 @@ Rebuilding from a tag in the publication job would require repeating the native 
 ## Consequences
 
 Retrying a partial upload requires the original bytes.
-Reconsider the staging source when a hosted build can retain every verified native artifact.
+Reconsider the staging source when a hosted build can keep every verified native artifact.
 
 ## Confirmation
 
