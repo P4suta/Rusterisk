@@ -19,15 +19,19 @@ fn digest_text(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn file_digest(path: &Path) -> io::Result<String> {
+fn open_regular(path: &Path) -> io::Result<fs::File> {
     if !fs::symlink_metadata(path)?.is_file() {
         return Err(invalid(format!(
             "expected a regular release asset at {}",
             path.display()
         )));
     }
+    fs::File::open(path)
+}
+
+fn file_digest(path: &Path) -> io::Result<String> {
     let mut hash = Sha256::new();
-    let mut file = fs::File::open(path)?;
+    let mut file = open_regular(path)?;
     let mut buffer = [0; 8192];
     loop {
         let count = file.read(&mut buffer)?;
@@ -40,11 +44,8 @@ fn file_digest(path: &Path) -> io::Result<String> {
 }
 
 pub(super) fn small_file(path: &Path, maximum: u64) -> io::Result<Vec<u8>> {
-    if !fs::symlink_metadata(path)?.is_file() {
-        return Err(invalid("expected a regular release file"));
-    }
     let mut bytes = Vec::new();
-    fs::File::open(path)?
+    open_regular(path)?
         .take(maximum + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() as u64 > maximum {
@@ -93,7 +94,11 @@ pub(super) struct Local {
 }
 
 impl Local {
-    pub fn verify(release: &Release<'_>, directory: &Path) -> io::Result<Self> {
+    pub fn verify(
+        release: &Release<'_>,
+        directory: &Path,
+        snapshots: Option<&Path>,
+    ) -> io::Result<Self> {
         let bytes = small_file(&directory.join("SHA256SUMS"), 16 * 1024)?;
         let entries = checksums(std::str::from_utf8(&bytes).map_err(io::Error::other)?)?;
         let paths = names(release)?;
@@ -105,16 +110,31 @@ impl Local {
         let mut assets = BTreeMap::new();
         let mut manifest = String::new();
         for (name, relative) in paths {
-            let path = directory.join(&relative);
-            let digest = file_digest(&path)?;
+            let original = directory.join(&relative);
+            let path = match snapshots {
+                Some(root) => {
+                    let copy = root.join(&name);
+                    io::copy(
+                        &mut open_regular(&original)?,
+                        &mut fs::File::create_new(&copy)?,
+                    )?;
+                    copy
+                }
+                None => original,
+            };
+            let digest = if name == release.crate_name() {
+                let archive = small_file(&path, 16 * 1024 * 1024)?;
+                check_crate(release, &archive)?;
+                sha256(&archive)
+            } else {
+                file_digest(&path)?
+            };
             if entries.get(&relative) != Some(&digest) {
                 return Err(invalid(format!("checksum mismatch for {relative}")));
             }
             manifest.push_str(&format!("{digest}  {name}\n"));
             assets.insert(name, (path, digest));
         }
-        let archive = small_file(&directory.join(release.crate_name()), 16 * 1024 * 1024)?;
-        check_crate(release, &archive)?;
         Ok(Self { assets, manifest })
     }
 

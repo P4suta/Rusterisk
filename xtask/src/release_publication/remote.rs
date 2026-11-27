@@ -158,7 +158,12 @@ impl Snapshot {
 }
 
 pub(super) fn stage(release: &Release<'_>, directory: &Path, submit: bool) -> io::Result<()> {
-    let local = candidate::Local::verify(release, directory)?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("rusterisk-upload-");
+    #[cfg(unix)]
+    builder.permissions(<fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700));
+    let scratch = builder.tempdir()?;
+    let local = candidate::Local::verify(release, directory, Some(scratch.path()))?;
     signed_tag(release)?;
     if get("immutable-releases")?["enabled"] != true {
         return Err(invalid("GitHub immutable releases must be enabled"));
@@ -196,7 +201,6 @@ pub(super) fn stage(release: &Release<'_>, directory: &Path, submit: bool) -> io
         }
     };
     let manifest_hash = local.manifest_hash();
-    let scratch = tempfile::tempdir()?;
     let manifest_path = scratch.path().join("SHA256SUMS");
     fs::File::create_new(&manifest_path)?.write_all(local.manifest.as_bytes())?;
     let mut files = local.assets;

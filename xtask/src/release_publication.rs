@@ -69,7 +69,7 @@ pub(super) fn execute(args: &[String]) -> io::Result<()> {
     let release = Release::new(version, source)?;
     match operation.as_str() {
         "plan" => {
-            let files = candidate::Local::verify(&release, Path::new(input))?;
+            let files = candidate::Local::verify(&release, Path::new(input), None)?;
             println!(
                 "{} assets for {} at {} with SHA256SUMS {}",
                 files.assets.len(),

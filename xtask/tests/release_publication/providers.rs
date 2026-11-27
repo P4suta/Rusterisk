@@ -21,7 +21,12 @@ case "$*" in
   *'/releases?per_page='*) cat "$STATE/pages" ;;
   *'--method PATCH'*|*'-X PATCH'*) cp "$STATE/public" "$STATE/pages"; echo page >> "$STATE/writes"; echo '{}' ;;
   *'release create'*'--verify-tag'*'--draft'*) cp "$STATE/draft" "$STATE/pages"; echo draft >> "$STATE/writes" ;;
-  *'release upload'*) echo asset >> "$STATE/writes"; cp "$STATE/complete" "$STATE/assets" ;;
+  *'release upload'*)
+    if [ -e "$STATE/change-source" ]; then
+      printf 'replacement' > "$STATE/local/${4##*/}"
+      cp "$4" "$STATE/uploaded"
+    fi
+    echo asset >> "$STATE/writes"; cp "$STATE/complete" "$STATE/assets" ;;
   *'workflow run'*) echo dispatch >> "$STATE/writes" ;;
   *) echo "unexpected gh $*" >&2; exit 1 ;;
 esac
@@ -200,6 +205,22 @@ fn publishing_resumes_from_the_registry_and_the_immutable_release() -> io::Resul
         fs::read_to_string(provider.file("writes"))?,
         "registry\npage\n"
     );
+    Ok(())
+}
+
+#[test]
+fn staging_uploads_the_verified_bytes_after_the_original_file_changes() -> io::Result<()> {
+    let provider = Provider::new()?;
+    let name = "rusterisk-0.2.0-aarch64-apple-darwin.tar.gz";
+    let original = fs::read(provider.file("local").join(name))?;
+    let mut assets: Vec<Vec<serde_json::Value>> =
+        serde_json::from_slice(&fs::read(provider.file("assets"))?)?;
+    assets[0].retain(|asset| asset["name"] != name);
+    fs::write(provider.file("assets"), serde_json::to_vec(&assets)?)?;
+    fs::write(provider.file("change-source"), "")?;
+    provider.succeeds("stage", &provider.file("local"))?;
+    assert_eq!(fs::read(provider.file("local").join(name))?, b"replacement");
+    assert_eq!(fs::read(provider.file("uploaded"))?, original);
     Ok(())
 }
 
