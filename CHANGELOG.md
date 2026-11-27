@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/P4suta/Rusterisk/compare/v0.1.0...v0.2.0) - 2026-11-27
+
+### Added
+
+- *(server)* preserve calls under load and recover interrupted recordings ([#116](https://github.com/P4suta/Rusterisk/pull/116))
+
+### Other
+
+- *(server)* [**breaking**] drive calls by events and deadlines ([#112](https://github.com/P4suta/Rusterisk/pull/112))
+
 ## [0.1.0](https://github.com/P4suta/Rusterisk/releases/tag/v0.1.0) - 2026-11-21
 
 ### Added

@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-rusterisk-core = { version = "0.1.0", path = "../core" }
+rusterisk-core = { version = "0.2.0", path = "../core" }
 bytes = "1.11.1"
 rtc-crypto = { version = "=0.21.1", default-features = false, features = [
   "crypto-ring",
