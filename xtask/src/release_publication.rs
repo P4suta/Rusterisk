@@ -1,8 +1,10 @@
 mod candidate;
 mod github;
+mod http;
 #[cfg(test)]
 mod protocol_tests;
 mod registry;
+mod remote;
 
 use std::{io, path::Path};
 
@@ -39,6 +41,26 @@ impl<'a> Release<'a> {
 }
 
 pub(super) fn execute(args: &[String]) -> io::Result<()> {
+    if let [operation, version, source, digest, file] = args {
+        let release = Release::new(version, source)?;
+        if !hex(digest, 64) {
+            return Err(invalid("expected an approved SHA-256 digest"));
+        }
+        return match operation.as_str() {
+            "export-cli" => {
+                let snapshot = remote::Snapshot::load(&release, digest)?;
+                http::present(&release, &snapshot.checksum)?;
+                use std::io::Write;
+                std::fs::File::create_new(file)?.write_all(&snapshot.archive)
+            }
+            "publish-archive" => {
+                remote::signed_tag(&release)?;
+                let archive = candidate::small_file(Path::new(file), 16 * 1024 * 1024)?;
+                http::publish(&release, digest, &archive)
+            }
+            _ => Err(invalid("unknown archive operation")),
+        };
+    }
     let [operation, version, source, input] = args else {
         return Err(invalid(
             "expected release-publication <operation> <version> <commit> <input>",
@@ -56,6 +78,23 @@ pub(super) fn execute(args: &[String]) -> io::Result<()> {
                 files.manifest_hash()
             );
             Ok(())
+        }
+        "stage" | "submit" => remote::stage(&release, Path::new(input), operation == "submit"),
+        "preflight" | "publish-crate" | "publish-page" => {
+            let snapshot = remote::Snapshot::load(&release, input)?;
+            let present = http::present(&release, &snapshot.checksum)?;
+            if !present && (!snapshot.page.draft || operation == "publish-page") {
+                return Err(invalid(
+                    "crates.io must confirm the approved release before GitHub publication",
+                ));
+            }
+            match operation.as_str() {
+                "publish-page" => remote::publish_page(&release, input, &snapshot),
+                "publish-crate" if !present => {
+                    http::publish(&release, &snapshot.checksum, &snapshot.archive)
+                }
+                _ => Ok(()),
+            }
         }
         _ => Err(invalid("unknown release publication operation")),
     }

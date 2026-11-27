@@ -53,7 +53,7 @@ pub(super) fn small_file(path: &Path, maximum: u64) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn names(release: &Release<'_>) -> io::Result<BTreeMap<String, String>> {
+pub(super) fn names(release: &Release<'_>) -> io::Result<BTreeMap<String, String>> {
     let mut paths = BTreeMap::new();
     for target in ServerTarget::ALL {
         let name = ServerCandidateName::new(release.version, target).map_err(io::Error::other)?;

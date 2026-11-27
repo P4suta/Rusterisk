@@ -1,5 +1,8 @@
 #[path = "release_publication/fixture.rs"]
 mod fixture;
+#[cfg(unix)]
+#[path = "release_publication/providers.rs"]
+mod providers;
 use fixture::{plan, SOURCE};
 use std::{fs, io};
 

@@ -7,6 +7,8 @@ use std::{
 
 #[derive(Clone, Deserialize)]
 pub(super) struct Asset {
+    pub id: u64,
+    pub size: Option<u64>,
     pub name: String,
     pub state: String,
     pub digest: Option<String>,
