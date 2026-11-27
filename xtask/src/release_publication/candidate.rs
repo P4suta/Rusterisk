@@ -20,13 +20,57 @@ fn digest_text(bytes: &[u8]) -> String {
 }
 
 fn open_regular(path: &Path) -> io::Result<fs::File> {
-    if !fs::symlink_metadata(path)?.is_file() {
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{open, Mode, OFlags};
+        let flags =
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY;
+        fs::File::from(open(path, flags, Mode::empty())?)
+    };
+    #[cfg(not(unix))]
+    let file = {
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+            options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        }
+        options.open(path)?
+    };
+    let metadata = file.metadata()?;
+    let regular = metadata.is_file();
+    #[cfg(windows)]
+    let regular = {
+        use std::os::windows::fs::MetadataExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+        regular && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+    };
+    if !regular {
         return Err(invalid(format!(
             "expected a regular release asset at {}",
             path.display()
         )));
     }
-    fs::File::open(path)
+    Ok(file)
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn release_inputs_open_without_waiting_and_accept_only_regular_files() -> io::Result<()> {
+    use rustix::fs::{fcntl_getfl, OFlags};
+    let root = tempfile::tempdir()?;
+    let path = root.path().join("asset");
+    fs::write(&path, b"release")?;
+    let link = root.path().join("link");
+    std::os::unix::fs::symlink(&path, &link)?;
+    assert!(open_regular(&link).is_err());
+    assert!(open_regular(root.path()).is_err());
+    let file = open_regular(&path)?;
+    assert!(file.metadata()?.is_file());
+    assert!(fcntl_getfl(&file)?.contains(OFlags::NONBLOCK));
+    Ok(())
 }
 
 fn file_digest(path: &Path) -> io::Result<String> {
