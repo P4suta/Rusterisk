@@ -20,6 +20,32 @@ fn a_partial_candidate_cannot_start_publication() -> io::Result<()> {
 }
 
 #[test]
+fn the_cli_archive_accepts_multiple_mebibytes_and_rejects_more_than_sixteen() -> io::Result<()> {
+    let root = tempfile::tempdir()?;
+    let name = "rusterisk-cli-0.2.0.crate";
+    let mut files = fixture::files(SOURCE)?;
+    let readme = "a".repeat(2 * 1024 * 1024);
+    let archive = fixture::crate_with_readme(SOURCE, &readme, flate2::Compression::none())?;
+    assert!(archive.len() >= readme.len());
+    files.insert(name.into(), archive);
+    fixture::write(root.path(), &files)?;
+    let valid = plan(root.path(), SOURCE)?;
+    assert!(
+        valid.status.success(),
+        "{}",
+        String::from_utf8_lossy(&valid.stderr)
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .open(root.path().join(name))?
+        .set_len(16 * 1024 * 1024 + 1)?;
+    let oversized = plan(root.path(), SOURCE)?;
+    assert!(!oversized.status.success());
+    assert!(String::from_utf8_lossy(&oversized.stderr).contains("size limit"));
+    Ok(())
+}
+
+#[test]
 fn plan_binds_all_downloads_and_the_embedded_cli_source() -> io::Result<()> {
     let root = tempfile::tempdir()?;
     let files = fixture::files(SOURCE)?;

@@ -19,7 +19,15 @@ pub fn digest(bytes: &[u8]) -> String {
 }
 
 pub fn crate_bytes(source: &str) -> io::Result<Vec<u8>> {
-    let mut archive = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+    crate_with_readme(source, "Remote CLI\n", Compression::fast())
+}
+
+pub fn crate_with_readme(
+    source: &str,
+    readme: &str,
+    compression: Compression,
+) -> io::Result<Vec<u8>> {
+    let mut archive = tar::Builder::new(GzEncoder::new(Vec::new(), compression));
     for (name, bytes) in [
         (
             "Cargo.toml",
@@ -29,7 +37,7 @@ pub fn crate_bytes(source: &str) -> io::Result<Vec<u8>> {
             ".cargo_vcs_info.json",
             format!(r#"{{"git":{{"sha1":"{source}"}},"path_in_vcs":"crates/cli"}}"#),
         ),
-        ("README.md", "Remote CLI\n".to_owned()),
+        ("README.md", readme.to_owned()),
     ] {
         let mut header = tar::Header::new_gnu();
         header.set_mode(0o644);
