@@ -18,6 +18,9 @@ fn request(url: &str, upload: Option<(&Path, &str)>) -> io::Result<Response> {
     let response = tempfile::NamedTempFile::new()?;
     let mut curl = Command::new("curl");
     curl.env_remove("CRATES_IO_PUBLISH_TOKEN")
+        .env_remove("RELEASE_SETTINGS_TOKEN")
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN")
         .args([
             "--disable",
             "--silent",

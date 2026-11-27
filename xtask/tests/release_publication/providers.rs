@@ -11,10 +11,18 @@ use std::{
 
 const GH: &str = r#"#!/bin/sh
 set -eu
+if [ -e "$STATE/check-credentials" ]; then
+  test -z "${RELEASE_SETTINGS_TOKEN-}"
+  case "$*" in
+    *immutable-releases*) test "$GH_TOKEN" = settings-fixture ;;
+    *) test "$GH_TOKEN" = contents-fixture ;;
+  esac
+fi
 case "$*" in
   *git/ref/tags/*) cat "$STATE/ref" ;;
   *git/tags/*) cat "$STATE/tag" ;;
-  *immutable-releases*) echo '{"enabled":true}' ;;
+  *immutable-releases*)
+    if [ -e "$STATE/disabled" ]; then echo '{"enabled":false}'; else echo '{"enabled":true}'; fi ;;
   *'--method DELETE'*'/releases/assets/333')
     cp "$STATE/after-delete" "$STATE/assets"; echo cleanup >> "$STATE/writes" ;;
   *releases/assets/21*) cat "$STATE/manifest" ;;
@@ -35,6 +43,9 @@ esac
 "#;
 const CURL: &str = r#"#!/bin/sh
 set -eu
+if [ -e "$STATE/check-credentials" ]; then
+  test -z "${GH_TOKEN-}${GITHUB_TOKEN-}${RELEASE_SETTINGS_TOKEN-}"
+fi
 out=
 upload=no
 while [ "$#" -gt 0 ]; do
@@ -52,6 +63,7 @@ if [ "$upload" = yes ]; then
  echo '{}' > "$out"
  printf '200'
 elif [ -e "$STATE/receipt" ]; then
+ if [ -e "$STATE/disable-during-lookup" ]; then touch "$STATE/disabled"; fi
  if [ -e "$STATE/changed-inventory" ]; then cp "$STATE/changed-inventory" "$STATE/assets"; fi
  if [ -e "$STATE/changed-page" ]; then cp "$STATE/changed-page" "$STATE/pages"; fi
  cat "$STATE/receipt" > "$out"
@@ -170,6 +182,33 @@ impl Provider {
         );
         Ok(())
     }
+}
+
+#[test]
+fn publication_requires_live_immutable_settings_with_a_separate_read_credential() -> io::Result<()>
+{
+    let provider = Provider::new()?;
+    fs::copy(provider.file("match"), provider.file("receipt"))?;
+    fs::write(provider.file("disable-during-lookup"), "")?;
+    let sum = Path::new(&provider.manifest);
+    assert!(!provider.run("publish-page", sum)?.status.success());
+    assert_eq!(fs::read_to_string(provider.file("writes"))?, "");
+    fs::remove_file(provider.file("disable-during-lookup"))?;
+    fs::remove_file(provider.file("disabled"))?;
+    fs::write(provider.file("check-credentials"), "")?;
+    let result = provider
+        .command("publish-page", sum)
+        .env("GH_TOKEN", "contents-fixture")
+        .env("GITHUB_TOKEN", "contents-fixture")
+        .env("RELEASE_SETTINGS_TOKEN", "settings-fixture")
+        .output()?;
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read_to_string(provider.file("writes"))?, "page\n");
+    Ok(())
 }
 
 #[test]

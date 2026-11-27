@@ -15,9 +15,18 @@ use std::{
 pub(super) const REPO: &str = "P4suta/Rusterisk";
 
 fn gh(args: &[&str]) -> io::Result<Vec<u8>> {
-    let result = Command::new("gh")
+    gh_with_token(args, None)
+}
+
+fn gh_with_token(args: &[&str], token: Option<std::ffi::OsString>) -> io::Result<Vec<u8>> {
+    let mut command = Command::new("gh");
+    if let Some(token) = token {
+        command.env_remove("GITHUB_TOKEN").env("GH_TOKEN", token);
+    }
+    let result = command
         .args(args)
         .env_remove("CRATES_IO_PUBLISH_TOKEN")
+        .env_remove("RELEASE_SETTINGS_TOKEN")
         .output()?;
     if !result.status.success() {
         return Err(io::Error::other(format!(
@@ -34,6 +43,18 @@ fn api(path: &str) -> String {
 
 fn get(path: &str) -> io::Result<serde_json::Value> {
     Ok(serde_json::from_slice(&gh(&["api", &api(path)])?)?)
+}
+
+fn require_immutable_releases() -> io::Result<()> {
+    let response = gh_with_token(
+        &["api", &api("immutable-releases")],
+        std::env::var_os("RELEASE_SETTINGS_TOKEN"),
+    )?;
+    let settings: serde_json::Value = serde_json::from_slice(&response)?;
+    if settings["enabled"] != true {
+        return Err(invalid("GitHub immutable releases must be enabled"));
+    }
+    Ok(())
 }
 
 fn list<T: DeserializeOwned>(path: &str) -> io::Result<Vec<T>> {
@@ -194,9 +215,7 @@ pub(super) fn stage(release: &Release<'_>, directory: &Path, submit: bool) -> io
     let scratch = builder.tempdir()?;
     let local = candidate::Local::verify(release, directory, Some(scratch.path()))?;
     signed_tag(release)?;
-    if get("immutable-releases")?["enabled"] != true {
-        return Err(invalid("GitHub immutable releases must be enabled"));
-    }
+    require_immutable_releases()?;
     let tag = format!("v{}", release.version);
     let page = match page(release)? {
         Some(page) => page,
@@ -298,6 +317,7 @@ pub(super) fn publish_page(
     if !live.draft {
         return Ok(());
     }
+    require_immutable_releases()?;
     let update = gh(&[
         "api",
         "--method",
