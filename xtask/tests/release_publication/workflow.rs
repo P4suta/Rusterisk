@@ -10,7 +10,7 @@ fn only_manual_default_branch_jobs_can_authenticate_or_publish() -> io::Result<(
     assert!(header.contains("\non:\n  workflow_dispatch:"));
     assert!(!header.contains("push:") && !header.contains("pull_request"));
     assert!(header.contains("default: verify-auth"));
-    assert!(!workflow.contains("secrets.") && !workflow.contains("--clobber"));
+    assert!(!workflow.contains("--clobber"));
     let job = |name: &str| -> io::Result<&str> {
         let (_, tail) = jobs
             .split_once(&format!("  {name}:\n"))
@@ -30,6 +30,23 @@ fn only_manual_default_branch_jobs_can_authenticate_or_publish() -> io::Result<(
     let verify = job("candidate")?;
     let registry = job("registry")?;
     let page = job("release-page")?;
+    for without_app in [header, probe, build, verify, registry] {
+        assert!(!without_app.contains("secrets.") && !without_app.contains("steps.settings."));
+    }
+    assert_eq!(page.matches("secrets.").count(), 1);
+    for required in [
+        "secrets.DOPPLER_TOKEN",
+        "inject-env-vars: false",
+        "repositories: Rusterisk",
+        "permission-administration: read",
+        "RELEASE_SETTINGS_TOKEN: ${{ steps.settings.outputs.token }}",
+    ] {
+        assert!(
+            page.contains(required),
+            "missing release settings input {required}"
+        );
+    }
+    assert_eq!(page.matches("permission-").count(), 1);
     assert!(probe.contains("environment: crates-io") && probe.contains("id-token: write"));
     assert!(
         probe.contains("inputs.operation == 'verify-auth'") && probe.contains("refs/heads/main")

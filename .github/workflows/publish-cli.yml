@@ -162,9 +162,34 @@ jobs:
           merge-multiple: true
           path: controller
       - env:
-          GH_TOKEN: ${{ github.token }}
           CONTROLLER: ${{ needs.build.outputs.checksum }}
         run: |
           printf '%s  controller/xtask\n' "$CONTROLLER" | sha256sum --check --strict
           chmod +x controller/xtask
-          controller/xtask release-publication publish-page "$VERSION" "$SOURCE" "$MANIFEST"
+      - uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        id: credentials
+        with:
+          auth-method: token
+          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
+          doppler-project: ${{ vars.RELEASE_APP_DOPPLER_PROJECT }}
+          doppler-config: ${{ vars.RELEASE_APP_DOPPLER_CONFIG }}
+          inject-env-vars: false
+      - name: Check release App inputs
+        if: >-
+          steps.credentials.outputs.GITHUB_APP_CLIENT_ID == '' ||
+          startsWith(steps.credentials.outputs.GITHUB_APP_CLIENT_ID, '${') ||
+          steps.credentials.outputs.GITHUB_APP_PRIVATE_KEY == '' ||
+          startsWith(steps.credentials.outputs.GITHUB_APP_PRIVATE_KEY, '${')
+        run: exit 1
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        id: settings
+        with:
+          client-id: ${{ steps.credentials.outputs.GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ steps.credentials.outputs.GITHUB_APP_PRIVATE_KEY }}
+          owner: P4suta
+          repositories: Rusterisk
+          permission-administration: read
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SETTINGS_TOKEN: ${{ steps.settings.outputs.token }}
+        run: controller/xtask release-publication publish-page "$VERSION" "$SOURCE" "$MANIFEST"
