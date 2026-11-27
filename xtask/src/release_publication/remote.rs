@@ -138,6 +138,14 @@ pub(super) struct Snapshot {
     pub page: Page,
     pub archive: Vec<u8>,
     pub checksum: String,
+    expected: BTreeMap<String, String>,
+}
+
+fn complete_inventory(expected: &BTreeMap<String, String>, assets: &[Asset]) -> io::Result<()> {
+    if !missing(expected, assets)?.is_empty() {
+        return Err(invalid("incomplete GitHub release assets"));
+    }
+    Ok(())
 }
 
 impl Snapshot {
@@ -166,15 +174,14 @@ impl Snapshot {
         }
         let checksum = expected[&release.crate_name()].clone();
         expected.insert("SHA256SUMS".into(), manifest_hash.into());
-        if !missing(&expected, &assets)?.is_empty() {
-            return Err(invalid("incomplete GitHub release assets"));
-        }
+        complete_inventory(&expected, &assets)?;
         let archive = download(&assets, &release.crate_name(), &checksum, 16 * 1024 * 1024)?;
         candidate::check_crate(release, &archive)?;
         Ok(Self {
             page,
             archive,
             checksum,
+            expected,
         })
     }
 }
@@ -282,11 +289,20 @@ pub(super) fn publish_page(
     if !snapshot.page.draft {
         return Ok(());
     }
+    signed_tag(release)?;
+    let live = page(release)?.ok_or_else(|| invalid("release draft is missing"))?;
+    if live.id != snapshot.page.id {
+        return Err(invalid("the approved release draft was replaced"));
+    }
+    complete_inventory(&snapshot.expected, &assets(&live)?)?;
+    if !live.draft {
+        return Ok(());
+    }
     let update = gh(&[
         "api",
         "--method",
         "PATCH",
-        &api(&format!("releases/{}", snapshot.page.id)),
+        &api(&format!("releases/{}", live.id)),
         "-F",
         "draft=false",
     ]);

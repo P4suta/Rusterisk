@@ -52,6 +52,8 @@ if [ "$upload" = yes ]; then
  echo '{}' > "$out"
  printf '200'
 elif [ -e "$STATE/receipt" ]; then
+ if [ -e "$STATE/changed-inventory" ]; then cp "$STATE/changed-inventory" "$STATE/assets"; fi
+ if [ -e "$STATE/changed-page" ]; then cp "$STATE/changed-page" "$STATE/pages"; fi
  cat "$STATE/receipt" > "$out"
  printf '200'
 else
@@ -168,6 +170,31 @@ impl Provider {
         );
         Ok(())
     }
+}
+
+#[test]
+fn a_draft_changed_during_the_registry_lookup_stays_unpublished() -> io::Result<()> {
+    let provider = Provider::new()?;
+    fs::copy(provider.file("match"), provider.file("receipt"))?;
+    let sum = Path::new(&provider.manifest);
+    let mut assets: Vec<Vec<serde_json::Value>> =
+        serde_json::from_slice(&fs::read(provider.file("complete"))?)?;
+    assets[0][0]["digest"] = format!("sha256:{}", fixture::digest(b"replacement")).into();
+    fs::write(
+        provider.file("changed-inventory"),
+        serde_json::to_vec(&assets)?,
+    )?;
+    assert!(!provider.run("publish-page", sum)?.status.success());
+    assert_eq!(fs::read_to_string(provider.file("writes"))?, "");
+    fs::remove_file(provider.file("changed-inventory"))?;
+    fs::copy(provider.file("complete"), provider.file("assets"))?;
+    let mut pages: Vec<Vec<serde_json::Value>> =
+        serde_json::from_slice(&fs::read(provider.file("draft"))?)?;
+    pages[0][0]["id"] = 2.into();
+    fs::write(provider.file("changed-page"), serde_json::to_vec(&pages)?)?;
+    assert!(!provider.run("publish-page", sum)?.status.success());
+    assert_eq!(fs::read_to_string(provider.file("writes"))?, "");
+    Ok(())
 }
 
 #[test]
