@@ -20,6 +20,7 @@ case "$*" in
   *'/releases/1/assets?'*) cat "$STATE/assets" ;;
   *'/releases?per_page='*) cat "$STATE/pages" ;;
   *'--method PATCH'*|*'-X PATCH'*) cp "$STATE/public" "$STATE/pages"; echo page >> "$STATE/writes"; echo '{}' ;;
+  *'release create'*'--verify-tag'*'--draft'*) cp "$STATE/draft" "$STATE/pages"; echo draft >> "$STATE/writes" ;;
   *'release upload'*) echo asset >> "$STATE/writes"; cp "$STATE/complete" "$STATE/assets" ;;
   *'workflow run'*) echo dispatch >> "$STATE/writes" ;;
   *) echo "unexpected gh $*" >&2; exit 1 ;;
@@ -68,10 +69,8 @@ impl Provider {
             fs::write(&path, script)?;
             fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
         }
-        let mut paths = vec![bin];
-        paths.extend(std::env::split_paths(
-            &std::env::var_os("PATH").unwrap_or_default(),
-        ));
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let paths = std::iter::once(bin).chain(std::env::split_paths(&inherited));
         let path = std::env::join_paths(paths).map_err(io::Error::other)?;
         let files = fixture::files(SOURCE)?;
         let local = dir.join("local");
@@ -104,13 +103,14 @@ impl Provider {
             );
         }
         assets.push(json!({"id":21,"name":"SHA256SUMS","state":"uploaded","digest":format!("sha256:{manifest_sum}")}));
-        fs::write(dir.join("assets"), serde_json::to_vec(&json!([assets]))?)?;
+        fs::write(dir.join("assets"), serde_json::to_vec(&[assets])?)?;
         fs::copy(dir.join("assets"), dir.join("complete"))?;
         let mut page = json!({"id":1,"tag_name":"v0.2.0","draft":true,"immutable":false,"prerelease":false,"body":"Release notes","name":"Rusterisk 0.2.0"});
-        fs::write(dir.join("pages"), serde_json::to_vec(&json!([[page]]))?)?;
+        fs::write(dir.join("pages"), serde_json::to_vec(&[[&page]])?)?;
+        fs::copy(dir.join("pages"), dir.join("draft"))?;
         page["draft"] = false.into();
         page["immutable"] = true.into();
-        fs::write(dir.join("public"), serde_json::to_vec(&json!([[page]]))?)?;
+        fs::write(dir.join("public"), serde_json::to_vec(&[[page]])?)?;
         fs::write(
             dir.join("ref"),
             serde_json::to_vec(&json!({"object":{"type":"tag","sha":SOURCE}}))?,
@@ -137,14 +137,19 @@ impl Provider {
         self.state.path().join(name)
     }
 
-    fn run(&self, operation: &str, input: &Path) -> io::Result<Output> {
-        Command::new(env!("CARGO_BIN_EXE_xtask"))
+    fn command(&self, operation: &str, input: &Path) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
+        command
             .args(["release-publication", operation, VERSION, SOURCE])
             .arg(input)
             .env("STATE", self.state.path())
             .env("PATH", &self.path)
-            .env("CRATES_IO_PUBLISH_TOKEN", "ephemeral-fixture")
-            .output()
+            .env("CRATES_IO_PUBLISH_TOKEN", "ephemeral-fixture");
+        command
+    }
+
+    fn run(&self, operation: &str, input: &Path) -> io::Result<Output> {
+        self.command(operation, input).output()
     }
 
     fn succeeds(&self, operation: &str, input: &Path) -> io::Result<()> {
@@ -165,8 +170,30 @@ fn publishing_resumes_from_the_registry_and_the_immutable_release() -> io::Resul
     provider.succeeds("preflight", sum)?;
     assert!(!provider.run("publish-page", sum)?.status.success());
     assert_eq!(fs::read_to_string(provider.file("writes"))?, "");
-    provider.succeeds("publish-crate", sum)?;
-    provider.succeeds("publish-crate", sum)?;
+    let exported = provider.file("exported.crate");
+    let output = provider
+        .command("export-cli", sum)
+        .arg(&exported)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let archive = fs::read(provider.file("archive"))?;
+    assert_eq!(fs::read(&exported)?, archive);
+    let digest = fixture::digest(&archive);
+    let upload = || {
+        provider
+            .command("publish-archive", Path::new(&digest))
+            .arg(&exported)
+            .output()
+    };
+    fs::write(&exported, "different bytes")?;
+    assert!(!upload()?.status.success());
+    fs::write(&exported, archive)?;
+    assert!(upload()?.status.success());
+    assert!(upload()?.status.success());
     provider.succeeds("publish-page", sum)?;
     provider.succeeds("publish-page", sum)?;
     assert_eq!(
@@ -193,5 +220,37 @@ fn staging_resumes_only_missing_assets_and_dispatches_the_full_release() -> io::
         fs::read_to_string(provider.file("writes"))?,
         "asset\ndispatch\n"
     );
+    Ok(())
+}
+
+#[test]
+fn a_published_page_without_a_registry_receipt_cannot_resume() -> io::Result<()> {
+    let provider = Provider::new()?;
+    fs::copy(provider.file("public"), provider.file("pages"))?;
+    assert!(!provider
+        .run("submit", &provider.file("local"))?
+        .status
+        .success());
+    assert!(!provider
+        .command("export-cli", Path::new(&provider.manifest))
+        .arg(provider.file("exported"))
+        .output()?
+        .status
+        .success());
+    assert_eq!(fs::read_to_string(provider.file("writes"))?, "");
+    Ok(())
+}
+
+#[test]
+fn the_first_staging_operation_creates_a_draft_with_notes_and_attaches_every_asset(
+) -> io::Result<()> {
+    let provider = Provider::new()?;
+    fs::write(provider.file("pages"), "[[]]")?;
+    fs::write(provider.file("assets"), "[[]]")?;
+    provider.succeeds("stage", &provider.file("local"))?;
+    let events = fs::read_to_string(provider.file("writes"))?;
+    assert_eq!(events.lines().next(), Some("draft"));
+    assert_eq!(events.lines().filter(|line| *line == "asset").count(), 21);
+    assert!(!events.contains("page") && !events.contains("dispatch"));
     Ok(())
 }

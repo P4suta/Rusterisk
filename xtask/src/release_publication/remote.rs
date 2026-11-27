@@ -119,6 +119,16 @@ pub(super) struct Snapshot {
 }
 
 impl Snapshot {
+    pub fn registry_present(&self, release: &Release<'_>) -> io::Result<bool> {
+        let present = super::http::present(release, &self.checksum)?;
+        if !present && !self.page.draft {
+            return Err(invalid(
+                "the published release is missing its registry receipt",
+            ));
+        }
+        Ok(present)
+    }
+
     pub fn load(release: &Release<'_>, manifest_hash: &str) -> io::Result<Self> {
         if !hex(manifest_hash, 64) {
             return Err(invalid("expected the SHA256SUMS digest"));
@@ -158,7 +168,7 @@ pub(super) fn stage(release: &Release<'_>, directory: &Path, submit: bool) -> io
         Some(page) => page,
         None => {
             let title = format!("Rusterisk {}", release.version);
-            let mut args = vec![
+            let mut args = Vec::from([
                 "release",
                 "create",
                 &tag,
@@ -171,7 +181,7 @@ pub(super) fn stage(release: &Release<'_>, directory: &Path, submit: bool) -> io
                 "--title",
                 &title,
                 "--generate-notes",
-            ];
+            ]);
             if release.version.contains('-') {
                 args.push("--prerelease");
             }
@@ -210,9 +220,12 @@ pub(super) fn stage(release: &Release<'_>, directory: &Path, submit: bool) -> io
             }
         }
     }
-    Snapshot::load(release, &manifest_hash)?;
+    let snapshot = Snapshot::load(release, &manifest_hash)?;
+    if !snapshot.page.draft {
+        snapshot.registry_present(release)?;
+    }
     println!("Verified {tag} with SHA256SUMS {manifest_hash}");
-    if submit && page.draft {
+    if submit && snapshot.page.draft {
         let out = gh(&[
             "workflow",
             "run",

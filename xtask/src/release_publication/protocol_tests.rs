@@ -7,9 +7,10 @@ const SOURCE: &str = "0123456789012345678901234567890123456789";
 fn draft_retries_reuse_matching_assets_and_reject_extra_or_conflicting_assets() -> io::Result<()> {
     let digest = candidate::sha256(b"server");
     let expected = BTreeMap::from([("server.tar.gz".to_owned(), digest.clone())]);
-    let mut assets: Vec<github::Asset> = serde_json::from_value(serde_json::json!([
+    let asset: github::Asset = serde_json::from_value(serde_json::json!(
         {"id":7,"name":"server.tar.gz","state":"uploaded","digest":format!("sha256:{digest}")}
-    ]))?;
+    ))?;
+    let mut assets = Vec::from([asset]);
     assert!(github::missing(&expected, &assets)?.is_empty());
     assert_eq!(github::missing(&expected, &[])?, ["server.tar.gz"]);
     assets[0].state = "starter".into();

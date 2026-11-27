@@ -49,7 +49,7 @@ pub(super) fn execute(args: &[String]) -> io::Result<()> {
         return match operation.as_str() {
             "export-cli" => {
                 let snapshot = remote::Snapshot::load(&release, digest)?;
-                http::present(&release, &snapshot.checksum)?;
+                snapshot.registry_present(&release)?;
                 use std::io::Write;
                 std::fs::File::create_new(file)?.write_all(&snapshot.archive)
             }
@@ -80,21 +80,18 @@ pub(super) fn execute(args: &[String]) -> io::Result<()> {
             Ok(())
         }
         "stage" | "submit" => remote::stage(&release, Path::new(input), operation == "submit"),
-        "preflight" | "publish-crate" | "publish-page" => {
+        "preflight" | "publish-page" => {
             let snapshot = remote::Snapshot::load(&release, input)?;
-            let present = http::present(&release, &snapshot.checksum)?;
-            if !present && (!snapshot.page.draft || operation == "publish-page") {
+            let present = snapshot.registry_present(&release)?;
+            if operation == "publish-page" {
+                if present {
+                    return remote::publish_page(&release, input, &snapshot);
+                }
                 return Err(invalid(
                     "crates.io must confirm the approved release before GitHub publication",
                 ));
             }
-            match operation.as_str() {
-                "publish-page" => remote::publish_page(&release, input, &snapshot),
-                "publish-crate" if !present => {
-                    http::publish(&release, &snapshot.checksum, &snapshot.archive)
-                }
-                _ => Ok(()),
-            }
+            Ok(())
         }
         _ => Err(invalid("unknown release publication operation")),
     }
