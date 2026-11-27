@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
-    io::{self, Read},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
 };
 use xtask::{
@@ -155,29 +155,28 @@ impl Local {
         let mut manifest = String::new();
         for (name, relative) in paths {
             let original = directory.join(&relative);
-            let path = match snapshots {
-                Some(root) => {
-                    let copy = root.join(&name);
-                    io::copy(
-                        &mut open_regular(&original)?,
-                        &mut fs::File::create_new(&copy)?,
-                    )?;
-                    copy
-                }
-                None => original,
-            };
+            let snapshot = snapshots.map(|root| root.join(&name));
             let digest = if name == release.crate_name() {
-                let archive = small_file(&path, 16 * 1024 * 1024)?;
+                let archive = small_file(&original, 16 * 1024 * 1024)?;
                 check_crate(release, &archive)?;
+                if let Some(copy) = &snapshot {
+                    fs::File::create_new(copy)?.write_all(&archive)?;
+                }
                 sha256(&archive)
+            } else if let Some(copy) = &snapshot {
+                io::copy(
+                    &mut open_regular(&original)?,
+                    &mut fs::File::create_new(copy)?,
+                )?;
+                file_digest(copy)?
             } else {
-                file_digest(&path)?
+                file_digest(&original)?
             };
             if entries.get(&relative) != Some(&digest) {
                 return Err(invalid(format!("checksum mismatch for {relative}")));
             }
             manifest.push_str(&format!("{digest}  {name}\n"));
-            assets.insert(name, (path, digest));
+            assets.insert(name, (snapshot.unwrap_or(original), digest));
         }
         Ok(Self { assets, manifest })
     }

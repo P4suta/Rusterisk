@@ -4,6 +4,33 @@ use std::{collections::BTreeMap, io};
 const SOURCE: &str = "0123456789012345678901234567890123456789";
 
 #[test]
+fn staging_rejects_an_oversized_crate_before_filling_the_snapshot() -> io::Result<()> {
+    use std::fs;
+    let source = tempfile::tempdir()?;
+    let snapshots = tempfile::tempdir()?;
+    let release = Release::new("0.2.0", SOURCE)?;
+    fs::create_dir(source.path().join("sbom"))?;
+    let mut sums = String::new();
+    for (name, relative) in candidate::names(&release)? {
+        let path = source.path().join(&relative);
+        if name == release.crate_name() {
+            fs::File::create_new(path)?.set_len(32 * 1024 * 1024)?;
+        } else {
+            fs::write(path, b"asset")?;
+        }
+        sums.push_str(&format!("{}  {relative}\n", candidate::sha256(b"asset")));
+    }
+    fs::write(source.path().join("SHA256SUMS"), sums)?;
+    let failure = candidate::Local::verify(&release, source.path(), Some(snapshots.path()));
+    assert!(matches!(failure, Err(error) if error.to_string().contains("size limit")));
+    let copied = snapshots.path().join(release.crate_name());
+    if copied.try_exists()? {
+        assert!(fs::metadata(copied)?.len() <= 16 * 1024 * 1024 + 1);
+    }
+    Ok(())
+}
+
+#[test]
 fn draft_retries_reuse_matching_assets_and_reject_extra_or_conflicting_assets() -> io::Result<()> {
     let digest = candidate::sha256(b"server");
     let expected = BTreeMap::from([("server.tar.gz".to_owned(), digest.clone())]);
