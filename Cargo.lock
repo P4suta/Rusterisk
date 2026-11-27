@@ -4093,6 +4093,7 @@ dependencies = [
  "win32console",
  "winconsole",
  "windows-spawn",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

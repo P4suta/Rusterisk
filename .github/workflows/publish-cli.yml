@@ -1,0 +1,195 @@
+name: Publish verified releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Publication operation
+        type: choice
+        required: true
+        default: verify-auth
+        options:
+          - verify-auth
+          - publish-cli
+          - publish-release
+      version:
+        description: Verified version without the tag prefix
+        type: string
+      source:
+        description: Full commit selected by the signed version tag
+        type: string
+      manifest:
+        description: SHA-256 of the staged SHA256SUMS file
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: release-publication-${{ inputs.version || 'verify-auth' }}
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ inputs.version }}
+  SOURCE: ${{ inputs.source }}
+  MANIFEST: ${{ inputs.manifest }}
+
+jobs:
+  verify-auth:
+    name: Verify crates.io authentication
+    if: github.repository == 'P4suta/Rusterisk' && github.ref == 'refs/heads/main' && inputs.operation == 'verify-auth'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: crates-io
+    permissions:
+      id-token: write # Exchange the workflow identity and revoke the temporary token.
+    steps:
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
+  build:
+    name: Build the release controller
+    if: >-
+      github.repository == 'P4suta/Rusterisk' && github.ref == 'refs/heads/main' &&
+      (inputs.operation == 'publish-cli' || inputs.operation == 'publish-release')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+      checksum: ${{ steps.digest.outputs.checksum }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+        with:
+          version: 2026.11.13
+          install_args: rust
+      - run: mise x -- cargo build --locked -p xtask --bin xtask
+        env:
+          CARGO_PROFILE_DEV_DEBUG: "0"
+          CARGO_INCREMENTAL: "0"
+      - id: digest
+        run: echo "checksum=$(sha256sum target/debug/xtask | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: release-controller-${{ github.run_attempt }}
+          path: target/debug/xtask
+          if-no-files-found: error
+          retention-days: 7
+
+  candidate:
+    name: Verify the staged release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # GitHub lists drafts only for callers with push access.
+    outputs:
+      artifact: ${{ steps.upload.outputs.artifact-id }}
+      checksum: ${{ steps.export.outputs.checksum }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact }}
+          merge-multiple: true
+          path: controller
+      - id: export
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONTROLLER: ${{ needs.build.outputs.checksum }}
+        run: |
+          printf '%s  controller/xtask\n' "$CONTROLLER" | sha256sum --check --strict
+          chmod +x controller/xtask
+          controller/xtask release-publication export-cli "$VERSION" "$SOURCE" "$MANIFEST" candidate.crate
+          echo "checksum=$(sha256sum candidate.crate | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        id: upload
+        with:
+          name: verified-cli-${{ github.run_attempt }}
+          path: candidate.crate
+          if-no-files-found: error
+          retention-days: 7
+
+  registry:
+    name: Publish the verified CLI
+    needs: [build, candidate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write # Authenticate the approved crate upload.
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact }}
+          merge-multiple: true
+          path: controller
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.candidate.outputs.artifact }}
+          merge-multiple: true
+          path: payload
+      - env:
+          CONTROLLER: ${{ needs.build.outputs.checksum }}
+          ARCHIVE: ${{ needs.candidate.outputs.checksum }}
+        run: |
+          printf '%s  controller/xtask\n%s  payload/candidate.crate\n' "$CONTROLLER" "$ARCHIVE" | sha256sum --check --strict
+          chmod +x controller/xtask
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: auth
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          CRATES_IO_PUBLISH_TOKEN: ${{ steps.auth.outputs.token }}
+          ARCHIVE: ${{ needs.candidate.outputs.checksum }}
+        run: controller/xtask release-publication publish-archive "$VERSION" "$SOURCE" "$ARCHIVE" payload/candidate.crate
+
+  release-page:
+    name: Publish the verified GitHub release
+    needs: [build, registry]
+    if: inputs.operation == 'publish-release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: github-release
+    permissions:
+      contents: write # Publish the verified draft.
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact }}
+          merge-multiple: true
+          path: controller
+      - env:
+          CONTROLLER: ${{ needs.build.outputs.checksum }}
+        run: |
+          printf '%s  controller/xtask\n' "$CONTROLLER" | sha256sum --check --strict
+          chmod +x controller/xtask
+      - uses: dopplerhq/secrets-fetch-action@451892f16195f9ac360e1a5bcbf0b5fd0e957534 # v2.0.0
+        id: credentials
+        with:
+          auth-method: token
+          doppler-token: ${{ secrets.DOPPLER_TOKEN }}
+          doppler-project: ${{ vars.RELEASE_APP_DOPPLER_PROJECT }}
+          doppler-config: ${{ vars.RELEASE_APP_DOPPLER_CONFIG }}
+          inject-env-vars: false
+      - name: Check release App inputs
+        if: >-
+          steps.credentials.outputs.GITHUB_APP_CLIENT_ID == '' ||
+          startsWith(steps.credentials.outputs.GITHUB_APP_CLIENT_ID, '${') ||
+          steps.credentials.outputs.GITHUB_APP_PRIVATE_KEY == '' ||
+          startsWith(steps.credentials.outputs.GITHUB_APP_PRIVATE_KEY, '${')
+        run: exit 1
+      - uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        id: settings
+        with:
+          client-id: ${{ steps.credentials.outputs.GITHUB_APP_CLIENT_ID }}
+          private-key: ${{ steps.credentials.outputs.GITHUB_APP_PRIVATE_KEY }}
+          owner: P4suta
+          repositories: Rusterisk
+          permission-administration: read
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SETTINGS_TOKEN: ${{ steps.settings.outputs.token }}
+        run: controller/xtask release-publication publish-page "$VERSION" "$SOURCE" "$MANIFEST"

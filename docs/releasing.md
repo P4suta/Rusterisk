@@ -66,9 +66,45 @@ mise x -- just release-check run fast --inputs "$inputs"
 mise x -- just release-check verify --inputs "$inputs"
 ```
 
-## Assemble the release
+## Publish the verified downloads
 
-Use a signed version tag on the verified commit after approval.
-Attach the approved artifacts and checksums to a draft GitHub release.
-Confirm the draft's source and asset hashes before publishing the complete release.
-Registry publication and platform signing use their own approvals.
+After verification and any required platform signing, place a signed, annotated version tag on the exact verified commit.
+Set `version` to the version without the leading `v`, `source` to the full commit ID, and `assets` to the verified distribution directory.
+The directory contains five server archives, two Linux image archives, the CLI crate, twelve CycloneDX files under `sbom/`, and `SHA256SUMS`.
+The local check reads the recorded digests and the source commit embedded in the CLI archive.
+
+```sh
+mise x -- just release-publication plan "$version" "$source" "$assets"
+```
+
+Run the submission command when the release is ready for approval.
+
+```sh
+mise x -- just release-publication submit "$version" "$source" "$assets"
+```
+
+Submission creates a draft with generated release notes, attaches the verified files, and starts `publish-cli.yml` on `main`.
+GitHub stores attachments in a single directory, so the uploaded checksum file uses the attachment names.
+Use the digest printed by the staging command for a manual workflow run.
+The `stage` operation stops after verifying the draft.
+A repeated submission reuses matching attachments and rejects conflicting contents.
+Staging uses private copies of the verified files and retries empty uploads left on the draft.
+
+The workflow builds its controller from the protected default branch.
+The candidate job needs GitHub push access to read draft releases and exports the verified CLI bytes.
+The `crates-io` environment controls publication of the original archive through [crates.io Trusted Publishing](https://crates.io/docs/trusted-publishing).
+Register `P4suta/Rusterisk`, workflow filename `publish-cli.yml`, and environment `crates-io` in the settings for `rusterisk-cli`.
+The `verify-auth` operation exchanges the GitHub identity for a temporary credential and revokes it at the end of the job.
+
+```sh
+gh workflow run publish-cli.yml --repo P4suta/Rusterisk --ref main -f operation=verify-auth
+```
+
+The `publish-cli` operation publishes only to crates.io.
+The `publish-release` operation also requests approval from the `github-release` environment.
+Configure the environment's `DOPPLER_TOKEN` for read access to the release App config named by `RELEASE_APP_DOPPLER_PROJECT` and `RELEASE_APP_DOPPLER_CONFIG`.
+The App needs the [Administration read permission](https://docs.github.com/en/rest/repos/repos#check-if-immutable-releases-are-enabled-for-a-repository) on `P4suta/Rusterisk` to read the repository setting.
+The final job checks the signed tag, all asset digests, and the crates.io receipt before making the [immutable release](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases) public.
+Keep the draft and its repository settings unchanged during publication.
+GitHub handles the final inventory read, settings read, and publication as separate requests.
+An interrupted run can resume with the same version, source, and checksum file.
