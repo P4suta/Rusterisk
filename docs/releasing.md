@@ -88,6 +88,7 @@ GitHub stores attachments in a single directory, so the uploaded checksum file u
 Use the digest printed by the staging command for a manual workflow run.
 The `stage` operation stops after verifying the draft.
 A repeated submission reuses matching attachments and rejects conflicting contents.
+Staging uses private copies of the verified files and retries empty uploads left on the draft.
 
 The workflow builds its controller from the protected default branch.
 The candidate job needs GitHub push access to read draft releases and exports the verified CLI bytes.
@@ -101,5 +102,9 @@ gh workflow run publish-cli.yml --repo P4suta/Rusterisk --ref main -f operation=
 
 The `publish-cli` operation publishes only to crates.io.
 The `publish-release` operation also requests approval from the `github-release` environment.
+Configure the environment's `DOPPLER_TOKEN` for read access to the release App config named by `RELEASE_APP_DOPPLER_PROJECT` and `RELEASE_APP_DOPPLER_CONFIG`.
+The App needs the [Administration read permission](https://docs.github.com/en/rest/repos/repos#check-if-immutable-releases-are-enabled-for-a-repository) on `P4suta/Rusterisk` to read the repository setting.
 The final job checks the signed tag, all asset digests, and the crates.io receipt before making the [immutable release](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases) public.
+Keep the draft and its repository settings unchanged during publication.
+GitHub handles the final inventory read, settings read, and publication as separate requests.
 An interrupted run can resume with the same version, source, and checksum file.

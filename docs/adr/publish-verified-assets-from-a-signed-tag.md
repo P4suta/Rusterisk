@@ -25,6 +25,8 @@ Rebuilding from a tag in the publication job would require repeating the native 
 ## Consequences
 
 Retrying a partial upload requires the original bytes.
+Read the draft inventory and the repository's immutability setting again after the registry confirms publication.
+GitHub permits other writers to edit the draft between the final checks and publication.
 Reconsider the staging source when a hosted build can keep every verified native artifact.
 
 ## Confirmation
