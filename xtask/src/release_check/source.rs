@@ -6,10 +6,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const FILES: [&str; 8] = [
+const FILES: [&str; 9] = [
     "rust-toolchain.toml",
     "clippy.toml",
     "deny.toml",
+    "release-plz.toml",
     "justfile",
     ".gitignore",
     "crates/core/proofs/Cargo.lock",
@@ -24,6 +25,26 @@ const DIRECTORIES: [&str; 6] = [
     "tests/interop/sipp",
     "docs/adr",
 ];
+
+#[cfg(test)]
+pub(super) fn write_fixture_inputs(root: &Path) -> io::Result<()> {
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .ok_or_else(|| io::Error::other("release fixture workspace missing"))?;
+    for directory in DIRECTORIES {
+        fs::create_dir_all(root.join(directory))?;
+    }
+    for relative in FILES {
+        let target = root.join(relative);
+        fs::create_dir_all(
+            target
+                .parent()
+                .ok_or_else(|| io::Error::other("release fixture parent missing"))?,
+        )?;
+        fs::copy(workspace.join(relative), target)?;
+    }
+    Ok(())
+}
 
 #[derive(Debug)]
 pub enum ReleaseSourceError {

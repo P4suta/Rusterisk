@@ -17,10 +17,10 @@ media = ["dep:rusterisk-media"]
 
 [dependencies]
 libfuzzer-sys = { version = "=0.4.13", optional = true }
-rusterisk-api = { version = "=0.1.0", path = "../../crates/api" }
-rusterisk-config = { version = "=0.1.0", path = "../../crates/config" }
-rusterisk-sip = { version = "=0.1.0", path = "../../crates/sip", optional = true }
-rusterisk-media = { version = "=0.1.0", path = "../../crates/media", optional = true }
+rusterisk-api = { version = "=0.2.0", path = "../../crates/api" }
+rusterisk-config = { version = "=0.2.0", path = "../../crates/config" }
+rusterisk-sip = { version = "=0.2.0", path = "../../crates/sip", optional = true }
+rusterisk-media = { version = "=0.2.0", path = "../../crates/media", optional = true }
 
 [[bin]]
 name = "settings"

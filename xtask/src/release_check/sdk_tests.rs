@@ -349,32 +349,6 @@ impl SdkPort for Port<'_> {
     }
 }
 
-fn release_inputs(source: &Path) -> io::Result<()> {
-    for path in [
-        "rust-toolchain.toml",
-        "clippy.toml",
-        "deny.toml",
-        "justfile",
-        ".gitignore",
-        "crates/core/proofs/Cargo.lock",
-        "crates/core/assurance/Cargo.lock",
-        "docs/server-distribution.md",
-    ] {
-        captured_fixture::write(source, path, b"release fixture\n")?;
-    }
-    for path in [
-        "api",
-        "containers",
-        ".github/workflows",
-        "tests/interop/node-ari-client",
-        "tests/interop/sipp",
-        "docs/adr",
-    ] {
-        fs::create_dir_all(source.join(path))?;
-    }
-    Ok(())
-}
-
 fn update_source_checksum(candidate: &Path) -> io::Result<()> {
     let source = CapturedSdk::read(&candidate.join("source")).map_err(io::Error::other)?;
     fs::write(
@@ -390,7 +364,7 @@ fn using_fixture(
         "release-sdk-flow",
         |_| Ok(()),
         |candidate| {
-            release_inputs(&candidate.join("source"))?;
+            crate::release_check::source::write_fixture_inputs(&candidate.join("source"))?;
             update_source_checksum(candidate)?;
             let captured =
                 CapturedReleaseSource::read(&candidate.join("source")).map_err(io::Error::other)?;

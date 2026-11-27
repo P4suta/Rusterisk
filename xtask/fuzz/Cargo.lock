@@ -1000,7 +1000,7 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "schemars",
  "serde",
@@ -1009,7 +1009,7 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rsipstack",
  "url",
@@ -1017,7 +1017,7 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-core"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "rusterisk-input-fuzz"
@@ -1032,7 +1032,7 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-media"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "opus",
@@ -1046,7 +1046,7 @@ dependencies = [
 
 [[package]]
 name = "rusterisk-sip"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "getrandom 0.4.3",
  "hmac 0.13.0",

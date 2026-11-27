@@ -29,6 +29,7 @@ pub(super) fn require(condition: bool, reason: &'static str) -> io::Result<()> {
 }
 
 fn prepare(root: &Path) -> io::Result<()> {
+    crate::release_check::source::write_fixture_inputs(root)?;
     let snapshot =
         CapturedAssurance::read(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/core"))
             .map_err(io::Error::other)?;
@@ -40,24 +41,6 @@ fn prepare(root: &Path) -> io::Result<()> {
         )?;
         fs::write(path, bytes)?;
     }
-    for path in [
-        "clippy.toml",
-        "deny.toml",
-        "justfile",
-        ".gitignore",
-        "crates/core/proofs/Cargo.lock",
-        "docs/server-distribution.md",
-    ] {
-        project_fixture::write(root, path, b"Miri release fixture\n")?;
-    }
-    project_fixture::write(
-        root,
-        "rust-toolchain.toml",
-        include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../rust-toolchain.toml"
-        )),
-    )?;
     project_fixture::write(
         root,
         "containers/input-verification/Dockerfile",
@@ -66,15 +49,6 @@ fn prepare(root: &Path) -> io::Result<()> {
             "/../containers/input-verification/Dockerfile"
         )),
     )?;
-    for path in [
-        "api",
-        ".github/workflows",
-        "tests/interop/node-ari-client",
-        "tests/interop/sipp",
-        "docs/adr",
-    ] {
-        fs::create_dir_all(root.join(path))?;
-    }
     Ok(())
 }
 
