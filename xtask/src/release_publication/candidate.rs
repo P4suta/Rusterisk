@@ -19,12 +19,20 @@ fn digest_text(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+#[cfg(any(windows, test))]
+fn regular_file_without_attributes(is_file: bool, attributes: u32, forbidden: u32) -> bool {
+    is_file && attributes & forbidden == 0
+}
+
 fn open_regular(path: &Path) -> io::Result<fs::File> {
     #[cfg(unix)]
     let file = {
         use rustix::fs::{open, Mode, OFlags};
-        let flags =
-            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY;
+        let flags = OFlags::RDONLY
+            .union(OFlags::CLOEXEC)
+            .union(OFlags::NOFOLLOW)
+            .union(OFlags::NONBLOCK)
+            .union(OFlags::NOCTTY);
         fs::File::from(open(path, flags, Mode::empty())?)
     };
     #[cfg(not(unix))]
@@ -45,7 +53,11 @@ fn open_regular(path: &Path) -> io::Result<fs::File> {
     let regular = {
         use std::os::windows::fs::MetadataExt;
         use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
-        regular && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        regular_file_without_attributes(
+            regular,
+            metadata.file_attributes(),
+            FILE_ATTRIBUTE_REPARSE_POINT,
+        )
     };
     if !regular {
         return Err(invalid(format!(
@@ -60,6 +72,7 @@ fn open_regular(path: &Path) -> io::Result<fs::File> {
 #[test]
 fn release_inputs_open_without_waiting_and_accept_only_regular_files() -> io::Result<()> {
     use rustix::fs::{fcntl_getfl, OFlags};
+    use rustix::io::{fcntl_getfd, FdFlags};
     let root = tempfile::tempdir()?;
     let path = root.path().join("asset");
     fs::write(&path, b"release")?;
@@ -70,7 +83,22 @@ fn release_inputs_open_without_waiting_and_accept_only_regular_files() -> io::Re
     let file = open_regular(&path)?;
     assert!(file.metadata()?.is_file());
     assert!(fcntl_getfl(&file)?.contains(OFlags::NONBLOCK));
+    assert!(fcntl_getfd(&file)?.contains(FdFlags::CLOEXEC));
     Ok(())
+}
+
+#[test]
+fn windows_release_inputs_reject_reparse_points_with_any_other_attributes() {
+    let reparse = 0x400;
+    for attributes in [0, 1, 0x80] {
+        assert!(regular_file_without_attributes(true, attributes, reparse));
+        assert!(!regular_file_without_attributes(false, attributes, reparse));
+        assert!(!regular_file_without_attributes(
+            true,
+            attributes | reparse,
+            reparse
+        ));
+    }
 }
 
 fn file_digest(path: &Path) -> io::Result<String> {
